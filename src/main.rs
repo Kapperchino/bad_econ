@@ -1,15 +1,18 @@
 use bevy::prelude::*;
+use bevy::utils::HashMap;
 use clap::Parser;
 use csv::Writer;
 use polars::prelude::*;
 use polars::prelude::*;
 use rand::distr::{Distribution, StandardUniform};
-use rand::Rng;
+use rand::{rng, Rng};
 use serde::Serialize;
 use std::fs::File;
 use std::io::Write;
 use std::sync::Arc;
 use std::time::Duration;
+use strum::IntoEnumIterator; // 0.17.1
+use strum_macros::EnumIter; // 0.17.1
 
 impl Distribution<Class> for StandardUniform {
     fn sample<R: Rng + ?Sized>(&self, rng: &mut R) -> Class {
@@ -27,7 +30,6 @@ impl Distribution<Income> for StandardUniform {
             0..=70 => Income::Low,
             71..=90 => Income::Middle,
             91..=98 => Income::High,
-            99..=100 => Income::VeryHigh,
             _ => Income::Low,
         }
     }
@@ -38,7 +40,7 @@ enum Class {
     Proletariat,
 }
 
-#[derive(Serialize)]
+#[derive(Serialize, Component,EnumIter)]
 enum GoodsType {
     Food,
     Steel,
@@ -55,9 +57,35 @@ enum GoodsType {
     Tobacco,
     Rent,
     Wood,
+    Labor,
+    Cotton,
 }
 
-#[derive(Serialize)]
+impl GoodsType {
+    pub fn starting_price(&self) -> f64 {
+        match self {
+            GoodsType::Food => 1.0,
+            GoodsType::Steel => 1.0,
+            GoodsType::Coal => 1.0,
+            GoodsType::Iron => 1.0,
+            GoodsType::Copper => 1.0,
+            GoodsType::Oil => 1.0,
+            GoodsType::Car => 1.0,
+            GoodsType::Tool => 1.0,
+            GoodsType::Weapon => 1.0,
+            GoodsType::Clothes => 1.0,
+            GoodsType::Furniture => 1.0,
+            GoodsType::Wine => 1.0,
+            GoodsType::Tobacco => 1.0,
+            GoodsType::Rent => 1.0,
+            GoodsType::Wood => 1.0,
+            GoodsType::Labor => 1.0,
+            GoodsType::Cotton => 1.0,
+        }
+    }
+}
+
+#[derive(Serialize, Clone)]
 enum Income {
     Low,
     Middle,
@@ -65,14 +93,23 @@ enum Income {
     VeryHigh,
 }
 
+impl Income {
+    pub fn starting_money(&self) -> f64 {
+        match self {
+            Income::Low => 10.0,
+            Income::Middle => 50.0,
+            Income::High => 100.0,
+            Income::VeryHigh => 1500.0,
+        }
+    }
+}
 #[derive(Serialize)]
 enum OrderType {
     Production,
     Person,
 }
 
-
-#[derive(Serialize)]
+#[derive(Serialize, Component)]
 struct Person {
     id: i64,
     class: Class,
@@ -80,32 +117,103 @@ struct Person {
     money: f64,
 }
 
-#[derive(Serialize)]
-struct Production {
-    id: i64,
-    input: Vec<GoodsType>,
-    output: GoodsType,
+#[derive(Serialize, Component, Debug)]
+enum Production {
+    SteelMill,
+    IronMine,
+    CoalMine,
+    CopperMine,
+    OilWell,
+    CarFactory,
+    ToolFactory,
+    WeaponFactory,
+    ClothesFactory,
+    FurnitureFactory,
+    WineFactory,
+    TobaccoFarm,
+    House,
+    SawMill,
+    CottonFarm,
+    // add other production types here
 }
 
-#[derive(Serialize)]
-struct OwnerShip {
-    id: i64,
-    owner_id: i64,
-    production_id: i64
+impl Production {
+    /// Returns the list of inputs for this production facility.
+    pub fn input(&self) -> Vec<GoodsType> {
+        match self {
+            Production::SteelMill => vec![GoodsType::Labor, GoodsType::Iron, GoodsType::Coal],
+            Production::IronMine => vec![GoodsType::Labor, GoodsType::Tool],
+            Production::CoalMine => vec![GoodsType::Labor, GoodsType::Tool],
+            Production::CopperMine => vec![GoodsType::Labor, GoodsType::Tool],
+            Production::OilWell => vec![GoodsType::Labor, GoodsType::Tool],
+            Production::CarFactory => vec![GoodsType::Labor, GoodsType::Steel],
+            Production::ToolFactory => vec![GoodsType::Labor, GoodsType::Steel],
+            Production::WeaponFactory => vec![GoodsType::Labor, GoodsType::Steel, GoodsType::Tool],
+            Production::ClothesFactory => vec![GoodsType::Labor, GoodsType::Tool],
+            Production::FurnitureFactory => vec![GoodsType::Labor,GoodsType::Wood, GoodsType::Tool],
+            Production::WineFactory => vec![GoodsType::Labor,  GoodsType::Tool],
+            Production::TobaccoFarm => vec![GoodsType::Labor],
+            Production::House => vec![],
+            Production::SawMill => vec![GoodsType::Labor,GoodsType::Tool],
+            Production::CottonFarm => vec![GoodsType::Labor,GoodsType::Tool],
+        }
+    }
+
+    /// Returns the output good for this production facility.
+    pub fn output(&self) -> GoodsType {
+        match self {
+            Production::SteelMill => GoodsType::Steel,
+            Production::IronMine => GoodsType::Iron,
+            Production::CoalMine => GoodsType::Coal,
+            Production::CopperMine => GoodsType::Copper,
+            Production::OilWell => GoodsType::Oil,
+            Production::CarFactory => GoodsType::Car,
+            Production::ToolFactory => GoodsType::Tool,
+            Production::WeaponFactory => GoodsType::Weapon,
+            Production::ClothesFactory => GoodsType::Clothes,
+            Production::FurnitureFactory => GoodsType::Furniture,
+            Production::WineFactory => GoodsType::Wine,
+            Production::TobaccoFarm => GoodsType::Tobacco,
+            Production::House => GoodsType::Rent,
+            Production::SawMill => GoodsType::Wood,
+            Production::CottonFarm => GoodsType::Cotton,
+        }
+    }
 }
 
+struct ProductionInstance {
+    id: i64,
+    production: Production,
+}
+
+#[derive(Component)]
+struct Price {
+    goods_type: GoodsType,
+    price: f64,
+}
+
+#[derive(Bundle)]
+struct BuyOrders {
+    goods_type: GoodsType,
+    buy_order: BuyOrder,
+}
+
+#[derive(Bundle)]
+struct SellOrders {
+    goods_type: GoodsType,
+    sell_order: SellOrder,
+}
+
+#[derive(Component)]
 struct BuyOrder {
-    id: i64,
-    person_or_production_id: i64,
     goods_type: GoodsType,
     amount: i64,
     price: f64,
     order_type: OrderType,
 }
 
+#[derive(Component)]
 struct SellOrder {
-    id: i64,
-    person_or_production_id: i64,
     goods_type: GoodsType,
     amount: i64,
     price: f64,
@@ -116,60 +224,71 @@ struct SellOrder {
 #[command(version, about)]
 struct Cli {}
 
-#[derive(Resource)]
-struct DataContext {
-    df: LazyFrame,
-}
 
-fn createCsv() {
-    let mut vec = Vec::new();
-    for i in 0..100 {
-        let person = Person {
-            id: i,
-            class: rand::random(),
-            income: rand::random(),
-            money: rand::random::<f64>() * 10000.0,
-        };
-        vec.push(person);
-    }
-    let mut wtr = Writer::from_writer(vec![]);
-    for person in vec {
-        wtr.serialize(person).unwrap();
-    }
-    wtr.flush().unwrap();
-    let csv_data = String::from_utf8(wtr.into_inner().unwrap_or_default()).unwrap_or_default();
-    let mut file = File::create("output.csv").unwrap();
-    file.write_all(csv_data.as_bytes()).unwrap();
-}
 fn main() {
     let _ = Cli::parse();
-
-    createCsv();
-
-    let file = std::fs::File::open("output.csv").expect("Could not open file");
-    let _ = CsvReader::new(file)
-        .finish()
-        .expect("Could not create DataFrame");
 
     App::new()
         .add_plugins(MinimalPlugins)
         .add_systems(Startup, startup)
-        .insert_resource(Time::<Fixed>::from_duration(Duration::from_millis(1000)))
-        .add_systems(FixedUpdate, main_loop)
         .insert_resource(Time::<Fixed>::from_seconds(1.0))
+        .add_systems(FixedUpdate, (main_loop, market_loop))
         .run();
 }
 
 fn startup(mut commands: Commands) {
-    let file = std::fs::File::open("output.csv").expect("Could not open file");
-    let df = CsvReader::new(file)
-        .finish()
-        .expect("Could not create DataFrame");
-    let df = df.lazy();
-    commands.insert_resource(DataContext { df });
+    for i in 0..1000 {
+        let class : Class = rng().random();
+        let income : Income = rng().random();
+        match class {
+            Class::Bourgeois => {
+                commands.spawn(Person {
+                    id: i,
+                    class: class,
+                    income: Income::VeryHigh,
+                    money: Income::VeryHigh.starting_money(),
+                });
+            },
+            Class::Proletariat => {
+                commands.spawn(Person {
+                    id: i,
+                    class: class,
+                    income: income.clone(),
+                    money: income.starting_money(),
+                });
+            },
+        }
+    }
+    for goods_type in GoodsType::iter() {
+        commands.spawn(Price {
+            goods_type,
+            price: 1.0,
+        });
+    };
 }
 
-fn main_loop(data_context: Res<DataContext>) {
-    let df = data_context.df.clone();
-    println!("{}", &df.collect().unwrap());
+fn main_loop(
+    people_query: Query<&Person>,
+    mut commands: Commands,
+) {
+    for person in people_query.iter() {
+        match person.class {
+            Class::Bourgeois => {
+                // TODO: Implement bourgeois behavior
+            },
+            Class::Proletariat => {
+                commands.spawn(BuyOrder {
+                    goods_type: GoodsType::Food,
+                    amount: 1,
+                    price: 1.0,
+                    order_type: OrderType::Person,
+                });
+            },
+        }
+    }
+}
+
+fn market_loop(buy_query: Query<&BuyOrder>,
+    sell_query: Query<&SellOrder>,
+    mut commands: Commands) {
 }

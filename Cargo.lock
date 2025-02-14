@@ -432,6 +432,8 @@ dependencies = [
  "polars",
  "rand 0.9.0",
  "serde",
+ "strum",
+ "strum_macros 0.27.0",
 ]
 
 [[package]]
@@ -3822,7 +3824,7 @@ dependencies = [
  "simdutf8",
  "streaming-iterator",
  "strength_reduce",
- "strum_macros",
+ "strum_macros 0.26.4",
  "version_check",
  "zstd",
 ]
@@ -3887,7 +3889,7 @@ dependencies = [
  "rand_distr",
  "rayon",
  "regex",
- "strum_macros",
+ "strum_macros 0.26.4",
  "thiserror 2.0.11",
  "version_check",
  "xxhash-rust",
@@ -4039,7 +4041,7 @@ dependencies = [
  "rayon",
  "regex",
  "regex-syntax 0.8.5",
- "strum_macros",
+ "strum_macros 0.26.4",
  "unicode-normalization",
  "unicode-reverse",
  "version_check",
@@ -4132,7 +4134,7 @@ dependencies = [
  "rayon",
  "recursive",
  "regex",
- "strum_macros",
+ "strum_macros 0.26.4",
  "version_check",
 ]
 
@@ -4233,7 +4235,7 @@ dependencies = [
  "polars-utils",
  "rayon",
  "regex",
- "strum_macros",
+ "strum_macros 0.26.4",
 ]
 
 [[package]]
@@ -4888,10 +4890,29 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "7da8b5736845d9f2fcb837ea5d9e2628564b3b043a70948a3f0b778838c5fb4f"
 
 [[package]]
+name = "strum"
+version = "0.27.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "ce1475c515a4f03a8a7129bb5228b81a781a86cb0b3fbbc19e1c556d491a401f"
+
+[[package]]
 name = "strum_macros"
 version = "0.26.4"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "4c6bee85a5a24955dc440386795aa378cd9cf82acd5f764469152d2270e581be"
+dependencies = [
+ "heck",
+ "proc-macro2",
+ "quote",
+ "rustversion",
+ "syn",
+]
+
+[[package]]
+name = "strum_macros"
+version = "0.27.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "9688894b43459159c82bfa5a5fa0435c19cbe3c9b427fa1dd7b1ce0c279b18a7"
 dependencies = [
  "heck",
  "proc-macro2",
