@@ -1,3 +1,5 @@
+mod models;
+
 use bevy::prelude::*;
 use bevy::utils::HashMap;
 use clap::Parser;
@@ -14,211 +16,7 @@ use std::time::Duration;
 use strum::IntoEnumIterator; // 0.17.1
 use strum_macros::EnumIter; // 0.17.1
 
-impl Distribution<Class> for StandardUniform {
-    fn sample<R: Rng + ?Sized>(&self, rng: &mut R) -> Class {
-        match rng.random_range(0..10) {
-            0 => Class::Bourgeois,
-            1 => Class::Bourgeois,
-            _ => Class::Proletariat,
-        }
-    }
-}
-
-impl Distribution<Income> for StandardUniform {
-    fn sample<R: Rng + ?Sized>(&self, rng: &mut R) -> Income {
-        match rng.random_range(0..100) {
-            0..=70 => Income::Low,
-            71..=90 => Income::Middle,
-            91..=98 => Income::High,
-            _ => Income::Low,
-        }
-    }
-}
-#[derive(Serialize)]
-enum Class {
-    Bourgeois,
-    Proletariat,
-}
-
-#[derive(Serialize, Component,EnumIter)]
-enum GoodsType {
-    Food,
-    Steel,
-    Coal,
-    Iron,
-    Copper,
-    Oil,
-    Car,
-    Tool,
-    Weapon,
-    Clothes,
-    Furniture,
-    Wine,
-    Tobacco,
-    Rent,
-    Wood,
-    Labor,
-    Cotton,
-}
-
-impl GoodsType {
-    pub fn starting_price(&self) -> f64 {
-        match self {
-            GoodsType::Food => 1.0,
-            GoodsType::Steel => 1.0,
-            GoodsType::Coal => 1.0,
-            GoodsType::Iron => 1.0,
-            GoodsType::Copper => 1.0,
-            GoodsType::Oil => 1.0,
-            GoodsType::Car => 1.0,
-            GoodsType::Tool => 1.0,
-            GoodsType::Weapon => 1.0,
-            GoodsType::Clothes => 1.0,
-            GoodsType::Furniture => 1.0,
-            GoodsType::Wine => 1.0,
-            GoodsType::Tobacco => 1.0,
-            GoodsType::Rent => 1.0,
-            GoodsType::Wood => 1.0,
-            GoodsType::Labor => 1.0,
-            GoodsType::Cotton => 1.0,
-        }
-    }
-}
-
-#[derive(Serialize, Clone)]
-enum Income {
-    Low,
-    Middle,
-    High,
-    VeryHigh,
-}
-
-impl Income {
-    pub fn starting_money(&self) -> f64 {
-        match self {
-            Income::Low => 10.0,
-            Income::Middle => 50.0,
-            Income::High => 100.0,
-            Income::VeryHigh => 1500.0,
-        }
-    }
-}
-#[derive(Serialize)]
-enum OrderType {
-    Production,
-    Person,
-}
-
-#[derive(Serialize, Component)]
-struct Person {
-    id: i64,
-    class: Class,
-    income: Income,
-    money: f64,
-}
-
-#[derive(Serialize, Component, Debug)]
-enum Production {
-    SteelMill,
-    IronMine,
-    CoalMine,
-    CopperMine,
-    OilWell,
-    CarFactory,
-    ToolFactory,
-    WeaponFactory,
-    ClothesFactory,
-    FurnitureFactory,
-    WineFactory,
-    TobaccoFarm,
-    House,
-    SawMill,
-    CottonFarm,
-    // add other production types here
-}
-
-impl Production {
-    /// Returns the list of inputs for this production facility.
-    pub fn input(&self) -> Vec<GoodsType> {
-        match self {
-            Production::SteelMill => vec![GoodsType::Labor, GoodsType::Iron, GoodsType::Coal],
-            Production::IronMine => vec![GoodsType::Labor, GoodsType::Tool],
-            Production::CoalMine => vec![GoodsType::Labor, GoodsType::Tool],
-            Production::CopperMine => vec![GoodsType::Labor, GoodsType::Tool],
-            Production::OilWell => vec![GoodsType::Labor, GoodsType::Tool],
-            Production::CarFactory => vec![GoodsType::Labor, GoodsType::Steel],
-            Production::ToolFactory => vec![GoodsType::Labor, GoodsType::Steel],
-            Production::WeaponFactory => vec![GoodsType::Labor, GoodsType::Steel, GoodsType::Tool],
-            Production::ClothesFactory => vec![GoodsType::Labor, GoodsType::Tool],
-            Production::FurnitureFactory => vec![GoodsType::Labor,GoodsType::Wood, GoodsType::Tool],
-            Production::WineFactory => vec![GoodsType::Labor,  GoodsType::Tool],
-            Production::TobaccoFarm => vec![GoodsType::Labor],
-            Production::House => vec![],
-            Production::SawMill => vec![GoodsType::Labor,GoodsType::Tool],
-            Production::CottonFarm => vec![GoodsType::Labor,GoodsType::Tool],
-        }
-    }
-
-    /// Returns the output good for this production facility.
-    pub fn output(&self) -> GoodsType {
-        match self {
-            Production::SteelMill => GoodsType::Steel,
-            Production::IronMine => GoodsType::Iron,
-            Production::CoalMine => GoodsType::Coal,
-            Production::CopperMine => GoodsType::Copper,
-            Production::OilWell => GoodsType::Oil,
-            Production::CarFactory => GoodsType::Car,
-            Production::ToolFactory => GoodsType::Tool,
-            Production::WeaponFactory => GoodsType::Weapon,
-            Production::ClothesFactory => GoodsType::Clothes,
-            Production::FurnitureFactory => GoodsType::Furniture,
-            Production::WineFactory => GoodsType::Wine,
-            Production::TobaccoFarm => GoodsType::Tobacco,
-            Production::House => GoodsType::Rent,
-            Production::SawMill => GoodsType::Wood,
-            Production::CottonFarm => GoodsType::Cotton,
-        }
-    }
-}
-
-struct ProductionInstance {
-    id: i64,
-    production: Production,
-}
-
-#[derive(Component)]
-struct Price {
-    goods_type: GoodsType,
-    price: f64,
-}
-
-#[derive(Bundle)]
-struct BuyOrders {
-    goods_type: GoodsType,
-    buy_order: BuyOrder,
-}
-
-#[derive(Bundle)]
-struct SellOrders {
-    goods_type: GoodsType,
-    sell_order: SellOrder,
-}
-
-#[derive(Component)]
-struct BuyOrder {
-    goods_type: GoodsType,
-    amount: i64,
-    price: f64,
-    order_type: OrderType,
-}
-
-#[derive(Component)]
-struct SellOrder {
-    goods_type: GoodsType,
-    amount: i64,
-    price: f64,
-    order_type: OrderType,
-}
+use models::*;
 
 #[derive(Parser)]
 #[command(version, about)]
@@ -237,7 +35,7 @@ fn main() {
 }
 
 fn startup(mut commands: Commands) {
-    for i in 0..1000 {
+    for i in 0..100000 {
         let class : Class = rng().random();
         let income : Income = rng().random();
         match class {
@@ -260,15 +58,17 @@ fn startup(mut commands: Commands) {
         }
     }
     for goods_type in GoodsType::iter() {
+        let price = goods_type.starting_price().clone();
         commands.spawn(Price {
             goods_type,
-            price: 1.0,
+            price,
         });
     };
 }
 
 fn main_loop(
     people_query: Query<&Person>,
+    prices_query: Query<&Price>,
     mut commands: Commands,
 ) {
     for person in people_query.iter() {
@@ -277,18 +77,80 @@ fn main_loop(
                 // TODO: Implement bourgeois behavior
             },
             Class::Proletariat => {
-                commands.spawn(BuyOrder {
-                    goods_type: GoodsType::Food,
-                    amount: 1,
-                    price: 1.0,
-                    order_type: OrderType::Person,
-                });
+                let food_price = prices_query.iter()
+                    .find(|p| p.goods_type == GoodsType::Food)
+                    .unwrap()
+                    .price;
+                match person.income {
+                    Income::Low => {
+                        commands.spawn(BuyOrder {
+                            goods_type: GoodsType::Food,
+                            amount: 1,
+                            price: food_price,
+                            order_type: OrderType::Person,
+                        });
+                    },      
+                    Income::Middle => {
+                        commands.spawn(BuyOrder {
+                            goods_type: GoodsType::Food,
+                            amount: 2,
+                            price: food_price,
+                            order_type: OrderType::Person,
+                        });
+                    },  
+                    Income::High => {
+                        commands.spawn(BuyOrder {
+                            goods_type: GoodsType::Food,
+                            amount: 3,
+                            price: food_price,
+                            order_type: OrderType::Person,
+                        });
+                    },
+                    Income::VeryHigh => {
+                        commands.spawn(BuyOrder {
+                            goods_type: GoodsType::Food,
+                            amount: 4,  
+                            price: food_price,
+                            order_type: OrderType::Person,
+                        });
+                    },
+                }
             },
         }
     }
 }
 
 fn market_loop(buy_query: Query<&BuyOrder>,
+    buy_entities_query: Query<Entity, With<BuyOrder>>,
     sell_query: Query<&SellOrder>,
     mut commands: Commands) {
+    let mut buy_orders: HashMap<GoodsType, Vec<BuyOrder>> = HashMap::new();
+    let mut buy_order_sums: HashMap<GoodsType, BuyOrderSum> = HashMap::new();
+    for buy_order in buy_query.iter() {
+        buy_orders.entry(buy_order.goods_type)
+            .or_insert_with(Vec::new)
+            .push(buy_order.clone());
+    }
+    for orders in buy_orders {
+        let buy_order_sum = BuyOrderSum {
+            goods_type: orders.0,
+            amount: 0,
+            price: 0.0,
+        };
+        let sum = orders.1.iter().fold(buy_order_sum, |mut sum, order| {
+            sum.amount += order.amount;
+            sum.price = order.price;
+            sum
+        });
+        buy_order_sums.insert(orders.0, sum);
+    }
+    buy_order_sums.iter().for_each(|(goods_type, buy_order_sum)| {
+        println!("Goods Type: {:?}, Amount: {:?}, Price: {:?}", goods_type, buy_order_sum.amount, buy_order_sum.price);
+    });
+
+    for buy_order in buy_entities_query.iter() {
+        commands.entity(buy_order).despawn();
+    }
+    // for sell_order in sell_query.iter() {
+    // }
 }
