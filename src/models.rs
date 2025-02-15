@@ -220,6 +220,13 @@ pub struct BuyOrderSum {
     pub price: f64,
 }
 
+#[derive(Clone,Copy, Debug)]
+pub struct SellOrderSum {
+    pub goods_type: GoodsType,
+    pub amount: i64,
+    pub price: f64,
+}
+
 #[derive(Component, Clone)]
 pub struct SellOrder {
     goods_type: GoodsType,

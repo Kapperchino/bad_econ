@@ -22,7 +22,6 @@ use models::*;
 #[command(version, about)]
 struct Cli {}
 
-
 fn main() {
     let _ = Cli::parse();
 
@@ -36,48 +35,42 @@ fn main() {
 
 fn startup(mut commands: Commands) {
     for i in 0..100000 {
-        let class : Class = rng().random();
-        let income : Income = rng().random();
+        let class: Class = rng().random();
+        let income: Income = rng().random();
         match class {
             Class::Bourgeois => {
                 commands.spawn(Person {
                     id: i,
-                    class: class,
+                    class,
                     income: Income::VeryHigh,
                     money: Income::VeryHigh.starting_money(),
                 });
-            },
+            }
             Class::Proletariat => {
                 commands.spawn(Person {
                     id: i,
-                    class: class,
+                    class,
                     income: income.clone(),
                     money: income.starting_money(),
                 });
-            },
+            }
         }
     }
     for goods_type in GoodsType::iter() {
         let price = goods_type.starting_price().clone();
-        commands.spawn(Price {
-            goods_type,
-            price,
-        });
-    };
+        commands.spawn(Price { goods_type, price });
+    }
 }
 
-fn main_loop(
-    people_query: Query<&Person>,
-    prices_query: Query<&Price>,
-    mut commands: Commands,
-) {
+fn main_loop(people_query: Query<&Person>, prices_query: Query<&Price>, mut commands: Commands) {
     for person in people_query.iter() {
         match person.class {
             Class::Bourgeois => {
                 // TODO: Implement bourgeois behavior
-            },
+            }
             Class::Proletariat => {
-                let food_price = prices_query.iter()
+                let food_price = prices_query
+                    .iter()
                     .find(|p| p.goods_type == GoodsType::Food)
                     .unwrap()
                     .price;
@@ -89,7 +82,7 @@ fn main_loop(
                             price: food_price,
                             order_type: OrderType::Person,
                         });
-                    },      
+                    }
                     Income::Middle => {
                         commands.spawn(BuyOrder {
                             goods_type: GoodsType::Food,
@@ -97,7 +90,7 @@ fn main_loop(
                             price: food_price,
                             order_type: OrderType::Person,
                         });
-                    },  
+                    }
                     Income::High => {
                         commands.spawn(BuyOrder {
                             goods_type: GoodsType::Food,
@@ -105,35 +98,48 @@ fn main_loop(
                             price: food_price,
                             order_type: OrderType::Person,
                         });
-                    },
+                    }
                     Income::VeryHigh => {
                         commands.spawn(BuyOrder {
                             goods_type: GoodsType::Food,
-                            amount: 4,  
+                            amount: 4,
                             price: food_price,
                             order_type: OrderType::Person,
                         });
-                    },
+                    }
                 }
-            },
+            }
         }
     }
 }
 
-fn market_loop(buy_query: Query<&BuyOrder>,
+fn market_loop(
+    buy_query: Query<&BuyOrder>,
     buy_entities_query: Query<Entity, With<BuyOrder>>,
     sell_query: Query<&SellOrder>,
-    mut commands: Commands) {
+    mut commands: Commands,
+) {
+    let buy_order_sums = sum_buy_orders(buy_query);
+    for buy_order in buy_entities_query.iter() {
+        commands.entity(buy_order).despawn();
+    }
+    
+    // for sell_order in sell_query.iter() {
+    // }
+}
+
+fn sum_buy_orders(buy_query: Query<&BuyOrder>) -> HashMap<GoodsType, BuyOrderSum> {
     let mut buy_orders: HashMap<GoodsType, Vec<BuyOrder>> = HashMap::new();
     let mut buy_order_sums: HashMap<GoodsType, BuyOrderSum> = HashMap::new();
     for buy_order in buy_query.iter() {
-        buy_orders.entry(buy_order.goods_type)
+        buy_orders
+            .entry(buy_order.goods_type)
             .or_insert_with(Vec::new)
             .push(buy_order.clone());
     }
-    for orders in buy_orders {
+    buy_orders.iter().for_each(|orders| {
         let buy_order_sum = BuyOrderSum {
-            goods_type: orders.0,
+            goods_type: *orders.0,
             amount: 0,
             price: 0.0,
         };
@@ -142,15 +148,9 @@ fn market_loop(buy_query: Query<&BuyOrder>,
             sum.price = order.price;
             sum
         });
-        buy_order_sums.insert(orders.0, sum);
-    }
-    buy_order_sums.iter().for_each(|(goods_type, buy_order_sum)| {
-        println!("Goods Type: {:?}, Amount: {:?}, Price: {:?}", goods_type, buy_order_sum.amount, buy_order_sum.price);
+        buy_order_sums.insert(*orders.0, sum);
     });
-
-    for buy_order in buy_entities_query.iter() {
-        commands.entity(buy_order).despawn();
-    }
-    // for sell_order in sell_query.iter() {
-    // }
+    buy_order_sums
 }
+
+fn calculate_prices(buy_order_sum: BuyOrderSum, sell_order_sum: SellOrderSum) {}
