@@ -1,5 +1,12 @@
-use super::flags::CONTROL_WORDS;
-use crate::ledger::{LEG_WORDS, MAX_LEGS};
+use super::flags::{ActorKind, ControlLayout};
+use crate::{
+    arithmetic::PRICE_TABLE,
+    domain::{Actor, Good, Scenario, Technique},
+    ledger::{LEG_WORDS, MAX_LEGS, TickLayout},
+};
+use anyhow::{Context, Result};
+use bytemuck::{Pod, Zeroable};
+use std::mem::offset_of;
 
 pub const WORD_BYTES: usize = size_of::<u32>();
 pub const TICK_BYTES: usize = size_of::<u64>();
@@ -9,100 +16,276 @@ pub const TICK_BITS: u32 = u64::BITS;
 pub const WORD_TOP_BIT: u32 = WORD_BITS - 1;
 pub const HALF_WORD_BITS: u32 = WORD_BITS / 2;
 pub const HALF_WORD_MASK: u32 = u16::MAX as u32;
-pub const LOW_WORD: usize = 0;
-pub const HIGH_WORD: usize = 1;
+pub const LOW_WORD: usize = TickLayout::LOW;
+pub const HIGH_WORD: usize = TickLayout::HIGH;
 pub const MIN_BUFFER_WORDS: usize = 4;
 pub const EVENT_WORDS: usize = MAX_LEGS * LEG_WORDS;
 pub const NO_ACTOR: u32 = u32::MAX;
 pub const NO_PREDECESSOR: u32 = u32::MAX;
 pub const NO_SUCCESSOR: u32 = u32::MAX;
 
-pub struct ActorLayout;
+#[repr(C)]
+#[derive(Clone, Copy, Pod, Zeroable)]
+pub struct ActorLayout {
+    x: u32,
+    y: u32,
+    kind: u32,
+    owner: u32,
+    capacity: u32,
+    labor_minutes: u32,
+    input_ticks: u32,
+    output_ticks: u32,
+}
 impl ActorLayout {
-    pub const X: usize = 0;
-    pub const Y: usize = 1;
-    pub const KIND: usize = 2;
-    pub const OWNER: usize = 3;
-    pub const CAPACITY: usize = 4;
-    pub const WORDS: usize = Self::CAPACITY + 1;
+    pub const X: usize = offset_of!(Self, x) / WORD_BYTES;
+    pub const Y: usize = offset_of!(Self, y) / WORD_BYTES;
+    pub const KIND: usize = offset_of!(Self, kind) / WORD_BYTES;
+    pub const OWNER: usize = offset_of!(Self, owner) / WORD_BYTES;
+    pub const CAPACITY: usize = offset_of!(Self, capacity) / WORD_BYTES;
+    pub const LABOR_MINUTES: usize = offset_of!(Self, labor_minutes) / WORD_BYTES;
+    pub const INPUT_TICKS: usize = offset_of!(Self, input_ticks) / WORD_BYTES;
+    pub const OUTPUT_TICKS: usize = offset_of!(Self, output_ticks) / WORD_BYTES;
+    pub const WORDS: usize = size_of::<Self>() / WORD_BYTES;
+
+    pub fn new(actor: &Actor, technique: Technique) -> Result<Self> {
+        Ok(Self {
+            x: actor.position.x,
+            y: actor.position.y,
+            kind: enumflags2::BitFlags::from_flag(ActorKind::new(actor.kind)?).bits(),
+            owner: actor.owner,
+            capacity: actor.capacity,
+            labor_minutes: technique.labor_minutes,
+            input_ticks: technique.input_ticks,
+            output_ticks: technique.output_ticks,
+        })
+    }
 }
 
-pub struct ConfigLayout;
+#[repr(C)]
+#[derive(Clone, Copy, Pod, Zeroable)]
+pub struct ConfigLayout {
+    actors: u32,
+    households: u32,
+    firms: u32,
+    fields: u32,
+    ring: u32,
+    search_radius: u32,
+    map_size: u32,
+    commute_speed: u32,
+    shipment_speed: u32,
+    household_need: u32,
+    capacity: u32,
+    packet_output: u32,
+    packet_minutes: u32,
+    work_cap: u32,
+    reserved_minutes: u32,
+    forecast_weight: u32,
+    coverage: u32,
+    distribution_rate: u32,
+    minimum_price: u32,
+    maximum_price: u32,
+    delivery_penalty: u32,
+    reserve_low: u32,
+    reserve_high: u32,
+    pub spatial_side: u32,
+    health_recovery: u32,
+    hunger_damage: u32,
+    work_fatigue: u32,
+    rest_recovery: u32,
+    wage_increment: u32,
+    price_response: u32,
+    reserved: [u32; 2],
+    price_table: [u32; PRICE_TABLE.len()],
+}
 impl ConfigLayout {
-    pub const ACTORS: usize = 0;
-    pub const HOUSEHOLDS: usize = 1;
-    pub const FIRMS: usize = 2;
-    pub const FIELDS: usize = 3;
-    pub const RING: usize = 4;
-    pub const SEARCH_RADIUS: usize = 5;
-    pub const MAP_SIZE: usize = 6;
-    pub const COMMUTE_SPEED: usize = 7;
-    pub const SHIPMENT_SPEED: usize = 8;
-    pub const HOUSEHOLD_NEED: usize = 9;
-    pub const CAPACITY: usize = 10;
-    pub const PACKET_OUTPUT: usize = 11;
-    pub const PACKET_MINUTES: usize = 12;
-    pub const WORK_CAP: usize = 13;
-    pub const RESERVED_MINUTES: usize = 14;
-    pub const FORECAST_WEIGHT: usize = 15;
-    pub const COVERAGE: usize = 16;
-    pub const DISTRIBUTION_RATE: usize = 17;
-    pub const MINIMUM_PRICE: usize = 18;
-    pub const MAXIMUM_PRICE: usize = 19;
-    pub const DELIVERY_PENALTY: usize = 20;
-    pub const RESERVE_LOW: usize = 21;
-    pub const RESERVE_HIGH: usize = 22;
-    pub const SPATIAL_SIDE: usize = 23;
-    pub const PRICE_TABLE: usize = 32;
+    pub const ACTORS: usize = offset_of!(Self, actors) / WORD_BYTES;
+    pub const HOUSEHOLDS: usize = offset_of!(Self, households) / WORD_BYTES;
+    pub const FIRMS: usize = offset_of!(Self, firms) / WORD_BYTES;
+    pub const FIELDS: usize = offset_of!(Self, fields) / WORD_BYTES;
+    pub const RING: usize = offset_of!(Self, ring) / WORD_BYTES;
+    pub const SEARCH_RADIUS: usize = offset_of!(Self, search_radius) / WORD_BYTES;
+    pub const MAP_SIZE: usize = offset_of!(Self, map_size) / WORD_BYTES;
+    pub const COMMUTE_SPEED: usize = offset_of!(Self, commute_speed) / WORD_BYTES;
+    pub const SHIPMENT_SPEED: usize = offset_of!(Self, shipment_speed) / WORD_BYTES;
+    pub const HOUSEHOLD_NEED: usize = offset_of!(Self, household_need) / WORD_BYTES;
+    pub const WORK_CAP: usize = offset_of!(Self, work_cap) / WORD_BYTES;
+    pub const RESERVED_MINUTES: usize = offset_of!(Self, reserved_minutes) / WORD_BYTES;
+    pub const FORECAST_WEIGHT: usize = offset_of!(Self, forecast_weight) / WORD_BYTES;
+    pub const COVERAGE: usize = offset_of!(Self, coverage) / WORD_BYTES;
+    pub const DISTRIBUTION_RATE: usize = offset_of!(Self, distribution_rate) / WORD_BYTES;
+    pub const MINIMUM_PRICE: usize = offset_of!(Self, minimum_price) / WORD_BYTES;
+    pub const MAXIMUM_PRICE: usize = offset_of!(Self, maximum_price) / WORD_BYTES;
+    pub const DELIVERY_PENALTY: usize = offset_of!(Self, delivery_penalty) / WORD_BYTES;
+    pub const RESERVE_LOW: usize = offset_of!(Self, reserve_low) / WORD_BYTES;
+    pub const RESERVE_HIGH: usize = offset_of!(Self, reserve_high) / WORD_BYTES;
+    pub const SPATIAL_SIDE: usize = offset_of!(Self, spatial_side) / WORD_BYTES;
+    pub const HEALTH_RECOVERY: usize = offset_of!(Self, health_recovery) / WORD_BYTES;
+    pub const HUNGER_DAMAGE: usize = offset_of!(Self, hunger_damage) / WORD_BYTES;
+    pub const WORK_FATIGUE: usize = offset_of!(Self, work_fatigue) / WORD_BYTES;
+    pub const REST_RECOVERY: usize = offset_of!(Self, rest_recovery) / WORD_BYTES;
+    pub const WAGE_INCREMENT: usize = offset_of!(Self, wage_increment) / WORD_BYTES;
+    pub const PRICE_RESPONSE: usize = offset_of!(Self, price_response) / WORD_BYTES;
+    pub const PRICE_TABLE: usize = offset_of!(Self, price_table) / WORD_BYTES;
+
+    pub fn new(scenario: &Scenario) -> Self {
+        let config = scenario.config();
+        Self {
+            actors: scenario.actors() as u32,
+            households: config.households,
+            firms: config.firms,
+            fields: scenario.fields() as u32,
+            ring: scenario.ring() as u32,
+            search_radius: config.search_radius,
+            map_size: config.map_size,
+            commute_speed: config.commute_speed,
+            shipment_speed: config.shipment_speed,
+            household_need: config.household_need,
+            capacity: config.capacity,
+            packet_output: config.packet_output,
+            packet_minutes: config.packet_minutes,
+            work_cap: config.work_cap,
+            reserved_minutes: config.reserved_minutes,
+            forecast_weight: config.forecast_weight,
+            coverage: config.coverage,
+            distribution_rate: config.distribution_rate,
+            minimum_price: config.minimum_price,
+            maximum_price: config.maximum_price,
+            delivery_penalty: config.delivery_penalty,
+            reserve_low: config.reserve as u32,
+            reserve_high: (config.reserve >> WORD_BITS) as u32,
+            spatial_side: config.map_size.div_ceil(config.search_radius),
+            health_recovery: config.behavior.health_recovery,
+            hunger_damage: config.behavior.hunger_damage,
+            work_fatigue: config.behavior.work_fatigue,
+            rest_recovery: config.behavior.rest_recovery,
+            wage_increment: config.behavior.wage_increment,
+            price_response: config.behavior.price_response,
+            reserved: [0; 2],
+            price_table: PRICE_TABLE,
+        }
+    }
 }
 
-pub struct ProposalLayout;
+#[repr(C)]
+#[derive(Clone, Copy, Pod, Zeroable)]
+pub struct ProposalLayout {
+    actor: u32,
+    quantity: TickLayout,
+    distance: u32,
+}
 impl ProposalLayout {
-    pub const ACTOR: usize = 0;
-    pub const QUANTITY_LOW: usize = 1;
-    pub const QUANTITY_HIGH: usize = 2;
-    pub const DISTANCE: usize = 3;
-    pub const WORDS: usize = Self::DISTANCE + 1;
+    pub const ACTOR: usize = offset_of!(Self, actor) / WORD_BYTES;
+    pub const QUANTITY_LOW: usize = offset_of!(Self, quantity) / WORD_BYTES + TickLayout::LOW;
+    pub const QUANTITY_HIGH: usize = offset_of!(Self, quantity) / WORD_BYTES + TickLayout::HIGH;
+    pub const DISTANCE: usize = offset_of!(Self, distance) / WORD_BYTES;
+    pub const WORDS: usize = size_of::<Self>() / WORD_BYTES;
 }
 
-pub struct ScratchLayout;
+#[repr(C)]
+#[derive(Clone, Copy, Pod, Zeroable)]
+pub struct ScratchLayout {
+    sort_first: [u32; MAX_LEGS],
+    sort_second: [u32; MAX_LEGS],
+    predecessors: [u32; MAX_LEGS],
+    statuses: [u32; 2],
+}
 impl ScratchLayout {
-    pub const SORT_BUFFERS: usize = 2;
-    pub const PREDECESSORS: usize = Self::SORT_BUFFERS;
-    pub const STATUSES: usize = Self::PREDECESSORS + 1;
-    pub const STATUS_BUFFERS: usize = 2;
-    pub const WORDS_PER_EVENT: usize = Self::STATUSES * MAX_LEGS + Self::STATUS_BUFFERS;
+    pub const PREDECESSORS: usize = offset_of!(Self, predecessors) / size_of::<[u32; MAX_LEGS]>();
+    pub const STATUSES: usize = offset_of!(Self, statuses) / size_of::<[u32; MAX_LEGS]>();
+    pub const WORDS_PER_EVENT: usize = size_of::<Self>() / WORD_BYTES;
 }
 
-pub struct LinkLayout;
+#[repr(C)]
+#[derive(Clone, Copy, Pod, Zeroable)]
+pub struct LinkLayout {
+    first_predecessor: u32,
+    last_predecessor: u32,
+    successor: u32,
+}
 impl LinkLayout {
-    pub const FIRST_PREDECESSOR: usize = 0;
-    pub const LAST_PREDECESSOR: usize = 1;
-    pub const SUCCESSOR: usize = 2;
-    pub const WORDS_PER_EVENT: usize = Self::SUCCESSOR + 1;
+    pub const FIRST_PREDECESSOR: usize = offset_of!(Self, first_predecessor) / WORD_BYTES;
+    pub const LAST_PREDECESSOR: usize = offset_of!(Self, last_predecessor) / WORD_BYTES;
+    pub const SUCCESSOR: usize = offset_of!(Self, successor) / WORD_BYTES;
+    pub const WORDS_PER_EVENT: usize = size_of::<Self>() / WORD_BYTES;
 }
 
-pub struct SummaryLayout;
+#[repr(C)]
+#[derive(Clone, Copy, Pod, Zeroable)]
+pub struct SummaryLayout {
+    pub cash: TickLayout,
+    pub employed: TickLayout,
+    pub shortages: TickLayout,
+    pub inventories: [TickLayout; Good::COUNT],
+    pub transit: [TickLayout; Good::COUNT],
+    pub produced: [TickLayout; Good::COUNT],
+    pub used: [TickLayout; Good::COUNT],
+    pub consumed: TickLayout,
+    pub minimum_wage: TickLayout,
+    pub maximum_wage: TickLayout,
+    pub minimum_price: TickLayout,
+    pub maximum_price: TickLayout,
+    pub firms_by_good: [TickLayout; Good::COUNT],
+    pub wage_minima: [TickLayout; Good::COUNT],
+    pub wage_maxima: [TickLayout; Good::COUNT],
+    pub wage_totals: [TickLayout; Good::COUNT],
+    pub wage_squares: [TickLayout; Good::COUNT],
+    pub price_minima: [TickLayout; Good::COUNT],
+    pub price_maxima: [TickLayout; Good::COUNT],
+    pub price_totals: [TickLayout; Good::COUNT],
+    pub price_squares: [TickLayout; Good::COUNT],
+}
 impl SummaryLayout {
-    pub const CASH: u32 = 0;
-    pub const EMPLOYED: u32 = 1;
-    pub const SHORTAGES: u32 = 2;
-    pub const INVENTORIES: u32 = 3;
-    pub const TRANSIT: u32 = 6;
-    pub const PRODUCED: u32 = 9;
-    pub const USED: u32 = 12;
-    pub const CONSUMED: u32 = 15;
-    pub const MINIMUM_WAGE: u32 = 16;
-    pub const MAXIMUM_WAGE: u32 = 17;
-    pub const MINIMUM_PRICE: u32 = 18;
-    pub const MAXIMUM_PRICE: u32 = 19;
-    pub const METRICS: usize = 24;
-    pub const WORDS: usize = Self::METRICS * TICK_WORDS;
+    pub const CASH: u32 = (offset_of!(Self, cash) / TICK_BYTES) as u32;
+    pub const EMPLOYED: u32 = (offset_of!(Self, employed) / TICK_BYTES) as u32;
+    pub const SHORTAGES: u32 = (offset_of!(Self, shortages) / TICK_BYTES) as u32;
+    pub const INVENTORIES: u32 = (offset_of!(Self, inventories) / TICK_BYTES) as u32;
+    pub const TRANSIT: u32 = (offset_of!(Self, transit) / TICK_BYTES) as u32;
+    pub const PRODUCED: u32 = (offset_of!(Self, produced) / TICK_BYTES) as u32;
+    pub const USED: u32 = (offset_of!(Self, used) / TICK_BYTES) as u32;
+    pub const CONSUMED: u32 = (offset_of!(Self, consumed) / TICK_BYTES) as u32;
+    pub const MINIMUM_WAGE: u32 = (offset_of!(Self, minimum_wage) / TICK_BYTES) as u32;
+    pub const MAXIMUM_WAGE: u32 = (offset_of!(Self, maximum_wage) / TICK_BYTES) as u32;
+    pub const MINIMUM_PRICE: u32 = (offset_of!(Self, minimum_price) / TICK_BYTES) as u32;
+    pub const MAXIMUM_PRICE: u32 = (offset_of!(Self, maximum_price) / TICK_BYTES) as u32;
+    pub const FIRMS_BY_GOOD: u32 = (offset_of!(Self, firms_by_good) / TICK_BYTES) as u32;
+    pub const WAGE_MINIMA: u32 = (offset_of!(Self, wage_minima) / TICK_BYTES) as u32;
+    pub const WAGE_MAXIMA: u32 = (offset_of!(Self, wage_maxima) / TICK_BYTES) as u32;
+    pub const WAGE_TOTALS: u32 = (offset_of!(Self, wage_totals) / TICK_BYTES) as u32;
+    pub const WAGE_SQUARES: u32 = (offset_of!(Self, wage_squares) / TICK_BYTES) as u32;
+    pub const PRICE_MINIMA: u32 = (offset_of!(Self, price_minima) / TICK_BYTES) as u32;
+    pub const PRICE_MAXIMA: u32 = (offset_of!(Self, price_maxima) / TICK_BYTES) as u32;
+    pub const PRICE_TOTALS: u32 = (offset_of!(Self, price_totals) / TICK_BYTES) as u32;
+    pub const PRICE_SQUARES: u32 = (offset_of!(Self, price_squares) / TICK_BYTES) as u32;
+    pub const METRICS: usize = size_of::<Self>() / TICK_BYTES;
+    pub const WORDS: usize = size_of::<Self>() / WORD_BYTES;
     pub const ACTORS_PER_GROUP: u32 = 256;
     pub const WEALTH_BINS: usize = u64::BITS as usize;
     pub const REGION_SIDE: usize = 16;
     pub const REGIONS: usize = Self::REGION_SIDE * Self::REGION_SIDE;
-    pub const WEALTH_START: usize = CONTROL_WORDS;
-    pub const REGIONS_START: usize = Self::WEALTH_START + Self::WEALTH_BINS;
-    pub const CONTROL_WORDS: usize = Self::REGIONS_START + Self::REGIONS;
+    pub const WEALTH_START: usize = offset_of!(ObservationControlLayout, wealth_bins) / WORD_BYTES;
+    pub const REGIONS_START: usize = offset_of!(ObservationControlLayout, regions) / WORD_BYTES;
+    pub const CONTROL_WORDS: usize = size_of::<ObservationControlLayout>() / WORD_BYTES;
+
+    pub fn new(words: &[u32]) -> Result<&Self> {
+        let record = words
+            .get(..Self::WORDS)
+            .context("incomplete summary record")?;
+        Ok(bytemuck::from_bytes(bytemuck::cast_slice(record)))
+    }
+}
+
+#[repr(C)]
+#[derive(Clone, Copy, Pod, Zeroable)]
+pub struct ObservationControlLayout {
+    pub scheduler: ControlLayout,
+    pub wealth_bins: [u32; SummaryLayout::WEALTH_BINS],
+    pub regions: [u32; SummaryLayout::REGIONS],
+}
+impl ObservationControlLayout {
+    pub fn new(words: &[u32]) -> Result<&Self> {
+        let record = words
+            .get(..SummaryLayout::CONTROL_WORDS)
+            .context("incomplete observation control record")?;
+        Ok(bytemuck::from_bytes(bytemuck::cast_slice(record)))
+    }
 }

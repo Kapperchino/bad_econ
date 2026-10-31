@@ -1,22 +1,73 @@
 use crate::arithmetic::add;
 use anyhow::{Context, Result, anyhow};
+use bytemuck::{Pod, Zeroable};
 use serde::{Deserialize, Serialize};
-use std::collections::BTreeMap;
+use std::{collections::BTreeMap, mem::offset_of};
 
 pub const MAX_LEGS: usize = 12;
-pub const LEG_WORDS: usize = LegLayout::GUARD_HIGH + 1;
+pub const LEG_WORDS: usize = size_of::<LegLayout>() / size_of::<u32>();
 pub const EMPTY: u32 = u32::MAX;
 
-pub struct LegLayout;
+#[repr(C)]
+#[derive(Clone, Copy, Debug, Default, Pod, Zeroable)]
+pub struct TickLayout {
+    low: u32,
+    high: u32,
+}
+impl TickLayout {
+    pub const LOW: usize = offset_of!(Self, low) / size_of::<u32>();
+    pub const HIGH: usize = offset_of!(Self, high) / size_of::<u32>();
+}
+impl From<u64> for TickLayout {
+    fn from(value: u64) -> Self {
+        Self {
+            low: value as u32,
+            high: (value >> u32::BITS) as u32,
+        }
+    }
+}
+impl From<TickLayout> for u64 {
+    fn from(value: TickLayout) -> Self {
+        Self::from(value.low) | (Self::from(value.high) << u32::BITS)
+    }
+}
+
+#[repr(C)]
+#[derive(Clone, Copy, Pod, Zeroable)]
+pub struct LegLayout {
+    coordinate: u32,
+    debit: TickLayout,
+    credit: TickLayout,
+    authorization: u32,
+    guard: TickLayout,
+}
 impl LegLayout {
-    pub const COORDINATE: usize = 0;
-    pub const DEBIT_LOW: usize = 1;
-    pub const DEBIT_HIGH: usize = 2;
-    pub const CREDIT_LOW: usize = 3;
-    pub const CREDIT_HIGH: usize = 4;
-    pub const AUTHORIZATION: usize = 5;
-    pub const GUARD_LOW: usize = 6;
-    pub const GUARD_HIGH: usize = 7;
+    pub const COORDINATE: usize = offset_of!(Self, coordinate) / size_of::<u32>();
+    pub const DEBIT_LOW: usize = offset_of!(Self, debit.low) / size_of::<u32>();
+    pub const DEBIT_HIGH: usize = offset_of!(Self, debit.high) / size_of::<u32>();
+    pub const CREDIT_LOW: usize = offset_of!(Self, credit.low) / size_of::<u32>();
+    pub const CREDIT_HIGH: usize = offset_of!(Self, credit.high) / size_of::<u32>();
+    pub const AUTHORIZATION: usize = offset_of!(Self, authorization) / size_of::<u32>();
+    pub const GUARD_LOW: usize = offset_of!(Self, guard.low) / size_of::<u32>();
+    pub const GUARD_HIGH: usize = offset_of!(Self, guard.high) / size_of::<u32>();
+
+    fn new(leg: &Leg) -> Self {
+        let authorization = EncodedAuthorization::from(leg.authorization);
+        Self {
+            coordinate: leg.coordinate.0,
+            debit: leg.debit.into(),
+            credit: leg.credit.into(),
+            authorization: authorization.flags.bits(),
+            guard: authorization.guard.into(),
+        }
+    }
+
+    fn empty() -> Self {
+        Self {
+            coordinate: EMPTY,
+            ..Self::zeroed()
+        }
+    }
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
@@ -168,25 +219,12 @@ impl Bundle {
         Ok(decision)
     }
     pub fn encode(&self) -> Vec<u32> {
-        let mut words = vec![0; MAX_LEGS * LEG_WORDS];
-        words
-            .chunks_exact_mut(LEG_WORDS)
-            .for_each(|leg| leg[LegLayout::COORDINATE] = EMPTY);
-        self.legs
-            .iter()
-            .zip(words.chunks_exact_mut(LEG_WORDS))
-            .for_each(|(leg, out)| {
-                let authorization = EncodedAuthorization::from(leg.authorization);
-                out[LegLayout::COORDINATE] = leg.coordinate.0;
-                out[LegLayout::DEBIT_LOW] = leg.debit as u32;
-                out[LegLayout::DEBIT_HIGH] = (leg.debit >> u32::BITS) as u32;
-                out[LegLayout::CREDIT_LOW] = leg.credit as u32;
-                out[LegLayout::CREDIT_HIGH] = (leg.credit >> u32::BITS) as u32;
-                out[LegLayout::AUTHORIZATION] = authorization.flags.bits();
-                out[LegLayout::GUARD_LOW] = authorization.guard as u32;
-                out[LegLayout::GUARD_HIGH] = (authorization.guard >> u32::BITS) as u32;
-            });
-        words
+        let legs: [LegLayout; MAX_LEGS] = std::array::from_fn(|index| {
+            self.legs
+                .get(index)
+                .map_or_else(LegLayout::empty, LegLayout::new)
+        });
+        bytemuck::cast_slice(&legs).to_vec()
     }
 }
 struct Posting {

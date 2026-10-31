@@ -1,0 +1,162 @@
+{
+  "batch_size": 65536,
+  "buffer_days": 4,
+  "capacity": 100,
+  "commute_speed": 50,
+  "coverage": 2,
+  "delivery_penalty": 5,
+  "distribution_rate": 0,
+  "experiment": "Baseline",
+  "firm_cash": 200000,
+  "firms": 3,
+  "forecast_weight": 250,
+  "household_cash": 5000,
+  "household_need": 1,
+  "households": 3,
+  "map_size": 1000,
+  "maximum_price": 10000,
+  "minimum_price": 1,
+  "packet_minutes": 360,
+  "packet_output": 3,
+  "prices": [
+    150,
+    300,
+    450
+  ],
+  "reserve": 100000,
+  "reserved_minutes": 960,
+  "search_radius": 1000,
+  "seed": 19,
+  "shipment_speed": 1000,
+  "version": 1,
+  "wage": 1,
+  "work_cap": 480,
+  "behavior": {
+    "health_recovery": 7,
+    "hunger_damage": 30,
+    "work_fatigue": 13,
+    "rest_recovery": 17,
+    "wage_increment": 0,
+    "price_response": 0
+  },
+  "population": {
+    "households": [
+      {
+        "identity": 101,
+        "position": {
+          "x": 0,
+          "y": 0
+        },
+        "cash": 1000,
+        "inventories": [
+          0,
+          0,
+          10
+        ],
+        "health": 1000,
+        "fatigue": 0
+      },
+      {
+        "identity": 303,
+        "position": {
+          "x": 0,
+          "y": 0
+        },
+        "cash": 1000,
+        "inventories": [
+          0,
+          0,
+          10
+        ],
+        "health": 1000,
+        "fatigue": 0
+      },
+      {
+        "identity": 901,
+        "position": {
+          "x": 0,
+          "y": 0
+        },
+        "cash": 1000,
+        "inventories": [
+          0,
+          0,
+          10
+        ],
+        "health": 1000,
+        "fatigue": 0
+      }
+    ],
+    "firms": [
+      {
+        "identity": 2000,
+        "owner": 901,
+        "good": "Grain",
+        "cash": 10000,
+        "position": {
+          "x": 0,
+          "y": 0
+        },
+        "inventories": [
+          0,
+          0,
+          0
+        ],
+        "capacity": 1,
+        "technique": {
+          "labor_minutes": 120,
+          "input_ticks": 0,
+          "output_ticks": 5
+        },
+        "wage": 1,
+        "price": 10
+      },
+      {
+        "identity": 5000,
+        "owner": 101,
+        "good": "Flour",
+        "cash": 10000,
+        "position": {
+          "x": 0,
+          "y": 0
+        },
+        "inventories": [
+          2,
+          0,
+          0
+        ],
+        "capacity": 1,
+        "technique": {
+          "labor_minutes": 180,
+          "input_ticks": 2,
+          "output_ticks": 3
+        },
+        "wage": 2,
+        "price": 20
+      },
+      {
+        "identity": 8000,
+        "owner": 303,
+        "good": "Bread",
+        "cash": 10000,
+        "position": {
+          "x": 0,
+          "y": 0
+        },
+        "inventories": [
+          0,
+          3,
+          0
+        ],
+        "capacity": 1,
+        "technique": {
+          "labor_minutes": 240,
+          "input_ticks": 3,
+          "output_ticks": 2
+        },
+        "wage": 3,
+        "price": 30
+      }
+    ]
+  }
+}

@@ -6,6 +6,11 @@ use anyhow::{Context, Result, anyhow};
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 
+mod population;
+pub use population::{
+    BehaviorPolicy, FirmSeed, HouseholdSeed, InitialTotals, Population, Technique,
+};
+
 pub const SCENARIO_VERSION: u32 = 1;
 pub const BASE_FIELDS: usize = 26;
 pub const MEMORY_BUDGET: u64 = 4 * 1024 * 1024 * 1024;
@@ -108,14 +113,25 @@ pub struct ScenarioConfig {
     pub delivery_penalty: u32,
     pub batch_size: u32,
     pub experiment: Experiment,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub population: Option<Population>,
+    #[serde(default, skip_serializing_if = "BehaviorPolicy::is_default")]
+    pub behavior: BehaviorPolicy,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Scenario {
     config: ScenarioConfig,
+    totals: InitialTotals,
 }
 impl Scenario {
-    pub fn new(config: ScenarioConfig) -> Result<Self> {
+    pub fn new(mut config: ScenarioConfig) -> Result<Self> {
+        config.behavior = BehaviorPolicy::new(config.behavior)?;
+        config.population = config
+            .population
+            .take()
+            .map(|population| Population::new(population, &config))
+            .transpose()?;
         let bounds = [
             config.version == SCENARIO_VERSION,
             (1..=1_000_000).contains(&config.households),
@@ -150,20 +166,39 @@ impl Scenario {
         match bounds.into_iter().all(std::convert::identity) {
             false => Err(anyhow!("scenario parameter outside DeterministicV1 bounds")),
             true => {
-                let scenario = Self { config };
+                let totals = match &config.population {
+                    Some(population) => population.totals()?,
+                    None => {
+                        let cash = u128::from(config.household_cash)
+                            * u128::from(config.households)
+                            + u128::from(config.firm_cash) * u128::from(config.firms);
+                        let stock = u64::from(config.capacity)
+                            * u64::from(config.packet_output)
+                            * u64::from(config.buffer_days);
+                        let grain = u64::from(config.firms.div_ceil(3));
+                        let flour = u64::from((config.firms + 1) / 3);
+                        let bread = u64::from(config.firms / 3);
+                        InitialTotals {
+                            cash: u64::try_from(cash)
+                                .context("initial cash exceeds tick capacity")?,
+                            goods: [
+                                stock * (grain + flour),
+                                stock * (flour + bread),
+                                stock * bread
+                                    + u64::from(config.households)
+                                        * u64::from(config.household_need)
+                                        * u64::from(config.buffer_days),
+                            ],
+                        }
+                    }
+                };
+                let scenario = Self { config, totals };
                 let ring = scenario.ring();
                 let side = scenario
                     .config
                     .map_size
                     .div_ceil(scenario.config.search_radius);
-                let cash = u128::from(scenario.config.household_cash)
-                    * u128::from(scenario.config.households)
-                    + u128::from(scenario.config.firm_cash) * u128::from(scenario.config.firms);
-                match side <= 256
-                    && ring <= 65
-                    && cash <= u128::from(u64::MAX)
-                    && scenario.memory_estimate() <= MEMORY_BUDGET
-                {
+                match side <= 256 && ring <= 65 && scenario.memory_estimate() <= MEMORY_BUDGET {
                     true => Ok(scenario),
                     false => Err(anyhow!(
                         "scenario exceeds transit, cash, or 4 GiB memory capacity"
@@ -208,6 +243,8 @@ impl Scenario {
             delivery_penalty: 5,
             batch_size: 65_536,
             experiment,
+            population: None,
+            behavior: BehaviorPolicy::default(),
         };
         match experiment {
             Experiment::Shortage => config.buffer_days = 0,
@@ -242,7 +279,47 @@ impl Scenario {
     pub fn fingerprint(&self) -> Result<String> {
         Ok(hex(&Sha256::digest(serde_json::to_vec(&self.config)?)))
     }
+    pub fn index_of(&self, identity: u64) -> Option<usize> {
+        match &self.config.population {
+            Some(population) => population.index_of(identity),
+            None => (1..=self.actors() as u64)
+                .contains(&identity)
+                .then(|| (identity - 1) as usize),
+        }
+    }
+    pub fn identity(&self, index: usize) -> Option<u64> {
+        match &self.config.population {
+            Some(population) => population.identity(index),
+            None => (index < self.actors()).then_some(index as u64 + 1),
+        }
+    }
+    pub fn next_identity(&self) -> u64 {
+        self.config
+            .population
+            .as_ref()
+            .map(Population::next_identity)
+            .unwrap_or(self.actors() as u64 + 1)
+    }
+    pub fn technique(&self, index: usize) -> Technique {
+        match (
+            &self.config.population,
+            index.checked_sub(self.config.households as usize),
+        ) {
+            (Some(population), Some(firm)) => population.firms[firm].technique,
+            _ => Technique {
+                labor_minutes: self.config.packet_minutes,
+                input_ticks: self.config.packet_output,
+                output_ticks: self.config.packet_output,
+            },
+        }
+    }
     pub fn initial(&self) -> Result<State> {
+        match &self.config.population {
+            Some(population) => population.initial(self),
+            None => self.generated(),
+        }
+    }
+    fn generated(&self) -> Result<State> {
         let actors = self.actors();
         let config = &self.config;
         let properties = (0..actors)
@@ -497,7 +574,7 @@ pub struct InspectionRequest {
 }
 impl InspectionRequest {
     pub fn new(identity: u64, scenario: &Scenario) -> Result<Self> {
-        match (1..=scenario.actors() as u64).contains(&identity) {
+        match scenario.index_of(identity).is_some() {
             true => Ok(Self { identity }),
             false => Err(anyhow!("unknown actor identity")),
         }
@@ -516,6 +593,7 @@ pub struct Inspection {
     pub health: u64,
     pub fatigue: u64,
     pub employer: u64,
+    pub owner_identity: u64,
     pub available_minutes: u64,
     pub wage: u64,
     pub price: u64,
@@ -541,7 +619,13 @@ impl Inspection {
             transit: state.get(Field::Transit, index),
             health: state.get(Field::Health, index),
             fatigue: state.get(Field::Fatigue, index),
-            employer: state.get(Field::Employer, index),
+            employer: state
+                .get(Field::Employer, index)
+                .checked_sub(1)
+                .and_then(|employer| state.actors.get(employer as usize))
+                .map(|actor| actor.identity)
+                .unwrap_or(0),
+            owner_identity: state.actors[state.actors[index].owner as usize].identity,
             available_minutes: state.get(Field::Time, index),
             wage: state.get(Field::Wage, index),
             price: state.get(Field::Price, index),
@@ -549,6 +633,44 @@ impl Inspection {
             open_slots: state.get(Field::Slots, index),
         })
     }
+}
+
+#[derive(Clone, Copy, Debug, Default, Serialize, Deserialize, PartialEq, Eq)]
+pub struct QuoteDistribution {
+    pub count: u64,
+    pub minimum: u64,
+    pub maximum: u64,
+    pub total: u64,
+    pub squares: u64,
+}
+impl QuoteDistribution {
+    pub fn include(&mut self, quote: u64) -> Result<()> {
+        self.minimum = match self.count {
+            0 => quote,
+            _ => self.minimum.min(quote),
+        };
+        self.maximum = self.maximum.max(quote);
+        self.count = add(self.count, 1)?;
+        self.total = add(self.total, quote)?;
+        self.squares = add(
+            self.squares,
+            quote.checked_mul(quote).context("quote square overflow")?,
+        )?;
+        Ok(())
+    }
+    pub fn mean(&self) -> f64 {
+        self.total as f64 / self.count.max(1) as f64
+    }
+    pub fn deviation(&self) -> f64 {
+        let numerator = u128::from(self.count) * u128::from(self.squares)
+            - u128::from(self.total) * u128::from(self.total);
+        (numerator as f64).sqrt() / self.count.max(1) as f64
+    }
+}
+#[derive(Clone, Copy, Debug, Default, Serialize, Deserialize, PartialEq, Eq)]
+pub struct MarketObservation {
+    pub wages: QuoteDistribution,
+    pub prices: QuoteDistribution,
 }
 
 #[derive(Clone, Debug, Default, Serialize, Deserialize, PartialEq, Eq)]
@@ -567,6 +689,7 @@ pub struct ObservationSnapshot {
     pub maximum_wage: u64,
     pub minimum_price: u64,
     pub maximum_price: u64,
+    pub markets: [MarketObservation; Good::COUNT],
     pub wealth_bins: Vec<u64>,
     pub regions: Vec<u64>,
 }
@@ -628,6 +751,12 @@ impl ObservationSnapshot {
                     }
                     kind => {
                         let j = kind as usize - 1;
+                        snapshot.markets[j]
+                            .wages
+                            .include(state.get(Field::Wage, i))?;
+                        snapshot.markets[j]
+                            .prices
+                            .include(state.get(Field::Price, i))?;
                         snapshot.produced[j] =
                             add(snapshot.produced[j], state.get(Field::Produced, i))?;
                         snapshot.inventories[j] =
@@ -696,18 +825,25 @@ impl<'a> AuditedState<'a> {
             true => Ok(()),
             false => Err(anyhow!("state shape does not match scenario")),
         }?;
-        let identities = state.actors.iter().enumerate().all(|(i, actor)| {
-            let kind = match i < c.households as usize {
-                true => 0,
-                false => 1 + (i as u32 - c.households) % 3,
-            };
-            actor.identity == i as u64 + 1
-                && actor.kind == kind
-                && actor.position.x < c.map_size
-                && actor.position.y < c.map_size
-                && actor.owner < c.households
-                && (1..=10_000).contains(&actor.capacity)
-        });
+        let identities = state
+            .actors
+            .iter()
+            .enumerate()
+            .all(|(i, actor)| match &c.population {
+                Some(population) => *actor == population.actor(i),
+                None => {
+                    let kind = match i < c.households as usize {
+                        true => 0,
+                        false => 1 + (i as u32 - c.households) % 3,
+                    };
+                    actor.identity == i as u64 + 1
+                        && actor.kind == kind
+                        && actor.position.x < c.map_size
+                        && actor.position.y < c.map_size
+                        && actor.owner < c.households
+                        && (1..=10_000).contains(&actor.capacity)
+                }
+            });
         let resources = (0..scenario.actors()).all(|i| {
             let limits = state.get(Field::Health, i) <= 1000
                 && state.get(Field::Fatigue, i) <= 1000
@@ -728,24 +864,12 @@ impl<'a> AuditedState<'a> {
             };
             limits && closed && quotes
         });
-        let cash = u128::from(c.household_cash) * u128::from(c.households)
-            + u128::from(c.firm_cash) * u128::from(c.firms);
-        let stock = u64::from(c.capacity) * u64::from(c.packet_output) * u64::from(c.buffer_days);
-        let grain_firms = u64::from(c.firms.div_ceil(3));
-        let flour_firms = u64::from((c.firms + 1) / 3);
-        let bread_firms = u64::from(c.firms / 3);
-        let goods = [
-            stock * (grain_firms + flour_firms),
-            stock * (flour_firms + bread_firms),
-            stock * bread_firms
-                + u64::from(c.households) * u64::from(c.household_need) * u64::from(c.buffer_days),
-        ];
         let valid = identities
             && resources
-            && state.next_identity == scenario.actors() as u64 + 1
+            && state.next_identity == scenario.next_identity()
             && state.day <= u64::from(u32::MAX) - scenario.ring() as u64
-            && u128::from(state.initial_cash) == cash
-            && state.initial_goods == goods;
+            && state.initial_cash == scenario.totals.cash
+            && state.initial_goods == scenario.totals.goods;
         match valid {
             true => Ok(Self { state }),
             false => Err(anyhow!(

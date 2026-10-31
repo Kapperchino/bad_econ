@@ -2,15 +2,34 @@ use super::words::{Ticks, equal, lt};
 use crate::domain::{Good, Market};
 use crate::ledger::{AuthorizationFlags, Decision};
 use anyhow::{Context, Result, anyhow};
+use bytemuck::{Pod, Zeroable};
 use cubecl::prelude::*;
 use enumflags2::BitFlags;
+use std::mem::offset_of;
 
-pub const CONTROL_WORDS: usize = 4;
-pub const PROGRESS_WORD: usize = 0;
-pub const FAULT_WORD: usize = 1;
-pub const COMPLETED_WORD: usize = 2;
-pub const DEPENDENCY_FLAGS_WORD: usize = 3;
-pub const CONSTRUCTED_EVENTS_WORD: usize = 3;
+pub const CONTROL_WORDS: usize = size_of::<ControlLayout>() / size_of::<u32>();
+pub const PROGRESS_WORD: usize = offset_of!(ControlLayout, progress) / size_of::<u32>();
+pub const FAULT_WORD: usize = offset_of!(ControlLayout, faults) / size_of::<u32>();
+pub const COMPLETED_WORD: usize = offset_of!(ControlLayout, completed) / size_of::<u32>();
+pub const DEPENDENCY_FLAGS_WORD: usize = offset_of!(ControlLayout, phase_data) / size_of::<u32>();
+pub const CONSTRUCTED_EVENTS_WORD: usize = offset_of!(ControlLayout, phase_data) / size_of::<u32>();
+
+#[repr(C)]
+#[derive(Clone, Copy, Pod, Zeroable)]
+pub struct ControlLayout {
+    pub progress: u32,
+    pub faults: u32,
+    pub completed: u32,
+    pub phase_data: u32,
+}
+impl ControlLayout {
+    pub fn new(words: &[u32]) -> Result<&Self> {
+        let record = words
+            .get(..CONTROL_WORDS)
+            .context("incomplete scheduler control record")?;
+        Ok(bytemuck::from_bytes(bytemuck::cast_slice(record)))
+    }
+}
 
 #[enumflags2::bitflags]
 #[repr(u32)]
@@ -164,16 +183,14 @@ pub struct SchedulerControl {
 }
 impl SchedulerControl {
     pub fn new(words: &[u32]) -> Result<Self> {
-        match words.get(..CONTROL_WORDS) {
-            Some(record) => Ok(Self {
-                progress: record[PROGRESS_WORD] as usize,
-                faults: FaultFlags::new(record[FAULT_WORD])?,
-                completed: record[COMPLETED_WORD] as usize,
-                dependencies: BitFlags::from_bits(record[DEPENDENCY_FLAGS_WORD])
-                    .context("unknown dependency flags")?,
-            }),
-            None => Err(anyhow!("incomplete scheduler control record")),
-        }
+        let record = ControlLayout::new(words)?;
+        Ok(Self {
+            progress: record.progress as usize,
+            faults: FaultFlags::new(record.faults)?,
+            completed: record.completed as usize,
+            dependencies: BitFlags::from_bits(record.phase_data)
+                .context("unknown dependency flags")?,
+        })
     }
     pub fn shape(&self) -> DependencyShape {
         match self.dependencies.is_empty() {
@@ -396,7 +413,7 @@ mod tests {
     }
 
     fn check_atomic_flags(device: Device) -> Result<()> {
-        let control = device.tensor(&[0; CONTROL_WORDS]);
+        let control = device.tensor(bytemuck::cast_slice(&[ControlLayout::zeroed()]));
         concurrent_flags::launch(
             &device.client,
             CubeCount::Static(8, 1, 1),

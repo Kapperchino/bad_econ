@@ -1,3 +1,4 @@
+mod model;
 use crate::{
     domain::*,
     runtime::{RuntimeState, SimulationCommand},
@@ -13,6 +14,7 @@ use bevy::{
     },
     sprite::Anchor,
 };
+use model::{Chart, ComparisonRun, DisplayState, RunTarget};
 use std::{
     collections::VecDeque,
     sync::{Arc, Mutex, mpsc},
@@ -51,6 +53,7 @@ enum VerificationState {
     Start,
     AwaitDay,
     AwaitInspection,
+    AwaitComparison,
     Frames(u32),
     Complete,
 }
@@ -59,14 +62,17 @@ struct Dashboard {
     sender: mpsc::Sender<Control>,
     data: Arc<Mutex<Display>>,
     selected: u64,
+    chart: Chart,
 }
 struct Display {
     snapshot: ObservationSnapshot,
     history: VecDeque<ObservationSnapshot>,
-    comparison: Option<ObservationSnapshot>,
+    comparison: Option<ComparisonRun>,
     inspection: Option<Inspection>,
     firms: Vec<Actor>,
-    status: String,
+    status: DisplayState,
+    error: Option<String>,
+    seed: u64,
     map_size: u32,
     speed: Speed,
 }
@@ -180,7 +186,9 @@ fn setup(
         comparison: None,
         inspection: None,
         firms: Vec::new(),
-        status: "Initializing shared GPU…".into(),
+        status: DisplayState::Initializing,
+        error: None,
+        seed: launch.scenario.config().seed,
         map_size: launch.scenario.config().map_size,
         speed: Speed::Normal,
     }));
@@ -188,7 +196,8 @@ fn setup(
     commands.insert_resource(Dashboard {
         sender,
         data: data.clone(),
-        selected: 1,
+        selected: launch.scenario.identity(0).expect("first household"),
+        chart: Chart::Employment,
     });
     let scenario = launch.scenario.clone();
     let workgroup = launch.workgroup;
@@ -199,7 +208,8 @@ fn setup(
         match result {
             Ok(()) => (),
             Err(error) => {
-                data.lock().expect("dashboard lock").status = format!("Fault: {error}");
+                data.lock().expect("dashboard lock").status =
+                    DisplayState::Unavailable(error.to_string());
             }
         }
     });
@@ -243,7 +253,7 @@ fn setup(
         Anchor::TOP_LEFT,
         Transform::from_xyz(75.0, 375.0, 2.0),
     ));
-    commands.spawn((Text2d::new("SPACE pause/resume    N step    R reset    1/2/3 speed    H household    F firm    TAB next    C compare next seed"), TextFont { font_size: FontSize::Px(15.0), ..Default::default() }, Anchor::TOP_LEFT, Transform::from_xyz(-600.0, -365.0, 2.0)));
+    commands.spawn((Text2d::new("SPACE pause/resume    N step    R reset    1/2/3 speed    H household    F firm    TAB next    C compare    G chart"), TextFont { font_size: FontSize::Px(15.0), ..Default::default() }, Anchor::TOP_LEFT, Transform::from_xyz(-600.0, -365.0, 2.0)));
 }
 
 fn worker(
@@ -254,6 +264,7 @@ fn worker(
     let mut speed = Speed::Normal;
     let mut workflow = WorkerState::Active;
     let mut next_day = Instant::now();
+    let mut target = RunTarget::Open;
     publish(&mut simulation, data)?;
     while matches!(workflow, WorkerState::Active) {
         let timeout = match simulation.status {
@@ -263,9 +274,18 @@ fn worker(
             _ => Duration::from_millis(50),
         };
         let result = match receiver.recv_timeout(timeout) {
-            Ok(Control::Simulation(command)) => simulation
-                .command(*command)
-                .and_then(|()| publish(&mut simulation, data)),
+            Ok(Control::Simulation(command)) => {
+                match &*command {
+                    SimulationCommand::Reset(_) | SimulationCommand::Restore(_) => {
+                        target = RunTarget::Open;
+                        data.lock().expect("dashboard lock").comparison = None;
+                    }
+                    _ => (),
+                }
+                simulation
+                    .command(*command)
+                    .and_then(|()| publish(&mut simulation, data))
+            }
             Ok(Control::Inspect(request)) => simulation.inspect(request).map(|inspection| {
                 data.lock().expect("dashboard lock").inspection = Some(inspection)
             }),
@@ -275,7 +295,10 @@ fn worker(
                 next_day = Instant::now();
                 Ok(())
             }
-            Ok(Control::Compare) => compare(&mut simulation, data),
+            Ok(Control::Compare) => compare(&mut simulation, data).map(|next| {
+                target = next;
+                next_day = Instant::now();
+            }),
             Err(mpsc::RecvTimeoutError::Disconnected) => {
                 workflow = WorkerState::Stopped;
                 Ok(())
@@ -283,18 +306,29 @@ fn worker(
             Err(mpsc::RecvTimeoutError::Timeout) => Ok(()),
         };
         if let Err(error) = result {
-            data.lock().expect("dashboard lock").status =
-                format!("{:?}: {error}", simulation.status);
+            let mut display = data.lock().expect("dashboard lock");
+            display.error = Some(error.to_string());
+            display.status = DisplayState::Active(simulation.status.clone());
+        }
+        if target.reached(simulation.snapshot.day) {
+            simulation.command(SimulationCommand::Pause)?;
+            target = RunTarget::Open;
+            publish(&mut simulation, data)?;
         }
         if let (WorkerState::Active, RuntimeState::Running, true) =
             (&workflow, &simulation.status, Instant::now() >= next_day)
         {
-            let result = simulation
-                .advance()
-                .and_then(|()| publish(&mut simulation, data));
+            let result = simulation.advance().and_then(|()| {
+                if target.reached(simulation.snapshot.day) {
+                    simulation.command(SimulationCommand::Pause)?;
+                    target = RunTarget::Open;
+                }
+                publish(&mut simulation, data)
+            });
             if let Err(error) = result {
-                data.lock().expect("dashboard lock").status =
-                    format!("{:?}: {error}", simulation.status);
+                let mut display = data.lock().expect("dashboard lock");
+                display.error = Some(error.to_string());
+                display.status = DisplayState::Active(simulation.status.clone());
             }
             next_day = Instant::now() + speed.period();
         }
@@ -302,16 +336,30 @@ fn worker(
     Ok(())
 }
 
-fn compare(simulation: &mut Simulation, data: &Arc<Mutex<Display>>) -> Result<()> {
+fn compare(simulation: &mut Simulation, data: &Arc<Mutex<Display>>) -> Result<RunTarget> {
     let mut config = simulation.scenario.config().clone();
     config.seed = config
         .seed
         .checked_add(1)
         .ok_or_else(|| anyhow::anyhow!("seed overflow"))?;
     let scenario = Scenario::new(config)?;
-    data.lock().expect("dashboard lock").comparison = Some(simulation.snapshot.clone());
+    let horizon = simulation.snapshot.day;
+    let reference = ComparisonRun {
+        seed: simulation.scenario.config().seed,
+        horizon,
+        history: data.lock().expect("dashboard lock").history.clone(),
+    };
     simulation.command(SimulationCommand::Reset(scenario))?;
-    publish(simulation, data)
+    data.lock().expect("dashboard lock").comparison = Some(reference);
+    let target = match horizon {
+        0 => RunTarget::Open,
+        _ => {
+            simulation.command(SimulationCommand::Resume)?;
+            RunTarget::UntilDay(horizon)
+        }
+    };
+    publish(simulation, data)?;
+    Ok(target)
 }
 
 fn verify(
@@ -324,10 +372,10 @@ fn verify(
         let display = dashboard.data.lock().expect("dashboard lock");
         match (
             Instant::now() >= verification.deadline,
-            display.status.starts_with("Fault"),
+            display.status.failed(),
         ) {
             (true, _) | (_, true) => {
-                eprintln!("viewer verification failed: {}", display.status);
+                eprintln!("viewer verification failed: {}", display.status.label());
                 exit.write(AppExit::error());
                 verification.state = VerificationState::Complete;
             }
@@ -340,17 +388,31 @@ fn verify(
                         VerificationState::AwaitDay
                     }
                     VerificationState::AwaitDay if display.snapshot.day == 1 => {
-                        let request =
-                            InspectionRequest::new(1, &launch.scenario).expect("first household");
+                        let request = InspectionRequest::new(
+                            launch.scenario.identity(0).expect("first household"),
+                            &launch.scenario,
+                        )
+                        .expect("first household");
                         let _ = dashboard.sender.send(Control::Inspect(request));
                         VerificationState::AwaitInspection
                     }
                     VerificationState::AwaitInspection if display.inspection.is_some() => {
+                        let _ = dashboard.sender.send(Control::Compare);
+                        VerificationState::AwaitComparison
+                    }
+                    VerificationState::AwaitComparison
+                        if display.seed == launch.scenario.config().seed + 1
+                            && display.snapshot.day == 1
+                            && matches!(
+                                display.status,
+                                DisplayState::Active(RuntimeState::Paused)
+                            ) =>
+                    {
                         VerificationState::Frames(3)
                     }
                     VerificationState::Frames(0) => {
                         eprintln!(
-                            "viewer verification passed: shared device, audited day, inspection, rendered frames"
+                            "viewer verification passed: shared device, audited day, inspection, same-day seed comparison, rendered frames"
                         );
                         exit.write(AppExit::Success);
                         VerificationState::Complete
@@ -359,6 +421,7 @@ fn verify(
                     ref state => match state {
                         VerificationState::AwaitDay => VerificationState::AwaitDay,
                         VerificationState::AwaitInspection => VerificationState::AwaitInspection,
+                        VerificationState::AwaitComparison => VerificationState::AwaitComparison,
                         _ => VerificationState::Complete,
                     },
                 };
@@ -380,6 +443,11 @@ fn publish(simulation: &mut Simulation, data: &Arc<Mutex<Display>>) -> Result<()
         _ => None,
     };
     let mut display = data.lock().expect("dashboard lock");
+    if let Some(firms) = firms {
+        display.firms = firms;
+        display.history.clear();
+        display.inspection = None;
+    }
     match display.history.back().map(|s| s.day) {
         Some(day) if day == simulation.snapshot.day => (),
         _ => {
@@ -389,17 +457,10 @@ fn publish(simulation: &mut Simulation, data: &Arc<Mutex<Display>>) -> Result<()
             }
         }
     }
-    if let Some(firms) = firms {
-        display.firms = firms;
-        display.history.clear();
-        display.inspection = None;
-    }
     display.snapshot = simulation.snapshot.clone();
-    display.status = format!(
-        "{:?} · seed {}",
-        simulation.status,
-        simulation.scenario.config().seed
-    );
+    display.status = DisplayState::Active(simulation.status.clone());
+    display.seed = simulation.scenario.config().seed;
+    display.error = None;
     Ok(())
 }
 
@@ -411,12 +472,13 @@ fn controls(
     match dashboard {
         None => (),
         Some(mut dashboard) => {
-            let running = dashboard
-                .data
-                .lock()
-                .expect("dashboard lock")
-                .status
-                .starts_with("Running");
+            let running = matches!(
+                dashboard.data.lock().expect("dashboard lock").status,
+                DisplayState::Active(RuntimeState::Running)
+            );
+            if keys.just_pressed(KeyCode::KeyG) {
+                dashboard.chart = dashboard.chart.next();
+            }
             let mut controls = Vec::new();
             if keys.just_pressed(KeyCode::Space) {
                 controls.push(Control::command(match running {
@@ -444,13 +506,20 @@ fn controls(
             .filter(|(key, _)| keys.just_pressed(*key))
             .for_each(|(_, speed)| controls.push(Control::Speed(speed)));
             if keys.just_pressed(KeyCode::KeyH) {
-                dashboard.selected = 1;
+                dashboard.selected = launch.scenario.identity(0).expect("first household");
             }
             if keys.just_pressed(KeyCode::KeyF) {
-                dashboard.selected = u64::from(launch.scenario.config().households) + 1;
+                dashboard.selected = launch
+                    .scenario
+                    .identity(launch.scenario.config().households as usize)
+                    .expect("first firm");
             }
             if keys.just_pressed(KeyCode::Tab) {
-                dashboard.selected = dashboard.selected % launch.scenario.actors() as u64 + 1;
+                let index = launch.scenario.index_of(dashboard.selected).unwrap_or(0);
+                dashboard.selected = launch
+                    .scenario
+                    .identity((index + 1) % launch.scenario.actors())
+                    .expect("next actor");
             }
             let inspection = [KeyCode::KeyH, KeyCode::KeyF, KeyCode::Tab]
                 .into_iter()
@@ -490,7 +559,7 @@ fn draw(
                         ),
                         _ => format!(
                             "Owner {} · wage {} · price {}\nCapacity {} · planned {} · open {}",
-                            i.actor.owner + 1,
+                            i.owner_identity,
                             i.wage,
                             i.price,
                             i.actor.capacity,
@@ -513,16 +582,39 @@ fn draw(
             let comparison = display
                 .comparison
                 .as_ref()
-                .map(|c| {
-                    format!(
-                        "Previous seed · day {}\nEmployed {} · shortage {}",
-                        c.day, c.employed, c.shortages
-                    )
+                .map(|reference| match reference.at_day(s.day) {
+                    Some(prior) => format!(
+                        "Seed {} · same day {}\nEmployment Δ {:+} · unmet bread Δ {:+}",
+                        reference.seed,
+                        s.day,
+                        i128::from(s.employed) - i128::from(prior.employed),
+                        i128::from(s.shortages) - i128::from(prior.shortages)
+                    ),
+                    None => format!(
+                        "Comparing seed {} · target day {}",
+                        reference.seed, reference.horizon
+                    ),
                 })
                 .unwrap_or_default();
+            let quotes = s
+                .markets
+                .iter()
+                .zip(["Grain", "Flour", "Bread"])
+                .map(|(market, name)| {
+                    format!(
+                        "{name}: {:.1} ± {:.1} / {:.1} ± {:.1}",
+                        market.prices.mean(),
+                        market.prices.deviation(),
+                        market.wages.mean(),
+                        market.wages.deviation()
+                    )
+                })
+                .collect::<Vec<_>>()
+                .join("\n");
             let text = format!(
-                "{}\nDay {} · target {}\n\nUnemployment  {:.1}%\nUnmet bread  {}\nCash  {}\n\nStocks G/F/B  {:?}\nIn transit  {:?}\nWages  {}–{} / minute\nPrices  {}–{}\n\n{}\n\n{}\n\nEmployment (green) / shortages (red)",
-                display.status,
+                "{} · seed {}\nDay {} · target {}\nUnemployment {:.1}% · unmet bread {}\nCash {}\nStocks G/F/B {:?}\nIn transit {:?}\n\nPrice / wage · mean ± standard deviation\n{}\n\n{}\n\n{}\n{}\nG: {}",
+                display.status.label(),
+                display.seed,
                 s.day,
                 display.speed.label(),
                 unemployment,
@@ -530,12 +622,11 @@ fn draw(
                 s.cash,
                 s.inventories,
                 s.transit,
-                s.minimum_wage,
-                s.maximum_wage,
-                s.minimum_price,
-                s.maximum_price,
+                quotes,
                 inspection,
-                comparison
+                comparison,
+                display.error.as_deref().unwrap_or(""),
+                dashboard.chart.label()
             );
             labels
                 .iter_mut()
@@ -558,24 +649,80 @@ fn draw(
                 );
                 gizmos.circle_2d(point, 2.0, color);
             });
-            display
-                .history
+            draw_chart(&display, dashboard.chart, &mut gizmos);
+        }
+    }
+}
+
+fn chart_color(chart: Chart, series: usize) -> Color {
+    match (chart, series) {
+        (Chart::Employment, 0) => Color::srgb(0.45, 0.90, 0.65),
+        (Chart::Employment, _) => Color::srgb(0.95, 0.35, 0.30),
+        (_, 0) => Color::srgb(0.95, 0.73, 0.25),
+        (_, 1) => Color::srgb(0.40, 0.70, 0.95),
+        _ => Color::srgb(0.45, 0.90, 0.65),
+    }
+}
+fn draw_chart(display: &Display, chart: Chart, gizmos: &mut Gizmos) {
+    let history = display
+        .history
+        .iter()
+        .map(|snapshot| chart.values(snapshot))
+        .collect::<Vec<_>>();
+    let peak = history.iter().flatten().copied().fold(1.0, f64::max) as f32;
+    let baseline = -315.0;
+    let height = 100.0;
+    gizmos.line_2d(
+        Vec2::new(80.0, baseline),
+        Vec2::new(560.0, baseline),
+        Color::srgb(0.3, 0.4, 0.45),
+    );
+    match chart {
+        Chart::Cash => {
+            let bins = &display.snapshot.wealth_bins;
+            let last = bins
                 .iter()
-                .zip(display.history.iter().skip(1))
+                .rposition(|count| *count > 0)
+                .unwrap_or(1)
+                .max(1);
+            bins.iter()
+                .take(last + 1)
                 .enumerate()
-                .for_each(|(i, (a, b))| {
-                    let x = 80.0 + i as f32 * 3.0;
-                    let h = s.households.max(1) as f32;
-                    gizmos.line_2d(
-                        Vec2::new(x, -300.0 + a.employed as f32 / h * 90.0),
-                        Vec2::new(x + 3.0, -300.0 + b.employed as f32 / h * 90.0),
-                        Color::srgb(0.45, 0.90, 0.65),
+                .for_each(|(bin, count)| {
+                    let x = 80.0 + bin as f32 / (last + 1) as f32 * 480.0;
+                    gizmos.rect_2d(
+                        Isometry2d::from_translation(Vec2::new(
+                            x + 3.0,
+                            baseline + *count as f32 / peak * height / 2.0,
+                        )),
+                        Vec2::new(6.0, *count as f32 / peak * height),
+                        Color::srgb(0.4, 0.7, 0.95),
                     );
-                    gizmos.line_2d(
-                        Vec2::new(x, -300.0 + a.shortages as f32 / h * 90.0),
-                        Vec2::new(x + 3.0, -300.0 + b.shortages as f32 / h * 90.0),
-                        Color::srgb(0.95, 0.35, 0.3),
-                    );
+                });
+        }
+        _ => {
+            let first = display
+                .history
+                .front()
+                .map(|snapshot| snapshot.day)
+                .unwrap_or(0);
+            let span = display.snapshot.day.saturating_sub(first).max(1) as f32;
+            history
+                .windows(2)
+                .zip(display.history.iter())
+                .for_each(|(pair, snapshot)| {
+                    let x = 80.0 + snapshot.day.saturating_sub(first) as f32 / span * 480.0;
+                    pair[0]
+                        .iter()
+                        .zip(&pair[1])
+                        .enumerate()
+                        .for_each(|(series, (a, b))| {
+                            gizmos.line_2d(
+                                Vec2::new(x, baseline + *a as f32 / peak * height),
+                                Vec2::new(x + 480.0 / span, baseline + *b as f32 / peak * height),
+                                chart_color(chart, series),
+                            );
+                        });
                 });
         }
     }

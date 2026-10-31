@@ -197,30 +197,52 @@ mod tests {
     use super::*;
     use crate::{
         arithmetic::DrawKey,
+        ledger::TickLayout,
         simulation::{Device, ops::TEST_WORKGROUP},
     };
     use anyhow::Result;
+    use bytemuck::{Pod, Zeroable};
+    use std::mem::offset_of;
 
-    struct ProbeInput;
-    impl ProbeInput {
-        const LEFT: usize = 0;
-        const NUMERATOR: usize = TICK_WORDS;
-        const DENOMINATOR: usize = Self::NUMERATOR + 1;
-        const RIGHT: usize = Self::DENOMINATOR + 1;
-        const WORDS: usize = Self::RIGHT + TICK_WORDS;
+    #[repr(C)]
+    #[derive(Clone, Copy, Debug, Pod, Zeroable)]
+    struct ProbeInput {
+        left: TickLayout,
+        numerator: u32,
+        denominator: u32,
+        right: TickLayout,
     }
-    struct ProbeOutput;
+    impl ProbeInput {
+        const LEFT: usize = offset_of!(Self, left) / WORD_BYTES;
+        const NUMERATOR: usize = offset_of!(Self, numerator) / WORD_BYTES;
+        const DENOMINATOR: usize = offset_of!(Self, denominator) / WORD_BYTES;
+        const RIGHT: usize = offset_of!(Self, right) / WORD_BYTES;
+        const WORDS: usize = size_of::<Self>() / WORD_BYTES;
+    }
+    #[repr(C)]
+    #[derive(Clone, Copy, Pod, Zeroable)]
+    struct ProbeOutput {
+        sum: TickLayout,
+        sum_faults: u32,
+        product: TickLayout,
+        product_faults: u32,
+        quotient: TickLayout,
+        ratio: TickLayout,
+        ratio_faults: u32,
+        fraction: u32,
+        difference: TickLayout,
+    }
     impl ProbeOutput {
-        const SUM: usize = 0;
-        const SUM_FAULTS: usize = Self::SUM + TICK_WORDS;
-        const PRODUCT: usize = Self::SUM_FAULTS + 1;
-        const PRODUCT_FAULTS: usize = Self::PRODUCT + TICK_WORDS;
-        const QUOTIENT: usize = Self::PRODUCT_FAULTS + 1;
-        const RATIO: usize = Self::QUOTIENT + TICK_WORDS;
-        const RATIO_FAULTS: usize = Self::RATIO + TICK_WORDS;
-        const FRACTION: usize = Self::RATIO_FAULTS + 1;
-        const DIFFERENCE: usize = Self::FRACTION + 1;
-        const WORDS: usize = Self::DIFFERENCE + TICK_WORDS;
+        const SUM: usize = offset_of!(Self, sum) / WORD_BYTES;
+        const SUM_FAULTS: usize = offset_of!(Self, sum_faults) / WORD_BYTES;
+        const PRODUCT: usize = offset_of!(Self, product) / WORD_BYTES;
+        const PRODUCT_FAULTS: usize = offset_of!(Self, product_faults) / WORD_BYTES;
+        const QUOTIENT: usize = offset_of!(Self, quotient) / WORD_BYTES;
+        const RATIO: usize = offset_of!(Self, ratio) / WORD_BYTES;
+        const RATIO_FAULTS: usize = offset_of!(Self, ratio_faults) / WORD_BYTES;
+        const FRACTION: usize = offset_of!(Self, fraction) / WORD_BYTES;
+        const DIFFERENCE: usize = offset_of!(Self, difference) / WORD_BYTES;
+        const WORDS: usize = size_of::<Self>() / WORD_BYTES;
     }
 
     #[cube(launch)]
@@ -307,83 +329,68 @@ mod tests {
                     2 => 1,
                     _ => (draw >> WORD_BITS) as u32 | 1,
                 };
-                (a, b, n, d)
+                ProbeInput {
+                    left: a.into(),
+                    numerator: n,
+                    denominator: d,
+                    right: b.into(),
+                }
             })
             .collect::<Vec<_>>();
-        let words = cases
-            .iter()
-            .flat_map(|&(a, b, n, d)| {
-                [
-                    a as u32,
-                    (a >> WORD_BITS) as u32,
-                    n,
-                    d,
-                    b as u32,
-                    (b >> WORD_BITS) as u32,
-                ]
-            })
-            .collect::<Vec<_>>();
-        let input = device.tensor(&words);
+        let input = device.tensor(bytemuck::cast_slice(&cases));
         let output = device.empty(cases.len() * ProbeOutput::WORDS);
         probe::launch(
             &device.client,
             CubeCount::Static((cases.len() as u32).div_ceil(TEST_WORKGROUP), 1, 1),
             CubeDim::new_1d(TEST_WORKGROUP),
-            unsafe { BufferArg::from_raw_parts(input.handle.clone(), words.len()) },
+            unsafe {
+                BufferArg::from_raw_parts(input.handle.clone(), cases.len() * ProbeInput::WORDS)
+            },
             unsafe {
                 BufferArg::from_raw_parts(output.handle.clone(), cases.len() * ProbeOutput::WORDS)
             },
         );
         let actual = device.read(&output)?;
-        for (case, words) in cases
-            .into_iter()
-            .zip(actual.chunks_exact(ProbeOutput::WORDS))
+        for (case, output) in cases
+            .iter()
+            .zip(bytemuck::cast_slice::<u32, ProbeOutput>(&actual))
         {
-            let (a, b, n, d) = case;
+            let a = u64::from(case.left);
+            let b = u64::from(case.right);
+            let n = case.numerator;
+            let d = case.denominator;
             let wide_sum = u128::from(a) + u128::from(b);
             let wide_product = u128::from(a) * u128::from(n);
             let wide_ratio = wide_product / u128::from(d);
-            let value =
-                |index: usize| u64::from(words[index]) | u64::from(words[index + 1]) << WORD_BITS;
             let faults = |wide| match wide > u128::from(u64::MAX) {
                 true => FaultFlags::ARITHMETIC_OVERFLOW,
                 false => FaultFlags::empty(),
             };
-            assert_eq!(value(ProbeOutput::SUM), wide_sum as u64, "sum {case:?}");
+            assert_eq!(u64::from(output.sum), wide_sum as u64, "sum {case:?}");
+            assert_eq!(FaultFlags::new(output.sum_faults)?, faults(wide_sum));
             assert_eq!(
-                FaultFlags::new(words[ProbeOutput::SUM_FAULTS])?,
-                faults(wide_sum)
-            );
-            assert_eq!(
-                value(ProbeOutput::PRODUCT),
+                u64::from(output.product),
                 wide_product as u64,
                 "product {case:?}"
             );
             assert_eq!(
-                FaultFlags::new(words[ProbeOutput::PRODUCT_FAULTS])?,
+                FaultFlags::new(output.product_faults)?,
                 faults(wide_product)
             );
             assert_eq!(
-                value(ProbeOutput::QUOTIENT),
+                u64::from(output.quotient),
                 a / u64::from(d),
                 "division {case:?}"
             );
+            assert_eq!(u64::from(output.ratio), wide_ratio as u64, "ratio {case:?}");
+            assert_eq!(FaultFlags::new(output.ratio_faults)?, faults(wide_ratio));
             assert_eq!(
-                value(ProbeOutput::RATIO),
-                wide_ratio as u64,
-                "ratio {case:?}"
-            );
-            assert_eq!(
-                FaultFlags::new(words[ProbeOutput::RATIO_FAULTS])?,
-                faults(wide_ratio)
-            );
-            assert_eq!(
-                words[ProbeOutput::FRACTION],
+                output.fraction,
                 (u128::from(a.min(b)) * u128::from(PRICE_INDEX_LIMIT) / u128::from(b)) as u32,
                 "fraction {case:?}"
             );
             assert_eq!(
-                value(ProbeOutput::DIFFERENCE),
+                u64::from(output.difference),
                 a.wrapping_sub(b),
                 "subtraction {case:?}"
             );

@@ -184,9 +184,14 @@ fn local(
                         add_checked(
                             control,
                             desired,
-                            ticks(config[ConfigLayout::PACKET_OUTPUT] - 1u32, 0u32),
+                            ticks(
+                                actors
+                                    [id as usize * ActorLayout::WORDS + ActorLayout::OUTPUT_TICKS]
+                                    - 1u32,
+                                0u32,
+                            ),
                         ),
-                        config[ConfigLayout::PACKET_OUTPUT],
+                        actors[id as usize * ActorLayout::WORDS + ActorLayout::OUTPUT_TICKS],
                     );
                     let mut planned = minimum(
                         quotient,
@@ -200,7 +205,7 @@ fn local(
                             planned,
                             divide(
                                 value(state, config, k.input(), id),
-                                config[ConfigLayout::PACKET_OUTPUT],
+                                actors[id as usize * ActorLayout::WORDS + ActorLayout::INPUT_TICKS],
                             ),
                         );
                     }
@@ -209,7 +214,8 @@ fn local(
                         divide(
                             value(state, config, comptime!(Field::Cash as u32), id),
                             number(state, config, comptime!(Field::Wage as u32), id)
-                                * config[ConfigLayout::PACKET_MINUTES],
+                                * actors
+                                    [id as usize * ActorLayout::WORDS + ActorLayout::LABOR_MINUTES],
                         ),
                     );
                     set(state, config, comptime!(Field::Slots as u32), id, planned);
@@ -246,24 +252,25 @@ fn local(
                     );
                     let mut health = min(
                         number(state, config, comptime!(Field::Health as u32), id)
-                            + HEALTH_RECOVERY,
+                            + config[ConfigLayout::HEALTH_RECOVERY],
                         POLICY_SCALE,
                     );
                     if shortage > 0u32 {
                         health = max(
                             number(state, config, comptime!(Field::Health as u32), id),
-                            HUNGER_DAMAGE,
-                        ) - HUNGER_DAMAGE;
+                            config[ConfigLayout::HUNGER_DAMAGE],
+                        ) - config[ConfigLayout::HUNGER_DAMAGE];
                     }
                     let mut fatigue = min(
-                        number(state, config, comptime!(Field::Fatigue as u32), id) + WORK_FATIGUE,
+                        number(state, config, comptime!(Field::Fatigue as u32), id)
+                            + config[ConfigLayout::WORK_FATIGUE],
                         POLICY_SCALE,
                     );
                     if number(state, config, comptime!(Field::Employed as u32), id) == 0u32 {
                         fatigue = max(
                             number(state, config, comptime!(Field::Fatigue as u32), id),
-                            REST_RECOVERY,
-                        ) - REST_RECOVERY;
+                            config[ConfigLayout::REST_RECOVERY],
+                        ) - config[ConfigLayout::REST_RECOVERY];
                     }
                     set32(state, config, comptime!(Field::Health as u32), id, health);
                     set32(state, config, comptime!(Field::Fatigue as u32), id, fatigue);
@@ -321,7 +328,9 @@ fn local(
                         minus(excess, unfilled),
                     );
                     let denominator = maximum(demand, ticks(1, 0));
-                    let scaled = fraction_index(magnitude, denominator);
+                    let scaled = fraction_index(magnitude, denominator)
+                        * config[ConfigLayout::PRICE_RESPONSE]
+                        / POLICY_SCALE;
                     let table_index = select(
                         positive_sign,
                         PRICE_INDEX_LIMIT + scaled,
@@ -356,7 +365,7 @@ fn local(
                     let cap = divide(
                         divide(
                             value(state, config, comptime!(Field::Cash as u32), id),
-                            config[ConfigLayout::PACKET_MINUTES],
+                            actors[id as usize * ActorLayout::WORDS + ActorLayout::LABOR_MINUTES],
                         ),
                         max(
                             number(state, config, comptime!(Field::Plan as u32), id),
@@ -366,7 +375,7 @@ fn local(
                     let offered = number(state, config, comptime!(Field::Wage as u32), id)
                         + select(
                             number(state, config, comptime!(Field::Slots as u32), id) > 0u32,
-                            WAGE_INCREMENT,
+                            config[ConfigLayout::WAGE_INCREMENT],
                             0u32,
                         );
                     set32(
@@ -423,7 +432,7 @@ fn propose(
                 search = k.processes_input() && k.input() == good;
                 wanted = ticks(
                     actors[id as usize * ActorLayout::WORDS + ActorLayout::CAPACITY]
-                        * config[ConfigLayout::PACKET_OUTPUT]
+                        * actors[id as usize * ActorLayout::WORDS + ActorLayout::INPUT_TICKS]
                         * config[ConfigLayout::COVERAGE],
                     0u32,
                 );
@@ -475,11 +484,7 @@ fn propose(
         }
         search = search
             && number(state, config, comptime!(Field::Time as u32), id)
-                >= select(
-                    comptime!(market == MarketFlag::Labor),
-                    config[ConfigLayout::PACKET_MINUTES],
-                    0,
-                );
+                >= select(comptime!(market == MarketFlag::Labor), 1u32, 0);
         if good > 0 {
             search = search
                 && !equal(wanted, zero())
@@ -519,7 +524,8 @@ fn propose(
                         );
                         let mut amount = ticks(1u32, 0u32);
                         if comptime!(market == MarketFlag::Labor) {
-                            let duration = config[ConfigLayout::PACKET_MINUTES]
+                            let duration = actors
+                                [firm as usize * ActorLayout::WORDS + ActorLayout::LABOR_MINUTES]
                                 + ceildiv(dist, config[ConfigLayout::COMMUTE_SPEED]) * COMMUTE_LEGS;
                             eligible = eligible
                                 && number(state, config, comptime!(Field::Slots as u32), firm)
@@ -527,7 +533,11 @@ fn propose(
                                 && number(state, config, comptime!(Field::Time as u32), id)
                                     >= duration;
                             score = divide(
-                                times32(wage * config[ConfigLayout::PACKET_MINUTES], POLICY_SCALE),
+                                times32(
+                                    wage * actors[firm as usize * ActorLayout::WORDS
+                                        + ActorLayout::LABOR_MINUTES],
+                                    POLICY_SCALE,
+                                ),
                                 duration,
                             );
                         } else {
@@ -662,7 +672,7 @@ fn construct(
                 MarketFlag::Labor => {
                     let wage = times32(
                         number(state, config, comptime!(Field::Wage as u32), other),
-                        config[ConfigLayout::PACKET_MINUTES],
+                        actors[other as usize * ActorLayout::WORDS + ActorLayout::LABOR_MINUTES],
                     );
                     event.transfer(
                         config,
@@ -694,7 +704,8 @@ fn construct(
                         comptime!(Field::Time as u32),
                         actor,
                         ticks(
-                            config[ConfigLayout::PACKET_MINUTES]
+                            actors
+                                [other as usize * ActorLayout::WORDS + ActorLayout::LABOR_MINUTES]
                                 + ceildiv(trip, config[ConfigLayout::COMMUTE_SPEED]) * COMMUTE_LEGS,
                             0u32,
                         ),
@@ -736,7 +747,11 @@ fn construct(
                         comptime!(Field::Hours as u32),
                         actor,
                         zero,
-                        ticks(config[ConfigLayout::PACKET_MINUTES], 0u32),
+                        ticks(
+                            actors
+                                [other as usize * ActorLayout::WORDS + ActorLayout::LABOR_MINUTES],
+                            0u32,
+                        ),
                     );
                     event.transfer(
                         config,
@@ -744,7 +759,10 @@ fn construct(
                         comptime!(Field::Pipeline as u32),
                         other,
                         zero,
-                        ticks(config[ConfigLayout::PACKET_OUTPUT], 0u32),
+                        ticks(
+                            actors[other as usize * ActorLayout::WORDS + ActorLayout::OUTPUT_TICKS],
+                            0u32,
+                        ),
                     );
                     event.leg(
                         config,
@@ -766,7 +784,11 @@ fn construct(
                             bundles,
                             kind(actors, other).input(),
                             other,
-                            ticks(config[ConfigLayout::PACKET_OUTPUT], 0u32),
+                            ticks(
+                                actors[other as usize * ActorLayout::WORDS
+                                    + ActorLayout::INPUT_TICKS],
+                                0u32,
+                            ),
                             zero,
                         );
                         event.transfer(
@@ -775,7 +797,11 @@ fn construct(
                             comptime!(Field::Used as u32),
                             other,
                             zero,
-                            ticks(config[ConfigLayout::PACKET_OUTPUT], 0u32),
+                            ticks(
+                                actors[other as usize * ActorLayout::WORDS
+                                    + ActorLayout::INPUT_TICKS],
+                                0u32,
+                            ),
                         );
                     }
                 }
@@ -930,6 +956,10 @@ fn summarize(
         }
         totals[SummaryLayout::MINIMUM_WAGE as usize] = ticks(u32::MAX, u32::MAX);
         totals[SummaryLayout::MINIMUM_PRICE as usize] = ticks(u32::MAX, u32::MAX);
+        for good in 0u32..Good::COUNT as u32 {
+            totals[(SummaryLayout::WAGE_MINIMA + good) as usize] = ticks(u32::MAX, u32::MAX);
+            totals[(SummaryLayout::PRICE_MINIMA + good) as usize] = ticks(u32::MAX, u32::MAX);
+        }
         for actor in id * SummaryLayout::ACTORS_PER_GROUP
             ..min(
                 (id + 1u32) * SummaryLayout::ACTORS_PER_GROUP,
@@ -1023,6 +1053,42 @@ fn summarize(
                         totals[(SummaryLayout::PRODUCED + k.output() - 1) as usize],
                         value(state, config, comptime!(Field::Produced as u32), actor),
                     );
+                    let good = k.output() - 1;
+                    let wage = value(state, config, comptime!(Field::Wage as u32), actor);
+                    let price = value(state, config, comptime!(Field::Price as u32), actor);
+                    totals[(SummaryLayout::FIRMS_BY_GOOD + good) as usize] = add_checked(
+                        control,
+                        totals[(SummaryLayout::FIRMS_BY_GOOD + good) as usize],
+                        ticks(1, 0),
+                    );
+                    totals[(SummaryLayout::WAGE_MINIMA + good) as usize] =
+                        minimum(totals[(SummaryLayout::WAGE_MINIMA + good) as usize], wage);
+                    totals[(SummaryLayout::WAGE_MAXIMA + good) as usize] =
+                        maximum(totals[(SummaryLayout::WAGE_MAXIMA + good) as usize], wage);
+                    totals[(SummaryLayout::WAGE_TOTALS + good) as usize] = add_checked(
+                        control,
+                        totals[(SummaryLayout::WAGE_TOTALS + good) as usize],
+                        wage,
+                    );
+                    totals[(SummaryLayout::WAGE_SQUARES + good) as usize] = add_checked(
+                        control,
+                        totals[(SummaryLayout::WAGE_SQUARES + good) as usize],
+                        times32(wage.extract(LOW_WORD), wage.extract(LOW_WORD)),
+                    );
+                    totals[(SummaryLayout::PRICE_MINIMA + good) as usize] =
+                        minimum(totals[(SummaryLayout::PRICE_MINIMA + good) as usize], price);
+                    totals[(SummaryLayout::PRICE_MAXIMA + good) as usize] =
+                        maximum(totals[(SummaryLayout::PRICE_MAXIMA + good) as usize], price);
+                    totals[(SummaryLayout::PRICE_TOTALS + good) as usize] = add_checked(
+                        control,
+                        totals[(SummaryLayout::PRICE_TOTALS + good) as usize],
+                        price,
+                    );
+                    totals[(SummaryLayout::PRICE_SQUARES + good) as usize] = add_checked(
+                        control,
+                        totals[(SummaryLayout::PRICE_SQUARES + good) as usize],
+                        times32(price.extract(LOW_WORD), price.extract(LOW_WORD)),
+                    );
                     totals[SummaryLayout::MINIMUM_WAGE as usize] = minimum(
                         totals[SummaryLayout::MINIMUM_WAGE as usize],
                         value(state, config, comptime!(Field::Wage as u32), actor),
@@ -1084,6 +1150,63 @@ fn summarize(
     }
 }
 
+#[enumflags2::bitflags]
+#[repr(u32)]
+#[derive(Clone, Copy)]
+enum ReductionKind {
+    Sum,
+    Minimum,
+    Maximum,
+}
+
+#[derive(CubeType, Clone, Copy)]
+struct SummaryReduction {
+    kind: u32,
+}
+#[cube]
+impl SummaryReduction {
+    fn new(metric: u32) -> Self {
+        let mut kind = u32::new(comptime!(i64::from(
+            enumflags2::BitFlags::from_flag(ReductionKind::Sum).bits()
+        )));
+        if metric == SummaryLayout::MINIMUM_WAGE
+            || metric == SummaryLayout::MINIMUM_PRICE
+            || (metric >= SummaryLayout::WAGE_MINIMA
+                && metric < SummaryLayout::WAGE_MINIMA + Good::COUNT as u32)
+            || (metric >= SummaryLayout::PRICE_MINIMA
+                && metric < SummaryLayout::PRICE_MINIMA + Good::COUNT as u32)
+        {
+            kind = comptime!(enumflags2::BitFlags::from_flag(ReductionKind::Minimum).bits());
+        }
+        if metric == SummaryLayout::MAXIMUM_WAGE
+            || metric == SummaryLayout::MAXIMUM_PRICE
+            || (metric >= SummaryLayout::WAGE_MAXIMA
+                && metric < SummaryLayout::WAGE_MAXIMA + Good::COUNT as u32)
+            || (metric >= SummaryLayout::PRICE_MAXIMA
+                && metric < SummaryLayout::PRICE_MAXIMA + Good::COUNT as u32)
+        {
+            kind = comptime!(enumflags2::BitFlags::from_flag(ReductionKind::Maximum).bits());
+        }
+        SummaryReduction { kind }
+    }
+    fn is(&self, #[comptime] kind: ReductionKind) -> bool {
+        self.kind == comptime!(enumflags2::BitFlags::from_flag(kind).bits())
+    }
+    fn combine(&self, control: &[Atomic<u32>], total: Ticks, part: Ticks) -> Ticks {
+        let mut result = zero();
+        if self.is(comptime!(ReductionKind::Minimum)) {
+            result = minimum(total, part);
+        }
+        if self.is(comptime!(ReductionKind::Maximum)) {
+            result = maximum(total, part);
+        }
+        if self.is(comptime!(ReductionKind::Sum)) {
+            result = add_checked(control, total, part);
+        }
+        result
+    }
+}
+
 #[cube]
 fn reduce(
     config: &[u32],
@@ -1094,7 +1217,8 @@ fn reduce(
 ) {
     if id < SummaryLayout::METRICS as u32 {
         let mut total = ticks(0u32, 0u32);
-        if id == SummaryLayout::MINIMUM_WAGE || id == SummaryLayout::MINIMUM_PRICE {
+        let reduction = SummaryReduction::new(id);
+        if reduction.is(comptime!(ReductionKind::Minimum)) {
             total = ticks(u32::MAX, u32::MAX);
         }
         for group in 0u32..ceildiv(
@@ -1103,17 +1227,7 @@ fn reduce(
         ) {
             let base = (group * SummaryLayout::METRICS as u32 + id) * TICK_WORDS as u32;
             let part = ticks(bundles[(base) as usize], bundles[(base + 1u32) as usize]);
-            match id {
-                SummaryLayout::MINIMUM_WAGE | SummaryLayout::MINIMUM_PRICE => {
-                    total = minimum(total, part);
-                }
-                SummaryLayout::MAXIMUM_WAGE | SummaryLayout::MAXIMUM_PRICE => {
-                    total = select(lt(total, part), part, total);
-                }
-                _ => {
-                    total = add_checked(control, total, part);
-                }
-            }
+            total = reduction.combine(control, total, part);
         }
         proposals[(id * TICK_WORDS as u32) as usize] = total.extract(LOW_WORD);
         proposals[(id * TICK_WORDS as u32 + 1u32) as usize] = total.extract(HIGH_WORD);

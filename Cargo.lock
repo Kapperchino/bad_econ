@@ -715,6 +715,7 @@ dependencies = [
  "bitflags 2.13.2",
  "burn",
  "burn-wgpu",
+ "bytemuck",
  "clap",
  "cubecl",
  "enumflags2",

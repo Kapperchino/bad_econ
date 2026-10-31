@@ -7,17 +7,18 @@ mod policy;
 mod scheduler;
 mod words;
 use crate::{
-    arithmetic::{PRICE_TABLE, add},
+    arithmetic::add,
     domain::*,
-    ledger::{Bundle, Decision, MAX_LEGS, Schedule},
+    ledger::{Bundle, Decision, MAX_LEGS, Schedule, TickLayout},
     runtime::{PhaseTiming, RuntimeState, SimulationCommand},
 };
 use anyhow::{Context, Result, anyhow};
 use burn_wgpu::{CubeBackend, CubeTensor};
+use bytemuck::Zeroable;
 use economy::EconomyStage;
 use flags::{
-    ActorKind, CONSTRUCTED_EVENTS_WORD, CONTROL_WORDS, DependencyShape, EventStatus, FaultFlags,
-    MarketFlag, SchedulerControl,
+    CONTROL_WORDS, ControlLayout, DependencyShape, EventStatus, FaultFlags, MarketFlag,
+    SchedulerControl,
 };
 use layout::*;
 pub use ops::Device;
@@ -75,55 +76,19 @@ impl Simulation {
     }
     fn from_state(scenario: Scenario, mut initial: State, device: Device) -> Result<Self> {
         let snapshot = ObservationSnapshot::from_state(&scenario, &initial)?;
-        let side = scenario
-            .config()
-            .map_size
-            .div_ceil(scenario.config().search_radius);
         let c = scenario.config();
-        let mut configuration = vec![0; ConfigLayout::PRICE_TABLE];
-        configuration[ConfigLayout::ACTORS] = scenario.actors() as u32;
-        configuration[ConfigLayout::HOUSEHOLDS] = c.households;
-        configuration[ConfigLayout::FIRMS] = c.firms;
-        configuration[ConfigLayout::FIELDS] = scenario.fields() as u32;
-        configuration[ConfigLayout::RING] = scenario.ring() as u32;
-        configuration[ConfigLayout::SEARCH_RADIUS] = c.search_radius;
-        configuration[ConfigLayout::MAP_SIZE] = c.map_size;
-        configuration[ConfigLayout::COMMUTE_SPEED] = c.commute_speed;
-        configuration[ConfigLayout::SHIPMENT_SPEED] = c.shipment_speed;
-        configuration[ConfigLayout::HOUSEHOLD_NEED] = c.household_need;
-        configuration[ConfigLayout::CAPACITY] = c.capacity;
-        configuration[ConfigLayout::PACKET_OUTPUT] = c.packet_output;
-        configuration[ConfigLayout::PACKET_MINUTES] = c.packet_minutes;
-        configuration[ConfigLayout::WORK_CAP] = c.work_cap;
-        configuration[ConfigLayout::RESERVED_MINUTES] = c.reserved_minutes;
-        configuration[ConfigLayout::FORECAST_WEIGHT] = c.forecast_weight;
-        configuration[ConfigLayout::COVERAGE] = c.coverage;
-        configuration[ConfigLayout::DISTRIBUTION_RATE] = c.distribution_rate;
-        configuration[ConfigLayout::MINIMUM_PRICE] = c.minimum_price;
-        configuration[ConfigLayout::MAXIMUM_PRICE] = c.maximum_price;
-        configuration[ConfigLayout::DELIVERY_PENALTY] = c.delivery_penalty;
-        configuration[ConfigLayout::RESERVE_LOW] = c.reserve as u32;
-        configuration[ConfigLayout::RESERVE_HIGH] = (c.reserve >> WORD_BITS) as u32;
-        configuration[ConfigLayout::SPATIAL_SIDE] = side;
-        configuration.extend(PRICE_TABLE);
-        let config = device.tensor(&configuration);
-        let actor_words = initial.actors.iter().try_fold(
-            Vec::with_capacity(initial.actors.len() * ActorLayout::WORDS),
-            |mut words, actor| -> Result<_> {
-                let offset = words.len();
-                words.resize(offset + ActorLayout::WORDS, 0);
-                words[offset + ActorLayout::X] = actor.position.x;
-                words[offset + ActorLayout::Y] = actor.position.y;
-                words[offset + ActorLayout::KIND] =
-                    enumflags2::BitFlags::from_flag(ActorKind::new(actor.kind)?).bits();
-                words[offset + ActorLayout::OWNER] = actor.owner;
-                words[offset + ActorLayout::CAPACITY] = actor.capacity;
-                Ok(words)
-            },
-        )?;
-        let actors = device.tensor(&actor_words);
+        let configuration = ConfigLayout::new(&scenario);
+        let side = configuration.spatial_side;
+        let config = device.tensor(bytemuck::cast_slice(std::slice::from_ref(&configuration)));
+        let actor_layouts = initial
+            .actors
+            .iter()
+            .enumerate()
+            .map(|(index, actor)| ActorLayout::new(actor, scenario.technique(index)))
+            .collect::<Result<Vec<_>>>()?;
+        let actors = device.tensor(bytemuck::cast_slice(&actor_layouts));
         let spatial = device.empty((side * side + 1 + c.firms) as usize);
-        let state = device.tensor(&encode(&initial.values));
+        let state = device.tensor(bytemuck::cast_slice(&encode(&initial.values)));
         let audited = device.empty(initial.values.len() * TICK_WORDS);
         initial.values.clear();
         initial.values.shrink_to_fit();
@@ -138,7 +103,7 @@ impl Simulation {
         );
         let scratch = device.empty(batch * ScratchLayout::WORDS_PER_EVENT);
         let links = device.empty(batch * LinkLayout::WORDS_PER_EVENT);
-        let control = device.tensor(&[0; SummaryLayout::CONTROL_WORDS]);
+        let control = device.tensor(bytemuck::cast_slice(&[ObservationControlLayout::zeroed()]));
         let proposals = device.empty(scenario.actors() * ProposalLayout::WORDS);
         let summary = device.empty((scenario.fields() * TICK_WORDS).max(SummaryLayout::WORDS));
         let feedback = device.tensor(&vec![0; CONTROL_WORDS + c.firms as usize * TICK_WORDS]);
@@ -327,8 +292,10 @@ impl Simulation {
         FaultFlags::read(&control)?.into_result()
     }
     fn local(&mut self, phase: Phase) -> Result<()> {
-        self.device
-            .write(&self.control, &[0; SummaryLayout::CONTROL_WORDS]);
+        self.device.write(
+            &self.control,
+            bytemuck::cast_slice(&[ObservationControlLayout::zeroed()]),
+        );
         let parameters = self.parameters(phase, Market::Labor, 0, self.scenario.actors())?;
         if let Phase::Opening = phase {
             self.feedback_operation(
@@ -352,8 +319,10 @@ impl Simulation {
         trace: Trace,
         evidence: &mut PhaseEvidence,
     ) -> Result<()> {
-        self.device
-            .write(&self.control, &[0; SummaryLayout::CONTROL_WORDS]);
+        self.device.write(
+            &self.control,
+            bytemuck::cast_slice(&[ObservationControlLayout::zeroed()]),
+        );
         let parameters = self.parameters(phase, market, 0, self.scenario.actors())?;
         match market {
             Market::Labor | Market::Input(_) | Market::Household => {
@@ -397,13 +366,15 @@ impl Simulation {
             .try_for_each(|offset| -> Result<()> {
                 let count = (end - offset).min(self.scenario.config().batch_size as usize);
                 let parameters = self.parameters(phase, market, offset, count)?;
-                self.device
-                    .write(&self.control, &[0; SummaryLayout::CONTROL_WORDS]);
+                self.device.write(
+                    &self.control,
+                    bytemuck::cast_slice(&[ObservationControlLayout::zeroed()]),
+                );
                 self.economy(EconomyStage::Construct, count, &parameters, &self.proposals);
                 self.fault_check()?;
                 let counters = self.device.read_range(&self.control, 0, CONTROL_WORDS)?;
                 self.readback_bytes += (CONTROL_WORDS * WORD_BYTES) as u64;
-                let result = match counters[CONSTRUCTED_EVENTS_WORD] {
+                let result = match ControlLayout::new(&counters)?.phase_data {
                     0 => Execution {
                         decisions: Vec::new(),
                         depth: 0,
@@ -439,8 +410,10 @@ impl Simulation {
             })
     }
     pub fn observe(&mut self) -> Result<ObservationSnapshot> {
-        self.device
-            .write(&self.control, &[0; SummaryLayout::CONTROL_WORDS]);
+        self.device.write(
+            &self.control,
+            bytemuck::cast_slice(&[ObservationControlLayout::zeroed()]),
+        );
         let parameters = self.parameters(Phase::Audit, Market::Labor, 0, self.scenario.actors())?;
         self.economy(
             EconomyStage::Summarize,
@@ -456,45 +429,54 @@ impl Simulation {
             &parameters,
             &self.summary,
         );
-        let totals = decode(
-            &self
-                .device
-                .read_range(&self.summary, 0, SummaryLayout::WORDS)?,
-        );
+        let totals = self
+            .device
+            .read_range(&self.summary, 0, SummaryLayout::WORDS)?;
+        let totals = SummaryLayout::new(&totals)?;
         let control = self.device.read(&self.control)?;
+        let control = ObservationControlLayout::new(&control)?;
         self.readback_bytes +=
             ((SummaryLayout::WORDS + SummaryLayout::CONTROL_WORDS) * WORD_BYTES) as u64;
-        FaultFlags::read(&control)?.into_result()?;
+        FaultFlags::new(control.scheduler.faults)?.into_result()?;
         let snapshot = ObservationSnapshot {
             day: self.day,
-            cash: totals[SummaryLayout::CASH as usize],
-            employed: totals[SummaryLayout::EMPLOYED as usize],
+            cash: totals.cash.into(),
+            employed: totals.employed.into(),
             households: u64::from(self.scenario.config().households),
-            shortages: totals[SummaryLayout::SHORTAGES as usize],
-            inventories: totals[SummaryLayout::INVENTORIES as usize
-                ..SummaryLayout::INVENTORIES as usize + Good::COUNT]
-                .try_into()?,
-            transit: totals
-                [SummaryLayout::TRANSIT as usize..SummaryLayout::TRANSIT as usize + Good::COUNT]
-                .try_into()?,
-            produced: totals
-                [SummaryLayout::PRODUCED as usize..SummaryLayout::PRODUCED as usize + Good::COUNT]
-                .try_into()?,
-            used: totals[SummaryLayout::USED as usize..SummaryLayout::USED as usize + Good::COUNT]
-                .try_into()?,
-            consumed: totals[SummaryLayout::CONSUMED as usize],
-            minimum_wage: totals[SummaryLayout::MINIMUM_WAGE as usize],
-            maximum_wage: totals[SummaryLayout::MAXIMUM_WAGE as usize],
-            minimum_price: totals[SummaryLayout::MINIMUM_PRICE as usize],
-            maximum_price: totals[SummaryLayout::MAXIMUM_PRICE as usize],
-            wealth_bins: control[SummaryLayout::WEALTH_START..SummaryLayout::REGIONS_START]
-                .iter()
-                .map(|&n| u64::from(n))
-                .collect(),
-            regions: control[SummaryLayout::REGIONS_START..SummaryLayout::CONTROL_WORDS]
-                .iter()
-                .map(|&n| u64::from(n))
-                .collect(),
+            shortages: totals.shortages.into(),
+            inventories: totals.inventories.map(u64::from),
+            transit: totals.transit.map(u64::from),
+            produced: totals.produced.map(u64::from),
+            used: totals.used.map(u64::from),
+            consumed: totals.consumed.into(),
+            minimum_wage: totals.minimum_wage.into(),
+            maximum_wage: totals.maximum_wage.into(),
+            minimum_price: totals.minimum_price.into(),
+            maximum_price: totals.maximum_price.into(),
+            markets: std::array::from_fn(|good| {
+                let count = u64::from(totals.firms_by_good[good]);
+                match count {
+                    0 => MarketObservation::default(),
+                    _ => MarketObservation {
+                        wages: QuoteDistribution {
+                            count,
+                            minimum: totals.wage_minima[good].into(),
+                            maximum: totals.wage_maxima[good].into(),
+                            total: totals.wage_totals[good].into(),
+                            squares: totals.wage_squares[good].into(),
+                        },
+                        prices: QuoteDistribution {
+                            count,
+                            minimum: totals.price_minima[good].into(),
+                            maximum: totals.price_maxima[good].into(),
+                            total: totals.price_totals[good].into(),
+                            squares: totals.price_squares[good].into(),
+                        },
+                    },
+                }
+            }),
+            wealth_bins: control.wealth_bins.iter().map(|&n| u64::from(n)).collect(),
+            regions: control.regions.iter().map(|&n| u64::from(n)).collect(),
         };
         snapshot.audit(self.metadata.initial_cash, self.metadata.initial_goods)?;
         Ok(snapshot)
@@ -642,7 +624,12 @@ impl Simulation {
             transit: values[Field::Transit as usize],
             health: values[Field::Health as usize],
             fatigue: values[Field::Fatigue as usize],
-            employer: values[Field::Employer as usize],
+            employer: values[Field::Employer as usize]
+                .checked_sub(1)
+                .and_then(|index| self.scenario.identity(index as usize))
+                .unwrap_or(0),
+            owner_identity: self.metadata.actors[self.metadata.actors[actor].owner as usize]
+                .identity,
             available_minutes: values[Field::Time as usize],
             wage: values[Field::Wage as usize],
             price: values[Field::Price as usize],
@@ -803,12 +790,12 @@ pub fn ledger(device: &Device, balances: &[u64], bundles: &[Bundle]) -> Result<L
         true => Ok(()),
         false => Err(anyhow!("invalid ledger coordinate")),
     }?;
-    let state = device.tensor(&encode(balances));
+    let state = device.tensor(bytemuck::cast_slice(&encode(balances)));
     let events = device.tensor(&bundles.iter().flat_map(Bundle::encode).collect::<Vec<_>>());
     let scratch =
         device.empty((bundles.len() * ScratchLayout::WORDS_PER_EVENT).max(MIN_BUFFER_WORDS));
     let links = device.empty((bundles.len() * LinkLayout::WORDS_PER_EVENT).max(MIN_BUFFER_WORDS));
-    let control = device.tensor(&[0; CONTROL_WORDS]);
+    let control = device.tensor(bytemuck::cast_slice(&[ControlLayout::zeroed()]));
     let result = execute(
         device,
         SchedulerBuffers {
@@ -835,15 +822,13 @@ pub fn ledger(device: &Device, balances: &[u64], bundles: &[Bundle]) -> Result<L
         frontier_depth: result.depth,
     })
 }
-fn encode(values: &[u64]) -> Vec<u32> {
-    values
-        .iter()
-        .flat_map(|&value| [value as u32, (value >> WORD_BITS) as u32])
-        .collect()
+fn encode(values: &[u64]) -> Vec<TickLayout> {
+    values.iter().copied().map(TickLayout::from).collect()
 }
 fn decode(words: &[u32]) -> Vec<u64> {
-    words
-        .chunks_exact(TICK_WORDS)
-        .map(|pair| u64::from(pair[LOW_WORD]) | (u64::from(pair[HIGH_WORD]) << WORD_BITS))
+    bytemuck::cast_slice::<u32, TickLayout>(words)
+        .iter()
+        .copied()
+        .map(u64::from)
         .collect()
 }
