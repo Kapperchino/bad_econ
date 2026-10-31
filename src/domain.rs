@@ -58,6 +58,7 @@ pub enum Good {
     Bread = 3,
 }
 impl Good {
+    pub const COUNT: usize = 3;
     pub fn from_index(index: u32) -> Result<Self> {
         match index {
             1 => Ok(Self::Grain),
@@ -394,8 +395,9 @@ impl State {
     }
 }
 
+#[enumflags2::bitflags]
 #[repr(u32)]
-#[derive(Clone, Copy, Debug, Serialize, Deserialize, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, Serialize, Deserialize, PartialEq, Eq, Hash)]
 pub enum Phase {
     Opening,
     Observation,

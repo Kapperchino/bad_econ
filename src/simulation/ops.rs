@@ -1,5 +1,7 @@
 use super::{
     economy::{self, EconomyStage},
+    layout::WORD_BYTES,
+    parameters::{EconomyParameters, SchedulerParameters},
     scheduler::{self, SchedulerStage},
 };
 use anyhow::{Context, Result, anyhow};
@@ -9,6 +11,12 @@ use burn::{
 };
 use burn_wgpu::{CubeBackend, CubeTensor, WgpuSetup, wgpu};
 use cubecl::{CubeCount, CubeDim, client::Client, prelude::BufferArg};
+
+const WORKGROUP_SIZES: [u32; 4] = [32, 64, 128, 256];
+const MAX_DISPATCH_GROUPS_PER_AXIS: u32 = u16::MAX as u32;
+
+#[cfg(test)]
+pub const TEST_WORKGROUP: u32 = 64;
 
 pub struct Device {
     pub client: Client,
@@ -42,7 +50,7 @@ impl Device {
         )
     }
     pub fn import(setup: WgpuSetup, workgroup: u32) -> Result<Self> {
-        match [32, 64, 128, 256].contains(&workgroup) {
+        match WORKGROUP_SIZES.contains(&workgroup) {
             true => {
                 let name = format!("{} / {:?}", setup.adapter.get_info().name, setup.backend);
                 let imported =
@@ -57,7 +65,7 @@ impl Device {
                     workgroup,
                 })
             }
-            false => Err(anyhow!("workgroup must be 32, 64, 128, or 256")),
+            false => Err(anyhow!("workgroup must be one of {WORKGROUP_SIZES:?}")),
         }
     }
     pub fn tensor(&self, words: &[u32]) -> CubeTensor {
@@ -78,7 +86,7 @@ impl Device {
             self.client.clone(),
             self.cube.clone(),
             Shape::new([words]),
-            self.client.empty(words * 4),
+            self.client.empty(words * WORD_BYTES),
             DType::U32,
         )
     }
@@ -86,7 +94,7 @@ impl Device {
         Ok(self
             .client
             .read_one(tensor.handle.clone())?
-            .chunks_exact(4)
+            .chunks_exact(WORD_BYTES)
             .map(|bytes| u32::from_le_bytes(bytes.try_into().expect("four bytes")))
             .collect())
     }
@@ -94,12 +102,12 @@ impl Device {
         let handle = tensor.handle.clone();
         let size = handle.size_in_used();
         let handle = handle
-            .offset_start(start as u64 * 4)
-            .offset_end(size - (start + length) as u64 * 4);
+            .offset_start((start * WORD_BYTES) as u64)
+            .offset_end(size - ((start + length) * WORD_BYTES) as u64);
         Ok(self
             .client
             .read_one(handle)?
-            .chunks_exact(4)
+            .chunks_exact(WORD_BYTES)
             .map(|bytes| u32::from_le_bytes(bytes.try_into().expect("four bytes")))
             .collect())
     }
@@ -119,68 +127,105 @@ impl Device {
     }
     fn count(&self, count: usize) -> CubeCount {
         let groups = (count as u32).div_ceil(self.workgroup).max(1);
-        let x = groups.min(65535);
+        let x = groups.min(MAX_DISPATCH_GROUPS_PER_AXIS);
         CubeCount::Static(x, groups.div_ceil(x), 1)
     }
     pub fn cpu(workgroup: u32) -> Result<Self> {
         let cube = cubecl::Device::cpu().map_err(|error| anyhow::anyhow!("{error}"))?;
         let client = cube.client();
-        match [32, 64, 128, 256].contains(&workgroup) {
+        match WORKGROUP_SIZES.contains(&workgroup) {
             true => Ok(Self {
                 client,
                 cube,
                 name: "CubeCL CPU / LLVM".into(),
                 workgroup,
             }),
-            false => Err(anyhow!("workgroup must be 32, 64, 128, or 256")),
+            false => Err(anyhow!("workgroup must be one of {WORKGROUP_SIZES:?}")),
         }
     }
 }
 
+pub struct EconomyBuffers<'a> {
+    pub state: &'a CubeTensor,
+    pub actors: &'a CubeTensor,
+    pub config: &'a CubeTensor,
+    pub spatial: &'a CubeTensor,
+    pub proposals: &'a CubeTensor,
+    pub events: &'a CubeTensor,
+    pub control: &'a CubeTensor,
+}
+
+#[derive(Clone, Copy)]
+pub struct SchedulerBuffers<'a> {
+    pub state: &'a CubeTensor,
+    pub events: &'a CubeTensor,
+    pub scratch: &'a CubeTensor,
+    pub control: &'a CubeTensor,
+    pub links: &'a CubeTensor,
+}
+
 pub trait EconomyOps: Backend {
-    fn economy(device: &Device, stage: EconomyStage, count: usize, buffers: &[&CubeTensor]);
-    fn schedule(device: &Device, stage: SchedulerStage, count: usize, buffers: &[&CubeTensor]);
+    fn economy(
+        device: &Device,
+        stage: EconomyStage,
+        count: usize,
+        buffers: EconomyBuffers<'_>,
+        parameters: &EconomyParameters,
+    );
+    fn schedule(
+        device: &Device,
+        stage: SchedulerStage,
+        count: usize,
+        buffers: SchedulerBuffers<'_>,
+        parameters: SchedulerParameters,
+    );
 }
 impl EconomyOps for CubeBackend {
-    fn economy(device: &Device, stage: EconomyStage, count: usize, buffers: &[&CubeTensor]) {
-        let argument = |index: usize| unsafe {
-            BufferArg::from_raw_parts(
-                buffers[index].handle.clone(),
-                buffers[index].meta.shape()[0],
-            )
+    fn economy(
+        device: &Device,
+        stage: EconomyStage,
+        count: usize,
+        buffers: EconomyBuffers<'_>,
+        parameters: &EconomyParameters,
+    ) {
+        let argument = |tensor: &CubeTensor| unsafe {
+            BufferArg::from_raw_parts(tensor.handle.clone(), tensor.meta.shape()[0])
         };
         economy::economy::launch(
             &device.client,
             device.count(count),
             CubeDim::new_1d(device.workgroup),
-            argument(0),
-            argument(1),
-            argument(2),
-            argument(3),
-            argument(4),
-            argument(5),
-            argument(6),
-            argument(7),
+            argument(buffers.state),
+            argument(buffers.actors),
+            argument(buffers.config),
+            argument(buffers.spatial),
+            argument(buffers.proposals),
+            argument(buffers.events),
+            argument(buffers.control),
+            parameters.launch(),
             stage,
         );
     }
-    fn schedule(device: &Device, stage: SchedulerStage, count: usize, buffers: &[&CubeTensor]) {
-        let argument = |index: usize| unsafe {
-            BufferArg::from_raw_parts(
-                buffers[index].handle.clone(),
-                buffers[index].meta.shape()[0],
-            )
+    fn schedule(
+        device: &Device,
+        stage: SchedulerStage,
+        count: usize,
+        buffers: SchedulerBuffers<'_>,
+        parameters: SchedulerParameters,
+    ) {
+        let argument = |tensor: &CubeTensor| unsafe {
+            BufferArg::from_raw_parts(tensor.handle.clone(), tensor.meta.shape()[0])
         };
         scheduler::schedule::launch(
             &device.client,
             device.count(count),
             CubeDim::new_1d(device.workgroup),
-            argument(0),
-            argument(1),
-            argument(2),
-            argument(3),
-            argument(4),
-            argument(5),
+            argument(buffers.state),
+            argument(buffers.events),
+            argument(buffers.scratch),
+            argument(buffers.control),
+            argument(buffers.links),
+            parameters.launch(),
             stage,
         );
     }

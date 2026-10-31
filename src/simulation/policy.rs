@@ -1,0 +1,16 @@
+pub const MATCHING_ROUNDS: usize = 4;
+pub const DISCOVERY_CANDIDATES: u32 = 8;
+pub const MINUTES_PER_DAY: u32 = 1440;
+pub const COMMUTE_LEGS: u32 = 2;
+pub const POLICY_SCALE: u32 = 1000;
+pub const CAPACITY_SCALE: u32 = POLICY_SCALE * POLICY_SCALE;
+pub const PRICE_SCALE: u32 = 1_000_000;
+pub const PRICE_INDEX_BITS: u32 = 5;
+pub const PRICE_INDEX_LIMIT: u32 = 1 << PRICE_INDEX_BITS;
+pub const HEALTH_RECOVERY: u32 = 5;
+pub const HUNGER_DAMAGE: u32 = 20;
+pub const WORK_FATIGUE: u32 = 10;
+pub const REST_RECOVERY: u32 = 20;
+pub const MINIMUM_WAGE: u32 = 1;
+pub const MAXIMUM_WAGE: u32 = 10_000;
+pub const WAGE_INCREMENT: u32 = 1;

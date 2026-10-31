@@ -1,16 +1,21 @@
+use super::{
+    flags::{FaultFlags, KernelFaults},
+    layout::*,
+    policy::{PRICE_INDEX_BITS, PRICE_INDEX_LIMIT},
+};
 use cubecl::prelude::*;
 
-pub type Ticks = Vector<u32, Const<2>>;
+pub type Ticks = Vector<u32, Const<TICK_WORDS>>;
 #[derive(CubeType, Clone, Copy)]
 pub struct CheckedTicks {
     pub value: Ticks,
-    pub overflow: u32,
+    pub faults: KernelFaults,
 }
 
 #[cube]
 pub fn ticks(low: u32, high: u32) -> Ticks {
     let mut result = Ticks::new(low);
-    result.insert(1usize, high);
+    result.insert(HIGH_WORD, high);
     result
 }
 #[cube]
@@ -19,45 +24,52 @@ pub fn zero() -> Ticks {
 }
 #[cube]
 pub fn equal(a: Ticks, b: Ticks) -> bool {
-    a.extract(0usize) == b.extract(0usize) && a.extract(1usize) == b.extract(1usize)
+    a.extract(LOW_WORD) == b.extract(LOW_WORD) && a.extract(HIGH_WORD) == b.extract(HIGH_WORD)
 }
 #[cube]
 pub fn lt(a: Ticks, b: Ticks) -> bool {
-    a.extract(1usize) < b.extract(1usize)
-        || (a.extract(1usize) == b.extract(1usize) && a.extract(0usize) < b.extract(0usize))
+    a.extract(HIGH_WORD) < b.extract(HIGH_WORD)
+        || (a.extract(HIGH_WORD) == b.extract(HIGH_WORD)
+            && a.extract(LOW_WORD) < b.extract(LOW_WORD))
 }
 #[cube]
 pub fn plus(a: Ticks, b: Ticks) -> CheckedTicks {
-    let low = a.extract(0usize) + b.extract(0usize);
-    let carry = u32::cast_from(low < a.extract(0usize));
-    let high = a.extract(1usize) + b.extract(1usize);
+    let low = a.extract(LOW_WORD) + b.extract(LOW_WORD);
+    let carry = u32::cast_from(low < a.extract(LOW_WORD));
+    let high = a.extract(HIGH_WORD) + b.extract(HIGH_WORD);
     let result = high + carry;
+    let mut faults = KernelFaults::none();
+    if high < a.extract(HIGH_WORD) || result < high {
+        faults.insert(KernelFaults::new(comptime!(
+            FaultFlags::ARITHMETIC_OVERFLOW
+        )));
+    }
     CheckedTicks {
         value: ticks(low, result),
-        overflow: u32::cast_from(high < a.extract(1usize) || result < high),
+        faults,
     }
 }
 #[cube]
 pub fn minus(a: Ticks, b: Ticks) -> Ticks {
     ticks(
-        a.extract(0usize) - b.extract(0usize),
-        a.extract(1usize)
-            - b.extract(1usize)
-            - u32::cast_from(a.extract(0usize) < b.extract(0usize)),
+        a.extract(LOW_WORD) - b.extract(LOW_WORD),
+        a.extract(HIGH_WORD)
+            - b.extract(HIGH_WORD)
+            - u32::cast_from(a.extract(LOW_WORD) < b.extract(LOW_WORD)),
     )
 }
 #[cube]
 pub fn minimum(a: Ticks, b: Ticks) -> Ticks {
     ticks(
-        select(lt(a, b), a.extract(0usize), b.extract(0usize)),
-        select(lt(a, b), a.extract(1usize), b.extract(1usize)),
+        select(lt(a, b), a.extract(LOW_WORD), b.extract(LOW_WORD)),
+        select(lt(a, b), a.extract(HIGH_WORD), b.extract(HIGH_WORD)),
     )
 }
 #[cube]
 pub fn maximum(a: Ticks, b: Ticks) -> Ticks {
     ticks(
-        select(lt(a, b), b.extract(0usize), a.extract(0usize)),
-        select(lt(a, b), b.extract(1usize), a.extract(1usize)),
+        select(lt(a, b), b.extract(LOW_WORD), a.extract(LOW_WORD)),
+        select(lt(a, b), b.extract(HIGH_WORD), a.extract(HIGH_WORD)),
     )
 }
 #[cube]
@@ -65,55 +77,65 @@ pub fn positive(a: Ticks, b: Ticks) -> Ticks {
     {
         let result = minus(a, b);
         ticks(
-            select(lt(a, b), 0, result.extract(0usize)),
-            select(lt(a, b), 0, result.extract(1usize)),
+            select(lt(a, b), 0, result.extract(LOW_WORD)),
+            select(lt(a, b), 0, result.extract(HIGH_WORD)),
         )
     }
 }
 #[cube]
 pub fn times32(a: u32, b: u32) -> Ticks {
-    let al = a & 65535;
-    let ah = a >> 16;
-    let bl = b & 65535;
-    let bh = b >> 16;
+    let al = a & HALF_WORD_MASK;
+    let ah = a >> HALF_WORD_BITS;
+    let bl = b & HALF_WORD_MASK;
+    let bh = b >> HALF_WORD_BITS;
     let low = al * bl;
-    let middle1 = ah * bl + (low >> 16);
-    let middle2 = al * bh + (middle1 & 65535);
+    let middle1 = ah * bl + (low >> HALF_WORD_BITS);
+    let middle2 = al * bh + (middle1 & HALF_WORD_MASK);
     ticks(
-        (middle2 << 16) | (low & 65535),
-        ah * bh + (middle1 >> 16) + (middle2 >> 16),
+        (middle2 << HALF_WORD_BITS) | (low & HALF_WORD_MASK),
+        ah * bh + (middle1 >> HALF_WORD_BITS) + (middle2 >> HALF_WORD_BITS),
     )
 }
 #[cube]
 pub fn times(a: Ticks, b: u32) -> CheckedTicks {
-    let low = times32(a.extract(0usize), b);
-    let high = times32(a.extract(1usize), b);
-    let sum = low.extract(1usize) + high.extract(0usize);
+    let low = times32(a.extract(LOW_WORD), b);
+    let high = times32(a.extract(HIGH_WORD), b);
+    let sum = low.extract(HIGH_WORD) + high.extract(LOW_WORD);
+    let mut faults = KernelFaults::none();
+    if high.extract(HIGH_WORD) > 0 || sum < low.extract(HIGH_WORD) {
+        faults.insert(KernelFaults::new(comptime!(
+            FaultFlags::ARITHMETIC_OVERFLOW
+        )));
+    }
     CheckedTicks {
-        value: ticks(low.extract(0usize), sum),
-        overflow: u32::cast_from(high.extract(1usize) > 0 || sum < low.extract(1usize)),
+        value: ticks(low.extract(LOW_WORD), sum),
+        faults,
     }
 }
 #[cube]
 pub fn divide(a: Ticks, b: u32) -> Ticks {
     let mut quotient = zero();
     let mut remainder = zero();
-    for step in 0..64u32 {
-        let bit = 63 - step;
-        let digit = (select(bit >= 32, a.extract(1usize), a.extract(0usize)) >> (bit & 31)) & 1;
+    for step in 0..TICK_BITS {
+        let bit = (TICK_BITS - 1) - step;
+        let digit = (select(bit >= WORD_BITS, a.extract(HIGH_WORD), a.extract(LOW_WORD))
+            >> (bit & WORD_TOP_BIT))
+            & 1;
         remainder = ticks(
-            (remainder.extract(0usize) << 1) | digit,
-            (remainder.extract(1usize) << 1) | (remainder.extract(0usize) >> 31),
+            (remainder.extract(LOW_WORD) << 1) | digit,
+            (remainder.extract(HIGH_WORD) << 1) | (remainder.extract(LOW_WORD) >> WORD_TOP_BIT),
         );
         if !lt(remainder, ticks(b, 0)) {
             remainder = minus(remainder, ticks(b, 0));
             quotient.insert(
-                1usize,
-                quotient.extract(1usize) | select(bit >= 32, 1u32 << (bit & 31), 0),
+                HIGH_WORD,
+                quotient.extract(HIGH_WORD)
+                    | select(bit >= WORD_BITS, 1u32 << (bit & WORD_TOP_BIT), 0),
             );
             quotient.insert(
-                0usize,
-                quotient.extract(0usize) | select(bit < 32, 1u32 << (bit & 31), 0),
+                LOW_WORD,
+                quotient.extract(LOW_WORD)
+                    | select(bit < WORD_BITS, 1u32 << (bit & WORD_TOP_BIT), 0),
             );
         }
     }
@@ -124,11 +146,11 @@ pub fn ratio(a: Ticks, numerator: u32, denominator: u32) -> CheckedTicks {
     let quotient = divide(a, denominator);
     let remainder = minus(a, times(quotient, denominator).value);
     let whole = times(quotient, numerator);
-    let fraction = divide(times32(remainder.extract(0usize), numerator), denominator);
+    let fraction = divide(times32(remainder.extract(LOW_WORD), numerator), denominator);
     let result = plus(whole.value, fraction);
     CheckedTicks {
         value: result.value,
-        overflow: whole.overflow | result.overflow,
+        faults: whole.faults.union(result.faults),
     }
 }
 #[cube]
@@ -136,18 +158,18 @@ pub fn fraction_index(numerator: Ticks, denominator: Ticks) -> u32 {
     let bounded = minimum(numerator, denominator);
     let mut remainder = bounded;
     let mut result = 0u32;
-    for _step in 0..5u32 {
-        let carry = remainder.extract(1usize) >> 31;
+    for _step in 0..PRICE_INDEX_BITS {
+        let carry = remainder.extract(HIGH_WORD) >> WORD_TOP_BIT;
         remainder = ticks(
-            remainder.extract(0usize) << 1,
-            (remainder.extract(1usize) << 1) | (remainder.extract(0usize) >> 31),
+            remainder.extract(LOW_WORD) << 1,
+            (remainder.extract(HIGH_WORD) << 1) | (remainder.extract(LOW_WORD) >> WORD_TOP_BIT),
         );
         let digit = carry != 0 || !lt(remainder, denominator);
         let reduced = minus(remainder, denominator);
         remainder = select(digit, reduced, remainder);
         result = result * 2 + u32::cast_from(digit);
     }
-    select(equal(bounded, denominator), 32, result)
+    select(equal(bounded, denominator), PRICE_INDEX_LIMIT, result)
 }
 #[allow(
     clippy::manual_is_multiple_of,
@@ -160,51 +182,82 @@ pub fn ceildiv(a: u32, b: u32) -> u32 {
 #[cube]
 pub fn load(values: &mut [u32], coordinate: u32) -> Ticks {
     ticks(
-        values[(coordinate * 2) as usize],
-        values[(coordinate * 2 + 1) as usize],
+        values[(coordinate * TICK_WORDS as u32) as usize],
+        values[(coordinate * TICK_WORDS as u32 + HIGH_WORD as u32) as usize],
     )
 }
 #[cube]
 pub fn store(values: &mut [u32], coordinate: u32, value: Ticks) {
-    values[(coordinate * 2) as usize] = value.extract(0usize);
-    values[(coordinate * 2 + 1) as usize] = value.extract(1usize);
+    values[(coordinate * TICK_WORDS as u32) as usize] = value.extract(LOW_WORD);
+    values[(coordinate * TICK_WORDS as u32 + HIGH_WORD as u32) as usize] = value.extract(HIGH_WORD);
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::{arithmetic::DrawKey, simulation::Device};
+    use crate::{
+        arithmetic::DrawKey,
+        simulation::{Device, ops::TEST_WORKGROUP},
+    };
     use anyhow::Result;
+
+    struct ProbeInput;
+    impl ProbeInput {
+        const LEFT: usize = 0;
+        const NUMERATOR: usize = TICK_WORDS;
+        const DENOMINATOR: usize = Self::NUMERATOR + 1;
+        const RIGHT: usize = Self::DENOMINATOR + 1;
+        const WORDS: usize = Self::RIGHT + TICK_WORDS;
+    }
+    struct ProbeOutput;
+    impl ProbeOutput {
+        const SUM: usize = 0;
+        const SUM_FAULTS: usize = Self::SUM + TICK_WORDS;
+        const PRODUCT: usize = Self::SUM_FAULTS + 1;
+        const PRODUCT_FAULTS: usize = Self::PRODUCT + TICK_WORDS;
+        const QUOTIENT: usize = Self::PRODUCT_FAULTS + 1;
+        const RATIO: usize = Self::QUOTIENT + TICK_WORDS;
+        const RATIO_FAULTS: usize = Self::RATIO + TICK_WORDS;
+        const FRACTION: usize = Self::RATIO_FAULTS + 1;
+        const DIFFERENCE: usize = Self::FRACTION + 1;
+        const WORDS: usize = Self::DIFFERENCE + TICK_WORDS;
+    }
 
     #[cube(launch)]
     fn probe(input: &[u32], output: &mut [u32]) {
         let id = ABSOLUTE_POS;
-        if id < input.len() / 6 {
-            let base = id * 6;
-            let a = ticks(input[base], input[base + 1]);
-            let numerator = input[base + 2];
-            let denominator = input[base + 3];
-            let b = ticks(input[base + 4], input[base + 5]);
+        if id < input.len() / ProbeInput::WORDS {
+            let base = id * ProbeInput::WORDS;
+            let a = ticks(
+                input[base + ProbeInput::LEFT + LOW_WORD],
+                input[base + ProbeInput::LEFT + HIGH_WORD],
+            );
+            let numerator = input[base + ProbeInput::NUMERATOR];
+            let denominator = input[base + ProbeInput::DENOMINATOR];
+            let b = ticks(
+                input[base + ProbeInput::RIGHT + LOW_WORD],
+                input[base + ProbeInput::RIGHT + HIGH_WORD],
+            );
             let sum = plus(a, b);
             let product = times(a, numerator);
             let quotient = divide(a, denominator);
             let scaled = ratio(a, numerator, denominator);
             let difference = minus(a, b);
-            let target = id * 14;
-            output[target] = sum.value.extract(0usize);
-            output[target + 1] = sum.value.extract(1usize);
-            output[target + 2] = sum.overflow;
-            output[target + 3] = product.value.extract(0usize);
-            output[target + 4] = product.value.extract(1usize);
-            output[target + 5] = product.overflow;
-            output[target + 6] = quotient.extract(0usize);
-            output[target + 7] = quotient.extract(1usize);
-            output[target + 8] = scaled.value.extract(0usize);
-            output[target + 9] = scaled.value.extract(1usize);
-            output[target + 10] = scaled.overflow;
-            output[target + 11] = fraction_index(a, b);
-            output[target + 12] = difference.extract(0usize);
-            output[target + 13] = difference.extract(1usize);
+            let target = id * ProbeOutput::WORDS;
+            output[target + ProbeOutput::SUM + LOW_WORD] = sum.value.extract(LOW_WORD);
+            output[target + ProbeOutput::SUM + HIGH_WORD] = sum.value.extract(HIGH_WORD);
+            output[target + ProbeOutput::SUM_FAULTS] = sum.faults.bits();
+            output[target + ProbeOutput::PRODUCT + LOW_WORD] = product.value.extract(LOW_WORD);
+            output[target + ProbeOutput::PRODUCT + HIGH_WORD] = product.value.extract(HIGH_WORD);
+            output[target + ProbeOutput::PRODUCT_FAULTS] = product.faults.bits();
+            output[target + ProbeOutput::QUOTIENT + LOW_WORD] = quotient.extract(LOW_WORD);
+            output[target + ProbeOutput::QUOTIENT + HIGH_WORD] = quotient.extract(HIGH_WORD);
+            output[target + ProbeOutput::RATIO + LOW_WORD] = scaled.value.extract(LOW_WORD);
+            output[target + ProbeOutput::RATIO + HIGH_WORD] = scaled.value.extract(HIGH_WORD);
+            output[target + ProbeOutput::RATIO_FAULTS] = scaled.faults.bits();
+            output[target + ProbeOutput::FRACTION] = fraction_index(a, b);
+            output[target + ProbeOutput::DIFFERENCE + LOW_WORD] = difference.extract(LOW_WORD);
+            output[target + ProbeOutput::DIFFERENCE + HIGH_WORD] = difference.extract(HIGH_WORD);
         }
     }
 
@@ -213,9 +266,9 @@ mod tests {
             0,
             1,
             u32::MAX as u64,
-            1u64 << 32,
-            (1u64 << 63) - 1,
-            1u64 << 63,
+            1u64 << WORD_BITS,
+            (1u64 << (TICK_BITS - 1)) - 1,
+            1u64 << (TICK_BITS - 1),
             u64::MAX - 1,
             u64::MAX,
         ];
@@ -231,11 +284,15 @@ mod tests {
                 }
                 .draw();
                 let a = match index {
-                    0..64 => edges[index as usize % 8],
+                    _ if (index as usize) < edges.len().pow(2) => {
+                        edges[index as usize % edges.len()]
+                    }
                     _ => draw,
                 };
                 let b = match index {
-                    0..64 => edges[index as usize / 8].max(1),
+                    _ if (index as usize) < edges.len().pow(2) => {
+                        edges[index as usize / edges.len()].max(1)
+                    }
                     _ => draw.rotate_left(19).max(1),
                 };
                 let n = match index % 4 {
@@ -248,7 +305,7 @@ mod tests {
                     0 => 1000,
                     1 => u32::MAX,
                     2 => 1,
-                    _ => (draw >> 32) as u32 | 1,
+                    _ => (draw >> WORD_BITS) as u32 | 1,
                 };
                 (a, b, n, d)
             })
@@ -256,50 +313,92 @@ mod tests {
         let words = cases
             .iter()
             .flat_map(|&(a, b, n, d)| {
-                [a as u32, (a >> 32) as u32, n, d, b as u32, (b >> 32) as u32]
+                [
+                    a as u32,
+                    (a >> WORD_BITS) as u32,
+                    n,
+                    d,
+                    b as u32,
+                    (b >> WORD_BITS) as u32,
+                ]
             })
             .collect::<Vec<_>>();
         let input = device.tensor(&words);
-        let output = device.empty(cases.len() * 14);
+        let output = device.empty(cases.len() * ProbeOutput::WORDS);
         probe::launch(
             &device.client,
-            CubeCount::Static(8, 1, 1),
-            CubeDim::new_1d(64),
+            CubeCount::Static((cases.len() as u32).div_ceil(TEST_WORKGROUP), 1, 1),
+            CubeDim::new_1d(TEST_WORKGROUP),
             unsafe { BufferArg::from_raw_parts(input.handle.clone(), words.len()) },
-            unsafe { BufferArg::from_raw_parts(output.handle.clone(), cases.len() * 14) },
+            unsafe {
+                BufferArg::from_raw_parts(output.handle.clone(), cases.len() * ProbeOutput::WORDS)
+            },
         );
         let actual = device.read(&output)?;
-        for (case, words) in cases.into_iter().zip(actual.chunks_exact(14)) {
+        for (case, words) in cases
+            .into_iter()
+            .zip(actual.chunks_exact(ProbeOutput::WORDS))
+        {
             let (a, b, n, d) = case;
             let wide_sum = u128::from(a) + u128::from(b);
             let wide_product = u128::from(a) * u128::from(n);
             let wide_ratio = wide_product / u128::from(d);
-            let value = |index: usize| u64::from(words[index]) | u64::from(words[index + 1]) << 32;
-            assert_eq!(value(0), wide_sum as u64, "sum {case:?}");
-            assert_eq!(words[2] != 0, wide_sum > u128::from(u64::MAX));
-            assert_eq!(value(3), wide_product as u64, "product {case:?}");
-            assert_eq!(words[5] != 0, wide_product > u128::from(u64::MAX));
-            assert_eq!(value(6), a / u64::from(d), "division {case:?}");
-            assert_eq!(value(8), wide_ratio as u64, "ratio {case:?}");
-            assert_eq!(words[10] != 0, wide_ratio > u128::from(u64::MAX));
+            let value =
+                |index: usize| u64::from(words[index]) | u64::from(words[index + 1]) << WORD_BITS;
+            let faults = |wide| match wide > u128::from(u64::MAX) {
+                true => FaultFlags::ARITHMETIC_OVERFLOW,
+                false => FaultFlags::empty(),
+            };
+            assert_eq!(value(ProbeOutput::SUM), wide_sum as u64, "sum {case:?}");
             assert_eq!(
-                words[11],
-                (u128::from(a.min(b)) * 32 / u128::from(b)) as u32,
+                FaultFlags::new(words[ProbeOutput::SUM_FAULTS])?,
+                faults(wide_sum)
+            );
+            assert_eq!(
+                value(ProbeOutput::PRODUCT),
+                wide_product as u64,
+                "product {case:?}"
+            );
+            assert_eq!(
+                FaultFlags::new(words[ProbeOutput::PRODUCT_FAULTS])?,
+                faults(wide_product)
+            );
+            assert_eq!(
+                value(ProbeOutput::QUOTIENT),
+                a / u64::from(d),
+                "division {case:?}"
+            );
+            assert_eq!(
+                value(ProbeOutput::RATIO),
+                wide_ratio as u64,
+                "ratio {case:?}"
+            );
+            assert_eq!(
+                FaultFlags::new(words[ProbeOutput::RATIO_FAULTS])?,
+                faults(wide_ratio)
+            );
+            assert_eq!(
+                words[ProbeOutput::FRACTION],
+                (u128::from(a.min(b)) * u128::from(PRICE_INDEX_LIMIT) / u128::from(b)) as u32,
                 "fraction {case:?}"
             );
-            assert_eq!(value(12), a.wrapping_sub(b), "subtraction {case:?}");
+            assert_eq!(
+                value(ProbeOutput::DIFFERENCE),
+                a.wrapping_sub(b),
+                "subtraction {case:?}"
+            );
         }
         Ok(())
     }
 
     #[test]
     fn portable_words_match_wide_oracle_on_cpu() -> Result<()> {
-        check(Device::cpu(64)?)
+        check(Device::cpu(TEST_WORKGROUP)?)
     }
 
     #[test]
     #[ignore = "requires a GPU adapter"]
     fn portable_words_match_wide_oracle_on_gpu() -> Result<()> {
-        check(Device::headless(64)?)
+        check(Device::headless(TEST_WORKGROUP)?)
     }
 }

@@ -1,0 +1,45 @@
+use super::flags::MarketFlag;
+use crate::domain::Phase;
+use cubecl::prelude::*;
+
+#[derive(CubeType, CubeLaunch, Clone, Copy)]
+pub struct EconomyParameters {
+    pub day: u32,
+    #[cube(comptime)]
+    pub phase: Phase,
+    #[cube(comptime)]
+    pub market: MarketFlag,
+    pub offset: u32,
+    pub count: u32,
+    pub status_start: u32,
+}
+impl EconomyParameters {
+    pub fn launch(self) -> EconomyParametersLaunch {
+        EconomyParametersLaunch {
+            day: self.day,
+            phase: self.phase,
+            market: self.market,
+            offset: self.offset,
+            count: self.count,
+            status_start: self.status_start,
+        }
+    }
+}
+
+#[derive(CubeType, CubeLaunch, Clone, Copy, Default)]
+pub struct SchedulerParameters {
+    pub count: u32,
+    pub width: u32,
+    pub source: u32,
+    pub status_offset: u32,
+}
+impl SchedulerParameters {
+    pub fn launch(self) -> SchedulerParametersLaunch {
+        SchedulerParametersLaunch {
+            count: self.count,
+            width: self.width,
+            source: self.source,
+            status_offset: self.status_offset,
+        }
+    }
+}

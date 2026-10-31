@@ -1,7 +1,18 @@
-use super::words::*;
+use super::{
+    flags::{
+        COMPLETED_WORD, CONTROL_WORDS, DependencyFlag, EventStatus, FaultFlags,
+        KernelAuthorization, KernelEventStatus, KernelFaults, PROGRESS_WORD, record_dependency,
+    },
+    layout::*,
+    parameters::SchedulerParameters,
+    words::*,
+};
+use crate::ledger::{EMPTY, LEG_WORDS, LegLayout, MAX_LEGS};
 use cubecl::prelude::*;
 
-#[derive(CubeType, Clone, Copy, Debug, Hash, PartialEq, Eq)]
+#[enumflags2::bitflags]
+#[repr(u32)]
+#[derive(Clone, Copy, Debug, Hash, PartialEq, Eq)]
 pub enum SchedulerStage {
     Initialize,
     Merge,
@@ -14,7 +25,7 @@ pub enum SchedulerStage {
 
 #[cube]
 fn coordinate(events: &[u32], incidence: u32) -> u32 {
-    events[(incidence * 8) as usize]
+    events[incidence as usize * LEG_WORDS + LegLayout::COORDINATE]
 }
 #[cube]
 fn before(events: &[u32], a: u32, b: u32) -> bool {
@@ -34,33 +45,38 @@ pub fn schedule(
     scratch: &mut [u32],
     control: &[Atomic<u32>],
     links: &[Atomic<u32>],
-    params: &[u32],
+    params: SchedulerParameters,
     #[comptime] stage: SchedulerStage,
 ) {
     let id = ABSOLUTE_POS as u32;
-    let count = params[0];
-    let total = count * 12;
+    let count = params.count;
+    let total = count * MAX_LEGS as u32;
     match stage {
         SchedulerStage::Initialize => {
             if id < total {
                 scratch[id as usize] = id;
-                scratch[(total * 2 + id) as usize] = u32::MAX;
+                scratch[(total * ScratchLayout::PREDECESSORS as u32 + id) as usize] =
+                    NO_PREDECESSOR;
             }
             if id < count {
-                scratch[(total * 3 + id) as usize] =
-                    u32::cast_from(events[(id * 96) as usize] != u32::MAX);
-                links[id as usize].store(u32::MAX);
-                links[(count + id) as usize].store(0);
-                links[(count * 2 + id) as usize].store(u32::MAX);
+                let mut status = KernelEventStatus::new(comptime!(EventStatus::Inactive));
+                if events[id as usize * EVENT_WORDS + LegLayout::COORDINATE] != EMPTY {
+                    status.set(comptime!(EventStatus::Pending));
+                }
+                status.store(scratch, total * ScratchLayout::STATUSES as u32 + id);
+                links[LinkLayout::FIRST_PREDECESSOR * count as usize + id as usize]
+                    .store(NO_PREDECESSOR);
+                links[LinkLayout::LAST_PREDECESSOR * count as usize + id as usize].store(0);
+                links[LinkLayout::SUCCESSOR * count as usize + id as usize].store(NO_SUCCESSOR);
             }
-            if id < 4 {
+            if id < CONTROL_WORDS as u32 {
                 control[id as usize].store(0);
             }
         }
         SchedulerStage::Merge => {
             if id < total {
-                let width = params[1];
-                let source = params[2];
+                let width = params.width;
+                let source = params.source;
                 let destination = total - source;
                 let base = id / (width * 2) * width * 2;
                 let middle = min(base + width, total);
@@ -83,74 +99,87 @@ pub fn schedule(
         }
         SchedulerStage::Dependencies => {
             if id > 0 && id < total {
-                let previous = scratch[(params[2] + id - 1) as usize];
-                let current = scratch[(params[2] + id) as usize];
-                if coordinate(events, current) != u32::MAX
+                let previous = scratch[(params.source + id - 1) as usize];
+                let current = scratch[(params.source + id) as usize];
+                if coordinate(events, current) != EMPTY
                     && coordinate(events, previous) == coordinate(events, current)
                 {
-                    scratch[(total * 2 + current) as usize] = previous / 12;
-                    let prior = previous / 12;
-                    let event = current / 12;
-                    links[event as usize].fetch_min(prior);
-                    links[(count + event) as usize].fetch_max(prior);
-                    let old = links[(count * 2 + prior) as usize].exchange(event);
-                    if old != u32::MAX && old != event {
-                        control[3].store(1);
+                    scratch[(total * ScratchLayout::PREDECESSORS as u32 + current) as usize] =
+                        previous / MAX_LEGS as u32;
+                    let prior = previous / MAX_LEGS as u32;
+                    let event = current / MAX_LEGS as u32;
+                    links[LinkLayout::FIRST_PREDECESSOR * count as usize + event as usize]
+                        .fetch_min(prior);
+                    links[LinkLayout::LAST_PREDECESSOR * count as usize + event as usize]
+                        .fetch_max(prior);
+                    let old = links[LinkLayout::SUCCESSOR * count as usize + prior as usize]
+                        .exchange(event);
+                    if old != NO_SUCCESSOR && old != event {
+                        record_dependency(control, comptime!(DependencyFlag::MultipleSuccessors));
                     }
                 }
             }
         }
         SchedulerStage::CheckChains => {
             if id < count {
-                let low = links[id as usize].load();
-                let high = links[(count + id) as usize].load();
-                if low != u32::MAX && low != high {
-                    control[3].store(1);
+                let low =
+                    links[LinkLayout::FIRST_PREDECESSOR * count as usize + id as usize].load();
+                let high =
+                    links[LinkLayout::LAST_PREDECESSOR * count as usize + id as usize].load();
+                if low != NO_PREDECESSOR && low != high {
+                    record_dependency(control, comptime!(DependencyFlag::MultiplePredecessors));
                 }
             }
         }
         SchedulerStage::Chains => {
             if id < count {
-                if links[id as usize].load() == u32::MAX && scratch[(total * 3 + id) as usize] == 1
+                let status =
+                    KernelEventStatus::load(scratch, total * ScratchLayout::STATUSES as u32 + id);
+                if links[LinkLayout::FIRST_PREDECESSOR * count as usize + id as usize].load()
+                    == NO_PREDECESSOR
+                    && status.contains(comptime!(EventStatus::Pending))
                 {
                     let mut event = id;
                     let mut depth = 0u32;
-                    while event != u32::MAX {
-                        scratch[(total * 3 + event) as usize] =
-                            post(balances, events, control, event);
-                        event = links[(count * 2 + event) as usize].load();
+                    while event != NO_SUCCESSOR {
+                        post(balances, events, control, event)
+                            .store(scratch, total * ScratchLayout::STATUSES as u32 + event);
+                        event =
+                            links[LinkLayout::SUCCESSOR * count as usize + event as usize].load();
                         depth += 1;
                     }
-                    control[0].fetch_max(depth);
+                    control[PROGRESS_WORD].fetch_max(depth);
                 }
             }
         }
         SchedulerStage::Clear => {
             if id == 0 {
-                control[0].store(0);
+                control[PROGRESS_WORD].store(0);
             }
         }
         SchedulerStage::Frontier => {
             if id < count {
-                let old = total * 3 + params[3];
-                let next = total * 3 + count - params[3];
-                let prior = scratch[(old + id) as usize];
-                let mut status = prior;
-                if prior == 1 {
+                let old = total * ScratchLayout::STATUSES as u32 + params.status_offset;
+                let next = total * ScratchLayout::STATUSES as u32 + count - params.status_offset;
+                let mut status = KernelEventStatus::load(scratch, old + id);
+                if status.contains(comptime!(EventStatus::Pending)) {
                     let mut ready = true;
-                    for slot in 0..12u32 {
-                        let predecessor = scratch[(total * 2 + id * 12 + slot) as usize];
-                        if predecessor != u32::MAX {
-                            ready = ready && scratch[(old + predecessor) as usize] != 1;
+                    for slot in 0..MAX_LEGS as u32 {
+                        let predecessor = scratch[(total * ScratchLayout::PREDECESSORS as u32
+                            + id * MAX_LEGS as u32
+                            + slot) as usize];
+                        if predecessor != NO_PREDECESSOR {
+                            let prior = KernelEventStatus::load(scratch, old + predecessor);
+                            ready = ready && !prior.contains(comptime!(EventStatus::Pending));
                         }
                     }
                     if ready {
-                        status = post(balances, events, control, id);
+                        status.replace(post(balances, events, control, id));
                     }
                 }
-                scratch[(next + id) as usize] = status;
-                if status == 1 {
-                    control[0].fetch_add(1);
+                status.store(scratch, next + id);
+                if status.contains(comptime!(EventStatus::Pending)) {
+                    control[PROGRESS_WORD].fetch_add(1);
                 }
             }
         }
@@ -158,52 +187,70 @@ pub fn schedule(
 }
 
 #[cube]
-fn post(balances: &mut [u32], events: &[u32], control: &[Atomic<u32>], id: u32) -> u32 {
-    control[2].fetch_add(1);
+fn post(
+    balances: &mut [u32],
+    events: &[u32],
+    control: &[Atomic<u32>],
+    id: u32,
+) -> KernelEventStatus {
+    control[COMPLETED_WORD].fetch_add(1);
     let mut valid = true;
-    let mut fault = 0u32;
-    let mut after = Array::<u32>::new(24usize);
-    for slot in 0..12u32 {
-        let base = (id * 12 + slot) * 8;
-        let cell = events[base as usize];
-        if cell != u32::MAX {
-            match u32::cast_from(cell < balances.len() as u32 / 2) {
-                1 => {
-                    let balance = load(balances, cell);
-                    let debit = ticks(events[(base + 1) as usize], events[(base + 2) as usize]);
-                    let credit = ticks(events[(base + 3) as usize], events[(base + 4) as usize]);
-                    let guard = ticks(events[(base + 6) as usize], events[(base + 7) as usize]);
-                    let funded = !lt(balance, debit);
-                    valid = valid && funded;
-                    match events[(base + 5) as usize] {
-                        1 => valid = valid && equal(balance, guard),
-                        2 => valid = valid && !lt(balance, guard),
-                        _ => (),
-                    }
-                    if funded {
-                        let proposed = plus(minus(balance, debit), credit);
-                        after[(slot * 2) as usize] = proposed.value.extract(0usize);
-                        after[(slot * 2 + 1) as usize] = proposed.value.extract(1usize);
-                        fault |= proposed.overflow;
-                    }
+    let mut faults = KernelFaults::none();
+    let mut after = Array::<u32>::new(MAX_LEGS * TICK_WORDS);
+    for slot in 0..MAX_LEGS as u32 {
+        let base = (id * MAX_LEGS as u32 + slot) * LEG_WORDS as u32;
+        let cell = events[base as usize + LegLayout::COORDINATE];
+        if cell != EMPTY {
+            if cell < balances.len() as u32 / TICK_WORDS as u32 {
+                let balance = load(balances, cell);
+                let debit = ticks(
+                    events[base as usize + LegLayout::DEBIT_LOW],
+                    events[base as usize + LegLayout::DEBIT_HIGH],
+                );
+                let credit = ticks(
+                    events[base as usize + LegLayout::CREDIT_LOW],
+                    events[base as usize + LegLayout::CREDIT_HIGH],
+                );
+                let guard = ticks(
+                    events[base as usize + LegLayout::GUARD_LOW],
+                    events[base as usize + LegLayout::GUARD_HIGH],
+                );
+                let funded = !lt(balance, debit);
+                valid = valid && funded;
+                let authorization =
+                    KernelAuthorization::load(events[base as usize + LegLayout::AUTHORIZATION]);
+                valid = valid && authorization.permits(balance, guard);
+                if funded {
+                    let proposed = plus(minus(balance, debit), credit);
+                    after[(slot * TICK_WORDS as u32) as usize] = proposed.value.extract(LOW_WORD);
+                    after[(slot * TICK_WORDS as u32 + 1) as usize] =
+                        proposed.value.extract(HIGH_WORD);
+                    faults.insert(proposed.faults);
                 }
-                _ => fault = 2,
+            } else {
+                faults.insert(KernelFaults::new(comptime!(FaultFlags::INVALID_COORDINATE)));
             }
         }
     }
-    let mut status = select(valid, 2u32, 3u32);
-    if fault > 0 {
-        status = 4;
-        control[1].fetch_max(fault);
+    let mut status = KernelEventStatus::new(comptime!(EventStatus::Rejected));
+    if valid {
+        status.set(comptime!(EventStatus::Accepted));
     }
-    if status == 2 {
-        for slot in 0..12u32 {
-            let cell = events[((id * 12 + slot) * 8) as usize];
-            if cell != u32::MAX {
+    if !faults.is_empty() {
+        status.set(comptime!(EventStatus::Faulted));
+        faults.record(control);
+    }
+    if status.contains(comptime!(EventStatus::Accepted)) {
+        for slot in 0..MAX_LEGS as u32 {
+            let cell = events[((id * MAX_LEGS as u32 + slot) * LEG_WORDS as u32) as usize];
+            if cell != EMPTY {
                 store(
                     balances,
                     cell,
-                    ticks(after[(slot * 2) as usize], after[(slot * 2 + 1) as usize]),
+                    ticks(
+                        after[(slot * TICK_WORDS as u32) as usize],
+                        after[(slot * TICK_WORDS as u32 + 1) as usize],
+                    ),
                 );
             }
         }

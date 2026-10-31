@@ -4,8 +4,20 @@ use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
 
 pub const MAX_LEGS: usize = 12;
-pub const LEG_WORDS: usize = 8;
+pub const LEG_WORDS: usize = LegLayout::GUARD_HIGH + 1;
 pub const EMPTY: u32 = u32::MAX;
+
+pub struct LegLayout;
+impl LegLayout {
+    pub const COORDINATE: usize = 0;
+    pub const DEBIT_LOW: usize = 1;
+    pub const DEBIT_HIGH: usize = 2;
+    pub const CREDIT_LOW: usize = 3;
+    pub const CREDIT_HIGH: usize = 4;
+    pub const AUTHORIZATION: usize = 5;
+    pub const GUARD_LOW: usize = 6;
+    pub const GUARD_HIGH: usize = 7;
+}
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
 pub struct Coordinate(pub u32);
@@ -15,6 +27,37 @@ pub enum Authorization {
     Any,
     Equal(u64),
     AtLeast(u64),
+}
+
+bitflags::bitflags! {
+    #[derive(Clone, Copy, Debug, PartialEq, Eq)]
+    pub(crate) struct AuthorizationFlags: u32 {
+        const EQUAL = 1 << 0;
+        const AT_LEAST = 1 << 1;
+    }
+}
+
+struct EncodedAuthorization {
+    flags: AuthorizationFlags,
+    guard: u64,
+}
+impl From<Authorization> for EncodedAuthorization {
+    fn from(authorization: Authorization) -> Self {
+        match authorization {
+            Authorization::Any => Self {
+                flags: AuthorizationFlags::empty(),
+                guard: 0,
+            },
+            Authorization::Equal(guard) => Self {
+                flags: AuthorizationFlags::EQUAL,
+                guard,
+            },
+            Authorization::AtLeast(guard) => Self {
+                flags: AuthorizationFlags::AT_LEAST,
+                guard,
+            },
+        }
+    }
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -128,26 +171,20 @@ impl Bundle {
         let mut words = vec![0; MAX_LEGS * LEG_WORDS];
         words
             .chunks_exact_mut(LEG_WORDS)
-            .for_each(|leg| leg[0] = EMPTY);
+            .for_each(|leg| leg[LegLayout::COORDINATE] = EMPTY);
         self.legs
             .iter()
             .zip(words.chunks_exact_mut(LEG_WORDS))
             .for_each(|(leg, out)| {
-                let (mode, guard) = match leg.authorization {
-                    Authorization::Any => (0, 0),
-                    Authorization::Equal(n) => (1, n),
-                    Authorization::AtLeast(n) => (2, n),
-                };
-                out.copy_from_slice(&[
-                    leg.coordinate.0,
-                    leg.debit as u32,
-                    (leg.debit >> 32) as u32,
-                    leg.credit as u32,
-                    (leg.credit >> 32) as u32,
-                    mode,
-                    guard as u32,
-                    (guard >> 32) as u32,
-                ]);
+                let authorization = EncodedAuthorization::from(leg.authorization);
+                out[LegLayout::COORDINATE] = leg.coordinate.0;
+                out[LegLayout::DEBIT_LOW] = leg.debit as u32;
+                out[LegLayout::DEBIT_HIGH] = (leg.debit >> u32::BITS) as u32;
+                out[LegLayout::CREDIT_LOW] = leg.credit as u32;
+                out[LegLayout::CREDIT_HIGH] = (leg.credit >> u32::BITS) as u32;
+                out[LegLayout::AUTHORIZATION] = authorization.flags.bits();
+                out[LegLayout::GUARD_LOW] = authorization.guard as u32;
+                out[LegLayout::GUARD_HIGH] = (authorization.guard >> u32::BITS) as u32;
             });
         words
     }

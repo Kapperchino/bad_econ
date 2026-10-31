@@ -23,6 +23,44 @@ fn event(identity: u64, legs: Vec<Leg>) -> Result<Bundle> {
 }
 
 #[test]
+fn authorization_flags_preserve_wide_guards_and_empty_events() -> Result<()> {
+    let wide = (1u64 << 32) + 9;
+    let balances = [0, 9, wide, u64::MAX, 0];
+    let mut events = vec![event(0, Vec::new())?];
+    for authorization in [
+        Authorization::Any,
+        Authorization::Equal(9),
+        Authorization::Equal(wide),
+        Authorization::AtLeast(9),
+        Authorization::AtLeast(wide),
+        Authorization::AtLeast(u64::MAX),
+    ] {
+        for coordinate in 0..4 {
+            events.push(event(
+                events.len() as u64,
+                vec![
+                    Leg {
+                        coordinate: Coordinate(coordinate),
+                        debit: 0,
+                        credit: 0,
+                        authorization,
+                    },
+                    Leg::transfer(Coordinate(4), 0, 1),
+                ],
+            )?);
+        }
+    }
+    events.push(event(events.len() as u64, Vec::new())?);
+    let mut expected = balances;
+    let decisions = serial(&mut expected, &events)?;
+    let actual = simulation::ledger(&support::device(64)?, &balances, &events)?;
+    assert_eq!(actual.decisions, decisions);
+    assert_eq!(actual.state, expected);
+    assert_eq!(actual.state[4], 12);
+    Ok(())
+}
+
+#[test]
 fn branched_graph_and_grouped_debits_match_serial_ledger() -> Result<()> {
     let mut expected = vec![1000; 12];
     let events = (0..256u64)
