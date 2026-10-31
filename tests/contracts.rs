@@ -1,0 +1,182 @@
+#[cfg(feature = "compute")]
+mod support;
+use anyhow::Result;
+#[cfg(feature = "compute")]
+use bad_econ::runtime::*;
+use bad_econ::{arithmetic::*, domain::*, ledger::*};
+
+fn event(id: u64, legs: &[Leg]) -> Bundle {
+    Bundle::new(
+        EventKey {
+            day: 0,
+            phase: 0,
+            subphase: 0,
+            priority: 0,
+            identity: id,
+        },
+        legs.iter().copied(),
+    )
+    .unwrap()
+}
+fn transfer(cell: u32, debit: u64, credit: u64) -> Leg {
+    Leg::transfer(Coordinate(cell), debit, credit)
+}
+
+#[test]
+fn lean_wage_before_purchase_and_rejected_buyer_fallback() -> Result<()> {
+    let mut state = vec![10, 20, 0];
+    let wage = event(1, &[transfer(0, 0, 6), transfer(1, 6, 0)]);
+    let purchase = event(2, &[transfer(0, 12, 0), transfer(2, 0, 12)]);
+    assert_eq!(
+        serial(&mut state, &[wage, purchase])?,
+        [Decision::Accepted, Decision::Accepted]
+    );
+    assert_eq!(state, [4, 14, 12]);
+    let mut state = vec![2, 3, 0, 1, 0, 0];
+    let a = event(
+        1,
+        &[
+            transfer(0, 3, 0),
+            transfer(2, 0, 3),
+            transfer(3, 1, 0),
+            transfer(4, 0, 1),
+        ],
+    );
+    let b = event(
+        2,
+        &[
+            transfer(1, 3, 0),
+            transfer(2, 0, 3),
+            transfer(3, 1, 0),
+            transfer(5, 0, 1),
+        ],
+    );
+    assert_eq!(
+        serial(&mut state, &[a, b])?,
+        [Decision::Rejected, Decision::Accepted]
+    );
+    assert_eq!(state, [2, 0, 3, 0, 0, 1]);
+    Ok(())
+}
+
+#[test]
+fn gross_affordability_repeated_legs_and_atomic_overflow() -> Result<()> {
+    let mut state = vec![1];
+    assert_eq!(
+        event(1, &[transfer(0, 3, 2)]).apply(&mut state)?,
+        Decision::Rejected
+    );
+    let mut state = vec![5];
+    assert_eq!(
+        event(1, &[transfer(0, 3, 0), transfer(0, 3, 0)]).apply(&mut state)?,
+        Decision::Rejected
+    );
+    let mut state = vec![100, u64::MAX];
+    assert!(
+        event(1, &[transfer(0, 1, 0), transfer(1, 0, 1)])
+            .apply(&mut state)
+            .is_err()
+    );
+    assert_eq!(state, [100, u64::MAX]);
+    Ok(())
+}
+
+#[test]
+fn authorization_reads_create_dependencies() -> Result<()> {
+    let mut state = vec![1, 0, 0];
+    let events = [
+        event(1, &[transfer(0, 1, 0)]),
+        event(2, &[Leg::read(Coordinate(0), 1), transfer(1, 0, 1)]),
+        event(3, &[Leg::read(Coordinate(0), 0), transfer(2, 0, 1)]),
+    ];
+    assert_eq!(
+        Schedule::new(&events)?.frontiers,
+        [vec![0], vec![1], vec![2]]
+    );
+    assert_eq!(
+        serial(&mut state, &events)?,
+        [Decision::Accepted, Decision::Rejected, Decision::Accepted]
+    );
+    assert_eq!(state, [0, 0, 1]);
+    assert!(serial(&mut state, &[])?.is_empty());
+    assert!(Schedule::new(&[events[1].clone(), events[0].clone()]).is_err());
+    Ok(())
+}
+
+#[test]
+fn lean_packets_claims_quotes_and_draws() -> Result<()> {
+    let packet = Packet::new(&[Ratio::new(1, 2)?, Ratio::new(1, 3)?, Ratio::new(1, 1)?])?;
+    assert_eq!(packet.activities, 6);
+    assert_eq!(packet.ticks, [3, 2, 6]);
+    assert_eq!(packet.capacity(4, &[8, 5, 100])?, 2);
+    assert_eq!(Packet::new(&[])?.capacity(4, &[])?, 4);
+    let thirds = Claim::new(3, 0)?.accrue(1)?.accrue(1)?;
+    assert_eq!(thirds.remainder(), 2);
+    assert_eq!(thirds.accrue(1)?.whole(), 1);
+    assert_eq!(Claim::new(3, 5)?.settle(1)?.remainder(), 2);
+    assert_eq!(quote(2001, 0, 2009, 10)?, 2000);
+    assert!(quote(2000, 2005, 2009, 10).is_err());
+    assert!(!Probability::new(1, 3)?.succeeds(2, 1)?);
+    assert!(!Probability::new(0, 3)?.succeeds(64, 0)?);
+    assert!(Probability::new(3, 3)?.succeeds(64, u64::MAX)?);
+    assert!(Probability::new(1, 1)?.succeeds(2, 4).is_err());
+    assert!(Probability::new(1, 1)?.succeeds(65, 0).is_err());
+    assert_eq!(forecast(10, 14, 0, 250)?, 11);
+    assert_eq!(
+        DrawKey {
+            seed: 42,
+            day: 7,
+            phase: 3,
+            actor: 12,
+            purpose: 9,
+            index: 0
+        }
+        .draw(),
+        9_825_991_519_559_520_269
+    );
+    assert_eq!(floor_ratio(u64::MAX, u64::MAX, u64::MAX)?, u64::MAX);
+    Ok(())
+}
+
+#[cfg(feature = "compute")]
+#[test]
+fn transport_ownership_time_budgets_and_checkpoint_replay() -> Result<()> {
+    let scenario = Scenario::baseline(120, 42, Experiment::Transport)?;
+    let mut simulation =
+        bad_econ::simulation::Simulation::new(scenario.clone(), support::device(64)?)?;
+    (0..8).try_for_each(|_| simulation.advance())?;
+    let initial_cash = simulation.download()?.initial_cash;
+    assert_eq!(simulation.snapshot.cash, initial_cash);
+    let checkpoint = simulation.checkpoint()?;
+    let serialized = serde_json::to_string(&checkpoint)?;
+    let checkpoint: Checkpoint = serde_json::from_str(&serialized)?;
+    (0..4).try_for_each(|_| simulation.advance())?;
+    let expected = simulation.download()?;
+    simulation.command(SimulationCommand::Restore(checkpoint))?;
+    (0..4).try_for_each(|_| simulation.advance())?;
+    assert_eq!(simulation.download()?, expected);
+    let state = simulation.download()?;
+    (0..scenario.config().households as usize).for_each(|i| {
+        assert!(
+            state.get(Field::Hours, i) + state.get(Field::Time, i)
+                <= u64::from(scenario.config().work_cap)
+        )
+    });
+    Ok(())
+}
+
+#[test]
+fn scenario_rejects_invalid_configuration_and_enforces_memory_budget() -> Result<()> {
+    let scenario = Scenario::baseline(1_000_000, 42, Experiment::Baseline)?;
+    assert!(scenario.memory_estimate() < MEMORY_BUDGET);
+    let mut config = scenario.config().clone();
+    config.shipment_speed = 0;
+    assert!(Scenario::new(config).is_err());
+    let mut config = scenario.config().clone();
+    config.household_cash = u64::MAX;
+    assert!(Scenario::new(config).is_err());
+    let mut config = scenario.config().clone();
+    config.search_radius = 0;
+    assert!(Scenario::new(config).is_err());
+    Ok(())
+}
