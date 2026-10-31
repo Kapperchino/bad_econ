@@ -1,0 +1,312 @@
+{
+  "batch_size": 65536,
+  "buffer_days": 4,
+  "capacity": 100,
+  "commute_speed": 50,
+  "coverage": 4,
+  "delivery_penalty": 5,
+  "distribution_rate": 0,
+  "experiment": "Baseline",
+  "firm_cash": 200000,
+  "firms": 3,
+  "forecast_weight": 0,
+  "household_cash": 5000,
+  "household_need": 1,
+  "households": 3,
+  "map_size": 1000,
+  "maximum_price": 10000,
+  "minimum_price": 1,
+  "packet_minutes": 360,
+  "packet_output": 3,
+  "prices": [
+    150,
+    300,
+    450
+  ],
+  "reserve": 100000,
+  "reserved_minutes": 960,
+  "search_radius": 1000,
+  "seed": 42,
+  "shipment_speed": 1000,
+  "version": 1,
+  "wage": 1,
+  "work_cap": 480,
+  "behavior": {
+    "health_recovery": 7,
+    "hunger_damage": 30,
+    "work_fatigue": 13,
+    "rest_recovery": 17,
+    "wage_increment": 0,
+    "price_response": 0
+  },
+  "population": {
+    "households": [
+      {
+        "identity": 101,
+        "position": {
+          "x": 0,
+          "y": 0
+        },
+        "cash": 0,
+        "inventories": [
+          0,
+          0,
+          10
+        ],
+        "health": 1000,
+        "fatigue": 0
+      },
+      {
+        "identity": 303,
+        "position": {
+          "x": 0,
+          "y": 0
+        },
+        "cash": 0,
+        "inventories": [
+          0,
+          0,
+          10
+        ],
+        "health": 1000,
+        "fatigue": 0
+      },
+      {
+        "identity": 901,
+        "position": {
+          "x": 0,
+          "y": 0
+        },
+        "cash": 0,
+        "inventories": [
+          0,
+          0,
+          10
+        ],
+        "health": 1000,
+        "fatigue": 0
+      }
+    ],
+    "firms": [
+      {
+        "identity": 2000,
+        "owner": 901,
+        "good": "Grain",
+        "cash": 0,
+        "position": {
+          "x": 0,
+          "y": 0
+        },
+        "inventories": [
+          0,
+          0,
+          0
+        ],
+        "capacity": 1,
+        "technique": {
+          "labor_minutes": 120,
+          "input_ticks": 0,
+          "output_ticks": 5
+        },
+        "wage": 1,
+        "price": 10
+      },
+      {
+        "identity": 5000,
+        "owner": 101,
+        "good": "Flour",
+        "cash": 10000,
+        "position": {
+          "x": 0,
+          "y": 0
+        },
+        "inventories": [
+          20,
+          0,
+          0
+        ],
+        "capacity": 1,
+        "technique": {
+          "labor_minutes": 180,
+          "input_ticks": 2,
+          "output_ticks": 3
+        },
+        "wage": 2,
+        "price": 20
+      },
+      {
+        "identity": 8000,
+        "owner": 303,
+        "good": "Bread",
+        "cash": 10000,
+        "position": {
+          "x": 0,
+          "y": 0
+        },
+        "inventories": [
+          0,
+          3,
+          0
+        ],
+        "capacity": 1,
+        "technique": {
+          "labor_minutes": 240,
+          "input_ticks": 3,
+          "output_ticks": 2
+        },
+        "wage": 3,
+        "price": 30
+      }
+    ]
+  },
+  "payroll": {
+    "base_rate": 100,
+    "employee_charge": 50,
+    "brackets": [
+      {
+        "threshold": 100,
+        "marginal_rate": 300
+      }
+    ]
+  },
+  "household_policy": {
+    "recovery": 100,
+    "deficit_damage": 200,
+    "fatigue_damage": 50,
+    "fatigue_response": 50,
+    "rest_minutes": 480
+  },
+  "bargaining": {
+    "legal_minimum": 1,
+    "quantum": 1,
+    "daily_cash_cost": 30,
+    "funded_other": 0,
+    "participating_adults": 1,
+    "normal_day_minutes": 480,
+    "work_cost_per_minute": 0,
+    "desired_wage": 3,
+    "mandate": 700,
+    "withdrawal": 500,
+    "alternatives": 300,
+    "concentration": 400,
+    "replacements": 200
+  },
+  "finance": {
+    "banks": [
+      {
+        "identity": 10000,
+        "reserves": 2000,
+        "minimum_capital": 100,
+        "risk_weight": 1000
+      }
+    ],
+    "loans": [
+      {
+        "identity": 11000,
+        "bank": 10000,
+        "borrower": 2000,
+        "requested": 500,
+        "target_cash": 500,
+        "first_day": 0,
+        "term": 5,
+        "daily_rate": 10,
+        "surplus": 200,
+        "debt_service": 0,
+        "service_fraction": 1000,
+        "advance": 1000,
+        "collateral": 1000,
+        "secured": 0,
+        "consent": "Granted"
+      }
+    ],
+    "support": {
+      "treasury": 60,
+      "recipients": [
+        {
+          "household": 101,
+          "target_cash": 100,
+          "consent": "Granted"
+        },
+        {
+          "household": 303,
+          "target_cash": 100,
+          "consent": "Granted"
+        },
+        {
+          "household": 901,
+          "target_cash": 100,
+          "consent": "Granted"
+        }
+      ]
+    }
+  },
+  "research": {
+    "labs": [
+      {
+        "owner": 5000,
+        "researcher": 901,
+        "discovered": 0,
+        "mastered": 0,
+        "permitted": 1,
+        "adopted": 0,
+        "adoption": "MasterAndAdoptPermitted",
+        "consent": "Granted",
+        "production_requirements": 1,
+        "projects": [
+          {
+            "identity": 12000,
+            "prerequisites": 0,
+            "outcomes": 1,
+            "inputs": [
+              1,
+              0,
+              0
+            ],
+            "labor_minutes": 16,
+            "minimum_effort": 1,
+            "pioneer_effort": 1,
+            "capacity": 1000,
+            "relatedness": 1000,
+            "shape": 1,
+            "exposure": 0,
+            "exposure_signal": 1000
+          }
+        ]
+      }
+    ],
+    "equipment": [
+      {
+        "firm": 5000,
+        "remaining_service": 4,
+        "condition": 1000,
+        "nameplate": 1,
+        "downtime": 0,
+        "wear_per_packet": 50,
+        "maintenance_good": "Grain",
+        "maintenance_ticks": 1,
+        "restoration_per_tick": 50
+      }
+    ],
+    "natural_stocks": [
+      {
+        "firm": 2000,
+        "stock": 12,
+        "capacity": 12,
+        "renewal_rate": 100,
+        "extraction_per_packet": 1
+      }
+    ],
+    "strikes": [
+      {
+        "household": 303,
+        "grievance": 1000,
+        "solidarity": 1000,
+        "trust": 1000,
+        "efficacy": 1000,
+        "peers": 1000,
+        "cost": 0,
+        "risk": 0
+      }
+    ]
+  }
+}

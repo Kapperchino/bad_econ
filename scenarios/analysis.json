@@ -1,0 +1,164 @@
+{
+  "context": {
+    "techniques": 1,
+    "units": 1,
+    "classification": 1,
+    "access": 1,
+    "reproduction": 1,
+    "occupations": 1,
+    "reference_occupation": 1,
+    "research_catalogue": 1,
+    "capability_graph": 1,
+    "numerical_profile": 1
+  },
+  "scale": 1000000,
+  "goods": {
+    "rows": 2,
+    "columns": 2,
+    "entries": [
+      {
+        "row": 0,
+        "column": 0,
+        "numerator": 1,
+        "denominator": 2
+      },
+      {
+        "row": 0,
+        "column": 1,
+        "numerator": 1,
+        "denominator": 1
+      }
+    ]
+  },
+  "labor": {
+    "rows": 1,
+    "columns": 2,
+    "entries": [
+      {
+        "row": 0,
+        "column": 0,
+        "numerator": 1,
+        "denominator": 1
+      },
+      {
+        "row": 0,
+        "column": 1,
+        "numerator": 1,
+        "denominator": 1
+      }
+    ]
+  },
+  "weights": [
+    1000000
+  ],
+  "final_demand": [
+    0,
+    2000000
+  ],
+  "goods_certificate": {
+    "numerator": 5,
+    "denominator": 6,
+    "weights": [
+      3,
+      1
+    ]
+  },
+  "value_certificate": {
+    "numerator": 1,
+    "denominator": 2,
+    "weights": [
+      1,
+      2
+    ]
+  },
+  "budget": {
+    "iterations": 256,
+    "weighted_tolerance": 32
+  },
+  "reference_occupation": 0,
+  "research": {
+    "inputs": {
+      "rows": 2,
+      "columns": 1,
+      "entries": [
+        {
+          "row": 0,
+          "column": 0,
+          "numerator": 1,
+          "denominator": 2
+        },
+        {
+          "row": 1,
+          "column": 0,
+          "numerator": 1,
+          "denominator": 1
+        }
+      ]
+    },
+    "hours": {
+      "rows": 1,
+      "columns": 1,
+      "entries": [
+        {
+          "row": 0,
+          "column": 0,
+          "numerator": 2,
+          "denominator": 1
+        }
+      ]
+    },
+    "attempts": [
+      1000000
+    ]
+  },
+  "reproduction": {
+    "goods": {
+      "rows": 2,
+      "columns": 1,
+      "entries": [
+        {
+          "row": 0,
+          "column": 0,
+          "numerator": 1,
+          "denominator": 8
+        },
+        {
+          "row": 1,
+          "column": 0,
+          "numerator": 1,
+          "denominator": 12
+        }
+      ]
+    },
+    "training": {
+      "rows": 1,
+      "columns": 1,
+      "entries": [
+        {
+          "row": 0,
+          "column": 0,
+          "numerator": 1,
+          "denominator": 4
+        }
+      ]
+    },
+    "certificate": {
+      "numerator": 20,
+      "denominator": 21,
+      "weights": [
+        14,
+        21,
+        6
+      ]
+    }
+  },
+  "comparator": {
+    "context": {
+      "population": "teaching example",
+      "classification": "grain and bread",
+      "period": "one plan",
+      "convention": "external labor weights"
+    },
+    "living": 15000000
+  }
+}

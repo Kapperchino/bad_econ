@@ -103,6 +103,19 @@ fn authorization_reads_create_dependencies() -> Result<()> {
     Ok(())
 }
 
+#[cfg(feature = "compute")]
+#[test]
+fn lean_indivisible_jobs_release_capacity_after_rejection() -> Result<()> {
+    let events = [
+        event(1, &[transfer(0, 6, 0)]),
+        event(2, &[transfer(0, 4, 0)]),
+    ];
+    let result = bad_econ::simulation::ledger(&support::device(64)?, &[5], &events)?;
+    assert_eq!(result.decisions, [Decision::Rejected, Decision::Accepted]);
+    assert_eq!(result.state, [1]);
+    Ok(())
+}
+
 #[test]
 fn lean_packets_claims_quotes_and_draws() -> Result<()> {
     let packet = Packet::new(&[Ratio::new(1, 2)?, Ratio::new(1, 3)?, Ratio::new(1, 1)?])?;
@@ -110,6 +123,7 @@ fn lean_packets_claims_quotes_and_draws() -> Result<()> {
     assert_eq!(packet.ticks, [3, 2, 6]);
     assert_eq!(packet.capacity(4, &[8, 5, 100])?, 2);
     assert_eq!(Packet::new(&[])?.capacity(4, &[])?, 4);
+    assert_eq!(Packet::new(&[Ratio::new(0, 1)?])?.capacity(4, &[0])?, 4);
     let thirds = Claim::new(3, 0)?.accrue(1)?.accrue(1)?;
     assert_eq!(thirds.remainder(), 2);
     assert_eq!(thirds.accrue(1)?.whole(), 1);
@@ -152,7 +166,7 @@ fn transport_ownership_time_budgets_and_checkpoint_replay() -> Result<()> {
     let checkpoint: Checkpoint = serde_json::from_str(&serialized)?;
     (0..4).try_for_each(|_| simulation.advance())?;
     let expected = simulation.download()?;
-    simulation.command(SimulationCommand::Restore(checkpoint))?;
+    simulation.command(SimulationCommand::Restore(checkpoint.into()))?;
     (0..4).try_for_each(|_| simulation.advance())?;
     assert_eq!(simulation.download()?, expected);
     let state = simulation.download()?;

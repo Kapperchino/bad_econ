@@ -21,7 +21,6 @@ fn event(identity: u64, legs: &[Leg]) -> Bundle {
 }
 
 #[test]
-#[ignore = "requires a GPU adapter"]
 fn gpu_integer_ledger() -> Result<()> {
     let device = Device::headless(64)?;
     let events = [
@@ -65,7 +64,6 @@ fn gpu_integer_ledger() -> Result<()> {
 }
 
 #[test]
-#[ignore = "requires a GPU adapter"]
 fn every_phase_matches_cpu_across_workgroups_and_experiments() -> Result<()> {
     let mut canonical = std::collections::BTreeMap::new();
     for workgroup in [32, 64, 128, 256, 64] {

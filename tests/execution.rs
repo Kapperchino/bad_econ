@@ -195,7 +195,7 @@ fn checkpoint_rejects_tampering_and_keeps_last_audited_boundary() -> Result<()> 
     invalid = scenario.initial()?;
     invalid.values.clear();
     assert!(Checkpoint::new(&scenario, &invalid).is_err());
-    simulation.command(SimulationCommand::Restore(checkpoint))?;
+    simulation.command(SimulationCommand::Restore(checkpoint.into()))?;
     let state = simulation.download()?;
     for identity in [1, 31] {
         let request = InspectionRequest::new(identity, &scenario)?;
@@ -239,7 +239,7 @@ fn arithmetic_fault_rolls_back_and_reset_recovers() -> Result<()> {
     state.set(Field::Used, 2, u64::MAX);
     let checkpoint = Checkpoint::new(&scenario, &state)?;
     let mut simulation = Simulation::new(scenario.clone(), support::device(64)?)?;
-    simulation.command(SimulationCommand::Restore(checkpoint.clone()))?;
+    simulation.command(SimulationCommand::Restore(checkpoint.clone().into()))?;
     let previous = simulation.snapshot.clone();
     assert!(simulation.advance().is_err());
     assert!(matches!(
@@ -253,7 +253,7 @@ fn arithmetic_fault_rolls_back_and_reset_recovers() -> Result<()> {
     assert_eq!(simulation.checkpoint()?, checkpoint);
     assert_eq!(simulation.download()?, state);
     assert!(simulation.command(SimulationCommand::Resume).is_err());
-    simulation.command(SimulationCommand::Reset(scenario))?;
+    simulation.command(SimulationCommand::Reset(scenario.into()))?;
     simulation.command(SimulationCommand::AdvanceDay)?;
     assert_eq!(simulation.snapshot.day, 1);
     assert_eq!(simulation.status, RuntimeState::Paused);
@@ -291,7 +291,7 @@ fn delivery_date_capacity_failure_retains_audited_checkpoint() -> Result<()> {
     state.day = u64::from(u32::MAX) - scenario.ring() as u64;
     let checkpoint = Checkpoint::new(&scenario, &state)?;
     let mut simulation = Simulation::new(scenario, support::device(64)?)?;
-    simulation.command(SimulationCommand::Restore(checkpoint.clone()))?;
+    simulation.command(SimulationCommand::Restore(checkpoint.clone().into()))?;
     assert!(simulation.advance().is_err());
     assert!(matches!(simulation.status, RuntimeState::Fault { .. }));
     assert_eq!(simulation.checkpoint()?, checkpoint);

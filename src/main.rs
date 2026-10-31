@@ -20,6 +20,8 @@ struct Cli {
     experiment: ExperimentArg,
     #[arg(long)]
     scenario: Option<PathBuf>,
+    #[arg(long)]
+    analysis: Option<PathBuf>,
     #[arg(long, default_value_t = 10)]
     days: u32,
     #[arg(long, default_value_t = 2)]
@@ -45,6 +47,7 @@ enum Mode {
     Benchmark,
     View,
     ViewCheck,
+    Analyze,
 }
 #[derive(Clone, Copy, ValueEnum)]
 enum Backend {
@@ -70,17 +73,43 @@ impl From<ExperimentArg> for Experiment {
 }
 fn main() -> Result<()> {
     let args = Cli::parse();
-    let scenario = match &args.scenario {
-        Some(path) => Scenario::new(serde_json::from_slice(&std::fs::read(path)?)?)?,
-        None => Scenario::baseline(args.households, args.seed, args.experiment.into())?,
-    };
     match args.mode {
-        Mode::Scenario => output(&args.output, &serde_json::to_value(scenario.config())?),
-        Mode::Run => run(scenario, &args),
-        Mode::Replay => replay(scenario, &args),
-        Mode::Benchmark => benchmark(scenario, &args),
-        Mode::View | Mode::ViewCheck => view(scenario, args.workgroup, args.mode),
+        Mode::Scenario => output(
+            &args.output,
+            &serde_json::to_value(scenario(&args)?.config())?,
+        ),
+        Mode::Run => run(scenario(&args)?, &args),
+        Mode::Replay => replay(scenario(&args)?, &args),
+        Mode::Benchmark => benchmark(scenario(&args)?, &args),
+        Mode::View | Mode::ViewCheck => view(scenario(&args)?, args.workgroup, args.mode),
+        Mode::Analyze => analyze(&args),
     }
+}
+fn scenario(args: &Cli) -> Result<Scenario> {
+    match &args.scenario {
+        Some(path) => Scenario::new(serde_json::from_slice(&std::fs::read(path)?)?),
+        None => Scenario::baseline(args.households, args.seed, args.experiment.into()),
+    }
+}
+#[cfg(feature = "compute")]
+fn analyze(args: &Cli) -> Result<()> {
+    use anyhow::Context;
+    use bad_econ::simulation::{Device, analytics::AnalysisRequest};
+    let path = args
+        .analysis
+        .as_ref()
+        .context("analyze requires --analysis PATH")?;
+    let request: AnalysisRequest = serde_json::from_slice(&std::fs::read(path)?)?;
+    let device = match args.backend {
+        Backend::Cpu => Device::cpu(args.workgroup)?,
+        Backend::Gpu => Device::headless(args.workgroup)?,
+    };
+    let report = request.run(&device)?;
+    output(&args.output, &serde_json::to_value(report)?)
+}
+#[cfg(not(feature = "compute"))]
+fn analyze(_: &Cli) -> Result<()> {
+    Err(anyhow!("build with the compute feature"))
 }
 #[cfg(feature = "compute")]
 fn run(scenario: Scenario, args: &Cli) -> Result<()> {

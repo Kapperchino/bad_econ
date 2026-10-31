@@ -1,7 +1,8 @@
 use super::flags::{ActorKind, ControlLayout};
+use super::negotiation::PolicyLayout;
 use crate::{
     arithmetic::PRICE_TABLE,
-    domain::{Actor, Good, Scenario, Technique},
+    domain::{Actor, Good, MAX_TAX_BRACKETS, Scenario, Technique},
     ledger::{LEG_WORDS, MAX_LEGS, TickLayout},
 };
 use anyhow::{Context, Result};
@@ -94,6 +95,19 @@ pub struct ConfigLayout {
     rest_recovery: u32,
     wage_increment: u32,
     price_response: u32,
+    payroll_enabled: u32,
+    tax_base_rate: u32,
+    employee_charge: u32,
+    tax_bracket_count: u32,
+    tax_thresholds: [TickLayout; MAX_TAX_BRACKETS],
+    tax_rates: [u32; MAX_TAX_BRACKETS],
+    household_policy_enabled: u32,
+    household_recovery: u32,
+    deficit_damage: u32,
+    fatigue_damage: u32,
+    fatigue_response: u32,
+    rest_minutes: u32,
+    bargaining: PolicyLayout,
     reserved: [u32; 2],
     price_table: [u32; PRICE_TABLE.len()],
 }
@@ -125,6 +139,20 @@ impl ConfigLayout {
     pub const REST_RECOVERY: usize = offset_of!(Self, rest_recovery) / WORD_BYTES;
     pub const WAGE_INCREMENT: usize = offset_of!(Self, wage_increment) / WORD_BYTES;
     pub const PRICE_RESPONSE: usize = offset_of!(Self, price_response) / WORD_BYTES;
+    pub const PAYROLL_ENABLED: usize = offset_of!(Self, payroll_enabled) / WORD_BYTES;
+    pub const TAX_BASE_RATE: usize = offset_of!(Self, tax_base_rate) / WORD_BYTES;
+    pub const EMPLOYEE_CHARGE: usize = offset_of!(Self, employee_charge) / WORD_BYTES;
+    pub const TAX_BRACKET_COUNT: usize = offset_of!(Self, tax_bracket_count) / WORD_BYTES;
+    pub const TAX_THRESHOLDS: usize = offset_of!(Self, tax_thresholds) / WORD_BYTES;
+    pub const TAX_RATES: usize = offset_of!(Self, tax_rates) / WORD_BYTES;
+    pub const HOUSEHOLD_POLICY_ENABLED: usize =
+        offset_of!(Self, household_policy_enabled) / WORD_BYTES;
+    pub const HOUSEHOLD_RECOVERY: usize = offset_of!(Self, household_recovery) / WORD_BYTES;
+    pub const DEFICIT_DAMAGE: usize = offset_of!(Self, deficit_damage) / WORD_BYTES;
+    pub const FATIGUE_DAMAGE: usize = offset_of!(Self, fatigue_damage) / WORD_BYTES;
+    pub const FATIGUE_RESPONSE: usize = offset_of!(Self, fatigue_response) / WORD_BYTES;
+    pub const REST_MINUTES: usize = offset_of!(Self, rest_minutes) / WORD_BYTES;
+    pub const BARGAINING: usize = offset_of!(Self, bargaining) / WORD_BYTES;
     pub const PRICE_TABLE: usize = offset_of!(Self, price_table) / WORD_BYTES;
 
     pub fn new(scenario: &Scenario) -> Self {
@@ -160,6 +188,53 @@ impl ConfigLayout {
             rest_recovery: config.behavior.rest_recovery,
             wage_increment: config.behavior.wage_increment,
             price_response: config.behavior.price_response,
+            household_policy_enabled: u32::from(config.household_policy.is_some()),
+            household_recovery: config
+                .household_policy
+                .as_ref()
+                .map_or(0, |policy| policy.recovery),
+            deficit_damage: config
+                .household_policy
+                .as_ref()
+                .map_or(0, |policy| policy.deficit_damage),
+            fatigue_damage: config
+                .household_policy
+                .as_ref()
+                .map_or(0, |policy| policy.fatigue_damage),
+            fatigue_response: config
+                .household_policy
+                .as_ref()
+                .map_or(0, |policy| policy.fatigue_response),
+            rest_minutes: config
+                .household_policy
+                .as_ref()
+                .map_or(0, |policy| policy.rest_minutes),
+            bargaining: PolicyLayout::new(config.bargaining.as_ref()),
+            payroll_enabled: u32::from(config.payroll.is_some()),
+            tax_base_rate: config.payroll.as_ref().map_or(0, |policy| policy.base_rate),
+            employee_charge: config
+                .payroll
+                .as_ref()
+                .map_or(0, |policy| policy.employee_charge),
+            tax_bracket_count: config
+                .payroll
+                .as_ref()
+                .map_or(0, |policy| policy.brackets.len() as u32),
+            tax_thresholds: std::array::from_fn(|index| {
+                config
+                    .payroll
+                    .as_ref()
+                    .and_then(|policy| policy.brackets.get(index))
+                    .map_or(0, |bracket| bracket.threshold)
+                    .into()
+            }),
+            tax_rates: std::array::from_fn(|index| {
+                config
+                    .payroll
+                    .as_ref()
+                    .and_then(|policy| policy.brackets.get(index))
+                    .map_or(0, |bracket| bracket.marginal_rate)
+            }),
             reserved: [0; 2],
             price_table: PRICE_TABLE,
         }
@@ -213,6 +288,9 @@ impl LinkLayout {
 #[derive(Clone, Copy, Pod, Zeroable)]
 pub struct SummaryLayout {
     pub cash: TickLayout,
+    pub payroll_reserves: TickLayout,
+    pub income_tax: TickLayout,
+    pub employee_charges: TickLayout,
     pub employed: TickLayout,
     pub shortages: TickLayout,
     pub inventories: [TickLayout; Good::COUNT],
@@ -236,6 +314,9 @@ pub struct SummaryLayout {
 }
 impl SummaryLayout {
     pub const CASH: u32 = (offset_of!(Self, cash) / TICK_BYTES) as u32;
+    pub const PAYROLL_RESERVES: u32 = (offset_of!(Self, payroll_reserves) / TICK_BYTES) as u32;
+    pub const INCOME_TAX: u32 = (offset_of!(Self, income_tax) / TICK_BYTES) as u32;
+    pub const EMPLOYEE_CHARGES: u32 = (offset_of!(Self, employee_charges) / TICK_BYTES) as u32;
     pub const EMPLOYED: u32 = (offset_of!(Self, employed) / TICK_BYTES) as u32;
     pub const SHORTAGES: u32 = (offset_of!(Self, shortages) / TICK_BYTES) as u32;
     pub const INVENTORIES: u32 = (offset_of!(Self, inventories) / TICK_BYTES) as u32;

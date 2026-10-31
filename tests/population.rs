@@ -221,7 +221,7 @@ mod compute {
         let checkpoint = simulation.checkpoint()?;
         simulation.advance()?;
         let expected = simulation.download()?;
-        simulation.command(SimulationCommand::Restore(checkpoint))?;
+        simulation.command(SimulationCommand::Restore(checkpoint.into()))?;
         simulation.advance()?;
         assert_eq!(simulation.download()?, expected);
         let mut config = scenario.config().clone();
@@ -288,7 +288,6 @@ mod compute {
     }
 
     #[test]
-    #[ignore = "requires a GPU adapter"]
     fn custom_population_matches_cpu_at_every_phase_and_workgroup() -> Result<()> {
         let mut canonical = None;
         for workgroup in [32, 64, 128, 256, 64] {

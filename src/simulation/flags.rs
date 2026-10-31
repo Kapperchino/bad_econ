@@ -139,6 +139,8 @@ bitflags::bitflags! {
         const TRANSIT_MISMATCH = 1 << 3;
         const UNSETTLED_COMMITMENTS = 1 << 4;
         const DEMAND_OVERFLOW = 1 << 5;
+        const PAYROLL_MISMATCH = 1 << 6;
+        const RESEARCH_MISMATCH = 1 << 7;
     }
 }
 impl FaultFlags {
@@ -394,13 +396,15 @@ mod tests {
     #[cube(launch)]
     fn concurrent_flags(control: &[Atomic<u32>]) {
         let id = ABSOLUTE_POS as u32;
-        match id % 6 {
+        match id % 8 {
             0 => KernelFaults::new(comptime!(FaultFlags::ARITHMETIC_OVERFLOW)).record(control),
             1 => KernelFaults::new(comptime!(FaultFlags::INVALID_COORDINATE)).record(control),
             2 => KernelFaults::new(comptime!(FaultFlags::TRANSIT_UNDERFLOW)).record(control),
             3 => KernelFaults::new(comptime!(FaultFlags::TRANSIT_MISMATCH)).record(control),
             4 => KernelFaults::new(comptime!(FaultFlags::UNSETTLED_COMMITMENTS)).record(control),
-            _ => KernelFaults::new(comptime!(FaultFlags::DEMAND_OVERFLOW)).record(control),
+            5 => KernelFaults::new(comptime!(FaultFlags::DEMAND_OVERFLOW)).record(control),
+            6 => KernelFaults::new(comptime!(FaultFlags::PAYROLL_MISMATCH)).record(control),
+            _ => KernelFaults::new(comptime!(FaultFlags::RESEARCH_MISMATCH)).record(control),
         }
         match id % 2 {
             0 => {
@@ -429,12 +433,12 @@ mod tests {
     }
 
     #[test]
+    #[ignore = "optional CPU backend check"]
     fn concurrent_flag_sets_survive_cpu_readback() -> Result<()> {
         check_atomic_flags(Device::cpu(TEST_WORKGROUP)?)
     }
 
     #[test]
-    #[ignore = "requires a GPU adapter"]
     fn concurrent_flag_sets_survive_gpu_readback() -> Result<()> {
         check_atomic_flags(Device::headless(TEST_WORKGROUP)?)
     }

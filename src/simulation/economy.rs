@@ -3,8 +3,16 @@ use super::{
         ActorKind, CONSTRUCTED_EVENTS_WORD, CONTROL_WORDS, EventStatus, FaultFlags,
         KernelActorKind, KernelAuthorization, KernelEventStatus, KernelFaults, MarketFlag,
     },
+    households::{
+        KernelCapacity, KernelFatigue, KernelHealth, KernelObservation, ObservationKind,
+        Participation, available_minutes, next_fatigue, next_health, observed_blend,
+    },
     layout::*,
+    negotiation::{
+        NegotiationRequest, NegotiationStatus, PolicyLayout, legal_grid_rate, negotiate,
+    },
     parameters::EconomyParameters,
+    payroll::PayrollAccrual,
     policy::*,
     words::*,
 };
@@ -142,43 +150,36 @@ fn local(
                 set32(state, config, comptime!(Field::Shortage as u32), id, 0u32);
                 set32(state, config, comptime!(Field::Purchased as u32), id, 0u32);
                 set32(state, config, comptime!(Field::Hours as u32), id, 0u32);
+                set32(
+                    state,
+                    config,
+                    comptime!(Field::ResearchMinutes as u32),
+                    id,
+                    0u32,
+                );
             }
             Phase::Observation => {
                 if k.is(comptime!(ActorKind::Household)) {
-                    let capacity = divide(
-                        times32(
-                            config[ConfigLayout::WORK_CAP]
-                                * number(state, config, comptime!(Field::Health as u32), id),
-                            POLICY_SCALE
-                                - number(state, config, comptime!(Field::Fatigue as u32), id),
-                        ),
-                        CAPACITY_SCALE,
-                    );
-                    set32(
-                        state,
-                        config,
-                        comptime!(Field::Time as u32),
-                        id,
-                        min(
-                            capacity.extract(LOW_WORD),
-                            MINUTES_PER_DAY - config[ConfigLayout::RESERVED_MINUTES],
-                        ),
-                    );
+                    let capacity = available_minutes(KernelCapacity {
+                        participation: comptime!(Participation::Available as u32),
+                        capacity_minutes: config[ConfigLayout::WORK_CAP],
+                        health: number(state, config, comptime!(Field::Health as u32), id),
+                        fatigue: number(state, config, comptime!(Field::Fatigue as u32), id),
+                        reserved_minutes: config[ConfigLayout::RESERVED_MINUTES],
+                    });
+                    set32(state, config, comptime!(Field::Time as u32), id, capacity);
                 }
             }
             Phase::Proposal => {
                 if !k.is(comptime!(ActorKind::Household)) {
-                    let desired = positive(
-                        multiply(
-                            control,
-                            value(state, config, comptime!(Field::Demand as u32), id),
-                            config[ConfigLayout::COVERAGE],
-                        ),
-                        add_checked(
-                            control,
-                            value(state, config, k.output(), id),
-                            value(state, config, comptime!(Field::Pipeline as u32), id),
-                        ),
+                    let desired = proposed_starts(
+                        KernelStarts {
+                            coverage: config[ConfigLayout::COVERAGE],
+                            demand: value(state, config, comptime!(Field::Demand as u32), id),
+                            finished: value(state, config, k.output(), id),
+                            pipeline: value(state, config, comptime!(Field::Pipeline as u32), id),
+                        },
+                        control,
                     );
                     let quotient = divide(
                         add_checked(
@@ -209,11 +210,17 @@ fn local(
                             ),
                         );
                     }
+                    let mut planning_wage =
+                        number(state, config, comptime!(Field::Wage as u32), id);
+                    if config[ConfigLayout::BARGAINING + PolicyLayout::ENABLED] != 0 {
+                        planning_wage =
+                            legal_grid_rate(config, comptime!(ConfigLayout::BARGAINING));
+                    }
                     planned = minimum(
                         planned,
                         divide(
                             value(state, config, comptime!(Field::Cash as u32), id),
-                            number(state, config, comptime!(Field::Wage as u32), id)
+                            planning_wage
                                 * actors
                                     [id as usize * ActorLayout::WORDS + ActorLayout::LABOR_MINUTES],
                         ),
@@ -272,6 +279,30 @@ fn local(
                             config[ConfigLayout::REST_RECOVERY],
                         ) - config[ConfigLayout::REST_RECOVERY];
                     }
+                    if config[ConfigLayout::HOUSEHOLD_POLICY_ENABLED] != 0 {
+                        let previous_health =
+                            number(state, config, comptime!(Field::Health as u32), id);
+                        let previous_fatigue =
+                            number(state, config, comptime!(Field::Fatigue as u32), id);
+                        let deficit =
+                            shortage * POLICY_SCALE / config[ConfigLayout::HOUSEHOLD_NEED];
+                        health = next_health(KernelHealth {
+                            health: previous_health,
+                            fatigue: previous_fatigue,
+                            deficit,
+                            recovery: config[ConfigLayout::HOUSEHOLD_RECOVERY],
+                            deficit_damage: config[ConfigLayout::DEFICIT_DAMAGE],
+                            fatigue_damage: config[ConfigLayout::FATIGUE_DAMAGE],
+                        });
+                        let exertion = number(state, config, comptime!(Field::Hours as u32), id)
+                            + number(state, config, comptime!(Field::ResearchMinutes as u32), id);
+                        fatigue = next_fatigue(KernelFatigue {
+                            fatigue: previous_fatigue,
+                            response: config[ConfigLayout::FATIGUE_RESPONSE],
+                            exertion_minutes: exertion,
+                            rest_minutes: config[ConfigLayout::REST_MINUTES],
+                        });
+                    }
                     set32(state, config, comptime!(Field::Health as u32), id, health);
                     set32(state, config, comptime!(Field::Fatigue as u32), id, fatigue);
                 }
@@ -297,28 +328,15 @@ fn local(
                         value(state, config, comptime!(Field::Sales as u32), id),
                         value(state, config, comptime!(Field::Unfilled as u32), id),
                     );
-                    let increasing = !lt(signal, old);
-                    let difference = select(increasing, minus(signal, old), minus(old, signal));
-                    let part = scaled(
-                        control,
-                        difference,
+                    let demand = observed_blend(
+                        old,
+                        KernelObservation {
+                            kind: comptime!(ObservationKind::Observed as u32),
+                            value: signal,
+                        },
                         config[ConfigLayout::FORECAST_WEIGHT],
-                        POLICY_SCALE,
+                        control,
                     );
-                    let remainder = minus(
-                        difference,
-                        times(divide(difference, POLICY_SCALE), POLICY_SCALE).value,
-                    );
-                    let adjustment = u32::cast_from(
-                        (remainder.extract(LOW_WORD) * config[ConfigLayout::FORECAST_WEIGHT])
-                            % POLICY_SCALE
-                            != 0,
-                    );
-                    let demand = if increasing {
-                        add_checked(control, old, part)
-                    } else {
-                        minus(old, add_checked(control, part, ticks(adjustment, 0)))
-                    };
                     let excess = positive(value(state, config, k.output(), id), demand);
                     let unfilled = value(state, config, comptime!(Field::Unfilled as u32), id);
                     let positive_sign = !lt(unfilled, excess);
@@ -513,7 +531,7 @@ fn propose(
                     while j < spatial[(cell + 1) as usize] && considered < DISCOVERY_CANDIDATES {
                         let firm = spatial[(side * side + 1u32 + j) as usize];
                         let dist = distance(actors, id, firm);
-                        let wage = number(state, config, comptime!(Field::Wage as u32), firm);
+                        let mut wage = number(state, config, comptime!(Field::Wage as u32), firm);
                         let quote = number(state, config, comptime!(Field::Price as u32), firm);
                         let mut eligible = dist <= config[ConfigLayout::SEARCH_RADIUS];
                         let mut score = ticks(
@@ -524,6 +542,52 @@ fn propose(
                         );
                         let mut amount = ticks(1u32, 0u32);
                         if comptime!(market == MarketFlag::Labor) {
+                            if config[ConfigLayout::BARGAINING + PolicyLayout::ENABLED] != 0 {
+                                let negotiation = negotiate(
+                                    NegotiationRequest {
+                                        prior_gross: value(
+                                            state,
+                                            config,
+                                            comptime!(Field::GrossIncome as u32),
+                                            id,
+                                        ),
+                                        household_cash: value(
+                                            state,
+                                            config,
+                                            comptime!(Field::Cash as u32),
+                                            id,
+                                        ),
+                                        funded_per_packet: divide(
+                                            value(
+                                                state,
+                                                config,
+                                                comptime!(Field::Cash as u32),
+                                                firm,
+                                            ),
+                                            max(
+                                                number(
+                                                    state,
+                                                    config,
+                                                    comptime!(Field::Slots as u32),
+                                                    firm,
+                                                ),
+                                                1,
+                                            ),
+                                        ),
+                                        candidate_wage: wage,
+                                        payable_minutes: actors[firm as usize * ActorLayout::WORDS
+                                            + ActorLayout::LABOR_MINUTES],
+                                    },
+                                    config,
+                                    control,
+                                    comptime!(ConfigLayout::BARGAINING),
+                                );
+                                eligible = eligible
+                                    && negotiation.status
+                                        == comptime!(NegotiationStatus::Agreed as u32);
+                                wage = negotiation.wage.extract(LOW_WORD);
+                                amount = negotiation.wage;
+                            }
                             let duration = actors
                                 [firm as usize * ActorLayout::WORDS + ActorLayout::LABOR_MINUTES]
                                 + ceildiv(dist, config[ConfigLayout::COMMUTE_SPEED]) * COMMUTE_LEGS;
@@ -670,8 +734,13 @@ fn construct(
             control[CONSTRUCTED_EVENTS_WORD].fetch_add(1u32);
             match comptime!(parameters.market) {
                 MarketFlag::Labor => {
+                    let mut offered_wage =
+                        number(state, config, comptime!(Field::Wage as u32), other);
+                    if config[ConfigLayout::BARGAINING + PolicyLayout::ENABLED] != 0 {
+                        offered_wage = quantity.extract(LOW_WORD);
+                    }
                     let wage = times32(
-                        number(state, config, comptime!(Field::Wage as u32), other),
+                        offered_wage,
                         actors[other as usize * ActorLayout::WORDS + ActorLayout::LABOR_MINUTES],
                     );
                     event.transfer(
@@ -806,6 +875,59 @@ fn construct(
                     }
                 }
                 MarketFlag::Payroll => {
+                    let mut net = quantity;
+                    if config[ConfigLayout::PAYROLL_ENABLED] != 0 {
+                        let prior =
+                            value(state, config, comptime!(Field::GrossIncome as u32), actor);
+                        let accrued = add_checked(control, prior, quantity);
+                        let before = PayrollAccrual::new(prior, config, control);
+                        let after = PayrollAccrual::new(accrued, config, control);
+                        net = minus(after.net, before.net);
+                        event.leg(
+                            config,
+                            bundles,
+                            KernelLeg {
+                                field: comptime!(Field::GrossIncome as u32),
+                                actor,
+                                debit: zero,
+                                credit: quantity,
+                                authorization: KernelAuthorization::new(comptime!(
+                                    AuthorizationFlags::EQUAL
+                                )),
+                                guard: prior,
+                            },
+                        );
+                        event.leg(
+                            config,
+                            bundles,
+                            KernelLeg {
+                                field: comptime!(Field::PayrollReserve as u32),
+                                actor,
+                                debit: before.reserve,
+                                credit: after.reserve,
+                                authorization: KernelAuthorization::new(comptime!(
+                                    AuthorizationFlags::EQUAL
+                                )),
+                                guard: before.reserve,
+                            },
+                        );
+                        event.transfer(
+                            config,
+                            bundles,
+                            comptime!(Field::TaxTreasury as u32),
+                            actor,
+                            zero,
+                            minus(after.tax, before.tax),
+                        );
+                        event.transfer(
+                            config,
+                            bundles,
+                            comptime!(Field::ChargeTreasury as u32),
+                            actor,
+                            zero,
+                            minus(after.charge, before.charge),
+                        );
+                    }
                     event.transfer(
                         config,
                         bundles,
@@ -828,7 +950,7 @@ fn construct(
                         comptime!(Field::Cash as u32),
                         actor,
                         zero,
-                        quantity,
+                        net,
                     );
                     event.leg(
                         config,
@@ -975,6 +1097,49 @@ fn summarize(
                     value(state, config, comptime!(Field::Escrow as u32), actor),
                 ),
             );
+            let payroll_reserve = value(
+                state,
+                config,
+                comptime!(Field::PayrollReserve as u32),
+                actor,
+            );
+            let tax = value(state, config, comptime!(Field::TaxTreasury as u32), actor);
+            let charge = value(
+                state,
+                config,
+                comptime!(Field::ChargeTreasury as u32),
+                actor,
+            );
+            totals[SummaryLayout::PAYROLL_RESERVES as usize] = add_checked(
+                control,
+                totals[SummaryLayout::PAYROLL_RESERVES as usize],
+                payroll_reserve,
+            );
+            totals[SummaryLayout::INCOME_TAX as usize] =
+                add_checked(control, totals[SummaryLayout::INCOME_TAX as usize], tax);
+            totals[SummaryLayout::EMPLOYEE_CHARGES as usize] = add_checked(
+                control,
+                totals[SummaryLayout::EMPLOYEE_CHARGES as usize],
+                charge,
+            );
+            totals[SummaryLayout::CASH as usize] = add_checked(
+                control,
+                totals[SummaryLayout::CASH as usize],
+                add_checked(control, payroll_reserve, add_checked(control, tax, charge)),
+            );
+            if config[ConfigLayout::PAYROLL_ENABLED] != 0 {
+                let accrued = PayrollAccrual::new(
+                    value(state, config, comptime!(Field::GrossIncome as u32), actor),
+                    config,
+                    control,
+                );
+                if !equal(payroll_reserve, accrued.reserve)
+                    || !equal(tax, accrued.tax)
+                    || !equal(charge, accrued.charge)
+                {
+                    KernelFaults::new(comptime!(FaultFlags::PAYROLL_MISMATCH)).record(control);
+                }
+            }
             for g in 0u32..Good::COUNT as u32 {
                 totals[(SummaryLayout::INVENTORIES + g) as usize] = add_checked(
                     control,

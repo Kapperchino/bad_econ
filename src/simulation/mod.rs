@@ -1,9 +1,16 @@
+pub mod analytics;
+pub mod bargaining;
 mod economy;
+pub mod finance;
 mod flags;
+pub mod households;
 mod layout;
+pub mod negotiation;
 mod ops;
 mod parameters;
+mod payroll;
 mod policy;
+pub mod research;
 mod scheduler;
 mod words;
 use crate::{
@@ -59,6 +66,9 @@ pub struct Simulation {
     control: CubeTensor,
     summary: CubeTensor,
     feedback: CubeTensor,
+    finance: Option<finance::FinanceRuntime>,
+    research: Option<research::ResearchRuntime>,
+    research_readback: u64,
 }
 impl Simulation {
     pub fn actors(&self) -> &[Actor] {
@@ -90,8 +100,46 @@ impl Simulation {
         let spatial = device.empty((side * side + 1 + c.firms) as usize);
         let state = device.tensor(bytemuck::cast_slice(&encode(&initial.values)));
         let audited = device.empty(initial.values.len() * TICK_WORDS);
+        let research = scenario
+            .config()
+            .research
+            .as_ref()
+            .map(|config| match &initial.research {
+                Some(snapshot) => research::ResearchRuntime::restore(
+                    &device, config, &scenario, &initial, snapshot,
+                ),
+                None => research::ResearchRuntime::new(&device, config, &scenario, &initial),
+            })
+            .transpose()?;
+        let finance = scenario
+            .config()
+            .finance
+            .as_ref()
+            .map(|config| {
+                let actors = initial
+                    .actors
+                    .iter()
+                    .enumerate()
+                    .map(|(index, actor)| finance::FinancialActor {
+                        identity: actor.identity,
+                        cash: initial.coordinate(Field::Cash, index),
+                        kind: match actor.kind {
+                            0 => finance::FinancialActorKind::Household,
+                            _ => finance::FinancialActorKind::Firm,
+                        },
+                    })
+                    .collect::<Vec<_>>();
+                finance::FinanceRuntime::new(
+                    &device,
+                    config,
+                    config.layout(scenario.actors() * scenario.fields())?,
+                    &actors,
+                )
+            })
+            .transpose()?;
         initial.values.clear();
         initial.values.shrink_to_fit();
+        initial.research = None;
         let batch = (c.batch_size as usize).min(scenario.actors());
         let events = device.empty(
             (batch * EVENT_WORDS).max(
@@ -131,7 +179,11 @@ impl Simulation {
             control,
             summary,
             feedback,
+            finance,
+            research,
+            research_readback: 0,
         };
+        simulation.snapshot = simulation.observe()?;
         simulation.copy_audited(CopyDirection::Save)?;
         Ok(simulation)
     }
@@ -143,9 +195,14 @@ impl Simulation {
         count: usize,
     ) -> Result<EconomyParameters> {
         let day = u32::try_from(self.day).context("day identity capacity exhausted")?;
-        let _ = day
-            .checked_add(self.scenario.ring() as u32 + 1)
-            .context("delivery date capacity exhausted")?;
+        match phase {
+            Phase::Audit => (),
+            _ => {
+                let _ = day
+                    .checked_add(self.scenario.ring() as u32 + 1)
+                    .context("delivery date capacity exhausted")?;
+            }
+        }
         Ok(EconomyParameters {
             day,
             phase,
@@ -227,6 +284,36 @@ impl Simulation {
     }
     fn execute_phase(&mut self, phase: Phase, trace: Trace) -> Result<PhaseEvidence> {
         let mut evidence = PhaseEvidence::default();
+        if let Some(research) = &self.research {
+            research.before_phase(&self.device, &self.state, phase, self.day)?;
+        }
+        if let Some(finance) = &self.finance {
+            match phase {
+                Phase::Opening | Phase::Proposal => {
+                    let stage = match phase {
+                        Phase::Opening => finance::FinanceStage::Opening,
+                        _ => finance::FinanceStage::Lending,
+                    };
+                    finance.phase(&self.device, &self.state, self.day as u32, stage)?;
+                    self.readback_bytes += finance.phase_readback_bytes();
+                    evidence.events += finance.last_event_count();
+                    if let Trace::Record = trace {
+                        let decisions = finance.decisions(&self.device)?;
+                        evidence.decisions.extend(decisions);
+                        self.readback_bytes += finance.decision_readback_bytes();
+                    }
+                }
+                Phase::ProvisionPurchase => {
+                    finance.support(&self.device, &self.state)?;
+                    self.readback_bytes += finance.support_readback_bytes();
+                    evidence.events += finance.last_event_count();
+                    if let Trace::Record = trace {
+                        evidence.decisions.extend(finance.support_decisions());
+                    }
+                }
+                _ => (),
+            }
+        }
         match phase {
             Phase::Commitment => (0..MATCHING_ROUNDS)
                 .try_for_each(|_| self.market(Market::Labor, phase, trace, &mut evidence)),
@@ -249,6 +336,9 @@ impl Simulation {
                 self.market(Market::Distribution, phase, trace, &mut evidence)
             }
             Phase::Audit => {
+                if let Some(research) = &self.research {
+                    research.phase(&self.device, &self.state, phase, self.day)?;
+                }
                 self.snapshot = self.observe()?;
                 self.day = add(self.day, 1)?;
                 self.snapshot.day = self.day;
@@ -256,7 +346,20 @@ impl Simulation {
             }
             _ => self.local(phase),
         }?;
+        match (&self.research, phase) {
+            (_, Phase::Audit) | (None, _) => (),
+            (Some(research), _) => research.phase(&self.device, &self.state, phase, self.day)?,
+        }
+        self.account_research_readbacks();
         Ok(evidence)
+    }
+    fn account_research_readbacks(&mut self) {
+        let total = self
+            .research
+            .as_ref()
+            .map_or(0, research::ResearchRuntime::readback_bytes);
+        self.readback_bytes += total - self.research_readback;
+        self.research_readback = total;
     }
     fn feedback_operation(
         &self,
@@ -438,9 +541,33 @@ impl Simulation {
         self.readback_bytes +=
             ((SummaryLayout::WORDS + SummaryLayout::CONTROL_WORDS) * WORD_BYTES) as u64;
         FaultFlags::new(control.scheduler.faults)?.into_result()?;
+        let financial = self
+            .finance
+            .as_ref()
+            .map(|finance| finance.observe(&self.device, &self.state, self.day as u32))
+            .transpose()?
+            .unwrap_or_default();
+        self.readback_bytes += self
+            .finance
+            .as_ref()
+            .map_or(0, finance::FinanceRuntime::readback_bytes_per_observation);
         let snapshot = ObservationSnapshot {
             day: self.day,
-            cash: totals.cash.into(),
+            cash: add(totals.cash.into(), financial.cash()?)?,
+            payroll_reserves: totals.payroll_reserves.into(),
+            income_tax: totals.income_tax.into(),
+            employee_charges: totals.employee_charges.into(),
+            financial_cash: financial.cash()?,
+            loan_principal: financial.principal,
+            loan_interest: financial.interest_due,
+            active_loans: financial.active_loans,
+            overdue_loans: financial.overdue_loans,
+            research: self
+                .research
+                .as_ref()
+                .map(|research| research.summary(&self.device))
+                .transpose()?
+                .unwrap_or_default(),
             employed: totals.employed.into(),
             households: u64::from(self.scenario.config().households),
             shortages: totals.shortages.into(),
@@ -479,14 +606,22 @@ impl Simulation {
             regions: control.regions.iter().map(|&n| u64::from(n)).collect(),
         };
         snapshot.audit(self.metadata.initial_cash, self.metadata.initial_goods)?;
+        self.account_research_readbacks();
         Ok(snapshot)
     }
     pub fn download(&mut self) -> Result<State> {
         let values = decode(&self.device.read(&self.state)?);
         self.readback_bytes += (values.len() * TICK_BYTES) as u64;
+        let research = self
+            .research
+            .as_ref()
+            .map(|research| research.snapshot(&self.device))
+            .transpose()?;
+        self.account_research_readbacks();
         Ok(State {
             day: self.day,
             values,
+            research,
             ..self.metadata.clone()
         })
     }
@@ -506,7 +641,7 @@ impl Simulation {
         CubeBackend::economy(
             &self.device,
             EconomyStage::CopyState,
-            self.scenario.actors() * self.scenario.fields(),
+            self.scenario.state_len(),
             EconomyBuffers {
                 state: source,
                 actors: &self.actors,
@@ -518,6 +653,13 @@ impl Simulation {
             },
             &parameters,
         );
+        if let Some(research) = &self.research {
+            match direction {
+                CopyDirection::Save => research.save_audited(&self.device)?,
+                CopyDirection::Restore => research.restore_audited(&self.device)?,
+            }
+        }
+        self.account_research_readbacks();
         self.device.sync()
     }
     pub fn advance(&mut self) -> Result<()> {
@@ -568,7 +710,7 @@ impl Simulation {
             }
             SimulationCommand::Reset(scenario) => {
                 let initial = scenario.initial()?;
-                self.replace(scenario, initial)
+                self.replace(*scenario, initial)
             }
             SimulationCommand::Restore(checkpoint) => {
                 let restored = checkpoint.restore()?;
@@ -589,9 +731,16 @@ impl Simulation {
     pub fn checkpoint(&mut self) -> Result<Checkpoint> {
         let values = decode(&self.device.read(&self.audited)?);
         self.readback_bytes += (values.len() * TICK_BYTES) as u64;
+        let research = self
+            .research
+            .as_ref()
+            .map(|research| research.audited_snapshot(&self.device))
+            .transpose()?;
+        self.account_research_readbacks();
         let state = State {
             day: self.audited_day,
             values,
+            research,
             ..self.metadata.clone()
         };
         Checkpoint::new(&self.scenario, &state)
@@ -620,6 +769,10 @@ impl Simulation {
             actor: self.metadata.actors[actor].clone(),
             day: self.day,
             cash: values[Field::Cash as usize],
+            gross_income: values[Field::GrossIncome as usize],
+            payroll_reserve: values[Field::PayrollReserve as usize],
+            income_tax: values[Field::TaxTreasury as usize],
+            employee_charges: values[Field::ChargeTreasury as usize],
             inventory: values[Field::Grain as usize..Field::Escrow as usize].try_into()?,
             transit: values[Field::Transit as usize],
             health: values[Field::Health as usize],
@@ -638,6 +791,7 @@ impl Simulation {
         })
     }
 }
+#[derive(Clone, Copy)]
 enum CopyDirection {
     Save,
     Restore,

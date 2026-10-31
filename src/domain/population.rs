@@ -216,6 +216,7 @@ impl Population {
             values: vec![0; scenario.fields() * count],
             initial_cash: 0,
             initial_goods: [0; 3],
+            research: None,
         };
         self.households
             .iter()

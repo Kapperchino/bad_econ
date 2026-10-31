@@ -6,8 +6,8 @@ pub enum SimulationCommand {
     Pause,
     Resume,
     AdvanceDay,
-    Reset(Scenario),
-    Restore(Checkpoint),
+    Reset(Box<Scenario>),
+    Restore(Box<Checkpoint>),
 }
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub enum RuntimeState {

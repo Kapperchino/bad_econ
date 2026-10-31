@@ -261,7 +261,7 @@ fn setup(
         PanelLabel::Statistics,
         Text2d::new("Initializing..."),
         TextFont {
-            font_size: FontSize::Px(17.0),
+            font_size: FontSize::Px(15.0),
             ..Default::default()
         },
         Anchor::TOP_LEFT,
@@ -386,7 +386,7 @@ fn compare(simulation: &mut Simulation, data: &Arc<Mutex<Display>>) -> Result<Ru
         horizon,
         history: data.lock().expect("dashboard lock").history.clone(),
     };
-    simulation.command(SimulationCommand::Reset(scenario))?;
+    simulation.command(SimulationCommand::Reset(scenario.into()))?;
     data.lock().expect("dashboard lock").comparison = Some(reference);
     let target = match horizon {
         0 => RunTarget::Open,
@@ -547,7 +547,7 @@ fn controls(
             }
             if keys.just_pressed(KeyCode::KeyR) {
                 controls.push(Control::command(SimulationCommand::Reset(
-                    launch.scenario.clone(),
+                    launch.scenario.clone().into(),
                 )));
             }
             if keys.just_pressed(KeyCode::KeyC) {
@@ -610,8 +610,9 @@ fn draw(
                 .map(|i| {
                     let detail = match i.actor.kind {
                         0 => format!(
-                            "Health {} | fatigue {} | labor {} min\nEmployer {}",
-                            i.health, i.fatigue, i.available_minutes, i.employer
+                            "Health {} | fatigue {} | labor {} min\nEmployer {} | gross paid {}\nTax {} | charges {} | payroll reserve {}",
+                            i.health, i.fatigue, i.available_minutes, i.employer,
+                            i.gross_income, i.income_tax, i.employee_charges, i.payroll_reserve
                         ),
                         _ => format!(
                             "Owner {} | wage {} | price {}\nCapacity {} | planned {} | open {}",
@@ -668,7 +669,7 @@ fn draw(
                 .collect::<Vec<_>>()
                 .join("\n");
             let text = format!(
-                "{} | seed {}\nDay {} | target {}\nUnemployment {:.1}% | unmet bread {}\nCash {}\nStocks G/F/B {:?}\nIn transit {:?}\n\nPrice / wage | mean +/- standard deviation\n{}\n\n{}\n\n{}\n{}",
+                "{} | seed {}\nDay {} | target {}\nUnemployment {:.1}% | unmet bread {}\nCash {}\nStocks G/F/B {:?}\nIn transit {:?}\nTax {} | charges {} | payroll reserve {}\nBank/support cash {} | loan principal {}\nLoans {} active / {} overdue | interest {}\nResearch {} attempts / {} successes | strikes {}\n\nPrice / wage | mean +/- standard deviation\n{}\n\n{}\n\n{}\n{}",
                 display.status.label(),
                 display.seed,
                 s.day,
@@ -678,6 +679,17 @@ fn draw(
                 s.cash,
                 s.inventories,
                 s.transit,
+                s.income_tax,
+                s.employee_charges,
+                s.payroll_reserves,
+                s.financial_cash,
+                s.loan_principal,
+                s.active_loans,
+                s.overdue_loans,
+                s.loan_interest,
+                s.research.attempts,
+                s.research.discoveries,
+                s.research.striking,
                 quotes,
                 inspection,
                 comparison,

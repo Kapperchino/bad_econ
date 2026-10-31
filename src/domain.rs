@@ -6,14 +6,21 @@ use anyhow::{Context, Result, anyhow};
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 
+pub mod bargaining;
+pub mod finance;
+mod households;
+mod payroll;
+pub mod research;
+pub use households::HouseholdPolicy;
 mod population;
+pub use payroll::{MAX_TAX_BRACKETS, PAYROLL_SCALE, PayrollPolicy, TaxBracket};
 pub use population::{
     BehaviorPolicy, FirmSeed, HouseholdSeed, InitialTotals, Population, Technique,
 };
 
 pub const SCENARIO_VERSION: u32 = 1;
-pub const STATE_HASH_VERSION: &str = "bad-econ/state/DeterministicV1/v2";
-pub const BASE_FIELDS: usize = 26;
+pub const STATE_HASH_VERSION: &str = "bad-econ/state/DeterministicV1/v3";
+pub const BASE_FIELDS: usize = 31;
 pub const MEMORY_BUDGET: u64 = 4 * 1024 * 1024 * 1024;
 
 #[repr(u32)]
@@ -45,6 +52,11 @@ pub enum Field {
     Plan,
     Purchased,
     Hours,
+    GrossIncome,
+    PayrollReserve,
+    TaxTreasury,
+    ChargeTreasury,
+    ResearchMinutes,
 }
 impl Field {
     pub fn inventory(good: Good) -> Self {
@@ -118,6 +130,16 @@ pub struct ScenarioConfig {
     pub population: Option<Population>,
     #[serde(default, skip_serializing_if = "BehaviorPolicy::is_default")]
     pub behavior: BehaviorPolicy,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub payroll: Option<PayrollPolicy>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub household_policy: Option<HouseholdPolicy>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub finance: Option<finance::FinanceConfig>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub research: Option<research::ResearchConfig>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub bargaining: Option<bargaining::BargainingPolicy>,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -127,6 +149,17 @@ pub struct Scenario {
 }
 impl Scenario {
     pub fn new(mut config: ScenarioConfig) -> Result<Self> {
+        config.bargaining = config
+            .bargaining
+            .take()
+            .map(bargaining::BargainingPolicy::new)
+            .transpose()?;
+        config.household_policy = config
+            .household_policy
+            .take()
+            .map(|policy| HouseholdPolicy::new(policy, config.reserved_minutes))
+            .transpose()?;
+        config.payroll = config.payroll.take().map(PayrollPolicy::new).transpose()?;
         config.behavior = BehaviorPolicy::new(config.behavior)?;
         config.population = config
             .population
@@ -193,7 +226,42 @@ impl Scenario {
                         }
                     }
                 };
-                let scenario = Self { config, totals };
+                let mut scenario = Self { config, totals };
+                if scenario.config.finance.is_some() || scenario.config.research.is_some() {
+                    let actors = (0..scenario.actors())
+                        .map(|index| scenario.actor(index))
+                        .collect::<Vec<_>>();
+                    scenario.config.research = scenario
+                        .config
+                        .research
+                        .take()
+                        .map(|config| research::ResearchConfig::new(config, &actors))
+                        .transpose()?;
+                    let identities = actors
+                        .iter()
+                        .map(|actor| actor.identity)
+                        .collect::<Vec<_>>();
+                    scenario.config.finance = scenario
+                        .config
+                        .finance
+                        .take()
+                        .map(|config| {
+                            finance::FinanceConfig::new(
+                                config,
+                                &identities,
+                                &identities[..scenario.config.households as usize],
+                            )
+                        })
+                        .transpose()?;
+                    let financial_cash = scenario
+                        .config
+                        .finance
+                        .as_ref()
+                        .map(finance::FinanceConfig::initial_cash)
+                        .transpose()?
+                        .unwrap_or(0);
+                    scenario.totals.cash = add(scenario.totals.cash, financial_cash)?;
+                }
                 let ring = scenario.ring();
                 let side = scenario
                     .config
@@ -246,6 +314,11 @@ impl Scenario {
             experiment,
             population: None,
             behavior: BehaviorPolicy::default(),
+            payroll: None,
+            household_policy: None,
+            finance: None,
+            research: None,
+            bargaining: None,
         };
         match experiment {
             Experiment::Shortage => config.buffer_days = 0,
@@ -270,10 +343,29 @@ impl Scenario {
     pub fn fields(&self) -> usize {
         BASE_FIELDS + self.ring()
     }
+    pub fn state_len(&self) -> usize {
+        self.actors() * self.fields()
+            + self
+                .config
+                .finance
+                .as_ref()
+                .map_or(0, finance::FinanceConfig::state_len)
+    }
     pub fn memory_estimate(&self) -> u64 {
         let actors = self.actors() as u64;
         let batch = u64::from(self.config.batch_size).min(actors);
-        actors * (self.fields() as u64 * 8 * 2 + 64)
+        self.state_len() as u64 * 8 * 2
+            + self
+                .config
+                .finance
+                .as_ref()
+                .map_or(0, finance::FinanceConfig::memory_estimate)
+            + self
+                .config
+                .research
+                .as_ref()
+                .map_or(0, research::ResearchConfig::memory_estimate)
+            + actors * 64
             + batch * (12 * 8 * 4 + 12 * 4 * 3 + 28)
             + 128 * 1024 * 1024
     }
@@ -318,10 +410,15 @@ impl Scenario {
         }
     }
     pub fn initial(&self) -> Result<State> {
-        match &self.config.population {
+        let mut state = match &self.config.population {
             Some(population) => population.initial(self),
             None => self.generated(),
+        }?;
+        if let Some(finance) = &self.config.finance {
+            state.values.extend(finance.initial_values());
+            state.initial_cash = add(state.initial_cash, finance.initial_cash()?)?;
         }
+        Ok(state)
     }
     fn actor(&self, index: usize) -> Actor {
         match &self.config.population {
@@ -377,6 +474,7 @@ impl Scenario {
             values: vec![0; self.fields() * actors],
             initial_cash: 0,
             initial_goods: [0; 3],
+            research: None,
         };
         (0..actors).try_for_each(|actor| -> Result<()> {
             let kind = state.actors[actor].kind;
@@ -459,6 +557,8 @@ pub struct State {
     pub values: Vec<u64>,
     pub initial_cash: u64,
     pub initial_goods: [u64; 3],
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub research: Option<research::ResearchSnapshot>,
 }
 impl State {
     pub fn coordinate(&self, field: Field, actor: usize) -> Coordinate {
@@ -497,6 +597,35 @@ impl State {
         self.values
             .iter()
             .for_each(|value| hash.update(value.to_le_bytes()));
+        match &self.research {
+            None => hash.update([0]),
+            Some(research) => {
+                hash.update([1]);
+                hash.update((research.profile.len() as u64).to_le_bytes());
+                hash.update(research.profile.as_bytes());
+                hash.update((research.table_hash.len() as u64).to_le_bytes());
+                hash.update(research.table_hash.as_bytes());
+                hash.update((research.configuration_hash.len() as u64).to_le_bytes());
+                hash.update(research.configuration_hash.as_bytes());
+                hash.update((research.words.len() as u64).to_le_bytes());
+                research
+                    .words
+                    .iter()
+                    .for_each(|word| hash.update(word.to_le_bytes()));
+                research
+                    .summary
+                    .consumed
+                    .iter()
+                    .chain([
+                        &research.summary.attempts,
+                        &research.summary.discoveries,
+                        &research.summary.remaining_service,
+                        &research.summary.natural_stock,
+                        &research.summary.striking,
+                    ])
+                    .for_each(|value| hash.update(value.to_le_bytes()));
+            }
+        }
         hex(&hash.finalize())
     }
 }
@@ -557,7 +686,7 @@ impl Checkpoint {
         let _ = ObservationSnapshot::from_state(scenario, state)?;
         let checksum = Self::checksum(scenario.config(), state)?;
         Ok(Self {
-            version: 1,
+            version: 2,
             profile: PROFILE.into(),
             table_hash: table_hash(),
             scenario: scenario.config.clone(),
@@ -571,10 +700,10 @@ impl Checkpoint {
     pub fn restore(&self) -> Result<Restored> {
         let scenario = Scenario::new(self.scenario.clone())?;
         let valid = [
-            self.version == 1,
+            self.version == 2,
             self.profile == PROFILE,
             self.table_hash == table_hash(),
-            self.state.values.len() == scenario.actors() * scenario.fields(),
+            self.state.values.len() == scenario.state_len(),
             self.state.actors.len() == scenario.actors(),
             self.checksum == Self::checksum(&self.scenario, &self.state)?,
         ];
@@ -617,6 +746,10 @@ pub struct Inspection {
     pub actor: Actor,
     pub day: u64,
     pub cash: u64,
+    pub gross_income: u64,
+    pub payroll_reserve: u64,
+    pub income_tax: u64,
+    pub employee_charges: u64,
     pub inventory: [u64; 3],
     pub transit: u64,
     pub health: u64,
@@ -640,6 +773,10 @@ impl Inspection {
             actor: state.actors[index].clone(),
             day: state.day,
             cash: state.get(Field::Cash, index),
+            gross_income: state.get(Field::GrossIncome, index),
+            payroll_reserve: state.get(Field::PayrollReserve, index),
+            income_tax: state.get(Field::TaxTreasury, index),
+            employee_charges: state.get(Field::ChargeTreasury, index),
             inventory: [
                 state.get(Field::Grain, index),
                 state.get(Field::Flour, index),
@@ -706,6 +843,15 @@ pub struct MarketObservation {
 pub struct ObservationSnapshot {
     pub day: u64,
     pub cash: u64,
+    pub payroll_reserves: u64,
+    pub income_tax: u64,
+    pub employee_charges: u64,
+    pub financial_cash: u64,
+    pub loan_principal: u64,
+    pub loan_interest: u64,
+    pub active_loans: u64,
+    pub overdue_loans: u64,
+    pub research: research::ResearchSummary,
     pub employed: u64,
     pub households: u64,
     pub shortages: u64,
@@ -728,6 +874,11 @@ impl ObservationSnapshot {
         let state = admitted.state;
         let mut snapshot = Self {
             day: state.day,
+            research: state
+                .research
+                .as_ref()
+                .map(|research| research.summary.clone())
+                .unwrap_or_default(),
             households: u64::from(scenario.config.households),
             minimum_wage: u64::MAX,
             minimum_price: u64::MAX,
@@ -744,6 +895,13 @@ impl ObservationSnapshot {
                     snapshot.cash,
                     add(state.get(Field::Cash, i), state.get(Field::Escrow, i))?,
                 )?;
+                let reserve = state.get(Field::PayrollReserve, i);
+                let tax = state.get(Field::TaxTreasury, i);
+                let charge = state.get(Field::ChargeTreasury, i);
+                snapshot.payroll_reserves = add(snapshot.payroll_reserves, reserve)?;
+                snapshot.income_tax = add(snapshot.income_tax, tax)?;
+                snapshot.employee_charges = add(snapshot.employee_charges, charge)?;
+                snapshot.cash = add(snapshot.cash, add(reserve, add(tax, charge)?)?)?;
                 (0..3).try_for_each(|good| -> Result<()> {
                     snapshot.inventories[good] = add(
                         snapshot.inventories[good],
@@ -814,6 +972,20 @@ impl ObservationSnapshot {
                     )),
                 }
             })?;
+        if let Some(finance) = &scenario.config.finance {
+            let view = finance::FinanceStateView::new(
+                finance,
+                finance.layout(scenario.actors() * scenario.fields())?,
+                &state.values,
+                state.day,
+            )?;
+            snapshot.financial_cash = view.cash;
+            snapshot.loan_principal = view.principal;
+            snapshot.loan_interest = view.interest_due;
+            snapshot.active_loans = view.active_loans;
+            snapshot.overdue_loans = view.overdue_loans;
+            snapshot.cash = add(snapshot.cash, view.cash)?;
+        }
         snapshot.audit(state.initial_cash, state.initial_goods)?;
         Ok(snapshot)
     }
@@ -827,6 +999,7 @@ impl ObservationSnapshot {
             let uses = u128::from(self.inventories[i])
                 + u128::from(self.transit[i])
                 + u128::from(self.used[i])
+                + u128::from(self.research.consumed[i])
                 + match i {
                     2 => u128::from(self.consumed),
                     _ => 0,
@@ -848,8 +1021,8 @@ struct AuditedState<'a> {
 impl<'a> AuditedState<'a> {
     fn new(scenario: &Scenario, state: &'a State) -> Result<Self> {
         let c = scenario.config();
-        let shape = state.actors.len() == scenario.actors()
-            && state.values.len() == scenario.actors() * scenario.fields();
+        let shape =
+            state.actors.len() == scenario.actors() && state.values.len() == scenario.state_len();
         match shape {
             true => Ok(()),
             false => Err(anyhow!("state shape does not match scenario")),
@@ -868,6 +1041,7 @@ impl<'a> AuditedState<'a> {
                 && state.get(Field::Fatigue, i) <= 1000
                 && state.get(Field::Time, i) <= 1440
                 && state.get(Field::Hours, i) <= 1440
+                && state.get(Field::ResearchMinutes, i) <= 1440
                 && state.get(Field::Employed, i) <= 1
                 && state.get(Field::Employer, i) <= scenario.actors() as u64;
             let closed = [Field::Escrow, Field::Due, Field::Pipeline]
@@ -882,7 +1056,9 @@ impl<'a> AuditedState<'a> {
             ) {
                 (0, 0, 0) => {
                     state.get(Field::Hours, i) == 0
-                        && u128::from(state.get(Field::Time, i)) <= daily_budget
+                        && u128::from(state.get(Field::Time, i))
+                            + u128::from(state.get(Field::ResearchMinutes, i))
+                            <= daily_budget
                 }
                 (0, 1, employer)
                     if (u64::from(c.households) + 1..=scenario.actors() as u64)
@@ -898,6 +1074,7 @@ impl<'a> AuditedState<'a> {
                     state.get(Field::Hours, i) == u64::from(technique.labor_minutes)
                         && u128::from(state.get(Field::Hours, i))
                             + u128::from(state.get(Field::Time, i))
+                            + u128::from(state.get(Field::ResearchMinutes, i))
                             + u128::from(commute)
                             <= daily_budget
                 }
@@ -934,9 +1111,28 @@ impl<'a> AuditedState<'a> {
                             .contains(&state.get(Field::Price, i))
                 }
             };
-            limits && closed && labor && planning && role && delivery_window && quotes
+            let payroll = match (&c.payroll, actor.kind) {
+                (Some(_), 0) => state.get(Field::PayrollReserve, i) <= 2,
+                _ => [
+                    Field::GrossIncome,
+                    Field::PayrollReserve,
+                    Field::TaxTreasury,
+                    Field::ChargeTreasury,
+                ]
+                .into_iter()
+                .all(|field| state.get(field, i) == 0),
+            };
+            limits && closed && labor && planning && role && delivery_window && quotes && payroll
         });
         let valid = resources
+            && match (&c.research, &state.research) {
+                (None, None) => true,
+                (Some(_), None) => state.day == 0,
+                (Some(_), Some(snapshot)) => {
+                    snapshot.profile == research::RESEARCH_PROFILE && !snapshot.words.is_empty()
+                }
+                (None, Some(_)) => false,
+            }
             && state.next_identity == scenario.next_identity()
             && state.day <= u64::from(u32::MAX) - scenario.ring() as u64
             && state.initial_cash == scenario.totals.cash
