@@ -12,6 +12,7 @@ pub use population::{
 };
 
 pub const SCENARIO_VERSION: u32 = 1;
+pub const STATE_HASH_VERSION: &str = "bad-econ/state/DeterministicV1/v2";
 pub const BASE_FIELDS: usize = 26;
 pub const MEMORY_BUDGET: u64 = 4 * 1024 * 1024 * 1024;
 
@@ -308,7 +309,10 @@ impl Scenario {
             (Some(population), Some(firm)) => population.firms[firm].technique,
             _ => Technique {
                 labor_minutes: self.config.packet_minutes,
-                input_ticks: self.config.packet_output,
+                input_ticks: match index.checked_sub(self.config.households as usize) {
+                    Some(firm) if firm % Good::COUNT == 0 => 0,
+                    _ => self.config.packet_output,
+                },
                 output_ticks: self.config.packet_output,
             },
         }
@@ -319,43 +323,52 @@ impl Scenario {
             None => self.generated(),
         }
     }
-    fn generated(&self) -> Result<State> {
-        let actors = self.actors();
-        let config = &self.config;
-        let properties = (0..actors)
-            .map(|index| {
+    fn actor(&self, index: usize) -> Actor {
+        match &self.config.population {
+            Some(population) => population.actor(index),
+            None => {
+                let config = &self.config;
                 let identity = index as u64 + 1;
-                let draw = DrawKey {
-                    seed: config.seed,
-                    day: 0,
-                    phase: 0,
-                    actor: identity,
-                    purpose: 0,
-                    index: 0,
-                }
-                .draw();
                 let kind = match index < config.households as usize {
                     true => 0,
-                    false => 1 + (index as u32 - config.households) % 3,
+                    false => 1 + (index as u32 - config.households) % Good::COUNT as u32,
                 };
-                let position = match (config.experiment, kind) {
-                    (Experiment::Concentrated, _) => Position {
+                let position = match config.experiment {
+                    Experiment::Concentrated => Position {
                         x: config.map_size / 2,
                         y: config.map_size / 2,
                     },
-                    _ => Position {
-                        x: draw as u32 % config.map_size,
-                        y: (draw >> 32) as u32 % config.map_size,
-                    },
+                    _ => {
+                        let draw = DrawKey {
+                            seed: config.seed,
+                            day: 0,
+                            phase: 0,
+                            actor: identity,
+                            purpose: 0,
+                            index: 0,
+                        }
+                        .draw();
+                        Position {
+                            x: draw as u32 % config.map_size,
+                            y: (draw >> 32) as u32 % config.map_size,
+                        }
+                    }
                 };
                 Actor {
                     identity,
                     position,
                     kind,
-                    owner: (index as u32 % config.households),
+                    owner: index as u32 % config.households,
                     capacity: config.capacity,
                 }
-            })
+            }
+        }
+    }
+    fn generated(&self) -> Result<State> {
+        let actors = self.actors();
+        let config = &self.config;
+        let properties = (0..actors)
+            .map(|index| self.actor(index))
             .collect::<Vec<_>>();
         let mut state = State {
             day: 0,
@@ -463,8 +476,24 @@ impl State {
     }
     pub fn digest(&self) -> String {
         let mut hash = Sha256::new();
+        hash.update(STATE_HASH_VERSION.as_bytes());
+        hash.update([0]);
         hash.update(self.day.to_le_bytes());
         hash.update(self.next_identity.to_le_bytes());
+        hash.update(self.initial_cash.to_le_bytes());
+        self.initial_goods
+            .iter()
+            .for_each(|value| hash.update(value.to_le_bytes()));
+        hash.update((self.actors.len() as u64).to_le_bytes());
+        self.actors.iter().for_each(|actor| {
+            hash.update(actor.identity.to_le_bytes());
+            hash.update(actor.position.x.to_le_bytes());
+            hash.update(actor.position.y.to_le_bytes());
+            hash.update(actor.kind.to_le_bytes());
+            hash.update(actor.owner.to_le_bytes());
+            hash.update(actor.capacity.to_le_bytes());
+        });
+        hash.update((self.values.len() as u64).to_le_bytes());
         self.values
             .iter()
             .for_each(|value| hash.update(value.to_le_bytes()));
@@ -829,21 +858,11 @@ impl<'a> AuditedState<'a> {
             .actors
             .iter()
             .enumerate()
-            .all(|(i, actor)| match &c.population {
-                Some(population) => *actor == population.actor(i),
-                None => {
-                    let kind = match i < c.households as usize {
-                        true => 0,
-                        false => 1 + (i as u32 - c.households) % 3,
-                    };
-                    actor.identity == i as u64 + 1
-                        && actor.kind == kind
-                        && actor.position.x < c.map_size
-                        && actor.position.y < c.map_size
-                        && actor.owner < c.households
-                        && (1..=10_000).contains(&actor.capacity)
-                }
-            });
+            .all(|(index, actor)| *actor == scenario.actor(index));
+        match identities {
+            true => Ok(()),
+            false => Err(anyhow!("actor metadata does not match the fixed scenario")),
+        }?;
         let resources = (0..scenario.actors()).all(|i| {
             let limits = state.get(Field::Health, i) <= 1000
                 && state.get(Field::Fatigue, i) <= 1000
@@ -854,7 +873,60 @@ impl<'a> AuditedState<'a> {
             let closed = [Field::Escrow, Field::Due, Field::Pipeline]
                 .into_iter()
                 .all(|field| state.get(field, i) == 0);
-            let quotes = match state.actors[i].kind {
+            let actor = &state.actors[i];
+            let daily_budget = u128::from(c.work_cap.min(1440 - c.reserved_minutes));
+            let labor = match (
+                actor.kind,
+                state.get(Field::Employed, i),
+                state.get(Field::Employer, i),
+            ) {
+                (0, 0, 0) => {
+                    state.get(Field::Hours, i) == 0
+                        && u128::from(state.get(Field::Time, i)) <= daily_budget
+                }
+                (0, 1, employer)
+                    if (u64::from(c.households) + 1..=scenario.actors() as u64)
+                        .contains(&employer) =>
+                {
+                    let employer = (employer - 1) as usize;
+                    let technique = scenario.technique(employer);
+                    let commute = actor
+                        .position
+                        .distance(state.actors[employer].position)
+                        .div_ceil(c.commute_speed)
+                        * 2;
+                    state.get(Field::Hours, i) == u64::from(technique.labor_minutes)
+                        && u128::from(state.get(Field::Hours, i))
+                            + u128::from(state.get(Field::Time, i))
+                            + u128::from(commute)
+                            <= daily_budget
+                }
+                (1..=3, 0, 0) => state.get(Field::Hours, i) == 0 && state.get(Field::Time, i) == 0,
+                _ => false,
+            };
+            let planning = state.get(Field::Slots, i) <= state.get(Field::Plan, i)
+                && state.get(Field::Plan, i) <= u64::from(actor.capacity);
+            let role = match actor.kind {
+                0 => [Field::Slots, Field::Plan, Field::Produced, Field::Used]
+                    .into_iter()
+                    .all(|field| state.get(field, i) == 0),
+                1 => [
+                    Field::Transit,
+                    Field::Used,
+                    Field::Consumed,
+                    Field::Shortage,
+                ]
+                .into_iter()
+                .all(|field| state.get(field, i) == 0),
+                _ => [Field::Consumed, Field::Shortage]
+                    .into_iter()
+                    .all(|field| state.get(field, i) == 0),
+            };
+            let cleared_slot = ((state.day % scenario.ring() as u64 + scenario.ring() as u64 - 1)
+                % scenario.ring() as u64) as usize;
+            let delivery_window =
+                state.values[state.ring_coordinate(cleared_slot, i).0 as usize] == 0;
+            let quotes = match actor.kind {
                 0 => true,
                 _ => {
                     (1..=10_000).contains(&state.get(Field::Wage, i))
@@ -862,10 +934,9 @@ impl<'a> AuditedState<'a> {
                             .contains(&state.get(Field::Price, i))
                 }
             };
-            limits && closed && quotes
+            limits && closed && labor && planning && role && delivery_window && quotes
         });
-        let valid = identities
-            && resources
+        let valid = resources
             && state.next_identity == scenario.next_identity()
             && state.day <= u64::from(u32::MAX) - scenario.ring() as u64
             && state.initial_cash == scenario.totals.cash

@@ -4,19 +4,21 @@ use crate::{
     runtime::{RuntimeState, SimulationCommand},
     simulation::{Device, Simulation},
 };
-use anyhow::Result;
+use anyhow::{Context, Result};
 use bevy::{
     prelude::*,
     render::{
         RenderApp, RenderPlugin,
         renderer::{RenderAdapter, RenderDevice, RenderInstance, RenderQueue},
         settings::{RenderCreation, WgpuSettings},
+        view::screenshot::{Screenshot, ScreenshotCaptured},
     },
     sprite::Anchor,
 };
-use model::{Chart, ComparisonRun, DisplayState, RunTarget};
+use model::{Chart, ChartRange, ComparisonRun, DisplayState, RunTarget};
 use std::{
     collections::VecDeque,
+    io::Write,
     sync::{Arc, Mutex, mpsc},
     time::{Duration, Instant},
 };
@@ -49,12 +51,15 @@ struct Verification {
     state: VerificationState,
     deadline: Instant,
 }
+#[derive(Clone, Copy)]
 enum VerificationState {
     Start,
     AwaitDay,
     AwaitInspection,
     AwaitComparison,
+    AwaitFirmInspection,
     Frames(u32),
+    AwaitCapture,
     Complete,
 }
 #[derive(Resource)]
@@ -114,7 +119,16 @@ enum WorkerState {
     Stopped,
 }
 #[derive(Component)]
-struct Statistics;
+enum PanelLabel {
+    Statistics,
+    ChartTitle,
+    ChartScale,
+}
+#[derive(Clone, Copy)]
+enum Publication {
+    Snapshot,
+    Restart,
+}
 #[derive(Component)]
 struct Region(usize);
 
@@ -137,7 +151,7 @@ pub fn run(scenario: Scenario, workgroup: u32, mode: ViewMode) -> Result<()> {
         DefaultPlugins
             .set(WindowPlugin {
                 primary_window: Some(Window {
-                    title: "Spatial economy · grain / flour / bread".into(),
+                    title: "Spatial economy | grain / flour / bread".into(),
                     resolution: (1280, 840).into(),
                     ..Default::default()
                 }),
@@ -235,7 +249,7 @@ fn setup(
         Transform::from_xyz(-600.0, 390.0, 2.0),
     ));
     commands.spawn((
-        Text2d::new("Regional shortages · amber grain / blue flour / green bread"),
+        Text2d::new("Regional shortages | amber grain / blue flour / green bread"),
         TextFont {
             font_size: FontSize::Px(15.0),
             ..Default::default()
@@ -244,14 +258,34 @@ fn setup(
         Transform::from_xyz(-600.0, 345.0, 2.0),
     ));
     commands.spawn((
-        Statistics,
-        Text2d::new("Initializing…"),
+        PanelLabel::Statistics,
+        Text2d::new("Initializing..."),
         TextFont {
             font_size: FontSize::Px(17.0),
             ..Default::default()
         },
         Anchor::TOP_LEFT,
         Transform::from_xyz(75.0, 375.0, 2.0),
+    ));
+    commands.spawn((
+        PanelLabel::ChartTitle,
+        Text2d::default(),
+        TextFont {
+            font_size: FontSize::Px(14.0),
+            ..Default::default()
+        },
+        Anchor::TOP_LEFT,
+        Transform::from_xyz(75.0, -170.0, 2.0),
+    ));
+    commands.spawn((
+        PanelLabel::ChartScale,
+        Text2d::default(),
+        TextFont {
+            font_size: FontSize::Px(13.0),
+            ..Default::default()
+        },
+        Anchor::TOP_LEFT,
+        Transform::from_xyz(75.0, -325.0, 2.0),
     ));
     commands.spawn((Text2d::new("SPACE pause/resume    N step    R reset    1/2/3 speed    H household    F firm    TAB next    C compare    G chart"), TextFont { font_size: FontSize::Px(15.0), ..Default::default() }, Anchor::TOP_LEFT, Transform::from_xyz(-600.0, -365.0, 2.0)));
 }
@@ -265,7 +299,7 @@ fn worker(
     let mut workflow = WorkerState::Active;
     let mut next_day = Instant::now();
     let mut target = RunTarget::Open;
-    publish(&mut simulation, data)?;
+    publish(&mut simulation, data, Publication::Restart)?;
     while matches!(workflow, WorkerState::Active) {
         let timeout = match simulation.status {
             RuntimeState::Running => next_day
@@ -275,16 +309,19 @@ fn worker(
         };
         let result = match receiver.recv_timeout(timeout) {
             Ok(Control::Simulation(command)) => {
-                match &*command {
+                let publication = match &*command {
                     SimulationCommand::Reset(_) | SimulationCommand::Restore(_) => {
+                        Publication::Restart
+                    }
+                    _ => Publication::Snapshot,
+                };
+                simulation.command(*command).and_then(|()| {
+                    if let Publication::Restart = publication {
                         target = RunTarget::Open;
                         data.lock().expect("dashboard lock").comparison = None;
                     }
-                    _ => (),
-                }
-                simulation
-                    .command(*command)
-                    .and_then(|()| publish(&mut simulation, data))
+                    publish(&mut simulation, data, publication)
+                })
             }
             Ok(Control::Inspect(request)) => simulation.inspect(request).map(|inspection| {
                 data.lock().expect("dashboard lock").inspection = Some(inspection)
@@ -313,7 +350,7 @@ fn worker(
         if target.reached(simulation.snapshot.day) {
             simulation.command(SimulationCommand::Pause)?;
             target = RunTarget::Open;
-            publish(&mut simulation, data)?;
+            publish(&mut simulation, data, Publication::Snapshot)?;
         }
         if let (WorkerState::Active, RuntimeState::Running, true) =
             (&workflow, &simulation.status, Instant::now() >= next_day)
@@ -323,7 +360,7 @@ fn worker(
                     simulation.command(SimulationCommand::Pause)?;
                     target = RunTarget::Open;
                 }
-                publish(&mut simulation, data)
+                publish(&mut simulation, data, Publication::Snapshot)
             });
             if let Err(error) = result {
                 let mut display = data.lock().expect("dashboard lock");
@@ -358,7 +395,7 @@ fn compare(simulation: &mut Simulation, data: &Arc<Mutex<Display>>) -> Result<Ru
             RunTarget::UntilDay(horizon)
         }
     };
-    publish(simulation, data)?;
+    publish(simulation, data, Publication::Restart)?;
     Ok(target)
 }
 
@@ -366,16 +403,21 @@ fn verify(
     mut verification: ResMut<Verification>,
     dashboard: Option<Res<Dashboard>>,
     launch: Res<Launch>,
+    mut commands: Commands,
     mut exit: MessageWriter<AppExit>,
 ) {
     if let Some(dashboard) = dashboard {
         let display = dashboard.data.lock().expect("dashboard lock");
         match (
             Instant::now() >= verification.deadline,
-            display.status.failed(),
+            display.status.failed() || display.error.is_some(),
         ) {
             (true, _) | (_, true) => {
-                eprintln!("viewer verification failed: {}", display.status.label());
+                eprintln!(
+                    "viewer verification failed: {} {}",
+                    display.status.label(),
+                    display.error.as_deref().unwrap_or("")
+                );
                 exit.write(AppExit::error());
                 verification.state = VerificationState::Complete;
             }
@@ -401,38 +443,51 @@ fn verify(
                         VerificationState::AwaitComparison
                     }
                     VerificationState::AwaitComparison
-                        if display.seed == launch.scenario.config().seed + 1
+                        if Some(display.seed) == launch.scenario.config().seed.checked_add(1)
                             && display.snapshot.day == 1
                             && matches!(
                                 display.status,
                                 DisplayState::Active(RuntimeState::Paused)
                             ) =>
                     {
+                        let identity = launch
+                            .scenario
+                            .identity(launch.scenario.config().households as usize)
+                            .expect("first firm");
+                        let request =
+                            InspectionRequest::new(identity, &launch.scenario).expect("first firm");
+                        let _ = dashboard.sender.send(Control::Inspect(request));
+                        VerificationState::AwaitFirmInspection
+                    }
+                    VerificationState::AwaitFirmInspection
+                        if display
+                            .inspection
+                            .as_ref()
+                            .is_some_and(|record| record.actor.kind > 0) =>
+                    {
                         VerificationState::Frames(3)
                     }
                     VerificationState::Frames(0) => {
-                        eprintln!(
-                            "viewer verification passed: shared device, audited day, inspection, same-day seed comparison, rendered frames"
-                        );
-                        exit.write(AppExit::Success);
-                        VerificationState::Complete
+                        commands
+                            .spawn(Screenshot::primary_window())
+                            .observe(capture_verified_frame);
+                        VerificationState::AwaitCapture
                     }
                     VerificationState::Frames(frames) => VerificationState::Frames(frames - 1),
-                    ref state => match state {
-                        VerificationState::AwaitDay => VerificationState::AwaitDay,
-                        VerificationState::AwaitInspection => VerificationState::AwaitInspection,
-                        VerificationState::AwaitComparison => VerificationState::AwaitComparison,
-                        _ => VerificationState::Complete,
-                    },
+                    state => state,
                 };
             }
         }
     }
 }
 
-fn publish(simulation: &mut Simulation, data: &Arc<Mutex<Display>>) -> Result<()> {
-    let firms = match simulation.snapshot.day {
-        0 => Some(
+fn publish(
+    simulation: &mut Simulation,
+    data: &Arc<Mutex<Display>>,
+    publication: Publication,
+) -> Result<()> {
+    let firms = match publication {
+        Publication::Restart => Some(
             simulation
                 .actors()
                 .iter()
@@ -440,11 +495,12 @@ fn publish(simulation: &mut Simulation, data: &Arc<Mutex<Display>>) -> Result<()
                 .cloned()
                 .collect(),
         ),
-        _ => None,
+        Publication::Snapshot => None,
     };
     let mut display = data.lock().expect("dashboard lock");
     if let Some(firms) = firms {
         display.firms = firms;
+        display.map_size = simulation.scenario.config().map_size;
         display.history.clear();
         display.inspection = None;
     }
@@ -537,7 +593,7 @@ fn controls(
 
 fn draw(
     dashboard: Option<Res<Dashboard>>,
-    mut labels: Query<&mut Text2d, With<Statistics>>,
+    mut labels: Query<(&PanelLabel, &mut Text2d)>,
     mut regions: Query<(&Region, &mut Sprite)>,
     mut gizmos: Gizmos,
 ) {
@@ -554,11 +610,11 @@ fn draw(
                 .map(|i| {
                     let detail = match i.actor.kind {
                         0 => format!(
-                            "Health {} · fatigue {} · labor {} min\nEmployer {}",
+                            "Health {} | fatigue {} | labor {} min\nEmployer {}",
                             i.health, i.fatigue, i.available_minutes, i.employer
                         ),
                         _ => format!(
-                            "Owner {} · wage {} · price {}\nCapacity {} · planned {} · open {}",
+                            "Owner {} | wage {} | price {}\nCapacity {} | planned {} | open {}",
                             i.owner_identity,
                             i.wage,
                             i.price,
@@ -568,7 +624,7 @@ fn draw(
                         ),
                     };
                     format!(
-                        "Actor {} · day {} · kind {}\nCash {} · stock {:?} · transit {}\n{}",
+                        "Actor {} | day {} | kind {}\nCash {} | stock {:?} | transit {}\n{}",
                         i.actor.identity,
                         i.day,
                         i.actor.kind,
@@ -584,14 +640,14 @@ fn draw(
                 .as_ref()
                 .map(|reference| match reference.at_day(s.day) {
                     Some(prior) => format!(
-                        "Seed {} · same day {}\nEmployment Δ {:+} · unmet bread Δ {:+}",
+                        "Seed {} | same day {}\nEmployment change {:+} | unmet bread change {:+}",
                         reference.seed,
                         s.day,
                         i128::from(s.employed) - i128::from(prior.employed),
                         i128::from(s.shortages) - i128::from(prior.shortages)
                     ),
                     None => format!(
-                        "Comparing seed {} · target day {}",
+                        "Comparing seed {} | target day {}",
                         reference.seed, reference.horizon
                     ),
                 })
@@ -602,7 +658,7 @@ fn draw(
                 .zip(["Grain", "Flour", "Bread"])
                 .map(|(market, name)| {
                     format!(
-                        "{name}: {:.1} ± {:.1} / {:.1} ± {:.1}",
+                        "{name}: {:.1} +/- {:.1} / {:.1} +/- {:.1}",
                         market.prices.mean(),
                         market.prices.deviation(),
                         market.wages.mean(),
@@ -612,7 +668,7 @@ fn draw(
                 .collect::<Vec<_>>()
                 .join("\n");
             let text = format!(
-                "{} · seed {}\nDay {} · target {}\nUnemployment {:.1}% · unmet bread {}\nCash {}\nStocks G/F/B {:?}\nIn transit {:?}\n\nPrice / wage · mean ± standard deviation\n{}\n\n{}\n\n{}\n{}\nG: {}",
+                "{} | seed {}\nDay {} | target {}\nUnemployment {:.1}% | unmet bread {}\nCash {}\nStocks G/F/B {:?}\nIn transit {:?}\n\nPrice / wage | mean +/- standard deviation\n{}\n\n{}\n\n{}\n{}",
                 display.status.label(),
                 display.seed,
                 s.day,
@@ -625,12 +681,29 @@ fn draw(
                 quotes,
                 inspection,
                 comparison,
-                display.error.as_deref().unwrap_or(""),
-                dashboard.chart.label()
+                display.error.as_deref().unwrap_or("")
             );
-            labels
-                .iter_mut()
-                .for_each(|mut label| label.0.clone_from(&text));
+            let range = ChartRange::new(
+                dashboard.chart,
+                s,
+                &display.history,
+                display.comparison.as_ref(),
+            );
+            let reference_label = match &display.comparison {
+                Some(reference) => format!(
+                    "Current seed {} | faint seed {}",
+                    display.seed, reference.seed
+                ),
+                None => "Grain amber | flour blue | bread green".into(),
+            };
+            let title = format!("G: {}\n{}", dashboard.chart.label(), reference_label);
+            labels.iter_mut().for_each(|(kind, mut label)| {
+                label.0 = match kind {
+                    PanelLabel::Statistics => text.clone(),
+                    PanelLabel::ChartTitle => title.clone(),
+                    PanelLabel::ChartScale => range.scale_label(dashboard.chart),
+                };
+            });
             let peak = s.regions.iter().copied().max().unwrap_or(1).max(1) as f32;
             regions.iter_mut().for_each(|(region, mut sprite)| {
                 let heat = s.regions.get(region.0).copied().unwrap_or(0) as f32 / peak;
@@ -649,7 +722,7 @@ fn draw(
                 );
                 gizmos.circle_2d(point, 2.0, color);
             });
-            draw_chart(&display, dashboard.chart, &mut gizmos);
+            draw_chart(&display, dashboard.chart, &range, &mut gizmos);
         }
     }
 }
@@ -663,67 +736,160 @@ fn chart_color(chart: Chart, series: usize) -> Color {
         _ => Color::srgb(0.45, 0.90, 0.65),
     }
 }
-fn draw_chart(display: &Display, chart: Chart, gizmos: &mut Gizmos) {
-    let history = display
-        .history
-        .iter()
-        .map(|snapshot| chart.values(snapshot))
-        .collect::<Vec<_>>();
-    let peak = history.iter().flatten().copied().fold(1.0, f64::max) as f32;
+fn draw_chart(display: &Display, chart: Chart, range: &ChartRange, gizmos: &mut Gizmos) {
     let baseline = -315.0;
-    let height = 100.0;
     gizmos.line_2d(
         Vec2::new(80.0, baseline),
         Vec2::new(560.0, baseline),
         Color::srgb(0.3, 0.4, 0.45),
     );
+    gizmos.line_2d(
+        Vec2::new(80.0, baseline),
+        Vec2::new(80.0, -215.0),
+        Color::srgb(0.3, 0.4, 0.45),
+    );
     match chart {
         Chart::Cash => {
-            let bins = &display.snapshot.wealth_bins;
-            let last = bins
-                .iter()
-                .rposition(|count| *count > 0)
-                .unwrap_or(1)
-                .max(1);
-            bins.iter()
-                .take(last + 1)
-                .enumerate()
-                .for_each(|(bin, count)| {
-                    let x = 80.0 + bin as f32 / (last + 1) as f32 * 480.0;
-                    gizmos.rect_2d(
-                        Isometry2d::from_translation(Vec2::new(
-                            x + 3.0,
-                            baseline + *count as f32 / peak * height / 2.0,
-                        )),
-                        Vec2::new(6.0, *count as f32 / peak * height),
-                        Color::srgb(0.4, 0.7, 0.95),
-                    );
-                });
+            if let Some(reference) = display
+                .comparison
+                .as_ref()
+                .and_then(|reference| reference.at_day(display.snapshot.day))
+            {
+                draw_cash(
+                    reference,
+                    range,
+                    Color::srgba(0.95, 0.73, 0.25, 0.5),
+                    gizmos,
+                );
+            }
+            draw_cash(
+                &display.snapshot,
+                range,
+                Color::srgb(0.4, 0.7, 0.95),
+                gizmos,
+            );
         }
         _ => {
-            let first = display
-                .history
-                .front()
-                .map(|snapshot| snapshot.day)
-                .unwrap_or(0);
-            let span = display.snapshot.day.saturating_sub(first).max(1) as f32;
-            history
-                .windows(2)
-                .zip(display.history.iter())
-                .for_each(|(pair, snapshot)| {
-                    let x = 80.0 + snapshot.day.saturating_sub(first) as f32 / span * 480.0;
-                    pair[0]
-                        .iter()
-                        .zip(&pair[1])
-                        .enumerate()
-                        .for_each(|(series, (a, b))| {
-                            gizmos.line_2d(
-                                Vec2::new(x, baseline + *a as f32 / peak * height),
-                                Vec2::new(x + 480.0 / span, baseline + *b as f32 / peak * height),
-                                chart_color(chart, series),
-                            );
-                        });
-                });
+            if let Some(reference) = &display.comparison {
+                draw_history(
+                    &reference.history,
+                    chart,
+                    range,
+                    LineStyle::Reference,
+                    gizmos,
+                );
+            }
+            draw_history(&display.history, chart, range, LineStyle::Current, gizmos);
         }
     }
+}
+
+#[derive(Clone, Copy)]
+enum LineStyle {
+    Current,
+    Reference,
+}
+fn draw_history(
+    history: &VecDeque<ObservationSnapshot>,
+    chart: Chart,
+    range: &ChartRange,
+    style: LineStyle,
+    gizmos: &mut Gizmos,
+) {
+    let visible = history
+        .iter()
+        .filter(|snapshot| (range.first_day..=range.last_day).contains(&snapshot.day))
+        .collect::<Vec<_>>();
+    let span = range.last_day.saturating_sub(range.first_day).max(1) as f32;
+    visible.windows(2).for_each(|pair| {
+        let a = chart.values(pair[0]);
+        let b = chart.values(pair[1]);
+        let from_x = 80.0 + pair[0].day.saturating_sub(range.first_day) as f32 / span * 480.0;
+        let to_x = 80.0 + pair[1].day.saturating_sub(range.first_day) as f32 / span * 480.0;
+        a.iter()
+            .zip(b)
+            .enumerate()
+            .for_each(|(series, (from, to))| {
+                let color = match style {
+                    LineStyle::Current => chart_color(chart, series),
+                    LineStyle::Reference => chart_color(chart, series).with_alpha(0.35),
+                };
+                gizmos.line_2d(
+                    Vec2::new(from_x, -315.0 + *from as f32 / range.maximum as f32 * 100.0),
+                    Vec2::new(to_x, -315.0 + to as f32 / range.maximum as f32 * 100.0),
+                    color,
+                );
+            });
+    });
+}
+fn draw_cash(
+    snapshot: &ObservationSnapshot,
+    range: &ChartRange,
+    color: Color,
+    gizmos: &mut Gizmos,
+) {
+    let width = 480.0 / (range.last_bin + 1) as f32;
+    snapshot
+        .wealth_bins
+        .iter()
+        .take(range.last_bin + 1)
+        .enumerate()
+        .for_each(|(bin, count)| {
+            let height = *count as f32 / range.maximum as f32 * 100.0;
+            gizmos.rect_2d(
+                Isometry2d::from_translation(Vec2::new(
+                    80.0 + (bin as f32 + 0.5) * width,
+                    -315.0 + height / 2.0,
+                )),
+                Vec2::new(width * 0.7, height),
+                color,
+            );
+        });
+}
+
+fn capture_verified_frame(
+    captured: On<ScreenshotCaptured>,
+    mut dashboard: ResMut<Dashboard>,
+    mut verification: ResMut<Verification>,
+    mut exit: MessageWriter<AppExit>,
+) {
+    let chart = dashboard.chart;
+    let result = save_verified_frame(&captured.image, chart);
+    match result {
+        Ok(path) => {
+            eprintln!("viewer captured {}", path.display());
+            match chart {
+                Chart::Cash => {
+                    eprintln!(
+                        "viewer verification passed: shared device, audited day, household and firm inspection, same-day seed comparison, all charts captured"
+                    );
+                    verification.state = VerificationState::Complete;
+                    exit.write(AppExit::Success);
+                }
+                _ => {
+                    dashboard.chart = chart.next();
+                    verification.state = VerificationState::Frames(3);
+                }
+            }
+        }
+        Err(error) => {
+            eprintln!("viewer capture failed: {error}");
+            verification.state = VerificationState::Complete;
+            exit.write(AppExit::error());
+        }
+    }
+}
+fn save_verified_frame(image: &Image, chart: Chart) -> Result<std::path::PathBuf> {
+    let pixels =
+        Context::context(image.clone().try_into_dynamic(), "read rendered frame")?.into_rgb8();
+    let first = Context::context(pixels.pixels().next(), "empty rendered frame")?;
+    match pixels.pixels().any(|pixel| pixel != first) {
+        true => Ok(()),
+        false => Err(anyhow::anyhow!("rendered frame contains only a flat color")),
+    }?;
+    let path = std::env::temp_dir().join(format!("bad-econ-viewer-{}.ppm", chart.file_label()));
+    let mut file = std::fs::File::create(&path)?;
+    write!(file, "P6\n{} {}\n255\n", pixels.width(), pixels.height())?;
+    file.write_all(pixels.as_raw())?;
+    Ok(path)
 }

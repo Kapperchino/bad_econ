@@ -109,6 +109,85 @@ fn population_admission_checks_identity_ownership_resources_and_policy() -> Resu
     Ok(())
 }
 
+#[test]
+fn checkpoint_admission_preserves_fixed_metadata_and_labor_budgets() -> Result<()> {
+    let generated = Scenario::baseline(3, 42, Experiment::Baseline)?;
+    let explicit = scenario()?;
+    for scenario in [&generated, &explicit] {
+        let state = scenario.initial()?;
+        let mut changed = state.clone();
+        changed.actors[3].owner = (changed.actors[3].owner + 1) % 3;
+        assert!(Checkpoint::new(scenario, &changed).is_err());
+        let mut changed = state.clone();
+        changed.actors[3].capacity += 1;
+        assert!(Checkpoint::new(scenario, &changed).is_err());
+        let mut changed = state.clone();
+        changed.actors[0].position.x =
+            (changed.actors[0].position.x + 1) % scenario.config().map_size;
+        assert!(Checkpoint::new(scenario, &changed).is_err());
+        let mut changed = state.clone();
+        changed.set(Field::Employed, 0, 1);
+        changed.set(Field::Employer, 0, 2);
+        assert!(Checkpoint::new(scenario, &changed).is_err());
+        let mut changed = state.clone();
+        changed.set(Field::Employed, 0, 1);
+        changed.set(Field::Employer, 0, 4);
+        changed.set(
+            Field::Hours,
+            0,
+            u64::from(scenario.technique(3).labor_minutes),
+        );
+        changed.set(Field::Time, 0, u64::from(scenario.config().work_cap));
+        assert!(Checkpoint::new(scenario, &changed).is_err());
+        let mut changed = state.clone();
+        changed.set(Field::Plan, 3, u64::from(changed.actors[3].capacity) + 1);
+        assert!(Checkpoint::new(scenario, &changed).is_err());
+        let mut changed = state.clone();
+        changed.set(Field::Transit, 3, 1);
+        let delivery = changed.ring_coordinate(0, 3).0 as usize;
+        changed.values[delivery] = 1;
+        assert!(Checkpoint::new(scenario, &changed).is_err());
+        let mut changed = state.clone();
+        changed.set(Field::Transit, 0, 1);
+        changed.set(Field::Bread, 0, changed.get(Field::Bread, 0) - 1);
+        let expired = changed.ring_coordinate(scenario.ring() - 1, 0).0 as usize;
+        changed.values[expired] = 1;
+        assert!(Checkpoint::new(scenario, &changed).is_err());
+        assert_eq!(Checkpoint::new(scenario, &state)?.restore()?.state, state);
+    }
+    assert_eq!(generated.technique(3).input_ticks, 0);
+    Ok(())
+}
+
+#[test]
+fn state_digest_includes_metadata_and_initial_totals() -> Result<()> {
+    let state = scenario()?.initial()?;
+    let digest = state.digest();
+    let mut changed = state.clone();
+    changed.actors[0].identity += 1;
+    assert_ne!(changed.digest(), digest);
+    let mut changed = state.clone();
+    changed.actors[3].owner = 0;
+    assert_ne!(changed.digest(), digest);
+    let mut changed = state.clone();
+    changed.actors[3].capacity += 1;
+    assert_ne!(changed.digest(), digest);
+    let mut changed = state.clone();
+    changed.actors[0].position.x += 1;
+    assert_ne!(changed.digest(), digest);
+    let mut changed = state.clone();
+    changed.initial_cash += 1;
+    assert_ne!(changed.digest(), digest);
+    let mut changed = state.clone();
+    changed.initial_goods[0] += 1;
+    assert_ne!(changed.digest(), digest);
+    assert_eq!(
+        serde_json::from_str::<State>(&serde_json::to_string(&state)?)?.digest(),
+        digest
+    );
+    Ok(())
+}
+
 #[cfg(feature = "compute")]
 mod compute {
     use super::*;

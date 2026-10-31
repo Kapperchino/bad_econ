@@ -78,7 +78,7 @@ fn main() -> Result<()> {
         Mode::Scenario => output(&args.output, &serde_json::to_value(scenario.config())?),
         Mode::Run => run(scenario, &args),
         Mode::Replay => replay(scenario, &args),
-        Mode::Benchmark => benchmark(&args),
+        Mode::Benchmark => benchmark(scenario, &args),
         Mode::View | Mode::ViewCheck => view(scenario, args.workgroup, args.mode),
     }
 }
@@ -139,7 +139,7 @@ fn replay(scenario: Scenario, args: &Cli) -> Result<()> {
     }
     output(
         &args.output,
-        &serde_json::json!({"days":args.days,"workgroup":args.workgroup,"state_hash":cpu.download()?.digest(),"device":gpu.device.name}),
+        &serde_json::json!({"days":args.days,"workgroup":args.workgroup,"state_hash":cpu.download()?.digest(),"state_hash_version":STATE_HASH_VERSION,"scenario_hash":cpu.scenario.fingerprint()?,"profile":bad_econ::arithmetic::PROFILE,"policy_table_hash":bad_econ::arithmetic::table_hash(),"device":gpu.device.name}),
     )
 }
 #[cfg(not(feature = "compute"))]
@@ -147,18 +147,30 @@ fn replay(_: Scenario, _: &Cli) -> Result<()> {
     Err(anyhow!("build with the compute feature"))
 }
 #[cfg(feature = "compute")]
-fn benchmark(args: &Cli) -> Result<()> {
+fn benchmark(scenario: Scenario, args: &Cli) -> Result<()> {
     use bad_econ::simulation::{Device, Simulation};
     match args.days {
         0 => Err(anyhow!("benchmark days must be positive")),
         _ => Ok(()),
     }?;
+    let scenarios = match args.scenario {
+        Some(_) => vec![scenario],
+        None => args
+            .sizes
+            .iter()
+            .map(|&households| Scenario::baseline(households, args.seed, args.experiment.into()))
+            .collect::<Result<Vec<_>>>()?,
+    };
     let mut reports = Vec::new();
-    for &households in &args.sizes {
-        let scenario = Scenario::baseline(households, args.seed, args.experiment.into())?;
+    for scenario in scenarios {
+        let households = scenario.config().households;
         let estimate = scenario.memory_estimate();
         let fingerprint = scenario.fingerprint()?;
-        let mut simulation = Simulation::new(scenario, Device::headless(args.workgroup)?)?;
+        let device = match args.backend {
+            Backend::Cpu => Device::cpu(args.workgroup)?,
+            Backend::Gpu => Device::headless(args.workgroup)?,
+        };
+        let mut simulation = Simulation::new(scenario, device)?;
         (0..args.warmup).try_for_each(|_| simulation.advance())?;
         let mut daily = Vec::new();
         let start = Instant::now();
@@ -180,13 +192,15 @@ fn benchmark(args: &Cli) -> Result<()> {
             daily.push(serde_json::json!({"day":simulation.snapshot.day,"seconds":day_start.elapsed().as_secs_f64(),"phases":simulation.timings,"memory":memory}));
         }
         let seconds = start.elapsed().as_secs_f64();
-        reports.push(serde_json::json!({"households":households,"firms":simulation.scenario.config().firms,"scenario":simulation.scenario.config(),"scenario_hash":fingerprint,"device":simulation.device.name,"workgroup":args.workgroup,"days":args.days,"warmup_days":args.warmup,"seconds":seconds,"days_per_second":f64::from(args.days)/seconds,"readback_bytes":simulation.readback_bytes-readback_before,"estimated_bytes":estimate,"memory_budget_bytes":MEMORY_BUDGET,"daily":daily,"snapshot":simulation.snapshot}));
+        let readback_bytes = simulation.readback_bytes - readback_before;
+        let state_hash = simulation.download()?.digest();
+        reports.push(serde_json::json!({"households":households,"firms":simulation.scenario.config().firms,"scenario":simulation.scenario.config(),"scenario_hash":fingerprint,"device":simulation.device.name,"workgroup":args.workgroup,"days":args.days,"warmup_days":args.warmup,"seconds":seconds,"days_per_second":f64::from(args.days)/seconds,"readback_bytes":readback_bytes,"final_state_hash":state_hash,"state_hash_version":STATE_HASH_VERSION,"profile":bad_econ::arithmetic::PROFILE,"policy_table_hash":bad_econ::arithmetic::table_hash(),"estimated_bytes":estimate,"memory_budget_bytes":MEMORY_BUDGET,"daily":daily,"snapshot":simulation.snapshot}));
         output(&args.output, &serde_json::to_value(&reports)?)?;
     }
     Ok(())
 }
 #[cfg(not(feature = "compute"))]
-fn benchmark(_: &Cli) -> Result<()> {
+fn benchmark(_: Scenario, _: &Cli) -> Result<()> {
     Err(anyhow!("build with the compute feature"))
 }
 #[cfg(feature = "viewer")]
@@ -208,7 +222,15 @@ fn view(_: Scenario, _: u32, _: Mode) -> Result<()> {
 fn output(path: &Option<PathBuf>, value: &serde_json::Value) -> Result<()> {
     let json = serde_json::to_string_pretty(value)?;
     match path {
-        Some(path) => std::fs::write(path, json)?,
+        Some(path) => {
+            if let Some(parent) = path
+                .parent()
+                .filter(|parent| !parent.as_os_str().is_empty())
+            {
+                std::fs::create_dir_all(parent)?;
+            }
+            std::fs::write(path, json)?;
+        }
         None => println!("{json}"),
     };
     Ok(())
