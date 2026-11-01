@@ -190,7 +190,9 @@ fn checkpoint_rejects_tampering_and_keeps_last_audited_boundary() -> Result<()> 
             .is_err()
     );
     let mut invalid = scenario.initial()?;
-    invalid.actors[0].kind = 99;
+    let mut actor = invalid.actors.at(0);
+    actor.kind = 99;
+    invalid.actors.set(0, actor);
     assert!(Checkpoint::new(&scenario, &invalid).is_err());
     invalid = scenario.initial()?;
     invalid.values.clear();

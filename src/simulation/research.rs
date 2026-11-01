@@ -16,7 +16,7 @@ use crate::arithmetic::hex;
 use crate::domain::{Phase, Scenario, State, research::*};
 use anyhow::{Context, Result, anyhow};
 use burn_wgpu::CubeTensor;
-use bytemuck::{Pod, Zeroable};
+use bytemuck::Zeroable;
 use cubecl::{CubeCount, CubeDim, prelude::BufferArg};
 pub use kernels::{AttemptOutcome, Participation};
 use sha2::{Digest, Sha256};
@@ -87,17 +87,9 @@ impl SnapshotOffsets {
 }
 
 impl ResearchSnapshot {
-    fn record<T: Pod>(&self, offset: usize, words: usize) -> Result<T> {
-        let record = self
-            .words
-            .get(offset..offset + words)
-            .context("incomplete research observation")?;
-        Ok(bytemuck::pod_read_unaligned(bytemuck::cast_slice(record)))
-    }
-
     pub fn lab(&self, config: &ResearchConfig, index: usize) -> Result<LabObservation> {
         let _ = config.labs.get(index).context("unknown lab observation")?;
-        let state: LabState = self.record(index * LabState::WORDS, LabState::WORDS)?;
+        let state: LabState = LabState::from_rows(&self.words, 0, config.labs.len(), index)?;
         Ok(LabObservation {
             discovered: state.discovered,
             mastered: state.mastered,
@@ -123,8 +115,13 @@ impl ResearchSnapshot {
             .map(|lab| lab.projects.len())
             .sum::<usize>()
             + project;
-        let offset = SnapshotOffsets::new(config).projects + index * ProjectState::WORDS;
-        let state: ProjectState = self.record(offset, ProjectState::WORDS)?;
+        let offset = SnapshotOffsets::new(config).projects;
+        let state: ProjectState = ProjectState::from_rows(
+            &self.words,
+            offset,
+            config.labs.iter().map(|lab| lab.projects.len()).sum(),
+            index,
+        )?;
         let outcome = match state.outcome {
             0 => AttemptOutcome::Idle,
             1 => AttemptOutcome::Ineligible,
@@ -148,8 +145,9 @@ impl ResearchSnapshot {
             .natural_stocks
             .get(index)
             .context("unknown stock observation")?;
-        let offset = SnapshotOffsets::new(config).stocks + index * StockState::WORDS;
-        let state: StockState = self.record(offset, StockState::WORDS)?;
+        let offset = SnapshotOffsets::new(config).stocks;
+        let state: StockState =
+            StockState::from_rows(&self.words, offset, config.natural_stocks.len(), index)?;
         Ok(StockObservation {
             stock: state.stock,
             extracted: state.extracted.into(),
@@ -161,8 +159,9 @@ impl ResearchSnapshot {
             .strikes
             .get(index)
             .context("unknown strike observation")?;
-        let offset = SnapshotOffsets::new(config).strikes + index * StrikeState::WORDS;
-        let state: StrikeState = self.record(offset, StrikeState::WORDS)?;
+        let offset = SnapshotOffsets::new(config).strikes;
+        let state: StrikeState =
+            StrikeState::from_rows(&self.words, offset, config.strikes.len(), index)?;
         let participation = match state.participation {
             0 => Participation::Working,
             1 => Participation::Striking,
@@ -179,8 +178,9 @@ impl ResearchSnapshot {
             .equipment
             .get(index)
             .context("unknown equipment observation")?;
-        let offset = SnapshotOffsets::new(config).machines + index * MachineState::WORDS;
-        let state: MachineState = self.record(offset, MachineState::WORDS)?;
+        let offset = SnapshotOffsets::new(config).machines;
+        let state: MachineState =
+            MachineState::from_rows(&self.words, offset, config.equipment.len(), index)?;
         Ok(EquipmentObservation {
             remaining_service: state.remaining.into(),
             condition: state.condition,
@@ -205,9 +205,9 @@ struct ResearchLaunch<'a> {
     count: usize,
 }
 
-fn append<T: Pod>(words: &mut Vec<u32>, values: &[T]) -> Result<u32> {
+fn append(words: &mut Vec<u32>, values: &[u32]) -> Result<u32> {
     let offset = u32::try_from(words.len()).context("research buffer capacity exceeded")?;
-    words.extend_from_slice(bytemuck::cast_slice(values));
+    words.extend_from_slice(values);
     Ok(offset)
 }
 
@@ -219,10 +219,10 @@ impl EncodedResearch {
                 .index_of(identity)
                 .context("unknown research actor")
         };
-        let mut labs = Vec::new();
-        let mut lab_states = Vec::new();
-        let mut projects = Vec::new();
-        let mut project_states = Vec::new();
+        let mut labs = LabLayoutRows::default();
+        let mut lab_states = LabStateRows::default();
+        let mut projects = ProjectLayoutRows::default();
+        let mut project_states = ProjectStateRows::default();
         for lab in &config.labs {
             labs.push(LabLayout {
                 owner: actor_index(lab.owner)? as u32,
@@ -279,7 +279,7 @@ impl EncodedResearch {
                     firm: firm as u32,
                     output_ticks: scenario.technique(firm).output_ticks,
                     initial_service: machine.remaining_service.into(),
-                    maximum_packets: initial.actors[firm].capacity,
+                    maximum_packets: initial.actors.at(firm).capacity,
                     nameplate: machine.nameplate,
                     downtime: machine.downtime,
                     wear: machine.wear_per_packet,
@@ -288,7 +288,7 @@ impl EncodedResearch {
                     restoration: machine.restoration_per_tick,
                 })
             })
-            .collect::<Result<Vec<_>>>()?;
+            .collect::<Result<MachineLayoutRows>>()?;
         let machine_states = config
             .equipment
             .iter()
@@ -297,7 +297,7 @@ impl EncodedResearch {
                 condition: machine.condition,
                 ..MachineState::zeroed()
             })
-            .collect::<Vec<_>>();
+            .collect::<MachineStateRows>();
         let stocks = config
             .natural_stocks
             .iter()
@@ -306,13 +306,13 @@ impl EncodedResearch {
                 Ok(StockLayout {
                     firm: firm as u32,
                     output_ticks: scenario.technique(firm).output_ticks,
-                    maximum_packets: initial.actors[firm].capacity,
+                    maximum_packets: initial.actors.at(firm).capacity,
                     capacity: stock.capacity,
                     renewal: stock.renewal_rate,
                     extraction: stock.extraction_per_packet,
                 })
             })
-            .collect::<Result<Vec<_>>>()?;
+            .collect::<Result<StockLayoutRows>>()?;
         let stock_states = config
             .natural_stocks
             .iter()
@@ -320,7 +320,7 @@ impl EncodedResearch {
                 stock: stock.stock,
                 ..StockState::zeroed()
             })
-            .collect::<Vec<_>>();
+            .collect::<StockStateRows>();
         let strikes = config
             .strikes
             .iter()
@@ -337,8 +337,9 @@ impl EncodedResearch {
                     risk: strike.risk,
                 })
             })
-            .collect::<Result<Vec<_>>>()?;
-        let strike_states = vec![StrikeState::zeroed(); strikes.len()];
+            .collect::<Result<StrikeLayoutRows>>()?;
+        let strike_states =
+            std::iter::repeat_n(StrikeState::zeroed(), strikes.len()).collect::<StrikeStateRows>();
         let mut configuration = vec![0; Header::WORDS];
         let mut state = Vec::new();
         let header = Header {
@@ -348,16 +349,16 @@ impl EncodedResearch {
             machine_count: machines.len() as u32,
             stock_count: stocks.len() as u32,
             strike_count: strikes.len() as u32,
-            labs: append(&mut configuration, &labs)?,
-            projects: append(&mut configuration, &projects)?,
-            machines: append(&mut configuration, &machines)?,
-            stocks: append(&mut configuration, &stocks)?,
-            strikes: append(&mut configuration, &strikes)?,
-            lab_state: append(&mut state, &lab_states)?,
-            project_state: append(&mut state, &project_states)?,
-            machine_state: append(&mut state, &machine_states)?,
-            stock_state: append(&mut state, &stock_states)?,
-            strike_state: append(&mut state, &strike_states)?,
+            labs: append(&mut configuration, &labs.words())?,
+            projects: append(&mut configuration, &projects.words())?,
+            machines: append(&mut configuration, &machines.words())?,
+            stocks: append(&mut configuration, &stocks.words())?,
+            strikes: append(&mut configuration, &strikes.words())?,
+            lab_state: append(&mut state, &lab_states.words())?,
+            project_state: append(&mut state, &project_states.words())?,
+            machine_state: append(&mut state, &machine_states.words())?,
+            stock_state: append(&mut state, &stock_states.words())?,
+            strike_state: append(&mut state, &strike_states.words())?,
             seed: scenario.config().seed.into(),
         };
         configuration[..Header::WORDS].copy_from_slice(bytemuck::cast_slice(&[header]));
@@ -374,7 +375,7 @@ impl EncodedResearch {
         .max()
         .unwrap_or(1);
         let mut hash = Sha256::new();
-        hash.update(b"bad-econ/research-configuration/ResearchFixedV1\0");
+        hash.update(b"bad-econ/research-configuration/ResearchFixedV2\0");
         hash.update(serde_json::to_vec(&config)?);
         for &word in configuration.iter().chain(&state) {
             hash.update(word.to_le_bytes());

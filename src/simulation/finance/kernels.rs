@@ -95,56 +95,58 @@ fn issue(
     state: &mut [u32],
     banks: &[u32],
     loans: &[u32],
-    bank: usize,
-    loan: usize,
+    bank: &RowIndex,
+    loan: &RowIndex,
     day: u32,
     control: &[Atomic<u32>],
 ) -> u32 {
     let mut decision = 0u32;
-    let b = banks[bank + BankMeta::STATE];
-    let l = loans[loan + LoanMeta::STATE];
-    let cash_coordinate = loans[loan + LoanMeta::CASH];
-    let status = load(state, l + LoanField::Status as u32);
+    let bank_count = ((banks.len() - 1) / BankMeta::WORDS) as u32;
+    let loan_count = ((loans.len() - 1) / LoanMeta::WORDS) as u32;
+    let b = banks[bank.field(BankMeta::STATE, 1usize)];
+    let l = loans[loan.field(LoanMeta::STATE, 1usize)];
+    let cash_coordinate = loans[loan.field(LoanMeta::CASH, 1usize)];
+    let status = load(state, l + LoanField::Status as u32 * loan_count);
     let cash = load(state, cash_coordinate);
     let requested = minimum(
-        read(loans, loan + LoanMeta::REQUESTED),
-        positive(read(loans, loan + LoanMeta::TARGET_CASH), cash),
+        read(loans, loan.field(LoanMeta::REQUESTED, 2usize)),
+        positive(read(loans, loan.field(LoanMeta::TARGET_CASH, 2usize)), cash),
     );
     let eligible = equal(status, ticks(LoanStatus::Dormant as u32, 0))
-        && day >= loans[loan + LoanMeta::FIRST_DAY]
-        && loans[loan + LoanMeta::CONSENT] == 1
+        && day >= loans[loan.field(LoanMeta::FIRST_DAY, 1usize)]
+        && loans[loan.field(LoanMeta::CONSENT, 1usize)] == 1
         && !equal(requested, zero());
     if eligible {
         decision = 2u32;
         let mut faults = KernelFaults::none();
-        let reserve = load(state, b + BankField::Reserve as u32);
-        let risk = load(state, b + BankField::RiskAssets as u32);
+        let reserve = load(state, b + BankField::Reserve as u32 * bank_count);
+        let risk = load(state, b + BankField::RiskAssets as u32 * bank_count);
         let amount = lending_limit(
             requested,
-            loans[loan + LoanMeta::TERM],
-            loans[loan + LoanMeta::DAILY_RATE],
-            read(loans, loan + LoanMeta::SURPLUS),
-            read(loans, loan + LoanMeta::DEBT_SERVICE),
-            loans[loan + LoanMeta::SERVICE_FRACTION],
-            loans[loan + LoanMeta::ADVANCE],
-            read(loans, loan + LoanMeta::COLLATERAL),
-            read(loans, loan + LoanMeta::SECURED),
-            load(state, b + BankField::Equity as u32),
-            banks[bank + BankMeta::MINIMUM_CAPITAL],
+            loans[loan.field(LoanMeta::TERM, 1usize)],
+            loans[loan.field(LoanMeta::DAILY_RATE, 1usize)],
+            read(loans, loan.field(LoanMeta::SURPLUS, 2usize)),
+            read(loans, loan.field(LoanMeta::DEBT_SERVICE, 2usize)),
+            loans[loan.field(LoanMeta::SERVICE_FRACTION, 1usize)],
+            loans[loan.field(LoanMeta::ADVANCE, 1usize)],
+            read(loans, loan.field(LoanMeta::COLLATERAL, 2usize)),
+            read(loans, loan.field(LoanMeta::SECURED, 2usize)),
+            load(state, b + BankField::Equity as u32 * bank_count),
+            banks[bank.field(BankMeta::MINIMUM_CAPITAL, 1usize)],
             risk,
-            banks[bank + BankMeta::RISK_WEIGHT],
+            banks[bank.field(BankMeta::RISK_WEIGHT, 1usize)],
             reserve,
             &mut faults,
         );
         let risk_debit = ceil_scaled(
             amount,
-            banks[bank + BankMeta::RISK_WEIGHT],
+            banks[bank.field(BankMeta::RISK_WEIGHT, 1usize)],
             FINANCE_SCALE,
             &mut faults,
         );
         let next_risk = add(risk, risk_debit, &mut faults);
         let next_cash = add(cash, amount, &mut faults);
-        let due = day + loans[loan + LoanMeta::TERM];
+        let due = day + loans[loan.field(LoanMeta::TERM, 1usize)];
         if due < day {
             faults.insert(KernelFaults::new(comptime!(
                 FaultFlags::ARITHMETIC_OVERFLOW
@@ -152,18 +154,34 @@ fn issue(
         }
         if faults.bits() == 0 && !equal(amount, zero()) {
             decision = 1u32;
-            store(state, b + BankField::Reserve as u32, minus(reserve, amount));
-            store(state, b + BankField::RiskAssets as u32, next_risk);
-            store(state, cash_coordinate, next_cash);
-            store(state, l + LoanField::Principal as u32, amount);
-            store(state, l + LoanField::Due as u32, ticks(due, 0));
             store(
                 state,
-                l + LoanField::Status as u32,
+                b + BankField::Reserve as u32 * bank_count,
+                minus(reserve, amount),
+            );
+            store(
+                state,
+                b + BankField::RiskAssets as u32 * bank_count,
+                next_risk,
+            );
+            store(state, cash_coordinate, next_cash);
+            store(state, l + LoanField::Principal as u32 * loan_count, amount);
+            store(state, l + LoanField::Due as u32 * loan_count, ticks(due, 0));
+            store(
+                state,
+                l + LoanField::Status as u32 * loan_count,
                 ticks(LoanStatus::Active as u32, 0),
             );
-            store(state, l + LoanField::RiskAssets as u32, risk_debit);
-            store(state, l + LoanField::LastAccrual as u32, ticks(day, 0));
+            store(
+                state,
+                l + LoanField::RiskAssets as u32 * loan_count,
+                risk_debit,
+            );
+            store(
+                state,
+                l + LoanField::LastAccrual as u32 * loan_count,
+                ticks(day, 0),
+            );
         }
         faults.record(control);
     }
@@ -178,23 +196,25 @@ fn opening(
     state: &mut [u32],
     banks: &[u32],
     loans: &[u32],
-    bank: usize,
-    loan: usize,
+    bank: &RowIndex,
+    loan: &RowIndex,
     day: u32,
     control: &[Atomic<u32>],
 ) -> u32 {
     let mut decision = 0u32;
-    let b = banks[bank + BankMeta::STATE];
-    let l = loans[loan + LoanMeta::STATE];
-    let status = load(state, l + LoanField::Status as u32).extract(LOW_WORD);
+    let bank_count = ((banks.len() - 1) / BankMeta::WORDS) as u32;
+    let loan_count = ((loans.len() - 1) / LoanMeta::WORDS) as u32;
+    let b = banks[bank.field(BankMeta::STATE, 1usize)];
+    let l = loans[loan.field(LoanMeta::STATE, 1usize)];
+    let status = load(state, l + LoanField::Status as u32 * loan_count).extract(LOW_WORD);
     if status == LoanStatus::Active as u32 || status == LoanStatus::Overdue as u32 {
         let mut faults = KernelFaults::none();
-        let principal = load(state, l + LoanField::Principal as u32);
-        let last = load(state, l + LoanField::LastAccrual as u32).extract(LOW_WORD);
+        let principal = load(state, l + LoanField::Principal as u32 * loan_count);
+        let last = load(state, l + LoanField::LastAccrual as u32 * loan_count).extract(LOW_WORD);
         let elapsed = day - min(day, last);
         let daily = scaled(
             principal,
-            loans[loan + LoanMeta::DAILY_RATE],
+            loans[loan.field(LoanMeta::DAILY_RATE, 1usize)],
             FINANCE_SCALE,
             &mut faults,
         );
@@ -202,72 +222,77 @@ fn opening(
             principal,
             times(divide(principal, FINANCE_SCALE), FINANCE_SCALE).value,
         );
-        let daily_remainder =
-            remainder.extract(LOW_WORD) * loans[loan + LoanMeta::DAILY_RATE] % FINANCE_SCALE;
+        let daily_remainder = remainder.extract(LOW_WORD)
+            * loans[loan.field(LoanMeta::DAILY_RATE, 1usize)]
+            % FINANCE_SCALE;
         let accumulated = add(
             times32(daily_remainder, elapsed),
-            load(state, l + LoanField::InterestRemainder as u32),
+            load(state, l + LoanField::InterestRemainder as u32 * loan_count),
             &mut faults,
         );
         let carried = divide(accumulated, FINANCE_SCALE);
         let new_remainder = minus(accumulated, times(carried, FINANCE_SCALE).value);
         let interest = add(
-            load(state, l + LoanField::Interest as u32),
+            load(state, l + LoanField::Interest as u32 * loan_count),
             add(multiply(daily, elapsed, &mut faults), carried, &mut faults),
             &mut faults,
         );
         let total = add(principal, interest, &mut faults);
-        let cash_coordinate = loans[loan + LoanMeta::CASH];
+        let cash_coordinate = loans[loan.field(LoanMeta::CASH, 1usize)];
         let cash = load(state, cash_coordinate);
-        let due = load(state, l + LoanField::Due as u32).extract(LOW_WORD);
+        let due = load(state, l + LoanField::Due as u32 * loan_count).extract(LOW_WORD);
         let repayment = day >= due && !lt(cash, total);
         let reserve = add(
-            load(state, b + BankField::Reserve as u32),
+            load(state, b + BankField::Reserve as u32 * bank_count),
             select(repayment, total, zero()),
             &mut faults,
         );
         let equity = add(
-            load(state, b + BankField::Equity as u32),
+            load(state, b + BankField::Equity as u32 * bank_count),
             select(repayment, interest, zero()),
             &mut faults,
         );
-        let risk = load(state, b + BankField::RiskAssets as u32);
-        let loan_risk = load(state, l + LoanField::RiskAssets as u32);
+        let risk = load(state, b + BankField::RiskAssets as u32 * bank_count);
+        let loan_risk = load(state, l + LoanField::RiskAssets as u32 * loan_count);
         if last > day || lt(risk, loan_risk) {
             faults.insert(KernelFaults::new(comptime!(FaultFlags::INVALID_COORDINATE)));
         }
         if faults.bits() == 0 {
-            store(state, l + LoanField::Interest as u32, interest);
+            store(state, l + LoanField::Interest as u32 * loan_count, interest);
             store(
                 state,
-                l + LoanField::InterestRemainder as u32,
+                l + LoanField::InterestRemainder as u32 * loan_count,
                 new_remainder,
             );
-            store(state, l + LoanField::LastAccrual as u32, ticks(day, 0));
+            store(
+                state,
+                l + LoanField::LastAccrual as u32 * loan_count,
+                ticks(day, 0),
+            );
             if day >= due {
                 decision = 2u32;
                 store(
                     state,
-                    l + LoanField::Status as u32,
+                    l + LoanField::Status as u32 * loan_count,
                     ticks(LoanStatus::Overdue as u32, 0),
                 );
             }
             if repayment {
                 decision = 1u32;
                 store(state, cash_coordinate, minus(cash, total));
-                store(state, b + BankField::Reserve as u32, reserve);
-                store(state, b + BankField::Equity as u32, equity);
+                store(state, b + BankField::Reserve as u32 * bank_count, reserve);
+                store(state, b + BankField::Equity as u32 * bank_count, equity);
                 store(
                     state,
-                    b + BankField::RiskAssets as u32,
+                    b + BankField::RiskAssets as u32 * bank_count,
                     minus(risk, loan_risk),
                 );
-                store(state, l + LoanField::Principal as u32, zero());
-                store(state, l + LoanField::Interest as u32, zero());
-                store(state, l + LoanField::RiskAssets as u32, zero());
+                store(state, l + LoanField::Principal as u32 * loan_count, zero());
+                store(state, l + LoanField::Interest as u32 * loan_count, zero());
+                store(state, l + LoanField::RiskAssets as u32 * loan_count, zero());
                 store(
                     state,
-                    l + LoanField::Status as u32,
+                    l + LoanField::Status as u32 * loan_count,
                     ticks(LoanStatus::Repaid as u32, 0),
                 );
             }
@@ -294,9 +319,11 @@ pub(super) fn banks(
 ) {
     let id = ABSOLUTE_POS as u32;
     if id < count {
-        let base = id as usize * BankMeta::WORDS;
-        let first = banks[base + BankMeta::FIRST_LOAN];
-        let last = first + banks[base + BankMeta::LOAN_COUNT];
+        let bank_count = count;
+        let loan_count = ((loans.len() - 1) / LoanMeta::WORDS) as u32;
+        let base = RowIndex::new(0, count as usize, id as usize);
+        let first = banks[base.field(BankMeta::FIRST_LOAN, 1usize)];
+        let last = first + banks[base.field(BankMeta::LOAN_COUNT, 1usize)];
         let mut principal = zero();
         let mut interest = zero();
         let mut risk = zero();
@@ -304,41 +331,55 @@ pub(super) fn banks(
         let mut overdue = 0u32;
         let mut faults = KernelFaults::none();
         for index in first..last {
-            let loan = index as usize * LoanMeta::WORDS;
+            let loan = RowIndex::new(0, (loans.len() - 1) / LoanMeta::WORDS, index as usize);
             match stage {
                 FinanceStage::Opening => {
                     decisions[index as usize] =
-                        opening(state, banks, loans, base, loan, day, control);
+                        opening(state, banks, loans, &base, &loan, day, control);
                 }
                 FinanceStage::Lending => {
                     decisions[index as usize] =
-                        issue(state, banks, loans, base, loan, day, control);
+                        issue(state, banks, loans, &base, &loan, day, control);
                 }
                 FinanceStage::Audit => {
-                    let state_base = loans[loan + LoanMeta::STATE];
+                    let state_base = loans[loan.field(LoanMeta::STATE, 1usize)];
                     principal = add(
                         principal,
-                        load(state, state_base + LoanField::Principal as u32),
+                        load(state, state_base + LoanField::Principal as u32 * loan_count),
                         &mut faults,
                     );
                     interest = add(
                         interest,
-                        load(state, state_base + LoanField::Interest as u32),
+                        load(state, state_base + LoanField::Interest as u32 * loan_count),
                         &mut faults,
                     );
                     risk = add(
                         risk,
-                        load(state, state_base + LoanField::RiskAssets as u32),
+                        load(
+                            state,
+                            state_base + LoanField::RiskAssets as u32 * loan_count,
+                        ),
                         &mut faults,
                     );
-                    let status =
-                        load(state, state_base + LoanField::Status as u32).extract(LOW_WORD);
-                    let loan_principal = load(state, state_base + LoanField::Principal as u32);
-                    let loan_interest = load(state, state_base + LoanField::Interest as u32);
-                    let remainder = load(state, state_base + LoanField::InterestRemainder as u32);
-                    let due = load(state, state_base + LoanField::Due as u32);
-                    let last_accrual = load(state, state_base + LoanField::LastAccrual as u32);
-                    let loan_risk = load(state, state_base + LoanField::RiskAssets as u32);
+                    let status = load(state, state_base + LoanField::Status as u32 * loan_count)
+                        .extract(LOW_WORD);
+                    let loan_principal =
+                        load(state, state_base + LoanField::Principal as u32 * loan_count);
+                    let loan_interest =
+                        load(state, state_base + LoanField::Interest as u32 * loan_count);
+                    let remainder = load(
+                        state,
+                        state_base + LoanField::InterestRemainder as u32 * loan_count,
+                    );
+                    let due = load(state, state_base + LoanField::Due as u32 * loan_count);
+                    let last_accrual = load(
+                        state,
+                        state_base + LoanField::LastAccrual as u32 * loan_count,
+                    );
+                    let loan_risk = load(
+                        state,
+                        state_base + LoanField::RiskAssets as u32 * loan_count,
+                    );
                     let lifecycle = match status {
                         0 => {
                             equal(loan_principal, zero())
@@ -369,8 +410,8 @@ pub(super) fn banks(
                         _ => false,
                     };
                     let expected_risk = ceil_scaled(
-                        load(state, state_base + LoanField::Principal as u32),
-                        banks[base + BankMeta::RISK_WEIGHT],
+                        load(state, state_base + LoanField::Principal as u32 * loan_count),
+                        banks[base.field(BankMeta::RISK_WEIGHT, 1usize)],
                         FINANCE_SCALE,
                         &mut faults,
                     );
@@ -378,34 +419,41 @@ pub(super) fn banks(
                     overdue += u32::cast_from(status == LoanStatus::Overdue as u32);
                     if status > LoanStatus::Repaid as u32
                         || !lifecycle
-                        || load(state, state_base + LoanField::Status as u32).extract(HIGH_WORD)
+                        || load(state, state_base + LoanField::Status as u32 * loan_count)
+                            .extract(HIGH_WORD)
                             != 0
                         || due.extract(HIGH_WORD) != 0
                         || lt(ticks(day, 0), last_accrual)
                         || lt(
                             minimum(
-                                read(loans, loan + LoanMeta::REQUESTED),
-                                read(loans, loan + LoanMeta::TARGET_CASH),
+                                read(loans, loan.field(LoanMeta::REQUESTED, 2usize)),
+                                read(loans, loan.field(LoanMeta::TARGET_CASH, 2usize)),
                             ),
                             loan_principal,
                         )
-                        || (loans[loan + LoanMeta::CONSENT] != 1
+                        || (loans[loan.field(LoanMeta::CONSENT, 1usize)] != 1
                             && status != LoanStatus::Dormant as u32)
                         || (status != LoanStatus::Dormant as u32
                             && lt(
                                 due,
                                 ticks(
-                                    loans[loan + LoanMeta::FIRST_DAY]
-                                        + loans[loan + LoanMeta::TERM],
+                                    loans[loan.field(LoanMeta::FIRST_DAY, 1usize)]
+                                        + loans[loan.field(LoanMeta::TERM, 1usize)],
                                     0,
                                 ),
                             ))
                         || !equal(
                             expected_risk,
-                            load(state, state_base + LoanField::RiskAssets as u32),
+                            load(
+                                state,
+                                state_base + LoanField::RiskAssets as u32 * loan_count,
+                            ),
                         )
                         || !lt(
-                            load(state, state_base + LoanField::InterestRemainder as u32),
+                            load(
+                                state,
+                                state_base + LoanField::InterestRemainder as u32 * loan_count,
+                            ),
                             ticks(FINANCE_SCALE, 0),
                         )
                     {
@@ -415,19 +463,23 @@ pub(super) fn banks(
             }
         }
         if comptime!(matches!(stage, FinanceStage::Audit)) {
-            let b = banks[base + BankMeta::STATE];
-            let reserve = load(state, b + BankField::Reserve as u32);
+            let b = banks[base.field(BankMeta::STATE, 1usize)];
+            let reserve = load(state, b + BankField::Reserve as u32 * bank_count);
             let assets = add(reserve, principal, &mut faults);
-            if !equal(assets, load(state, b + BankField::Equity as u32))
-                || !equal(risk, load(state, b + BankField::RiskAssets as u32))
-            {
+            if !equal(
+                assets,
+                load(state, b + BankField::Equity as u32 * bank_count),
+            ) || !equal(
+                risk,
+                load(state, b + BankField::RiskAssets as u32 * bank_count),
+            ) {
                 faults.insert(KernelFaults::new(comptime!(FaultFlags::INVALID_COORDINATE)));
             }
-            store(output, id * 5, reserve);
-            store(output, id * 5 + 1, principal);
-            store(output, id * 5 + 2, interest);
-            store(output, id * 5 + 3, ticks(active, 0));
-            store(output, id * 5 + 4, ticks(overdue, 0));
+            store(output, id, reserve);
+            store(output, count + id, principal);
+            store(output, 2 * count + id, interest);
+            store(output, 3 * count + id, ticks(active, 0));
+            store(output, 4 * count + id, ticks(overdue, 0));
         }
         faults.record(control);
     }
@@ -437,15 +489,19 @@ pub(super) fn banks(
 pub(super) fn support_needs(state: &mut [u32], recipients: &[u32], output: &mut [u32], count: u32) {
     let id = ABSOLUTE_POS as u32;
     if id < count {
-        let base = id as usize * SupportMeta::WORDS;
+        let base = RowIndex::new(0, count as usize, id as usize);
         let need = positive(
-            read(recipients, base + SupportMeta::TARGET),
-            load(state, recipients[base + SupportMeta::CASH]),
+            read(recipients, base.field(SupportMeta::TARGET, 2usize)),
+            load(state, recipients[base.field(SupportMeta::CASH, 1usize)]),
         );
         store(
             output,
             id,
-            select(recipients[base + SupportMeta::CONSENT] == 1, need, zero()),
+            select(
+                recipients[base.field(SupportMeta::CONSENT, 1usize)] == 1,
+                need,
+                zero(),
+            ),
         );
     }
 }
@@ -533,7 +589,8 @@ pub(super) fn support_plan(
         );
         let cash = load(
             state,
-            recipients[id as usize * SupportMeta::WORDS + SupportMeta::CASH],
+            recipients
+                [RowIndex::new(0, count as usize, id as usize).field(SupportMeta::CASH, 1usize)],
         );
         let new_cash = plus(cash, grant);
         new_cash.faults.record(control);
@@ -559,21 +616,12 @@ pub(super) fn support_post(
     if id < count {
         store(
             state,
-            recipients[id as usize * SupportMeta::WORDS + SupportMeta::CASH],
+            recipients
+                [RowIndex::new(0, count as usize, id as usize).field(SupportMeta::CASH, 1usize)],
             load(output, id),
         );
     }
     if id == count {
         store(state, treasury, load(output, count));
-    }
-}
-
-#[cube(launch)]
-pub(super) fn audit_columns(input: &mut [u32], output: &mut [u32], count: u32) {
-    let id = ABSOLUTE_POS as u32;
-    if id < count * 5 {
-        let bank = id % count;
-        let field = id / count;
-        store(output, id, load(input, bank * 5 + field));
     }
 }

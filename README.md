@@ -13,6 +13,8 @@ cargo run -- analyze --analysis scenarios/analysis.json --output /tmp/accounts.j
 
 GPU is the default; use `--backend cpu` for CPU execution. `--seed` controls generated populations, `--output PATH` saves JSON, and `--checkpoint PATH` / `--restore PATH` save and resume audited state. See `cargo run -- --help` for all options.
 
+State stores actor metadata, bank and loan balances, and research records in field rows on the host and GPU. Checkpoints use format 3 with the `ResearchFixedV2` research layout; checkpoints from earlier formats must be regenerated.
+
 The viewer starts paused: Space toggles running, N advances one day, R resets, G changes the display, and C compares the next seed. Simulation runs on a worker; the viewer renders aggregate snapshots rather than household entities.
 
 ## Model

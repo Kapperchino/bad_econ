@@ -116,14 +116,19 @@ fn checkpoint_admission_preserves_fixed_metadata_and_labor_budgets() -> Result<(
     for scenario in [&generated, &explicit] {
         let state = scenario.initial()?;
         let mut changed = state.clone();
-        changed.actors[3].owner = (changed.actors[3].owner + 1) % 3;
+        let mut actor = changed.actors.at(3);
+        actor.owner = (changed.actors.at(3).owner + 1) % 3;
+        changed.actors.set(3, actor);
         assert!(Checkpoint::new(scenario, &changed).is_err());
         let mut changed = state.clone();
-        changed.actors[3].capacity += 1;
+        let mut actor = changed.actors.at(3);
+        actor.capacity += 1;
+        changed.actors.set(3, actor);
         assert!(Checkpoint::new(scenario, &changed).is_err());
         let mut changed = state.clone();
-        changed.actors[0].position.x =
-            (changed.actors[0].position.x + 1) % scenario.config().map_size;
+        let mut actor = changed.actors.at(0);
+        actor.position.x = (changed.actors.at(0).position.x + 1) % scenario.config().map_size;
+        changed.actors.set(0, actor);
         assert!(Checkpoint::new(scenario, &changed).is_err());
         let mut changed = state.clone();
         changed.set(Field::Employed, 0, 1);
@@ -140,7 +145,7 @@ fn checkpoint_admission_preserves_fixed_metadata_and_labor_budgets() -> Result<(
         changed.set(Field::Time, 0, u64::from(scenario.config().work_cap));
         assert!(Checkpoint::new(scenario, &changed).is_err());
         let mut changed = state.clone();
-        changed.set(Field::Plan, 3, u64::from(changed.actors[3].capacity) + 1);
+        changed.set(Field::Plan, 3, u64::from(changed.actors.at(3).capacity) + 1);
         assert!(Checkpoint::new(scenario, &changed).is_err());
         let mut changed = state.clone();
         changed.set(Field::Transit, 3, 1);
@@ -164,16 +169,24 @@ fn state_digest_includes_metadata_and_initial_totals() -> Result<()> {
     let state = scenario()?.initial()?;
     let digest = state.digest();
     let mut changed = state.clone();
-    changed.actors[0].identity += 1;
+    let mut actor = changed.actors.at(0);
+    actor.identity += 1;
+    changed.actors.set(0, actor);
     assert_ne!(changed.digest(), digest);
     let mut changed = state.clone();
-    changed.actors[3].owner = 0;
+    let mut actor = changed.actors.at(3);
+    actor.owner = 0;
+    changed.actors.set(3, actor);
     assert_ne!(changed.digest(), digest);
     let mut changed = state.clone();
-    changed.actors[3].capacity += 1;
+    let mut actor = changed.actors.at(3);
+    actor.capacity += 1;
+    changed.actors.set(3, actor);
     assert_ne!(changed.digest(), digest);
     let mut changed = state.clone();
-    changed.actors[0].position.x += 1;
+    let mut actor = changed.actors.at(0);
+    actor.position.x += 1;
+    changed.actors.set(0, actor);
     assert_ne!(changed.digest(), digest);
     let mut changed = state.clone();
     changed.initial_cash += 1;
@@ -283,4 +296,38 @@ mod compute {
         );
         Ok(())
     }
+}
+
+#[cfg(feature = "compute")]
+#[test]
+fn actor_rows_round_trip_on_gpu_and_reject_mismatched_lengths() -> Result<()> {
+    use bad_econ::simulation::Simulation;
+    let scenario = scenario()?;
+    let expected = scenario.initial()?;
+    let mut simulation = Simulation::new(scenario.clone(), support::device(64)?)?;
+    assert_eq!(simulation.download()?, expected);
+    let encoded = serde_json::to_value(&expected)?;
+    assert_eq!(
+        encoded["actors"]["identity"],
+        serde_json::json!([101, 303, 901, 2000, 5000, 8000])
+    );
+    for field in ["identity", "x", "y", "kind", "owner", "capacity"] {
+        let mut invalid = encoded.clone();
+        invalid["actors"][field].as_array_mut().unwrap().pop();
+        assert!(serde_json::from_value::<State>(invalid).is_err());
+    }
+    for actor in expected.actors.iter() {
+        let request = InspectionRequest::new(actor.identity, &scenario)?;
+        assert_eq!(simulation.inspect(request.clone())?.actor, actor);
+        assert_eq!(Inspection::from_state(&expected, &request)?.actor, actor);
+    }
+    let checkpoint = simulation.checkpoint()?;
+    let mut old = serde_json::to_value(&checkpoint)?;
+    old["version"] = serde_json::json!(2);
+    assert!(
+        serde_json::from_value::<Checkpoint>(old)?
+            .restore()
+            .is_err()
+    );
+    Ok(())
 }

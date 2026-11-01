@@ -4,6 +4,7 @@ use super::super::{
 };
 use super::{layout::*, nonlinear::*, random::*};
 use crate::domain::{Field, Phase, research::RESEARCH_SCALE};
+use crate::simulation::rows::RowIndex;
 use cubecl::prelude::*;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
@@ -79,11 +80,11 @@ fn cap_plan(main: &mut [u32], config: &[u32], firm: u32, capacity: Ticks) {
 }
 
 #[cube]
-fn access(state: &mut [u32], base: usize) -> u32 {
-    state[base + LabState::DISCOVERED]
-        & state[base + LabState::MASTERED]
-        & state[base + LabState::PERMITTED]
-        & state[base + LabState::ADOPTED]
+fn access(state: &mut [u32], base: &RowIndex) -> u32 {
+    state[base.field(LabState::DISCOVERED, 1usize)]
+        & state[base.field(LabState::MASTERED, 1usize)]
+        & state[base.field(LabState::PERMITTED, 1usize)]
+        & state[base.field(LabState::ADOPTED, 1usize)]
 }
 
 #[cube]
@@ -102,42 +103,58 @@ fn attempt(
     day: u32,
     id: usize,
 ) {
-    let base = config[Header::LABS] as usize + id * LabLayout::WORDS;
-    let lab_state = config[Header::LAB_STATE] as usize + id * LabState::WORDS;
-    let owner = config[base + LabLayout::OWNER];
-    let researcher = config[base + LabLayout::RESEARCHER];
+    let base = RowIndex::new(
+        config[Header::LABS] as usize,
+        config[Header::LAB_COUNT] as usize,
+        id,
+    );
+    let lab_state = RowIndex::new(
+        config[Header::LAB_STATE] as usize,
+        config[Header::LAB_COUNT] as usize,
+        id,
+    );
+    let owner = config[base.field(LabLayout::OWNER, 1usize)];
+    let researcher = config[base.field(LabLayout::RESEARCHER, 1usize)];
     let time = main_coordinate(config, comptime!(Field::Time as u32), researcher);
     let research_minutes =
         main_coordinate(config, comptime!(Field::ResearchMinutes as u32), researcher);
-    let start = config[base + LabLayout::FIRST_PROJECT];
-    let end = start + config[base + LabLayout::PROJECT_COUNT];
+    let start = config[base.field(LabLayout::FIRST_PROJECT, 1usize)];
+    let end = start + config[base.field(LabLayout::PROJECT_COUNT, 1usize)];
     for project in start..end {
-        let item = config[Header::PROJECTS] as usize + project as usize * ProjectLayout::WORDS;
-        let saved = config[Header::PROJECT_STATE] as usize + project as usize * ProjectState::WORDS;
-        let exposure = state[saved + ProjectState::EXPOSURE];
+        let item = RowIndex::new(
+            config[Header::PROJECTS] as usize,
+            config[Header::PROJECT_COUNT] as usize,
+            project as usize,
+        );
+        let saved = RowIndex::new(
+            config[Header::PROJECT_STATE] as usize,
+            config[Header::PROJECT_COUNT] as usize,
+            project as usize,
+        );
+        let exposure = state[saved.field(ProjectState::EXPOSURE, 1usize)];
         let correlated = exposure
-            * config[item + ProjectLayout::CAPACITY]
-            * config[item + ProjectLayout::RELATEDNESS]
+            * config[item.field(ProjectLayout::CAPACITY, 1usize)]
+            * config[item.field(ProjectLayout::RELATEDNESS, 1usize)]
             / (RESEARCH_SCALE * RESEARCH_SCALE);
         let mut power = u32::new(comptime!(RESEARCH_SCALE as i64));
-        for _step in 0..config[item + ProjectLayout::SHAPE] {
+        for _step in 0..config[item.field(ProjectLayout::SHAPE, 1usize)] {
             power = power * (RESEARCH_SCALE - correlated) / RESEARCH_SCALE;
         }
-        let scale = config[item + ProjectLayout::MINIMUM_EFFORT]
-            + (config[item + ProjectLayout::PIONEER_EFFORT]
-                - config[item + ProjectLayout::MINIMUM_EFFORT])
+        let scale = config[item.field(ProjectLayout::MINIMUM_EFFORT, 1usize)]
+            + (config[item.field(ProjectLayout::PIONEER_EFFORT, 1usize)]
+                - config[item.field(ProjectLayout::MINIMUM_EFFORT, 1usize)])
                 * power
                 / RESEARCH_SCALE;
-        let effort = config[item + ProjectLayout::LABOR_MINUTES];
+        let effort = config[item.field(ProjectLayout::LABOR_MINUTES, 1usize)];
         let probability = hazard(
             min(effort * RESEARCH_SCALE / scale, 16 * RESEARCH_SCALE),
             table,
         );
-        state[saved + ProjectState::PROBABILITY] = probability;
+        state[saved.field(ProjectState::PROBABILITY, 1usize)] = probability;
         let mut outcome = u32::new(comptime!(AttemptOutcome::Failed as i64));
-        let required = config[item + ProjectLayout::PREREQUISITES];
-        if (access(state, lab_state) & required) != required
-            || config[base + LabLayout::CONSENT] == 0
+        let required = config[item.field(ProjectLayout::PREREQUISITES, 1usize)];
+        if (access(state, &lab_state) & required) != required
+            || config[base.field(LabLayout::CONSENT, 1usize)] == 0
         {
             outcome = comptime!(AttemptOutcome::Ineligible as u32);
         }
@@ -146,7 +163,7 @@ fn attempt(
             if outcome == comptime!(AttemptOutcome::Failed as u32)
                 && lt(
                     available,
-                    ticks(config[item + ProjectLayout::INPUTS + good], 0),
+                    ticks(config[item.field(ProjectLayout::INPUTS, 3usize) + good], 0),
                 )
             {
                 outcome = comptime!(AttemptOutcome::MissingResources as u32);
@@ -158,15 +175,15 @@ fn attempt(
             outcome = comptime!(AttemptOutcome::NoTime as u32);
         }
         if outcome == comptime!(AttemptOutcome::Failed as u32) {
-            let attempts = read(state, saved + ProjectState::ATTEMPTS);
+            let attempts = read(state, saved.field(ProjectState::ATTEMPTS, 2usize));
             let random = draw(
                 RandomKey {
                     seed: seed(config),
                     day: ticks(day, 0),
                     phase: comptime!(Phase::PhysicalClose as u32),
                     actor: ticks(
-                        config[item + ProjectLayout::IDENTITY],
-                        config[item + ProjectLayout::IDENTITY + 1],
+                        config[item.field(ProjectLayout::IDENTITY, 2usize)],
+                        config[item.field(ProjectLayout::IDENTITY, 2usize) + 1],
                     ),
                     purpose: 0x52535243,
                     index: attempts,
@@ -175,12 +192,12 @@ fn attempt(
             );
             for good in 0..3 {
                 let coordinate = main_coordinate(config, good as u32 + 1, owner);
-                let used = ticks(config[item + ProjectLayout::INPUTS + good], 0);
+                let used = ticks(config[item.field(ProjectLayout::INPUTS, 3usize) + good], 0);
                 let remaining = minus(read(main, coordinate), used);
                 write(main, coordinate, remaining);
                 increment(
                     state,
-                    lab_state + LabState::CONSUMED + good * 2,
+                    lab_state.field(LabState::CONSUMED, 6usize) + good * 2,
                     used,
                     control,
                 );
@@ -188,32 +205,42 @@ fn attempt(
             let remaining = minus(read(main, time), ticks(effort, 0));
             write(main, time, remaining);
             increment(main, research_minutes, ticks(effort, 0), control);
-            increment(state, saved + ProjectState::ATTEMPTS, ticks(1, 0), control);
+            increment(
+                state,
+                saved.field(ProjectState::ATTEMPTS, 2usize),
+                ticks(1, 0),
+                control,
+            );
             if succeeds(probability, random) {
                 outcome = comptime!(AttemptOutcome::Discovered as u32);
                 increment(
                     state,
-                    saved + ProjectState::DISCOVERIES,
+                    saved.field(ProjectState::DISCOVERIES, 2usize),
                     ticks(1, 0),
                     control,
                 );
-                state[lab_state + LabState::DISCOVERED] |= config[item + ProjectLayout::OUTCOMES];
+                state[lab_state.field(LabState::DISCOVERED, 1usize)] |=
+                    config[item.field(ProjectLayout::OUTCOMES, 1usize)];
             }
         }
-        state[saved + ProjectState::OUTCOME] = outcome;
-        let signal = hazard(config[item + ProjectLayout::SIGNAL], table);
-        state[saved + ProjectState::EXPOSURE] =
+        state[saved.field(ProjectState::OUTCOME, 1usize)] = outcome;
+        let signal = hazard(config[item.field(ProjectLayout::SIGNAL, 1usize)], table);
+        state[saved.field(ProjectState::EXPOSURE, 1usize)] =
             exposure + (RESEARCH_SCALE - exposure) * signal / PROBABILITY_SCALE;
-        if config[base + LabLayout::ADOPTION] != 0 {
-            state[lab_state + LabState::MASTERED] |= state[lab_state + LabState::DISCOVERED];
-            state[lab_state + LabState::ADOPTED] |=
-                state[lab_state + LabState::MASTERED] & state[lab_state + LabState::PERMITTED];
+        if config[base.field(LabLayout::ADOPTION, 1usize)] != 0 {
+            state[lab_state.field(LabState::MASTERED, 1usize)] |=
+                state[lab_state.field(LabState::DISCOVERED, 1usize)];
+            state[lab_state.field(LabState::ADOPTED, 1usize)] |= state
+                [lab_state.field(LabState::MASTERED, 1usize)]
+                & state[lab_state.field(LabState::PERMITTED, 1usize)];
         }
     }
-    if config[base + LabLayout::ADOPTION] != 0 {
-        state[lab_state + LabState::MASTERED] |= state[lab_state + LabState::DISCOVERED];
-        state[lab_state + LabState::ADOPTED] |=
-            state[lab_state + LabState::MASTERED] & state[lab_state + LabState::PERMITTED];
+    if config[base.field(LabLayout::ADOPTION, 1usize)] != 0 {
+        state[lab_state.field(LabState::MASTERED, 1usize)] |=
+            state[lab_state.field(LabState::DISCOVERED, 1usize)];
+        state[lab_state.field(LabState::ADOPTED, 1usize)] |= state
+            [lab_state.field(LabState::MASTERED, 1usize)]
+            & state[lab_state.field(LabState::PERMITTED, 1usize)];
     }
 }
 
@@ -238,73 +265,138 @@ pub fn research(
         }
         ResearchStage::Opening => {
             if id < config[Header::MACHINE_COUNT] as usize {
-                let item = config[Header::MACHINES] as usize + id * MachineLayout::WORDS;
-                let saved = config[Header::MACHINE_STATE] as usize + id * MachineState::WORDS;
+                let item = RowIndex::new(
+                    config[Header::MACHINES] as usize,
+                    config[Header::MACHINE_COUNT] as usize,
+                    id,
+                );
+                let saved = RowIndex::new(
+                    config[Header::MACHINE_STATE] as usize,
+                    config[Header::MACHINE_COUNT] as usize,
+                    id,
+                );
                 let produced = read(
                     main,
                     main_coordinate(
                         config,
                         comptime!(Field::Produced as u32),
-                        config[item + MachineLayout::FIRM],
+                        config[item.field(MachineLayout::FIRM, 1usize)],
                     ),
                 );
-                write(state, saved + MachineState::PRODUCED_BEFORE, produced);
-                state[saved + MachineState::MAINTENANCE_RESTORATION] = 0;
+                write(
+                    state,
+                    saved.field(MachineState::PRODUCED_BEFORE, 2usize),
+                    produced,
+                );
+                state[saved.field(MachineState::MAINTENANCE_RESTORATION, 1usize)] = 0;
             }
             if id < config[Header::STOCK_COUNT] as usize {
-                let item = config[Header::STOCKS] as usize + id * StockLayout::WORDS;
-                let saved = config[Header::STOCK_STATE] as usize + id * StockState::WORDS;
+                let item = RowIndex::new(
+                    config[Header::STOCKS] as usize,
+                    config[Header::STOCK_COUNT] as usize,
+                    id,
+                );
+                let saved = RowIndex::new(
+                    config[Header::STOCK_STATE] as usize,
+                    config[Header::STOCK_COUNT] as usize,
+                    id,
+                );
                 let produced = read(
                     main,
                     main_coordinate(
                         config,
                         comptime!(Field::Produced as u32),
-                        config[item + StockLayout::FIRM],
+                        config[item.field(StockLayout::FIRM, 1usize)],
                     ),
                 );
-                write(state, saved + StockState::PRODUCED_BEFORE, produced);
+                write(
+                    state,
+                    saved.field(StockState::PRODUCED_BEFORE, 2usize),
+                    produced,
+                );
             }
             if id < config[Header::PROJECT_COUNT] as usize {
-                let saved = config[Header::PROJECT_STATE] as usize + id * ProjectState::WORDS;
-                state[saved + ProjectState::OUTCOME] = comptime!(AttemptOutcome::Idle as u32);
+                let saved = RowIndex::new(
+                    config[Header::PROJECT_STATE] as usize,
+                    config[Header::PROJECT_COUNT] as usize,
+                    id,
+                );
+                state[saved.field(ProjectState::OUTCOME, 1usize)] =
+                    comptime!(AttemptOutcome::Idle as u32);
             }
         }
         ResearchStage::ProductionReadiness => {
             if id < config[Header::LAB_COUNT] as usize {
-                let item = config[Header::LABS] as usize + id * LabLayout::WORDS;
-                let saved = config[Header::LAB_STATE] as usize + id * LabState::WORDS;
-                let required = config[item + LabLayout::PRODUCTION_REQUIREMENTS];
-                if (access(state, saved) & required) != required {
-                    cap_plan(main, config, config[item + LabLayout::OWNER], zero());
+                let item = RowIndex::new(
+                    config[Header::LABS] as usize,
+                    config[Header::LAB_COUNT] as usize,
+                    id,
+                );
+                let saved = RowIndex::new(
+                    config[Header::LAB_STATE] as usize,
+                    config[Header::LAB_COUNT] as usize,
+                    id,
+                );
+                let required = config[item.field(LabLayout::PRODUCTION_REQUIREMENTS, 1usize)];
+                if (access(state, &saved) & required) != required {
+                    cap_plan(
+                        main,
+                        config,
+                        config[item.field(LabLayout::OWNER, 1usize)],
+                        zero(),
+                    );
                 }
             }
         }
         ResearchStage::MachineCapacity => {
             if id < config[Header::MACHINE_COUNT] as usize {
-                let item = config[Header::MACHINES] as usize + id * MachineLayout::WORDS;
-                let saved = config[Header::MACHINE_STATE] as usize + id * MachineState::WORDS;
-                let nominal = config[item + MachineLayout::NAMEPLATE]
-                    - config[item + MachineLayout::DOWNTIME];
+                let item = RowIndex::new(
+                    config[Header::MACHINES] as usize,
+                    config[Header::MACHINE_COUNT] as usize,
+                    id,
+                );
+                let saved = RowIndex::new(
+                    config[Header::MACHINE_STATE] as usize,
+                    config[Header::MACHINE_COUNT] as usize,
+                    id,
+                );
+                let nominal = config[item.field(MachineLayout::NAMEPLATE, 1usize)]
+                    - config[item.field(MachineLayout::DOWNTIME, 1usize)];
                 let capacity = minimum(
-                    read(state, saved + MachineState::REMAINING),
+                    read(state, saved.field(MachineState::REMAINING, 2usize)),
                     ticks(
-                        state[saved + MachineState::CONDITION] * nominal / RESEARCH_SCALE,
+                        state[saved.field(MachineState::CONDITION, 1usize)] * nominal
+                            / RESEARCH_SCALE,
                         0,
                     ),
                 );
-                cap_plan(main, config, config[item + MachineLayout::FIRM], capacity);
+                cap_plan(
+                    main,
+                    config,
+                    config[item.field(MachineLayout::FIRM, 1usize)],
+                    capacity,
+                );
             }
         }
         ResearchStage::StockCapacity => {
             if id < config[Header::STOCK_COUNT] as usize {
-                let item = config[Header::STOCKS] as usize + id * StockLayout::WORDS;
-                let saved = config[Header::STOCK_STATE] as usize + id * StockState::WORDS;
+                let item = RowIndex::new(
+                    config[Header::STOCKS] as usize,
+                    config[Header::STOCK_COUNT] as usize,
+                    id,
+                );
+                let saved = RowIndex::new(
+                    config[Header::STOCK_STATE] as usize,
+                    config[Header::STOCK_COUNT] as usize,
+                    id,
+                );
                 cap_plan(
                     main,
                     config,
-                    config[item + StockLayout::FIRM],
+                    config[item.field(StockLayout::FIRM, 1usize)],
                     ticks(
-                        state[saved + StockState::STOCK] / config[item + StockLayout::EXTRACTION],
+                        state[saved.field(StockState::STOCK, 1usize)]
+                            / config[item.field(StockLayout::EXTRACTION, 1usize)],
                         0,
                     ),
                 );
@@ -312,15 +404,23 @@ pub fn research(
         }
         ResearchStage::Strike => {
             if id < config[Header::STRIKE_COUNT] as usize {
-                let item = config[Header::STRIKES] as usize + id * StrikeLayout::WORDS;
-                let saved = config[Header::STRIKE_STATE] as usize + id * StrikeState::WORDS;
-                let positive = 2 * config[item + StrikeLayout::GRIEVANCE]
-                    + config[item + StrikeLayout::SOLIDARITY]
-                    + config[item + StrikeLayout::TRUST]
-                    + config[item + StrikeLayout::EFFICACY]
-                    + config[item + StrikeLayout::PEERS];
-                let negative = 2 * config[item + StrikeLayout::COST]
-                    + config[item + StrikeLayout::RISK]
+                let item = RowIndex::new(
+                    config[Header::STRIKES] as usize,
+                    config[Header::STRIKE_COUNT] as usize,
+                    id,
+                );
+                let saved = RowIndex::new(
+                    config[Header::STRIKE_STATE] as usize,
+                    config[Header::STRIKE_COUNT] as usize,
+                    id,
+                );
+                let positive = 2 * config[item.field(StrikeLayout::GRIEVANCE, 1usize)]
+                    + config[item.field(StrikeLayout::SOLIDARITY, 1usize)]
+                    + config[item.field(StrikeLayout::TRUST, 1usize)]
+                    + config[item.field(StrikeLayout::EFFICACY, 1usize)]
+                    + config[item.field(StrikeLayout::PEERS, 1usize)];
+                let negative = 2 * config[item.field(StrikeLayout::COST, 1usize)]
+                    + config[item.field(StrikeLayout::RISK, 1usize)]
                     + 1500;
                 let score = i32::cast_from(positive) - i32::cast_from(negative);
                 let probability = sigmoid(score, table);
@@ -330,8 +430,8 @@ pub fn research(
                         day: ticks(day, 0),
                         phase: comptime!(Phase::Observation as u32),
                         actor: ticks(
-                            config[item + StrikeLayout::IDENTITY],
-                            config[item + StrikeLayout::IDENTITY + 1],
+                            config[item.field(StrikeLayout::IDENTITY, 2usize)],
+                            config[item.field(StrikeLayout::IDENTITY, 2usize) + 1],
                         ),
                         purpose: 0x5354524b,
                         index: zero(),
@@ -343,16 +443,16 @@ pub fn research(
                     comptime!(Participation::Striking as u32),
                     comptime!(Participation::Working as u32),
                 );
-                state[saved + StrikeState::SCORE] = u32::cast_from(score + 4500);
-                state[saved + StrikeState::PROBABILITY] = probability;
-                state[saved + StrikeState::PARTICIPATION] = participation;
+                state[saved.field(StrikeState::SCORE, 1usize)] = u32::cast_from(score + 4500);
+                state[saved.field(StrikeState::PROBABILITY, 1usize)] = probability;
+                state[saved.field(StrikeState::PARTICIPATION, 1usize)] = participation;
                 if participation == comptime!(Participation::Striking as u32) {
                     write(
                         main,
                         main_coordinate(
                             config,
                             comptime!(Field::Time as u32),
-                            config[item + StrikeLayout::HOUSEHOLD],
+                            config[item.field(StrikeLayout::HOUSEHOLD, 1usize)],
                         ),
                         zero(),
                     );
@@ -361,21 +461,37 @@ pub fn research(
         }
         ResearchStage::Maintenance => {
             if id < config[Header::MACHINE_COUNT] as usize {
-                let item = config[Header::MACHINES] as usize + id * MachineLayout::WORDS;
-                let saved = config[Header::MACHINE_STATE] as usize + id * MachineState::WORDS;
+                let item = RowIndex::new(
+                    config[Header::MACHINES] as usize,
+                    config[Header::MACHINE_COUNT] as usize,
+                    id,
+                );
+                let saved = RowIndex::new(
+                    config[Header::MACHINE_STATE] as usize,
+                    config[Header::MACHINE_COUNT] as usize,
+                    id,
+                );
                 let coordinate = main_coordinate(
                     config,
-                    config[item + MachineLayout::MAINTENANCE_GOOD],
-                    config[item + MachineLayout::FIRM],
+                    config[item.field(MachineLayout::MAINTENANCE_GOOD, 1usize)],
+                    config[item.field(MachineLayout::FIRM, 1usize)],
                 );
-                let required = ticks(config[item + MachineLayout::MAINTENANCE_TICKS], 0);
+                let required = ticks(
+                    config[item.field(MachineLayout::MAINTENANCE_TICKS, 1usize)],
+                    0,
+                );
                 let available = read(main, coordinate);
                 if !lt(available, required) {
                     write(main, coordinate, minus(available, required));
-                    increment(state, saved + MachineState::CONSUMED, required, control);
-                    state[saved + MachineState::MAINTENANCE_RESTORATION] = config
-                        [item + MachineLayout::MAINTENANCE_TICKS]
-                        * config[item + MachineLayout::RESTORATION];
+                    increment(
+                        state,
+                        saved.field(MachineState::CONSUMED, 2usize),
+                        required,
+                        control,
+                    );
+                    state[saved.field(MachineState::MAINTENANCE_RESTORATION, 1usize)] = config
+                        [item.field(MachineLayout::MAINTENANCE_TICKS, 1usize)]
+                        * config[item.field(MachineLayout::RESTORATION, 1usize)];
                 }
             }
         }
@@ -386,28 +502,42 @@ pub fn research(
         }
         ResearchStage::MachineClose => {
             if id < config[Header::MACHINE_COUNT] as usize {
-                let item = config[Header::MACHINES] as usize + id * MachineLayout::WORDS;
-                let saved = config[Header::MACHINE_STATE] as usize + id * MachineState::WORDS;
+                let item = RowIndex::new(
+                    config[Header::MACHINES] as usize,
+                    config[Header::MACHINE_COUNT] as usize,
+                    id,
+                );
+                let saved = RowIndex::new(
+                    config[Header::MACHINE_STATE] as usize,
+                    config[Header::MACHINE_COUNT] as usize,
+                    id,
+                );
                 let produced = read(
                     main,
                     main_coordinate(
                         config,
                         comptime!(Field::Produced as u32),
-                        config[item + MachineLayout::FIRM],
+                        config[item.field(MachineLayout::FIRM, 1usize)],
                     ),
                 );
-                let before = read(state, saved + MachineState::PRODUCED_BEFORE);
+                let before = read(state, saved.field(MachineState::PRODUCED_BEFORE, 2usize));
                 let used = divide(
                     positive(produced, before),
-                    config[item + MachineLayout::OUTPUT_TICKS],
+                    config[item.field(MachineLayout::OUTPUT_TICKS, 1usize)],
                 );
-                let remaining = read(state, saved + MachineState::REMAINING);
-                let reproduced = times(used, config[item + MachineLayout::OUTPUT_TICKS]);
+                let remaining = read(state, saved.field(MachineState::REMAINING, 2usize));
+                let reproduced = times(
+                    used,
+                    config[item.field(MachineLayout::OUTPUT_TICKS, 1usize)],
+                );
                 reproduced.faults.record(control);
                 if lt(remaining, used)
                     || lt(produced, before)
                     || lt(
-                        ticks(config[item + MachineLayout::MAXIMUM_PACKETS], 0),
+                        ticks(
+                            config[item.field(MachineLayout::MAXIMUM_PACKETS, 1usize)],
+                            0,
+                        ),
                         used,
                     )
                     || !equal(reproduced.value, positive(produced, before))
@@ -416,58 +546,70 @@ pub fn research(
                 }
                 write(
                     state,
-                    saved + MachineState::REMAINING,
+                    saved.field(MachineState::REMAINING, 2usize),
                     positive(remaining, used),
                 );
-                let wear = used.extract(0usize) * config[item + MachineLayout::WEAR];
-                let repaired = state[saved + MachineState::CONDITION]
-                    + state[saved + MachineState::MAINTENANCE_RESTORATION];
-                state[saved + MachineState::CONDITION] =
+                let wear = used.extract(0usize) * config[item.field(MachineLayout::WEAR, 1usize)];
+                let repaired = state[saved.field(MachineState::CONDITION, 1usize)]
+                    + state[saved.field(MachineState::MAINTENANCE_RESTORATION, 1usize)];
+                state[saved.field(MachineState::CONDITION, 1usize)] =
                     min(RESEARCH_SCALE, repaired - min(repaired, wear));
-                state[saved + MachineState::MAINTENANCE_RESTORATION] = 0;
+                state[saved.field(MachineState::MAINTENANCE_RESTORATION, 1usize)] = 0;
             }
         }
         ResearchStage::StockClose => {
             if id < config[Header::STOCK_COUNT] as usize {
-                let item = config[Header::STOCKS] as usize + id * StockLayout::WORDS;
-                let saved = config[Header::STOCK_STATE] as usize + id * StockState::WORDS;
+                let item = RowIndex::new(
+                    config[Header::STOCKS] as usize,
+                    config[Header::STOCK_COUNT] as usize,
+                    id,
+                );
+                let saved = RowIndex::new(
+                    config[Header::STOCK_STATE] as usize,
+                    config[Header::STOCK_COUNT] as usize,
+                    id,
+                );
                 let produced = read(
                     main,
                     main_coordinate(
                         config,
                         comptime!(Field::Produced as u32),
-                        config[item + StockLayout::FIRM],
+                        config[item.field(StockLayout::FIRM, 1usize)],
                     ),
                 );
-                let before = read(state, saved + StockState::PRODUCED_BEFORE);
+                let before = read(state, saved.field(StockState::PRODUCED_BEFORE, 2usize));
                 let used = divide(
                     positive(produced, before),
-                    config[item + StockLayout::OUTPUT_TICKS],
+                    config[item.field(StockLayout::OUTPUT_TICKS, 1usize)],
                 );
-                let extraction = times(used, config[item + StockLayout::EXTRACTION]);
+                let extraction = times(used, config[item.field(StockLayout::EXTRACTION, 1usize)]);
                 extraction.faults.record(control);
-                let stock = state[saved + StockState::STOCK];
-                let reproduced = times(used, config[item + StockLayout::OUTPUT_TICKS]);
+                let stock = state[saved.field(StockState::STOCK, 1usize)];
+                let reproduced = times(used, config[item.field(StockLayout::OUTPUT_TICKS, 1usize)]);
                 reproduced.faults.record(control);
                 if lt(ticks(stock, 0), extraction.value)
                     || lt(produced, before)
-                    || lt(ticks(config[item + StockLayout::MAXIMUM_PACKETS], 0), used)
+                    || lt(
+                        ticks(config[item.field(StockLayout::MAXIMUM_PACKETS, 1usize)], 0),
+                        used,
+                    )
                     || !equal(reproduced.value, positive(produced, before))
                 {
                     KernelFaults::new(comptime!(FaultFlags::RESEARCH_MISMATCH)).record(control);
                 }
                 let remaining = positive(ticks(stock, 0), extraction.value).extract(0usize);
-                let capacity = config[item + StockLayout::CAPACITY];
+                let capacity = config[item.field(StockLayout::CAPACITY, 1usize)];
                 let growth = ratio(
                     ticks(remaining, 0),
-                    config[item + StockLayout::RENEWAL] * (capacity - remaining),
+                    config[item.field(StockLayout::RENEWAL, 1usize)] * (capacity - remaining),
                     capacity * RESEARCH_SCALE,
                 );
                 growth.faults.record(control);
-                state[saved + StockState::STOCK] = remaining + growth.value.extract(0usize);
+                state[saved.field(StockState::STOCK, 1usize)] =
+                    remaining + growth.value.extract(0usize);
                 increment(
                     state,
-                    saved + StockState::EXTRACTED,
+                    saved.field(StockState::EXTRACTED, 2usize),
                     extraction.value,
                     control,
                 );
@@ -483,39 +625,65 @@ pub fn research(
                             total,
                             read(
                                 state,
-                                config[Header::LAB_STATE] as usize
-                                    + lab * LabState::WORDS
-                                    + LabState::CONSUMED
+                                RowIndex::new(
+                                    config[Header::LAB_STATE] as usize,
+                                    config[Header::LAB_COUNT] as usize,
+                                    lab,
+                                )
+                                .field(LabState::CONSUMED, 6usize)
                                     + id * 2,
                             ),
                         );
                     }
                 }
                 for project in 0..config[Header::PROJECT_COUNT] as usize {
-                    let saved =
-                        config[Header::PROJECT_STATE] as usize + project * ProjectState::WORDS;
+                    let saved = RowIndex::new(
+                        config[Header::PROJECT_STATE] as usize,
+                        config[Header::PROJECT_COUNT] as usize,
+                        project,
+                    );
                     if id == SummaryLayout::ATTEMPTS / 2 {
-                        total = add(control, total, read(state, saved + ProjectState::ATTEMPTS));
+                        total = add(
+                            control,
+                            total,
+                            read(state, saved.field(ProjectState::ATTEMPTS, 2usize)),
+                        );
                     }
                     if id == SummaryLayout::DISCOVERIES / 2 {
                         total = add(
                             control,
                             total,
-                            read(state, saved + ProjectState::DISCOVERIES),
+                            read(state, saved.field(ProjectState::DISCOVERIES, 2usize)),
                         );
                     }
                 }
                 for machine in 0..config[Header::MACHINE_COUNT] as usize {
-                    let saved =
-                        config[Header::MACHINE_STATE] as usize + machine * MachineState::WORDS;
-                    let item = config[Header::MACHINES] as usize + machine * MachineLayout::WORDS;
+                    let saved = RowIndex::new(
+                        config[Header::MACHINE_STATE] as usize,
+                        config[Header::MACHINE_COUNT] as usize,
+                        machine,
+                    );
+                    let item = RowIndex::new(
+                        config[Header::MACHINES] as usize,
+                        config[Header::MACHINE_COUNT] as usize,
+                        machine,
+                    );
                     if id < SummaryLayout::CONSUMED / 2 + 3
-                        && config[item + MachineLayout::MAINTENANCE_GOOD] == id as u32 + 1
+                        && config[item.field(MachineLayout::MAINTENANCE_GOOD, 1usize)]
+                            == id as u32 + 1
                     {
-                        total = add(control, total, read(state, saved + MachineState::CONSUMED));
+                        total = add(
+                            control,
+                            total,
+                            read(state, saved.field(MachineState::CONSUMED, 2usize)),
+                        );
                     }
                     if id == SummaryLayout::REMAINING_SERVICE / 2 {
-                        total = add(control, total, read(state, saved + MachineState::REMAINING));
+                        total = add(
+                            control,
+                            total,
+                            read(state, saved.field(MachineState::REMAINING, 2usize)),
+                        );
                     }
                 }
                 for stock in 0..config[Header::STOCK_COUNT] as usize {
@@ -524,9 +692,12 @@ pub fn research(
                             control,
                             total,
                             ticks(
-                                state[config[Header::STOCK_STATE] as usize
-                                    + stock * StockState::WORDS
-                                    + StockState::STOCK],
+                                state[RowIndex::new(
+                                    config[Header::STOCK_STATE] as usize,
+                                    config[Header::STOCK_COUNT] as usize,
+                                    stock,
+                                )
+                                .field(StockState::STOCK, 1usize)],
                                 0,
                             ),
                         );
@@ -538,9 +709,12 @@ pub fn research(
                             control,
                             total,
                             ticks(
-                                state[config[Header::STRIKE_STATE] as usize
-                                    + strike * StrikeState::WORDS
-                                    + StrikeState::PARTICIPATION],
+                                state[RowIndex::new(
+                                    config[Header::STRIKE_STATE] as usize,
+                                    config[Header::STRIKE_COUNT] as usize,
+                                    strike,
+                                )
+                                .field(StrikeState::PARTICIPATION, 1usize)],
                                 0,
                             ),
                         );
@@ -551,61 +725,107 @@ pub fn research(
         }
         ResearchStage::Audit => {
             if id < config[Header::LAB_COUNT] as usize {
-                let saved = config[Header::LAB_STATE] as usize + id * LabState::WORDS;
-                let item = config[Header::LABS] as usize + id * LabLayout::WORDS;
-                if state[saved + LabState::MASTERED] & !state[saved + LabState::DISCOVERED] != 0
-                    || state[saved + LabState::ADOPTED]
-                        & !(state[saved + LabState::MASTERED] & state[saved + LabState::PERMITTED])
+                let saved = RowIndex::new(
+                    config[Header::LAB_STATE] as usize,
+                    config[Header::LAB_COUNT] as usize,
+                    id,
+                );
+                let item = RowIndex::new(
+                    config[Header::LABS] as usize,
+                    config[Header::LAB_COUNT] as usize,
+                    id,
+                );
+                if state[saved.field(LabState::MASTERED, 1usize)]
+                    & !state[saved.field(LabState::DISCOVERED, 1usize)]
+                    != 0
+                    || state[saved.field(LabState::ADOPTED, 1usize)]
+                        & !(state[saved.field(LabState::MASTERED, 1usize)]
+                            & state[saved.field(LabState::PERMITTED, 1usize)])
                         != 0
-                    || state[saved + LabState::PERMITTED] != config[item + LabLayout::PERMITTED]
-                    || config[item + LabLayout::DISCOVERED] & !state[saved + LabState::DISCOVERED]
+                    || state[saved.field(LabState::PERMITTED, 1usize)]
+                        != config[item.field(LabLayout::PERMITTED, 1usize)]
+                    || config[item.field(LabLayout::DISCOVERED, 1usize)]
+                        & !state[saved.field(LabState::DISCOVERED, 1usize)]
                         != 0
-                    || config[item + LabLayout::MASTERED] & !state[saved + LabState::MASTERED] != 0
-                    || config[item + LabLayout::ADOPTED] & !state[saved + LabState::ADOPTED] != 0
+                    || config[item.field(LabLayout::MASTERED, 1usize)]
+                        & !state[saved.field(LabState::MASTERED, 1usize)]
+                        != 0
+                    || config[item.field(LabLayout::ADOPTED, 1usize)]
+                        & !state[saved.field(LabState::ADOPTED, 1usize)]
+                        != 0
                 {
                     KernelFaults::new(comptime!(FaultFlags::RESEARCH_MISMATCH)).record(control);
                 }
             }
             if id < config[Header::PROJECT_COUNT] as usize {
-                let saved = config[Header::PROJECT_STATE] as usize + id * ProjectState::WORDS;
-                if state[saved + ProjectState::EXPOSURE] > RESEARCH_SCALE
-                    || state[saved + ProjectState::OUTCOME]
+                let saved = RowIndex::new(
+                    config[Header::PROJECT_STATE] as usize,
+                    config[Header::PROJECT_COUNT] as usize,
+                    id,
+                );
+                if state[saved.field(ProjectState::EXPOSURE, 1usize)] > RESEARCH_SCALE
+                    || state[saved.field(ProjectState::OUTCOME, 1usize)]
                         > comptime!(AttemptOutcome::Discovered as u32)
-                    || state[saved + ProjectState::PROBABILITY] > PROBABILITY_SCALE
+                    || state[saved.field(ProjectState::PROBABILITY, 1usize)] > PROBABILITY_SCALE
                     || lt(
-                        read(state, saved + ProjectState::ATTEMPTS),
-                        read(state, saved + ProjectState::DISCOVERIES),
+                        read(state, saved.field(ProjectState::ATTEMPTS, 2usize)),
+                        read(state, saved.field(ProjectState::DISCOVERIES, 2usize)),
                     )
                 {
                     KernelFaults::new(comptime!(FaultFlags::RESEARCH_MISMATCH)).record(control);
                 }
             }
             if id < config[Header::MACHINE_COUNT] as usize {
-                let saved = config[Header::MACHINE_STATE] as usize + id * MachineState::WORDS;
-                let item = config[Header::MACHINES] as usize + id * MachineLayout::WORDS;
-                let initial = ticks(
-                    config[item + MachineLayout::INITIAL_SERVICE],
-                    config[item + MachineLayout::INITIAL_SERVICE + 1],
+                let saved = RowIndex::new(
+                    config[Header::MACHINE_STATE] as usize,
+                    config[Header::MACHINE_COUNT] as usize,
+                    id,
                 );
-                if state[saved + MachineState::CONDITION] > RESEARCH_SCALE
-                    || state[saved + MachineState::MAINTENANCE_RESTORATION] != 0
-                    || lt(initial, read(state, saved + MachineState::REMAINING))
+                let item = RowIndex::new(
+                    config[Header::MACHINES] as usize,
+                    config[Header::MACHINE_COUNT] as usize,
+                    id,
+                );
+                let initial = ticks(
+                    config[item.field(MachineLayout::INITIAL_SERVICE, 2usize)],
+                    config[item.field(MachineLayout::INITIAL_SERVICE, 2usize) + 1],
+                );
+                if state[saved.field(MachineState::CONDITION, 1usize)] > RESEARCH_SCALE
+                    || state[saved.field(MachineState::MAINTENANCE_RESTORATION, 1usize)] != 0
+                    || lt(
+                        initial,
+                        read(state, saved.field(MachineState::REMAINING, 2usize)),
+                    )
                 {
                     KernelFaults::new(comptime!(FaultFlags::RESEARCH_MISMATCH)).record(control);
                 }
             }
             if id < config[Header::STOCK_COUNT] as usize {
-                let saved = config[Header::STOCK_STATE] as usize + id * StockState::WORDS;
-                let item = config[Header::STOCKS] as usize + id * StockLayout::WORDS;
-                if state[saved + StockState::STOCK] > config[item + StockLayout::CAPACITY] {
+                let saved = RowIndex::new(
+                    config[Header::STOCK_STATE] as usize,
+                    config[Header::STOCK_COUNT] as usize,
+                    id,
+                );
+                let item = RowIndex::new(
+                    config[Header::STOCKS] as usize,
+                    config[Header::STOCK_COUNT] as usize,
+                    id,
+                );
+                if state[saved.field(StockState::STOCK, 1usize)]
+                    > config[item.field(StockLayout::CAPACITY, 1usize)]
+                {
                     KernelFaults::new(comptime!(FaultFlags::RESEARCH_MISMATCH)).record(control);
                 }
             }
             if id < config[Header::STRIKE_COUNT] as usize {
-                let saved = config[Header::STRIKE_STATE] as usize + id * StrikeState::WORDS;
-                if state[saved + StrikeState::SCORE] > 9000
-                    || state[saved + StrikeState::PROBABILITY] > PROBABILITY_SCALE
-                    || state[saved + StrikeState::PARTICIPATION]
+                let saved = RowIndex::new(
+                    config[Header::STRIKE_STATE] as usize,
+                    config[Header::STRIKE_COUNT] as usize,
+                    id,
+                );
+                if state[saved.field(StrikeState::SCORE, 1usize)] > 9000
+                    || state[saved.field(StrikeState::PROBABILITY, 1usize)] > PROBABILITY_SCALE
+                    || state[saved.field(StrikeState::PARTICIPATION, 1usize)]
                         > comptime!(Participation::Striking as u32)
                 {
                     KernelFaults::new(comptime!(FaultFlags::RESEARCH_MISMATCH)).record(control);

@@ -1,10 +1,10 @@
-use super::{Actor, Good};
+use super::{ActorRows, Good};
 use anyhow::{Context, Result, anyhow};
 use serde::{Deserialize, Serialize};
 use std::collections::{BTreeMap, BTreeSet};
 
 pub const RESEARCH_SCALE: u32 = 1000;
-pub const RESEARCH_PROFILE: &str = "ResearchFixedV1";
+pub const RESEARCH_PROFILE: &str = "ResearchFixedV2";
 pub const MAX_RESEARCH_RECORDS: usize = 100_000;
 
 #[derive(Clone, Copy, Debug, Default, Serialize, Deserialize, PartialEq, Eq)]
@@ -120,7 +120,7 @@ impl ResearchConfig {
             + 4096
     }
 
-    pub fn new(mut config: Self, actors: &[Actor]) -> Result<Self> {
+    pub fn new(mut config: Self, actors: &ActorRows) -> Result<Self> {
         config.labs.sort_by_key(|lab| lab.owner);
         config.equipment.sort_by_key(|machine| machine.firm);
         config.natural_stocks.sort_by_key(|stock| stock.firm);
@@ -132,7 +132,7 @@ impl ResearchConfig {
         let actor = |identity| {
             identities
                 .get(&identity)
-                .copied()
+                .cloned()
                 .context("institution references an unknown actor")
         };
         let mut owners = BTreeSet::new();

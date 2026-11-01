@@ -492,7 +492,6 @@ fn publish(
                 .actors()
                 .iter()
                 .filter(|actor| actor.kind > 0)
-                .cloned()
                 .collect(),
         ),
         Publication::Snapshot => None,

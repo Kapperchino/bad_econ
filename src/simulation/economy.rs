@@ -81,15 +81,17 @@ fn increase(
 
 #[cube]
 fn kind(actors: &[u32], actor: u32) -> KernelActorKind {
-    KernelActorKind::load(actors[actor as usize * ActorLayout::WORDS + ActorLayout::KIND])
+    KernelActorKind::load(
+        actors[ActorLayout::KIND * (actors.len() / ActorLayout::WORDS) + actor as usize],
+    )
 }
 
 #[cube]
 fn distance(actors: &[u32], a: u32, b: u32) -> u32 {
-    let ax = actors[a as usize * ActorLayout::WORDS + ActorLayout::X];
-    let ay = actors[a as usize * ActorLayout::WORDS + ActorLayout::Y];
-    let bx = actors[b as usize * ActorLayout::WORDS + ActorLayout::X];
-    let by = actors[b as usize * ActorLayout::WORDS + ActorLayout::Y];
+    let ax = actors[ActorLayout::X * (actors.len() / ActorLayout::WORDS) + a as usize];
+    let ay = actors[ActorLayout::Y * (actors.len() / ActorLayout::WORDS) + a as usize];
+    let bx = actors[ActorLayout::X * (actors.len() / ActorLayout::WORDS) + b as usize];
+    let by = actors[ActorLayout::Y * (actors.len() / ActorLayout::WORDS) + b as usize];
     max(ax, bx) - min(ax, bx) + max(ay, by) - min(ay, by)
 }
 
@@ -191,18 +193,21 @@ fn local(
                             control,
                             desired,
                             ticks(
-                                actors
-                                    [id as usize * ActorLayout::WORDS + ActorLayout::OUTPUT_TICKS]
+                                actors[ActorLayout::OUTPUT_TICKS
+                                    * (actors.len() / ActorLayout::WORDS)
+                                    + id as usize]
                                     - 1u32,
                                 0u32,
                             ),
                         ),
-                        actors[id as usize * ActorLayout::WORDS + ActorLayout::OUTPUT_TICKS],
+                        actors[ActorLayout::OUTPUT_TICKS * (actors.len() / ActorLayout::WORDS)
+                            + id as usize],
                     );
                     let mut planned = minimum(
                         quotient,
                         ticks(
-                            actors[id as usize * ActorLayout::WORDS + ActorLayout::CAPACITY],
+                            actors[ActorLayout::CAPACITY * (actors.len() / ActorLayout::WORDS)
+                                + id as usize],
                             0u32,
                         ),
                     );
@@ -211,7 +216,9 @@ fn local(
                             planned,
                             divide(
                                 value(state, config, k.input(), id),
-                                actors[id as usize * ActorLayout::WORDS + ActorLayout::INPUT_TICKS],
+                                actors[ActorLayout::INPUT_TICKS
+                                    * (actors.len() / ActorLayout::WORDS)
+                                    + id as usize],
                             ),
                         );
                     }
@@ -226,8 +233,9 @@ fn local(
                         divide(
                             value(state, config, comptime!(Field::Cash as u32), id),
                             planning_wage
-                                * actors
-                                    [id as usize * ActorLayout::WORDS + ActorLayout::LABOR_MINUTES],
+                                * actors[ActorLayout::LABOR_MINUTES
+                                    * (actors.len() / ActorLayout::WORDS)
+                                    + id as usize],
                         ),
                     );
                     set(state, config, comptime!(Field::Slots as u32), id, planned);
@@ -388,7 +396,9 @@ fn local(
                     let cap = divide(
                         divide(
                             value(state, config, comptime!(Field::Cash as u32), id),
-                            actors[id as usize * ActorLayout::WORDS + ActorLayout::LABOR_MINUTES],
+                            actors[ActorLayout::LABOR_MINUTES
+                                * (actors.len() / ActorLayout::WORDS)
+                                + id as usize],
                         ),
                         max(
                             number(state, config, comptime!(Field::Plan as u32), id),
@@ -454,8 +464,10 @@ fn propose(
                 good = comptime!(market.good().expect("input market") as u32);
                 search = k.processes_input() && k.input() == good;
                 wanted = ticks(
-                    actors[id as usize * ActorLayout::WORDS + ActorLayout::CAPACITY]
-                        * actors[id as usize * ActorLayout::WORDS + ActorLayout::INPUT_TICKS]
+                    actors
+                        [ActorLayout::CAPACITY * (actors.len() / ActorLayout::WORDS) + id as usize]
+                        * actors[ActorLayout::INPUT_TICKS * (actors.len() / ActorLayout::WORDS)
+                            + id as usize]
                         * config[ConfigLayout::COVERAGE],
                     0u32,
                 );
@@ -490,7 +502,8 @@ fn propose(
                         POLICY_SCALE,
                     );
                     if !equal(quantity, ticks(0u32, 0u32)) {
-                        chosen = actors[id as usize * ActorLayout::WORDS + ActorLayout::OWNER];
+                        chosen = actors[ActorLayout::OWNER * (actors.len() / ActorLayout::WORDS)
+                            + id as usize];
                     }
                 }
             }
@@ -517,9 +530,9 @@ fn propose(
                 );
         }
         if search {
-            let cx = actors[id as usize * ActorLayout::WORDS + ActorLayout::X]
+            let cx = actors[ActorLayout::X * (actors.len() / ActorLayout::WORDS) + id as usize]
                 / config[ConfigLayout::SEARCH_RADIUS];
-            let cy = actors[id as usize * ActorLayout::WORDS + ActorLayout::Y]
+            let cy = actors[ActorLayout::Y * (actors.len() / ActorLayout::WORDS) + id as usize]
                 / config[ConfigLayout::SEARCH_RADIUS];
             let side = config[ConfigLayout::SPATIAL_SIDE];
             let mut best = ticks(u32::MAX, u32::MAX);
@@ -580,8 +593,9 @@ fn propose(
                                             ),
                                         ),
                                         candidate_wage: wage,
-                                        payable_minutes: actors[firm as usize * ActorLayout::WORDS
-                                            + ActorLayout::LABOR_MINUTES],
+                                        payable_minutes: actors[ActorLayout::LABOR_MINUTES
+                                            * (actors.len() / ActorLayout::WORDS)
+                                            + firm as usize],
                                     },
                                     config,
                                     control,
@@ -593,8 +607,9 @@ fn propose(
                                 wage = negotiation.wage.extract(LOW_WORD);
                                 amount = negotiation.wage;
                             }
-                            let duration = actors
-                                [firm as usize * ActorLayout::WORDS + ActorLayout::LABOR_MINUTES]
+                            let duration = actors[ActorLayout::LABOR_MINUTES
+                                * (actors.len() / ActorLayout::WORDS)
+                                + firm as usize]
                                 + ceildiv(dist, config[ConfigLayout::COMMUTE_SPEED]) * COMMUTE_LEGS;
                             eligible = eligible
                                 && number(state, config, comptime!(Field::Slots as u32), firm)
@@ -603,8 +618,9 @@ fn propose(
                                     >= duration;
                             score = divide(
                                 times32(
-                                    wage * actors[firm as usize * ActorLayout::WORDS
-                                        + ActorLayout::LABOR_MINUTES],
+                                    wage * actors[ActorLayout::LABOR_MINUTES
+                                        * (actors.len() / ActorLayout::WORDS)
+                                        + firm as usize],
                                     POLICY_SCALE,
                                 ),
                                 duration,
@@ -759,7 +775,8 @@ fn construct(
                     }
                     let wage = times32(
                         offered_wage,
-                        actors[other as usize * ActorLayout::WORDS + ActorLayout::LABOR_MINUTES],
+                        actors[ActorLayout::LABOR_MINUTES * (actors.len() / ActorLayout::WORDS)
+                            + other as usize],
                     );
                     event.transfer(
                         config,
@@ -791,8 +808,9 @@ fn construct(
                         comptime!(Field::Time as u32),
                         actor,
                         ticks(
-                            actors
-                                [other as usize * ActorLayout::WORDS + ActorLayout::LABOR_MINUTES]
+                            actors[ActorLayout::LABOR_MINUTES
+                                * (actors.len() / ActorLayout::WORDS)
+                                + other as usize]
                                 + ceildiv(trip, config[ConfigLayout::COMMUTE_SPEED]) * COMMUTE_LEGS,
                             0u32,
                         ),
@@ -835,8 +853,9 @@ fn construct(
                         actor,
                         zero,
                         ticks(
-                            actors
-                                [other as usize * ActorLayout::WORDS + ActorLayout::LABOR_MINUTES],
+                            actors[ActorLayout::LABOR_MINUTES
+                                * (actors.len() / ActorLayout::WORDS)
+                                + other as usize],
                             0u32,
                         ),
                     );
@@ -847,7 +866,8 @@ fn construct(
                         other,
                         zero,
                         ticks(
-                            actors[other as usize * ActorLayout::WORDS + ActorLayout::OUTPUT_TICKS],
+                            actors[ActorLayout::OUTPUT_TICKS * (actors.len() / ActorLayout::WORDS)
+                                + other as usize],
                             0u32,
                         ),
                     );
@@ -872,8 +892,9 @@ fn construct(
                             kind(actors, other).input(),
                             other,
                             ticks(
-                                actors[other as usize * ActorLayout::WORDS
-                                    + ActorLayout::INPUT_TICKS],
+                                actors[ActorLayout::INPUT_TICKS
+                                    * (actors.len() / ActorLayout::WORDS)
+                                    + other as usize],
                                 0u32,
                             ),
                             zero,
@@ -885,8 +906,9 @@ fn construct(
                             other,
                             zero,
                             ticks(
-                                actors[other as usize * ActorLayout::WORDS
-                                    + ActorLayout::INPUT_TICKS],
+                                actors[ActorLayout::INPUT_TICKS
+                                    * (actors.len() / ActorLayout::WORDS)
+                                    + other as usize],
                                 0u32,
                             ),
                         );
@@ -1206,10 +1228,12 @@ fn summarize(
                         + min(bin, SummaryLayout::WEALTH_BINS as u32 - 1))
                         as usize]
                         .fetch_add(1u32);
-                    let x = actors[actor as usize * ActorLayout::WORDS + ActorLayout::X]
+                    let x = actors
+                        [ActorLayout::X * (actors.len() / ActorLayout::WORDS) + actor as usize]
                         * SummaryLayout::REGION_SIDE as u32
                         / config[ConfigLayout::MAP_SIZE];
-                    let y = actors[actor as usize * ActorLayout::WORDS + ActorLayout::Y]
+                    let y = actors
+                        [ActorLayout::Y * (actors.len() / ActorLayout::WORDS) + actor as usize]
                         * SummaryLayout::REGION_SIDE as u32
                         / config[ConfigLayout::MAP_SIZE];
                     control[(SummaryLayout::REGIONS_START as u32

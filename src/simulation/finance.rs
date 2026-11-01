@@ -2,6 +2,7 @@ mod kernels;
 mod payments;
 mod policies;
 
+use super::rows::{RowIndex, row_layout};
 use super::{
     Device,
     flags::{CONTROL_WORDS, FaultFlags},
@@ -39,73 +40,36 @@ pub struct FinancialActor {
     pub kind: FinancialActorKind,
 }
 
-#[repr(C)]
-#[derive(Clone, Copy, Pod, Zeroable)]
-struct BankMeta {
-    state: u32,
-    first_loan: u32,
-    loan_count: u32,
-    minimum_capital: u32,
-    risk_weight: u32,
-}
-impl BankMeta {
-    const STATE: usize = offset_of!(Self, state) / WORD_BYTES;
-    const FIRST_LOAN: usize = offset_of!(Self, first_loan) / WORD_BYTES;
-    const LOAN_COUNT: usize = offset_of!(Self, loan_count) / WORD_BYTES;
-    const MINIMUM_CAPITAL: usize = offset_of!(Self, minimum_capital) / WORD_BYTES;
-    const RISK_WEIGHT: usize = offset_of!(Self, risk_weight) / WORD_BYTES;
-    const WORDS: usize = size_of::<Self>() / WORD_BYTES;
-}
+row_layout!(BankMetaRows, BankMeta {
+    state: u32 => STATE,
+    first_loan: u32 => FIRST_LOAN,
+    loan_count: u32 => LOAN_COUNT,
+    minimum_capital: u32 => MINIMUM_CAPITAL,
+    risk_weight: u32 => RISK_WEIGHT,
+});
 
-#[repr(C)]
-#[derive(Clone, Copy, Pod, Zeroable)]
-struct LoanMeta {
-    state: u32,
-    cash: u32,
-    requested: crate::ledger::TickLayout,
-    target_cash: crate::ledger::TickLayout,
-    first_day: u32,
-    term: u32,
-    daily_rate: u32,
-    surplus: crate::ledger::TickLayout,
-    debt_service: crate::ledger::TickLayout,
-    service_fraction: u32,
-    advance: u32,
-    collateral: crate::ledger::TickLayout,
-    secured: crate::ledger::TickLayout,
-    consent: u32,
-}
-impl LoanMeta {
-    const STATE: usize = offset_of!(Self, state) / WORD_BYTES;
-    const CASH: usize = offset_of!(Self, cash) / WORD_BYTES;
-    const REQUESTED: usize = offset_of!(Self, requested) / WORD_BYTES;
-    const TARGET_CASH: usize = offset_of!(Self, target_cash) / WORD_BYTES;
-    const FIRST_DAY: usize = offset_of!(Self, first_day) / WORD_BYTES;
-    const TERM: usize = offset_of!(Self, term) / WORD_BYTES;
-    const DAILY_RATE: usize = offset_of!(Self, daily_rate) / WORD_BYTES;
-    const SURPLUS: usize = offset_of!(Self, surplus) / WORD_BYTES;
-    const DEBT_SERVICE: usize = offset_of!(Self, debt_service) / WORD_BYTES;
-    const SERVICE_FRACTION: usize = offset_of!(Self, service_fraction) / WORD_BYTES;
-    const ADVANCE: usize = offset_of!(Self, advance) / WORD_BYTES;
-    const COLLATERAL: usize = offset_of!(Self, collateral) / WORD_BYTES;
-    const SECURED: usize = offset_of!(Self, secured) / WORD_BYTES;
-    const CONSENT: usize = offset_of!(Self, consent) / WORD_BYTES;
-    const WORDS: usize = size_of::<Self>() / WORD_BYTES;
-}
+row_layout!(LoanMetaRows, LoanMeta {
+    state: u32 => STATE,
+    cash: u32 => CASH,
+    requested: crate::ledger::TickLayout => REQUESTED,
+    target_cash: crate::ledger::TickLayout => TARGET_CASH,
+    first_day: u32 => FIRST_DAY,
+    term: u32 => TERM,
+    daily_rate: u32 => DAILY_RATE,
+    surplus: crate::ledger::TickLayout => SURPLUS,
+    debt_service: crate::ledger::TickLayout => DEBT_SERVICE,
+    service_fraction: u32 => SERVICE_FRACTION,
+    advance: u32 => ADVANCE,
+    collateral: crate::ledger::TickLayout => COLLATERAL,
+    secured: crate::ledger::TickLayout => SECURED,
+    consent: u32 => CONSENT,
+});
 
-#[repr(C)]
-#[derive(Clone, Copy, Pod, Zeroable)]
-struct SupportMeta {
-    cash: u32,
-    target: crate::ledger::TickLayout,
-    consent: u32,
-}
-impl SupportMeta {
-    const CASH: usize = offset_of!(Self, cash) / WORD_BYTES;
-    const TARGET: usize = offset_of!(Self, target) / WORD_BYTES;
-    const CONSENT: usize = offset_of!(Self, consent) / WORD_BYTES;
-    const WORDS: usize = size_of::<Self>() / WORD_BYTES;
-}
+row_layout!(SupportMetaRows, SupportMeta {
+    cash: u32 => CASH,
+    target: crate::ledger::TickLayout => TARGET,
+    consent: u32 => CONSENT,
+});
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub enum FinanceStage {
@@ -204,20 +168,20 @@ impl FinanceRuntime {
                     .loans
                     .partition_point(|loan| loan.bank <= bank.identity);
                 BankMeta {
-                    state: layout.banks + (index * BANK_FIELDS) as u32,
+                    state: layout.banks + index as u32,
                     first_loan: first as u32,
                     loan_count: (end - first) as u32,
                     minimum_capital: bank.minimum_capital,
                     risk_weight: bank.risk_weight,
                 }
             })
-            .collect::<Vec<_>>();
+            .collect::<BankMetaRows>();
         let loans = admitted
             .loans
             .iter()
             .enumerate()
             .map(|(index, loan)| LoanMeta {
-                state: layout.loans + (index * LOAN_FIELDS) as u32,
+                state: layout.loans + index as u32,
                 cash: actor_map[&loan.borrower],
                 requested: loan.requested.into(),
                 target_cash: loan.target_cash.into(),
@@ -232,7 +196,7 @@ impl FinanceRuntime {
                 secured: loan.secured.into(),
                 consent: u32::from(loan.consent == Consent::Granted),
             })
-            .collect::<Vec<_>>();
+            .collect::<LoanMetaRows>();
         let recipients = admitted
             .support
             .as_ref()
@@ -245,13 +209,14 @@ impl FinanceRuntime {
                         target: recipient.target_cash.into(),
                         consent: u32::from(recipient.consent == Consent::Granted),
                     })
-                    .collect::<Vec<_>>()
+                    .collect::<SupportMetaRows>()
             })
             .unwrap_or_default();
         let scratch = recipients.len().max(banks.len() * 5).max(1) * TICK_WORDS;
         Ok(Self {
             banks: device.tensor(
-                bytemuck::cast_slice(&banks)
+                banks
+                    .words()
                     .iter()
                     .copied()
                     .chain(std::iter::once(0))
@@ -259,7 +224,8 @@ impl FinanceRuntime {
                     .as_slice(),
             ),
             loans: device.tensor(
-                bytemuck::cast_slice(&loans)
+                loans
+                    .words()
                     .iter()
                     .copied()
                     .chain(std::iter::once(0))
@@ -267,7 +233,8 @@ impl FinanceRuntime {
                     .as_slice(),
             ),
             support: device.tensor(
-                bytemuck::cast_slice(&recipients)
+                recipients
+                    .words()
                     .iter()
                     .copied()
                     .chain(std::iter::once(0))
@@ -323,7 +290,7 @@ impl FinanceRuntime {
             argument(state),
             argument(&self.banks),
             argument(&self.loans),
-            argument(&self.output),
+            argument(&self.scan_a),
             argument(&self.decisions),
             argument(&self.control),
             day,
@@ -421,14 +388,6 @@ impl FinanceRuntime {
         day: u32,
     ) -> Result<FinanceObservation> {
         self.phase(device, state, day, FinanceStage::Audit)?;
-        kernels::audit_columns::launch(
-            &device.client,
-            count(device, self.bank_count * 5),
-            CubeDim::new_1d(device.workgroup),
-            argument(&self.output),
-            argument(&self.scan_a),
-            self.bank_count as u32,
-        );
         let totals = self.scan(device, self.bank_count, 5)?;
         let values = match self.bank_count {
             0 => vec![0; 5],

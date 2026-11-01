@@ -143,10 +143,12 @@ impl PeerBalances {
                 }
                 let wage = times32(
                     rate,
-                    actors[peer as usize * ActorLayout::WORDS + ActorLayout::LABOR_MINUTES],
+                    actors[ActorLayout::LABOR_MINUTES * (actors.len() / ActorLayout::WORDS)
+                        + peer as usize],
                 );
                 let output = ticks(
-                    actors[peer as usize * ActorLayout::WORDS + ActorLayout::OUTPUT_TICKS],
+                    actors[ActorLayout::OUTPUT_TICKS * (actors.len() / ActorLayout::WORDS)
+                        + peer as usize],
                     0,
                 );
                 let escrow = plus(self.escrow, wage);
@@ -159,7 +161,8 @@ impl PeerBalances {
                 next_pipeline = pipeline.value;
                 if kind(actors, peer).processes_input() {
                     let input = ticks(
-                        actors[peer as usize * ActorLayout::WORDS + ActorLayout::INPUT_TICKS],
+                        actors[ActorLayout::INPUT_TICKS * (actors.len() / ActorLayout::WORDS)
+                            + peer as usize],
                         0,
                     );
                     let used = plus(self.used, input);

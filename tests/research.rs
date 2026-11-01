@@ -614,3 +614,122 @@ fn strike_participation_and_research_share_the_actual_household_clock() -> Resul
     assert_eq!(saved.summary.consumed, [0; 3]);
     Ok(())
 }
+
+#[test]
+fn research_rows_preserve_multiple_records_and_checkpoint_replay() -> Result<()> {
+    let mut config = base_config()?;
+    for firm in &mut config.population.as_mut().unwrap().firms {
+        firm.cash = 100_000;
+    }
+    let mut first = lab();
+    first.permitted = 3;
+    first.projects.push(ResearchProject {
+        identity: 901,
+        outcomes: 2,
+        exposure: 300,
+        inputs: [0, 0, 1],
+        ..first.projects[0].clone()
+    });
+    let mut second = lab();
+    second.owner = 101;
+    second.researcher = 2;
+    second.permitted = 4;
+    second.production_requirements = 4;
+    second.projects[0].identity = 902;
+    second.projects[0].outcomes = 4;
+    second.projects[0].exposure = 700;
+    config.research = Some(ResearchConfig {
+        labs: vec![first, second],
+        equipment: [100, 102]
+            .into_iter()
+            .enumerate()
+            .map(|(index, firm)| Equipment {
+                firm,
+                remaining_service: (1 << 33) + index as u64 * 100,
+                condition: 800 + index as u32 * 100,
+                nameplate: 5,
+                downtime: index as u32,
+                wear_per_packet: 10 + index as u32 * 10,
+                maintenance_good: Good::Bread,
+                maintenance_ticks: 0,
+                restoration_per_tick: 0,
+            })
+            .collect(),
+        natural_stocks: [100, 102]
+            .into_iter()
+            .enumerate()
+            .map(|(index, firm)| NaturalStock {
+                firm,
+                stock: 20 + index as u32 * 10,
+                capacity: 40 + index as u32 * 10,
+                renewal_rate: 0,
+                extraction_per_packet: index as u32 + 1,
+            })
+            .collect(),
+        strikes: [5, 6]
+            .into_iter()
+            .enumerate()
+            .map(|(index, household)| StrikePolicy {
+                household,
+                grievance: index as u32 * 1000,
+                solidarity: 0,
+                trust: 0,
+                efficacy: 0,
+                peers: 0,
+                cost: 1000,
+                risk: 1000,
+            })
+            .collect(),
+    });
+    let scenario = Scenario::new(config)?;
+    let research = scenario.config().research.as_ref().unwrap();
+    let mut simulation = Simulation::new(scenario.clone(), support::device(64)?)?;
+    let initial = simulation.download()?;
+    let initial_research = initial.research.as_ref().unwrap();
+    assert_eq!(initial_research.project(research, 0, 1)?.exposure, 300);
+    assert_eq!(initial_research.project(research, 1, 0)?.exposure, 700);
+    for _ in 0..2 {
+        simulation.advance()?;
+        let state = simulation.download()?;
+        let snapshot = state.research.as_ref().unwrap();
+        for (index, machine) in research.equipment.iter().enumerate() {
+            let actor = scenario.index_of(machine.firm).unwrap();
+            let produced = state.get(Field::Produced, actor);
+            let actual = snapshot.equipment(research, index)?;
+            assert_eq!(
+                actual.remaining_service,
+                machine.remaining_service - produced
+            );
+            assert_eq!(
+                actual.condition,
+                machine.condition - produced as u32 * machine.wear_per_packet
+            );
+            let stock = &research.natural_stocks[index];
+            let extracted = produced * u64::from(stock.extraction_per_packet);
+            assert_eq!(snapshot.stock(research, index)?.extracted, extracted);
+            assert_eq!(
+                snapshot.stock(research, index)?.stock,
+                stock.stock - extracted as u32
+            );
+        }
+        assert_eq!(snapshot.lab(research, 0)?.permitted, 3);
+        assert_eq!(snapshot.lab(research, 1)?.permitted, 4);
+        assert!(snapshot.project(research, 0, 1)?.attempts > 0);
+        assert!(snapshot.project(research, 1, 0)?.attempts > 0);
+        assert_ne!(
+            snapshot.strike(research, 0)?.score,
+            snapshot.strike(research, 1)?.score
+        );
+    }
+    let checkpoint = simulation.checkpoint()?;
+    let encoded = serde_json::to_string(&checkpoint)?;
+    simulation.advance()?;
+    let expected = simulation.download()?;
+    let mut restored = Simulation::new(scenario, support::device(128)?)?;
+    restored.command(SimulationCommand::Restore(
+        serde_json::from_str::<Checkpoint>(&encoded)?.into(),
+    ))?;
+    restored.advance()?;
+    assert_eq!(restored.download()?, expected);
+    Ok(())
+}

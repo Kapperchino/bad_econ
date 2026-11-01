@@ -172,9 +172,14 @@ impl FinanceConfig {
     }
 
     pub fn initial_values(&self) -> Vec<u64> {
-        self.banks
-            .iter()
-            .flat_map(|bank| [bank.reserves, bank.reserves, 0])
+        [BankField::Reserve, BankField::Equity, BankField::RiskAssets]
+            .into_iter()
+            .flat_map(|field| {
+                self.banks.iter().map(move |bank| match field {
+                    BankField::Reserve | BankField::Equity => bank.reserves,
+                    BankField::RiskAssets => 0,
+                })
+            })
             .chain(std::iter::repeat_n(0, self.loans.len() * LOAN_FIELDS))
             .chain(self.support.as_ref().map(|support| support.treasury))
             .collect()
@@ -201,6 +206,21 @@ pub struct FinanceLayout {
     pub loans: u32,
     pub treasury: u32,
     pub end: u32,
+}
+
+impl FinanceLayout {
+    pub fn bank_count(self) -> usize {
+        (self.loans - self.banks) as usize / BANK_FIELDS
+    }
+    pub fn loan_count(self) -> usize {
+        (self.treasury - self.loans) as usize / LOAN_FIELDS
+    }
+    pub fn bank(self, field: BankField, index: usize) -> usize {
+        self.banks as usize + field as usize * self.bank_count() + index
+    }
+    pub fn loan(self, field: LoanField, index: usize) -> usize {
+        self.loans as usize + field as usize * self.loan_count() + index
+    }
 }
 
 #[repr(u32)]
@@ -259,10 +279,9 @@ impl FinanceStateView {
             overdue_loans: 0,
         };
         for (bank_index, bank) in config.banks.iter().enumerate() {
-            let base = layout.banks as usize + bank_index * BANK_FIELDS;
-            let reserve = values[base + BankField::Reserve as usize];
-            let equity = values[base + BankField::Equity as usize];
-            let risk_assets = values[base + BankField::RiskAssets as usize];
+            let reserve = values[layout.bank(BankField::Reserve, bank_index)];
+            let equity = values[layout.bank(BankField::Equity, bank_index)];
+            let risk_assets = values[layout.bank(BankField::RiskAssets, bank_index)];
             let mut principal_total = 0u128;
             let mut risk_total = 0u128;
             let first = config
@@ -273,14 +292,13 @@ impl FinanceStateView {
                 .partition_point(|loan| loan.bank <= bank.identity);
             for (relative, loan) in config.loans[first..end].iter().enumerate() {
                 let loan_index = first + relative;
-                let loan_base = layout.loans as usize + loan_index * LOAN_FIELDS;
-                let principal = values[loan_base + LoanField::Principal as usize];
-                let interest = values[loan_base + LoanField::Interest as usize];
-                let remainder = values[loan_base + LoanField::InterestRemainder as usize];
-                let due = values[loan_base + LoanField::Due as usize];
-                let status = values[loan_base + LoanField::Status as usize];
-                let risk = values[loan_base + LoanField::RiskAssets as usize];
-                let last = values[loan_base + LoanField::LastAccrual as usize];
+                let principal = values[layout.loan(LoanField::Principal, loan_index)];
+                let interest = values[layout.loan(LoanField::Interest, loan_index)];
+                let remainder = values[layout.loan(LoanField::InterestRemainder, loan_index)];
+                let due = values[layout.loan(LoanField::Due, loan_index)];
+                let status = values[layout.loan(LoanField::Status, loan_index)];
+                let risk = values[layout.loan(LoanField::RiskAssets, loan_index)];
+                let last = values[layout.loan(LoanField::LastAccrual, loan_index)];
                 let lifecycle = match status {
                     0 => [principal, interest, remainder, due, risk, last]
                         .into_iter()

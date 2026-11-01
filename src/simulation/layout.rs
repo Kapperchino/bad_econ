@@ -1,5 +1,6 @@
 use super::flags::{ActorKind, ControlLayout};
 use super::negotiation::PolicyLayout;
+use super::rows::row_layout;
 use crate::{
     arithmetic::PRICE_TABLE,
     domain::{Actor, Good, MAX_TAX_BRACKETS, Scenario, State, Technique},
@@ -35,7 +36,7 @@ impl SpatialIndex {
         let cells = (side * side) as usize;
         let segment = cells + 1 + config.firms as usize;
         let cell = |index: usize| {
-            let position = state.actors[index].position;
+            let position = state.actors.at(index).position;
             (position.y / config.search_radius * side + position.x / config.search_radius) as usize
         };
         let mut firms = (config.households as usize..scenario.actors()).collect::<Vec<_>>();
@@ -52,29 +53,17 @@ impl SpatialIndex {
     }
 }
 
-#[repr(C)]
-#[derive(Clone, Copy, Pod, Zeroable)]
-pub struct ActorLayout {
-    x: u32,
-    y: u32,
-    kind: u32,
-    owner: u32,
-    capacity: u32,
-    labor_minutes: u32,
-    input_ticks: u32,
-    output_ticks: u32,
-}
+row_layout!(ActorMetadataRows, ActorLayout {
+    x: u32 => X,
+    y: u32 => Y,
+    kind: u32 => KIND,
+    owner: u32 => OWNER,
+    capacity: u32 => CAPACITY,
+    labor_minutes: u32 => LABOR_MINUTES,
+    input_ticks: u32 => INPUT_TICKS,
+    output_ticks: u32 => OUTPUT_TICKS,
+});
 impl ActorLayout {
-    pub const X: usize = offset_of!(Self, x) / WORD_BYTES;
-    pub const Y: usize = offset_of!(Self, y) / WORD_BYTES;
-    pub const KIND: usize = offset_of!(Self, kind) / WORD_BYTES;
-    pub const OWNER: usize = offset_of!(Self, owner) / WORD_BYTES;
-    pub const CAPACITY: usize = offset_of!(Self, capacity) / WORD_BYTES;
-    pub const LABOR_MINUTES: usize = offset_of!(Self, labor_minutes) / WORD_BYTES;
-    pub const INPUT_TICKS: usize = offset_of!(Self, input_ticks) / WORD_BYTES;
-    pub const OUTPUT_TICKS: usize = offset_of!(Self, output_ticks) / WORD_BYTES;
-    pub const WORDS: usize = size_of::<Self>() / WORD_BYTES;
-
     pub fn new(actor: &Actor, technique: Technique) -> Result<Self> {
         Ok(Self {
             x: actor.position.x,

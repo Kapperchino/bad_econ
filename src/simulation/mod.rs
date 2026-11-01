@@ -11,6 +11,7 @@ mod parameters;
 mod payroll;
 mod policy;
 pub mod research;
+mod rows;
 mod scheduler;
 mod words;
 use crate::{
@@ -83,7 +84,7 @@ pub struct Simulation {
     research_readback: u64,
 }
 impl Simulation {
-    pub fn actors(&self) -> &[Actor] {
+    pub fn actors(&self) -> &ActorRows {
         &self.metadata.actors
     }
     pub fn memory_usage(&self) -> cubecl::MemoryUsage {
@@ -105,9 +106,9 @@ impl Simulation {
             .actors
             .iter()
             .enumerate()
-            .map(|(index, actor)| ActorLayout::new(actor, scenario.technique(index)))
-            .collect::<Result<Vec<_>>>()?;
-        let actors = device.tensor(bytemuck::cast_slice(&actor_layouts));
+            .map(|(index, actor)| ActorLayout::new(&actor, scenario.technique(index)))
+            .collect::<Result<ActorMetadataRows>>()?;
+        let actors = device.tensor(&actor_layouts.words());
         let spatial = device.tensor(&SpatialIndex::new(&scenario, &initial).words);
         let state = device.tensor(bytemuck::cast_slice(&encode(&initial.values)));
         let audited = device.empty(initial.values.len() * TICK_WORDS);
@@ -889,7 +890,7 @@ impl Simulation {
         )?);
         self.readback_bytes += (values.len() * TICK_BYTES) as u64;
         Ok(Inspection {
-            actor: self.metadata.actors[actor].clone(),
+            actor: self.metadata.actors.at(actor),
             day: self.day,
             cash: values[Field::Cash as usize],
             gross_income: values[Field::GrossIncome as usize],
@@ -904,7 +905,10 @@ impl Simulation {
                 .checked_sub(1)
                 .and_then(|index| self.scenario.identity(index as usize))
                 .unwrap_or(0),
-            owner_identity: self.metadata.actors[self.metadata.actors[actor].owner as usize]
+            owner_identity: self
+                .metadata
+                .actors
+                .at(self.metadata.actors.at(actor).owner as usize)
                 .identity,
             available_minutes: values[Field::Time as usize],
             wage: values[Field::Wage as usize],

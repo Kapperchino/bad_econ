@@ -19,7 +19,7 @@ pub use population::{
 };
 
 pub const SCENARIO_VERSION: u32 = 1;
-pub const STATE_HASH_VERSION: &str = "bad-econ/state/DeterministicV1/v3";
+pub const STATE_HASH_VERSION: &str = "bad-econ/state/DeterministicV1/v4";
 pub const BASE_FIELDS: usize = 31;
 pub const MEMORY_BUDGET: u64 = 4 * 1024 * 1024 * 1024;
 
@@ -230,7 +230,7 @@ impl Scenario {
                 if scenario.config.finance.is_some() || scenario.config.research.is_some() {
                     let actors = (0..scenario.actors())
                         .map(|index| scenario.actor(index))
-                        .collect::<Vec<_>>();
+                        .collect::<ActorRows>();
                     scenario.config.research = scenario
                         .config
                         .research
@@ -466,7 +466,7 @@ impl Scenario {
         let config = &self.config;
         let properties = (0..actors)
             .map(|index| self.actor(index))
-            .collect::<Vec<_>>();
+            .collect::<ActorRows>();
         let mut state = State {
             day: 0,
             next_identity: actors as u64 + 1,
@@ -477,7 +477,7 @@ impl Scenario {
             research: None,
         };
         (0..actors).try_for_each(|actor| -> Result<()> {
-            let kind = state.actors[actor].kind;
+            let kind = state.actors.at(actor).kind;
             let cash = match kind {
                 0 => config.household_cash,
                 _ => config.firm_cash,
@@ -549,11 +549,106 @@ pub struct Actor {
     pub owner: u32,
     pub capacity: u32,
 }
+#[derive(Clone, Debug, Default, Serialize, PartialEq, Eq)]
+pub struct ActorRows {
+    identity: Vec<u64>,
+    x: Vec<u32>,
+    y: Vec<u32>,
+    kind: Vec<u32>,
+    owner: Vec<u32>,
+    capacity: Vec<u32>,
+}
+impl ActorRows {
+    pub fn len(&self) -> usize {
+        self.identity.len()
+    }
+    pub fn is_empty(&self) -> bool {
+        self.identity.is_empty()
+    }
+    pub fn at(&self, index: usize) -> Actor {
+        Actor {
+            identity: self.identity[index],
+            position: Position {
+                x: self.x[index],
+                y: self.y[index],
+            },
+            kind: self.kind[index],
+            owner: self.owner[index],
+            capacity: self.capacity[index],
+        }
+    }
+    pub fn get(&self, index: usize) -> Option<Actor> {
+        (index < self.len()).then(|| self.at(index))
+    }
+    pub fn set(&mut self, index: usize, actor: Actor) {
+        self.identity[index] = actor.identity;
+        self.x[index] = actor.position.x;
+        self.y[index] = actor.position.y;
+        self.kind[index] = actor.kind;
+        self.owner[index] = actor.owner;
+        self.capacity[index] = actor.capacity;
+    }
+    pub fn iter(&self) -> impl ExactSizeIterator<Item = Actor> + '_ {
+        (0..self.len()).map(|index| self.at(index))
+    }
+}
+impl FromIterator<Actor> for ActorRows {
+    fn from_iter<T: IntoIterator<Item = Actor>>(actors: T) -> Self {
+        actors.into_iter().fold(Self::default(), |mut rows, actor| {
+            rows.identity.push(actor.identity);
+            rows.x.push(actor.position.x);
+            rows.y.push(actor.position.y);
+            rows.kind.push(actor.kind);
+            rows.owner.push(actor.owner);
+            rows.capacity.push(actor.capacity);
+            rows
+        })
+    }
+}
+impl<'de> Deserialize<'de> for ActorRows {
+    fn deserialize<D: serde::Deserializer<'de>>(
+        deserializer: D,
+    ) -> std::result::Result<Self, D::Error> {
+        #[derive(Deserialize)]
+        #[serde(deny_unknown_fields)]
+        struct Rows {
+            identity: Vec<u64>,
+            x: Vec<u32>,
+            y: Vec<u32>,
+            kind: Vec<u32>,
+            owner: Vec<u32>,
+            capacity: Vec<u32>,
+        }
+        let rows = Rows::deserialize(deserializer)?;
+        match [
+            rows.x.len(),
+            rows.y.len(),
+            rows.kind.len(),
+            rows.owner.len(),
+            rows.capacity.len(),
+        ]
+        .into_iter()
+        .all(|len| len == rows.identity.len())
+        {
+            true => Ok(Self {
+                identity: rows.identity,
+                x: rows.x,
+                y: rows.y,
+                kind: rows.kind,
+                owner: rows.owner,
+                capacity: rows.capacity,
+            }),
+            false => Err(serde::de::Error::custom(
+                "actor rows have different lengths",
+            )),
+        }
+    }
+}
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
 pub struct State {
     pub day: u64,
     pub next_identity: u64,
-    pub actors: Vec<Actor>,
+    pub actors: ActorRows,
     pub values: Vec<u64>,
     pub initial_cash: u64,
     pub initial_goods: [u64; 3],
@@ -686,7 +781,7 @@ impl Checkpoint {
         let _ = ObservationSnapshot::from_state(scenario, state)?;
         let checksum = Self::checksum(scenario.config(), state)?;
         Ok(Self {
-            version: 2,
+            version: 3,
             profile: PROFILE.into(),
             table_hash: table_hash(),
             scenario: scenario.config.clone(),
@@ -700,7 +795,7 @@ impl Checkpoint {
     pub fn restore(&self) -> Result<Restored> {
         let scenario = Scenario::new(self.scenario.clone())?;
         let valid = [
-            self.version == 2,
+            self.version == 3,
             self.profile == PROFILE,
             self.table_hash == table_hash(),
             self.state.values.len() == scenario.state_len(),
@@ -770,7 +865,7 @@ impl Inspection {
             .position(|actor| actor.identity == request.identity)
             .context("unknown actor identity")?;
         Ok(Self {
-            actor: state.actors[index].clone(),
+            actor: state.actors.at(index),
             day: state.day,
             cash: state.get(Field::Cash, index),
             gross_income: state.get(Field::GrossIncome, index),
@@ -791,7 +886,10 @@ impl Inspection {
                 .and_then(|employer| state.actors.get(employer as usize))
                 .map(|actor| actor.identity)
                 .unwrap_or(0),
-            owner_identity: state.actors[state.actors[index].owner as usize].identity,
+            owner_identity: state
+                .actors
+                .at(state.actors.at(index).owner as usize)
+                .identity,
             available_minutes: state.get(Field::Time, index),
             wage: state.get(Field::Wage, index),
             price: state.get(Field::Price, index),
@@ -1031,7 +1129,7 @@ impl<'a> AuditedState<'a> {
             .actors
             .iter()
             .enumerate()
-            .all(|(index, actor)| *actor == scenario.actor(index));
+            .all(|(index, actor)| actor == scenario.actor(index));
         match identities {
             true => Ok(()),
             false => Err(anyhow!("actor metadata does not match the fixed scenario")),
@@ -1047,7 +1145,7 @@ impl<'a> AuditedState<'a> {
             let closed = [Field::Escrow, Field::Due, Field::Pipeline]
                 .into_iter()
                 .all(|field| state.get(field, i) == 0);
-            let actor = &state.actors[i];
+            let actor = &state.actors.at(i);
             let daily_budget = u128::from(c.work_cap.min(1440 - c.reserved_minutes));
             let labor = match (
                 actor.kind,
@@ -1068,7 +1166,7 @@ impl<'a> AuditedState<'a> {
                     let technique = scenario.technique(employer);
                     let commute = actor
                         .position
-                        .distance(state.actors[employer].position)
+                        .distance(state.actors.at(employer).position)
                         .div_ceil(c.commute_speed)
                         * 2;
                     state.get(Field::Hours, i) == u64::from(technique.labor_minutes)

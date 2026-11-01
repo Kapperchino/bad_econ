@@ -104,7 +104,7 @@ fn planning_scenario() -> Result<Scenario> {
 }
 
 fn planned_packets(scenario: &Scenario, state: &State, index: usize) -> Result<u64> {
-    let actor = &state.actors[index];
+    let actor = &state.actors.at(index);
     let technique = scenario.technique(index);
     let output = Good::from_index(actor.kind)?;
     let demand =
@@ -172,7 +172,7 @@ fn proposal_and_decision_kernels_match_independent_policy_formulas() -> Result<(
                 before.get(Field::Unfilled, firm),
                 u64::from(scenario.config().forecast_weight),
             )?;
-            let good = Good::from_index(before.actors[firm].kind)?;
+            let good = Good::from_index(before.actors.at(firm).kind)?;
             let excess = before
                 .get(Field::inventory(good), firm)
                 .saturating_sub(demand);

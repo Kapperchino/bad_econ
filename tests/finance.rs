@@ -93,12 +93,9 @@ fn funded_loan_creation_accrual_repayment_and_balance_sheet_run_on_device() -> R
     let settled = ticks(device.read(&state)?);
     assert_eq!(settled[0], 12);
     assert_eq!(settled[layout.banks as usize], 108);
+    assert_eq!(settled[layout.bank(BankField::Equity, 0)], 108);
     assert_eq!(
-        settled[layout.banks as usize + BankField::Equity as usize],
-        108
-    );
-    assert_eq!(
-        settled[layout.loans as usize + LoanField::Status as usize],
+        settled[layout.loan(LoanField::Status, 0)],
         LoanStatus::Repaid as u64
     );
     assert_eq!(runtime.observe(&device, &state, 2)?.principal, 0);
@@ -370,12 +367,9 @@ fn repayment_retains_fractional_interest_without_accruing_after_settlement() -> 
         [bad_econ::ledger::Decision::Accepted]
     );
     let settled = ticks(device.read(&state)?);
+    assert_eq!(settled[layout.loan(LoanField::InterestRemainder, 0)], 333);
     assert_eq!(
-        settled[layout.loans as usize + LoanField::InterestRemainder as usize],
-        333
-    );
-    assert_eq!(
-        settled[layout.loans as usize + LoanField::Status as usize],
+        settled[layout.loan(LoanField::Status, 0)],
         LoanStatus::Repaid as u64
     );
     runtime.phase(&device, &state, 9, FinanceStage::Opening)?;
@@ -730,10 +724,99 @@ fn financial_audit_rejects_forged_risk_assets_even_when_bank_totals_match() -> R
     ));
     runtime.phase(&device, &state, 0, FinanceStage::Lending)?;
     let mut forged = ticks(device.read(&state)?);
-    forged[layout.banks as usize + BankField::RiskAssets as usize] = 1;
-    forged[layout.loans as usize + LoanField::RiskAssets as usize] = 1;
+    forged[layout.bank(BankField::RiskAssets, 0)] = 1;
+    forged[layout.loan(LoanField::RiskAssets, 0)] = 1;
     assert!(FinanceStateView::new(&config, layout, &forged, 0).is_err());
     device.write(&state, &words(&forged));
     assert!(runtime.observe(&device, &state, 0).is_err());
+    Ok(())
+}
+
+#[test]
+fn financial_rows_keep_distinct_banks_loans_and_support_recipients() -> Result<()> {
+    let device = support::device(64)?;
+    let config = FinanceConfig::new(
+        FinanceConfig {
+            banks: vec![
+                BankSeed {
+                    reserves: 1 << 40,
+                    ..bank()
+                },
+                BankSeed {
+                    identity: 20,
+                    reserves: 1 << 41,
+                    risk_weight: 500,
+                    ..bank()
+                },
+            ],
+            loans: (0..3)
+                .map(|index| LoanContract {
+                    bank: match index {
+                        2 => 20,
+                        _ => 10,
+                    },
+                    target_cash: 30 + index * 10,
+                    daily_rate: 100 + index as u32 * 100,
+                    ..loan(index + 1, index + 1, 30 + index * 10)
+                })
+                .collect(),
+            support: Some(SupportPolicy {
+                treasury: 11,
+                recipients: vec![
+                    SupportRecipient {
+                        household: 1,
+                        target_cash: 32,
+                        consent: Consent::Granted,
+                    },
+                    SupportRecipient {
+                        household: 2,
+                        target_cash: 49,
+                        consent: Consent::Granted,
+                    },
+                ],
+            }),
+        },
+        &[1, 2, 3],
+        &[1, 2, 3],
+    )?;
+    let layout = config.layout(3)?;
+    let initial = [0, 0, 0]
+        .into_iter()
+        .chain(config.initial_values())
+        .collect::<Vec<_>>();
+    assert_eq!(&initial[3..9], &[1 << 40, 1 << 41, 1 << 40, 1 << 41, 0, 0]);
+    let state = device.tensor(&words(&initial));
+    let runtime = FinanceRuntime::new(&device, &config, layout, &actors(3))?;
+    runtime.phase(&device, &state, 0, FinanceStage::Lending)?;
+    runtime.support(&device, &state)?;
+    runtime.phase(&device, &state, 1, FinanceStage::Opening)?;
+    let actual = ticks(device.read(&state)?);
+    assert_eq!(&actual[..3], &[32, 49, 50]);
+    assert_eq!(actual[layout.bank(BankField::Reserve, 0)], (1 << 40) - 70);
+    assert_eq!(actual[layout.bank(BankField::Reserve, 1)], (1 << 41) - 50);
+    assert_eq!(actual[layout.bank(BankField::RiskAssets, 0)], 70);
+    assert_eq!(actual[layout.bank(BankField::RiskAssets, 1)], 25);
+    for index in 0..3 {
+        assert_eq!(
+            actual[layout.loan(LoanField::Principal, index)],
+            30 + index as u64 * 10
+        );
+        assert_eq!(
+            actual[layout.loan(LoanField::Interest, index)],
+            [3, 8, 15][index]
+        );
+        assert_eq!(
+            actual[layout.loan(LoanField::Status, index)],
+            LoanStatus::Active as u64
+        );
+    }
+    let observed = runtime.observe(&device, &state, 1)?;
+    let audited = FinanceStateView::new(&config, layout, &actual, 1)?;
+    assert_eq!(observed.principal, 120);
+    assert_eq!(observed.interest_due, 26);
+    assert_eq!(observed.active_loans, 3);
+    assert_eq!(observed.cash()?, audited.cash);
+    assert_eq!(observed.principal, audited.principal);
+    assert_eq!(observed.interest_due, audited.interest_due);
     Ok(())
 }
