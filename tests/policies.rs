@@ -14,6 +14,17 @@ fn planning_scenario() -> Result<Scenario> {
     config.firms = 6;
     config.distribution_rate = 0;
     let position = Position { x: 0, y: 0 };
+    config.resources = ResourceMap::Explicit {
+        regions: vec![ResourceRegion::new(
+            Good::Grain,
+            Position { x: 0, y: 0 },
+            Position {
+                x: config.map_size,
+                y: config.map_size,
+            },
+            config.map_size,
+        )?],
+    };
     config.population = Some(Population {
         households: (1..=12)
             .map(|identity| HouseholdSeed {

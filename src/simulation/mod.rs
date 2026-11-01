@@ -123,7 +123,7 @@ impl Simulation {
         let actor_layouts = initial
             .actors
             .iter()
-            .map(|actor| ActorLayout::new(&actor))
+            .map(|actor| ActorLayout::new(&actor, &scenario))
             .collect::<ActorMetadataRows>();
         let actors = device.tensor(&actor_layouts.words());
         let spatial = device.tensor(&SpatialIndex::new(&scenario, &initial).words);

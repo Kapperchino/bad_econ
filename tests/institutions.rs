@@ -18,6 +18,17 @@ fn configuration() -> Result<ScenarioConfig> {
     config.behavior.hunger_damage = 0;
     config.behavior.work_fatigue = 0;
     config.behavior.wage_increment = 0;
+    config.resources = ResourceMap::Explicit {
+        regions: vec![ResourceRegion::new(
+            Good::Grain,
+            Position { x: 0, y: 0 },
+            Position {
+                x: config.map_size,
+                y: config.map_size,
+            },
+            config.map_size,
+        )?],
+    };
     config.population = Some(Population {
         households: (1..=3)
             .map(|identity| HouseholdSeed {

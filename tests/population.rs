@@ -16,6 +16,17 @@ fn scenario() -> Result<Scenario> {
         wage_increment: 0,
         price_response: 0,
     };
+    config.resources = ResourceMap::Explicit {
+        regions: vec![ResourceRegion::new(
+            Good::Grain,
+            Position { x: 0, y: 0 },
+            Position {
+                x: config.map_size,
+                y: config.map_size,
+            },
+            config.map_size,
+        )?],
+    };
     config.population = Some(Population {
         households: [901, 101, 303]
             .into_iter()

@@ -13,6 +13,7 @@ fn steelworks(coal: u64) -> Result<ScenarioConfig> {
         .config()
         .clone();
     config.coverage = 30;
+    config.resources = ResourceMap::Explicit { regions: vec![] };
     config.forecast_weight = 0;
     config.distribution_rate = 0;
     config.behavior = BehaviorPolicy {

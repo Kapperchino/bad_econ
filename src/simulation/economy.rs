@@ -189,7 +189,8 @@ fn local(
                     let mut planned = minimum(
                         quotient,
                         ticks(
-                            actors[ActorLayout::CAPACITY * (actors.len() / ActorLayout::WORDS)
+                            actors[ActorLayout::GEOGRAPHIC_CAPACITY
+                                * (actors.len() / ActorLayout::WORDS)
                                 + id as usize],
                             0u32,
                         ),

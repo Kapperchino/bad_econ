@@ -25,6 +25,17 @@ fn base_config() -> Result<ScenarioConfig> {
         price_response: 0,
     };
     let position = Position { x: 0, y: 0 };
+    config.resources = ResourceMap::Explicit {
+        regions: vec![ResourceRegion::new(
+            Good::Grain,
+            Position { x: 0, y: 0 },
+            Position {
+                x: config.map_size,
+                y: config.map_size,
+            },
+            config.map_size,
+        )?],
+    };
     config.population = Some(Population {
         households: (1..=6)
             .map(|identity| HouseholdSeed {

@@ -59,15 +59,17 @@ row_layout!(ActorMetadataRows, ActorLayout {
     kind: u32 => KIND,
     owner: u32 => OWNER,
     capacity: u32 => CAPACITY,
+    geographic_capacity: u32 => GEOGRAPHIC_CAPACITY,
 });
 impl ActorLayout {
-    pub fn new(actor: &Actor) -> Self {
+    pub fn new(actor: &Actor, scenario: &Scenario) -> Self {
         Self {
             x: actor.position.x,
             y: actor.position.y,
             kind: actor.kind,
             owner: actor.owner,
             capacity: actor.capacity,
+            geographic_capacity: scenario.geographic_capacity(actor),
         }
     }
 }

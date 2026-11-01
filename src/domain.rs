@@ -15,13 +15,15 @@ pub mod research;
 pub use households::HouseholdPolicy;
 pub use industry::{Economy, ProductionMethod, Technology};
 mod population;
+mod resources;
 pub use payroll::{MAX_TAX_BRACKETS, PAYROLL_SCALE, PayrollPolicy, TaxBracket};
 pub use population::{
     BehaviorPolicy, FirmSeed, HouseholdSeed, InitialTotals, Population, Technique,
 };
+pub use resources::{ProductionSite, ResourceMap, ResourceRegion};
 
 pub const SCENARIO_VERSION: u32 = 1;
-pub const STATE_HASH_VERSION: &str = "bad-econ/state/DeterministicV1/v5";
+pub const STATE_HASH_VERSION: &str = "bad-econ/state/DeterministicV1/v6";
 pub const USED_FIELDS: usize = Field::ActiveMethod as usize + 1;
 pub const TRANSIT_FIELDS: usize = USED_FIELDS + Good::COUNT;
 pub const CONSUMPTION_FIELDS: usize = TRANSIT_FIELDS + Good::COUNT;
@@ -104,6 +106,12 @@ impl Field {
     }
 }
 
+#[derive(Clone, Copy, Debug, Serialize, Deserialize, PartialEq, Eq)]
+pub enum GoodKind {
+    Natural,
+    Manufactured,
+}
+
 #[repr(u32)]
 #[derive(Clone, Copy, Debug, Serialize, Deserialize, PartialEq, Eq, Hash)]
 pub enum Good {
@@ -144,6 +152,26 @@ impl Good {
         Self::Dye,
         Self::Glass,
     ];
+    pub fn kind(self) -> GoodKind {
+        match self {
+            Self::Grain
+            | Self::Iron
+            | Self::Coal
+            | Self::Flax
+            | Self::Wood
+            | Self::Cotton
+            | Self::Dye => GoodKind::Natural,
+            Self::Flour
+            | Self::Bread
+            | Self::Steel
+            | Self::Linen
+            | Self::Cloth
+            | Self::Coats
+            | Self::Tools
+            | Self::Furniture
+            | Self::Glass => GoodKind::Manufactured,
+        }
+    }
     pub fn inputs(self) -> [Option<Self>; 2] {
         match self {
             Self::Flour => [Some(Self::Grain), None],
@@ -219,6 +247,8 @@ pub struct ScenarioConfig {
     pub households: u32,
     pub firms: u32,
     pub map_size: u32,
+    #[serde(default)]
+    pub resources: ResourceMap,
     pub search_radius: u32,
     pub commute_speed: u32,
     pub shipment_speed: u32,
@@ -262,6 +292,7 @@ pub struct ScenarioConfig {
 pub struct Scenario {
     config: ScenarioConfig,
     totals: InitialTotals,
+    resources: resources::ResourceGeography,
 }
 impl Scenario {
     pub fn industrial(households: u32, seed: u64, experiment: Experiment) -> Result<Self> {
@@ -430,7 +461,12 @@ impl Scenario {
                         }
                     }
                 };
-                let mut scenario = Self { config, totals };
+                let resources = resources::ResourceGeography::new(&config)?;
+                let mut scenario = Self {
+                    config,
+                    totals,
+                    resources,
+                };
                 if scenario.config.finance.is_some() || scenario.config.research.is_some() {
                     let actors = (0..scenario.actors())
                         .map(|index| scenario.actor(index))
@@ -492,6 +528,7 @@ impl Scenario {
             households,
             firms,
             map_size,
+            resources: ResourceMap::Generated,
             search_radius: 1000,
             commute_speed: 50,
             shipment_speed: 1000,
@@ -532,6 +569,29 @@ impl Scenario {
     }
     pub fn config(&self) -> &ScenarioConfig {
         &self.config
+    }
+    pub fn resource_regions(&self) -> &[ResourceRegion] {
+        self.resources.regions()
+    }
+    pub fn has_resource(&self, good: Good, position: Position) -> bool {
+        self.resources.has_resource(good, position)
+    }
+    pub fn production_site(&self, good: Good, position: Position) -> ProductionSite {
+        self.resources.production_site(good, position)
+    }
+    pub fn geographic_capacity(&self, actor: &Actor) -> u32 {
+        match actor.kind {
+            0 => actor.capacity,
+            _ => match self.production_site(
+                Good::from_index(actor.kind).expect("validated firm good"),
+                actor.position,
+            ) {
+                ProductionSite::ResourceMissing => 0,
+                ProductionSite::UnrestrictedManufacturing | ProductionSite::ResourceAvailable => {
+                    actor.capacity
+                }
+            },
+        }
     }
     pub fn actors(&self) -> usize {
         (self.config.households + self.config.firms) as usize
@@ -700,6 +760,15 @@ impl Scenario {
                             y: (draw >> 32) as u32 % config.map_size,
                         }
                     }
+                };
+                let position = match kind {
+                    0 => position,
+                    _ => self.resources.place(
+                        Good::from_index(kind).expect("generated firm good"),
+                        identity,
+                        config,
+                        position,
+                    ),
                 };
                 Actor {
                     identity,
@@ -1071,7 +1140,7 @@ impl Checkpoint {
         let _ = ObservationSnapshot::from_state(scenario, state)?;
         let checksum = Self::checksum(scenario.config(), state)?;
         Ok(Self {
-            version: 4,
+            version: 5,
             profile: PROFILE.into(),
             table_hash: table_hash(),
             scenario: scenario.config.clone(),
@@ -1085,7 +1154,7 @@ impl Checkpoint {
     pub fn restore(&self) -> Result<Restored> {
         let scenario = Scenario::new(self.scenario.clone())?;
         let valid = [
-            self.version == 4,
+            self.version == 5,
             self.profile == PROFILE,
             self.table_hash == table_hash(),
             self.state.values.len() == scenario.state_len(),
@@ -1504,13 +1573,16 @@ impl<'a> AuditedState<'a> {
                         .contains(&employer) =>
                 {
                     let employer = (employer - 1) as usize;
+                    let employer_capacity =
+                        scenario.geographic_capacity(&state.actors.at(employer));
                     let labor_minutes = state.get(Field::LaborMinutes, employer);
                     let commute = actor
                         .position
                         .distance(state.actors.at(employer).position)
                         .div_ceil(c.commute_speed)
                         * 2;
-                    state.get(Field::Hours, i) == labor_minutes
+                    employer_capacity > 0
+                        && state.get(Field::Hours, i) == labor_minutes
                         && u128::from(state.get(Field::Hours, i))
                             + u128::from(state.get(Field::Time, i))
                             + u128::from(state.get(Field::ResearchMinutes, i))
@@ -1520,8 +1592,13 @@ impl<'a> AuditedState<'a> {
                 (1..=16, 0, 0) => state.get(Field::Hours, i) == 0 && state.get(Field::Time, i) == 0,
                 _ => false,
             };
+            let capacity = scenario.geographic_capacity(actor);
             let planning = state.get(Field::Slots, i) <= state.get(Field::Plan, i)
-                && state.get(Field::Plan, i) <= u64::from(actor.capacity);
+                && state.get(Field::Plan, i) <= u64::from(capacity);
+            let production = match capacity {
+                0 => state.get(Field::Produced, i) == 0,
+                _ => true,
+            };
             let role = match actor.kind {
                 0 => [Field::Slots, Field::Plan, Field::Produced, Field::Used]
                     .into_iter()
@@ -1561,6 +1638,7 @@ impl<'a> AuditedState<'a> {
                 && closed
                 && labor
                 && planning
+                && production
                 && role
                 && delivery_window
                 && quotes

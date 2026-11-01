@@ -12,9 +12,9 @@ cargo run -- run --scenario scenarios/institutions.json --days 12
 cargo run -- analyze --analysis scenarios/analysis.json --output /tmp/accounts.json
 ```
 
-GPU and the industrial economy are the defaults. `--economy agrarian` selects the original food economy; loaded scenarios retain their own economy setting. `--seed` controls generated populations, `--output PATH` saves JSON, and `--checkpoint PATH` / `--restore PATH` save and resume audited state. See `cargo run -- --help` for all options.
+GPU and the industrial economy are the defaults. `--economy agrarian` selects the original food economy; loaded scenarios retain their own economy setting. `--seed` controls generated populations and resource geography, `--output PATH` saves JSON, and `--checkpoint PATH` / `--restore PATH` save and resume audited state. See `cargo run -- --help` for all options.
 
-State stores actor metadata, active recipes, per-good deliveries and consumption, bank and loan balances, and research records in field rows on the host and GPU. Checkpoints use format 4 with the `ResearchFixedV3` research layout; checkpoints from earlier formats must be regenerated. Existing three-good scenario files still load, with additional inventories and research inputs initialized to zero.
+State stores actor metadata, active recipes, per-good deliveries and consumption, bank and loan balances, and research records in field rows on the host and GPU. Checkpoints use format 5 with the `ResearchFixedV3` research layout and state-hash version 6; checkpoints from earlier formats must be regenerated. Scenario format remains version 1. Existing three-good scenario files still load, with additional inventories and research inputs initialized to zero, and omitted resource maps default to generated geography.
 
 The viewer starts paused: Space toggles running, N advances one day, R resets, G changes the display, and C compares the next seed. Simulation runs on a worker; the viewer renders aggregate snapshots rather than household entities.
 
@@ -39,6 +39,25 @@ A loaded scenario supplies its own seed and population settings.
 ## Goods and production
 
 Inventory, research-input, consumption, and market arrays follow this order: grain, flour, bread, iron, coal, steel, flax, linen, cloth, coats, wood, tools, furniture, cotton, dye, glass. `FirmSeed.good` uses the corresponding Rust enum name, such as `"Steel"` or `"Coats"`. A firm's `Technique.input_ticks` is consumed for **each** ingredient per packet; both ingredients must be available before labor can be committed.
+
+Grain, iron, coal, flax, wood, cotton, and dye are **natural** goods. Their producers require the matching local resource as well as labor and any recipe inputs. All other goods are **manufactured** and can be produced anywhere with sufficient labor and inputs. Tools and fuel used by extraction upgrades do not change a good's category.
+
+The optional `resources` setting defaults to `"Generated"`. Generation creates four seeded square patches per natural good, each with side length `max(1, map_size / 4)`, using random draws independent of population generation. Generated natural producers are placed within matching patches; household and manufacturer placement follows the existing population rules. The concentrated preset puts one patch of each natural good around the shared center.
+
+An explicit resource map replaces all generated patches. For example:
+
+```json
+"resources": {
+  "Explicit": {
+    "regions": [
+      { "good": "Grain", "lower": { "x": 0, "y": 0 }, "upper": { "x": 250, "y": 250 } },
+      { "good": "Iron", "lower": { "x": 100, "y": 100 }, "upper": { "x": 500, "y": 500 } }
+    ]
+  }
+}
+```
+
+Regions must name natural goods and be nonempty rectangles within the map. Lower bounds are inclusive, upper bounds exclusive; overlaps make all listed resources available. `{"Explicit":{"regions":[]}}` describes a map with no natural resources. Automatic population generation rejects a missing region for any natural good it needs to produce. Explicit populations keep their supplied positions: a natural producer at an unsuitable site remains valid and may sell existing inventory, but plans no production, hires no production labor, and creates no output. Its nominal capacity is retained. Resource capacity is cached separately in GPU actor metadata at initialization and restoration; research, equipment, and optional natural-stock constraints can further limit production. Geography itself does not deplete or renew, and firms do not relocate.
 
 | Industry | Basic inputs | Research method | Required technology |
 | --- | --- | --- | --- |

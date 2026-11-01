@@ -14,6 +14,17 @@
   "household_need": 1,
   "households": 3,
   "map_size": 1000,
+  "resources": {
+    "Explicit": {
+      "regions": [
+        {
+          "good": "Grain",
+          "lower": { "x": 0, "y": 0 },
+          "upper": { "x": 250, "y": 250 }
+        }
+      ]
+    }
+  },
   "maximum_price": 10000,
   "minimum_price": 1,
   "packet_minutes": 360,
