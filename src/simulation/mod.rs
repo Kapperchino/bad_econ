@@ -37,6 +37,16 @@ use std::time::Instant;
 
 const MILLISECONDS_PER_SECOND: f64 = 1000.0;
 
+#[derive(Clone, Copy)]
+enum MarketExecution {
+    Grouped,
+    #[cfg(test)]
+    Reference,
+}
+
+#[cfg(test)]
+mod tests;
+
 #[derive(Clone, Copy, Debug)]
 pub enum Trace {
     Record,
@@ -62,7 +72,9 @@ pub struct Simulation {
     proposals: CubeTensor,
     events: CubeTensor,
     scratch: CubeTensor,
+    #[cfg(test)]
     links: CubeTensor,
+    market_execution: MarketExecution,
     control: CubeTensor,
     summary: CubeTensor,
     feedback: CubeTensor,
@@ -88,7 +100,6 @@ impl Simulation {
         let snapshot = ObservationSnapshot::from_state(&scenario, &initial)?;
         let c = scenario.config();
         let configuration = ConfigLayout::new(&scenario);
-        let side = configuration.spatial_side;
         let config = device.tensor(bytemuck::cast_slice(std::slice::from_ref(&configuration)));
         let actor_layouts = initial
             .actors
@@ -97,7 +108,7 @@ impl Simulation {
             .map(|(index, actor)| ActorLayout::new(actor, scenario.technique(index)))
             .collect::<Result<Vec<_>>>()?;
         let actors = device.tensor(bytemuck::cast_slice(&actor_layouts));
-        let spatial = device.empty((side * side + 1 + c.firms) as usize);
+        let spatial = device.tensor(&SpatialIndex::new(&scenario, &initial).words);
         let state = device.tensor(bytemuck::cast_slice(&encode(&initial.values)));
         let audited = device.empty(initial.values.len() * TICK_WORDS);
         let research = scenario
@@ -140,16 +151,20 @@ impl Simulation {
         initial.values.clear();
         initial.values.shrink_to_fit();
         initial.research = None;
+        let event_words = scenario
+            .actors()
+            .div_ceil(SummaryLayout::ACTORS_PER_GROUP as usize)
+            * SummaryLayout::WORDS;
+        let scratch_words = scenario.actors() * 5;
+        #[cfg(test)]
         let batch = (c.batch_size as usize).min(scenario.actors());
-        let events = device.empty(
-            (batch * EVENT_WORDS).max(
-                scenario
-                    .actors()
-                    .div_ceil(SummaryLayout::ACTORS_PER_GROUP as usize)
-                    * SummaryLayout::WORDS,
-            ),
-        );
-        let scratch = device.empty(batch * ScratchLayout::WORDS_PER_EVENT);
+        #[cfg(test)]
+        let event_words = event_words.max(batch * EVENT_WORDS);
+        #[cfg(test)]
+        let scratch_words = scratch_words.max(batch * ScratchLayout::WORDS_PER_EVENT);
+        let events = device.empty(event_words);
+        let scratch = device.empty(scratch_words);
+        #[cfg(test)]
         let links = device.empty(batch * LinkLayout::WORDS_PER_EVENT);
         let control = device.tensor(bytemuck::cast_slice(&[ObservationControlLayout::zeroed()]));
         let proposals = device.empty(scenario.actors() * ProposalLayout::WORDS);
@@ -175,7 +190,9 @@ impl Simulation {
             proposals,
             events,
             scratch,
+            #[cfg(test)]
             links,
+            market_execution: MarketExecution::Grouped,
             control,
             summary,
             feedback,
@@ -210,6 +227,8 @@ impl Simulation {
             offset: offset as u32,
             count: count as u32,
             status_start: 0,
+            sort_source: 0,
+            sort_width: 0,
         })
     }
     fn economy(
@@ -456,13 +475,115 @@ impl Simulation {
             &parameters,
             &self.proposals,
         );
-        self.fault_check()?;
+        self.economy(
+            EconomyStage::MarketActivity,
+            self.scenario.actors().div_ceil(256),
+            &parameters,
+            &self.proposals,
+        );
+        let words = self.device.read_range(&self.control, 0, CONTROL_WORDS)?;
+        self.readback_bytes += (CONTROL_WORDS * WORD_BYTES) as u64;
+        let activity = ControlLayout::new(&words)?;
+        FaultFlags::new(activity.faults)?.into_result()?;
         let range = match market {
             Market::Input(_) | Market::Distribution => {
                 self.scenario.config().households as usize..self.scenario.actors()
             }
             _ => 0..self.scenario.config().households as usize,
         };
+        match (activity.phase_data, self.market_execution) {
+            (0, _) => Ok(()),
+            (_, MarketExecution::Grouped) => {
+                self.clear_market(market, phase, range, trace, evidence)
+            }
+            #[cfg(test)]
+            (_, MarketExecution::Reference) => {
+                self.reference_market(market, phase, range, trace, evidence)
+            }
+        }
+    }
+    fn clear_market(
+        &mut self,
+        market: Market,
+        phase: Phase,
+        range: std::ops::Range<usize>,
+        trace: Trace,
+        evidence: &mut PhaseEvidence,
+    ) -> Result<()> {
+        let count = range.len();
+        let mut parameters = self.parameters(phase, market, range.start, count)?;
+        let launch = |stage, parameters: &EconomyParameters| {
+            let invocations = match (stage, market) {
+                (EconomyStage::GroupExecute, Market::Distribution) => {
+                    self.scenario.config().households as usize
+                }
+                (EconomyStage::GroupExecute, _) => self.scenario.config().firms as usize,
+                _ => count,
+            };
+            CubeBackend::economy(
+                &self.device,
+                stage,
+                invocations,
+                EconomyBuffers {
+                    state: &self.state,
+                    actors: &self.actors,
+                    config: &self.config,
+                    spatial: &self.spatial,
+                    proposals: &self.proposals,
+                    events: &self.scratch,
+                    control: &self.control,
+                },
+                parameters,
+            );
+        };
+        launch(EconomyStage::GroupInitialize, &parameters);
+        if let Market::Labor | Market::Input(_) | Market::Household = market {
+            launch(EconomyStage::GroupPrepare, &parameters);
+        }
+        let mut width = 1;
+        while width < count {
+            parameters.sort_width = width as u32;
+            launch(EconomyStage::GroupMerge, &parameters);
+            parameters.sort_source = 2 * count as u32 - parameters.sort_source;
+            width *= 2;
+        }
+        launch(EconomyStage::GroupExecute, &parameters);
+        if let Market::Labor | Market::Input(_) | Market::Household = market {
+            launch(EconomyStage::GroupFinalize, &parameters);
+        }
+        let words = self.device.read_range(&self.control, 0, CONTROL_WORDS)?;
+        self.readback_bytes += (CONTROL_WORDS * WORD_BYTES) as u64;
+        let counters = ControlLayout::new(&words)?;
+        FaultFlags::new(counters.faults)?.into_result()?;
+        evidence.frontier_depth = evidence.frontier_depth.max(counters.progress as usize);
+        evidence.events += counters.completed as usize;
+        parameters.status_start = 4 * count as u32;
+        if let Market::Input(_) | Market::Household = market {
+            self.feedback_operation(EconomyStage::RecordFeedback, count, &parameters);
+        }
+        if let Trace::Record = trace {
+            let statuses = self.device.read_range(&self.scratch, 4 * count, count)?;
+            self.readback_bytes += (count * WORD_BYTES) as u64;
+            evidence.decisions.extend(
+                statuses
+                    .into_iter()
+                    .map(|code| EventStatus::try_from(code)?.decision())
+                    .collect::<Result<Vec<_>>>()?
+                    .into_iter()
+                    .flatten(),
+            );
+        }
+        Ok(())
+    }
+    #[cfg(test)]
+    fn reference_market(
+        &mut self,
+        market: Market,
+        phase: Phase,
+        range: std::ops::Range<usize>,
+        trace: Trace,
+        evidence: &mut PhaseEvidence,
+    ) -> Result<()> {
         let end = range.end;
         range
             .step_by(self.scenario.config().batch_size as usize)
@@ -633,6 +754,8 @@ impl Simulation {
             offset: 0,
             count: 0,
             status_start: 0,
+            sort_source: 0,
+            sort_width: 0,
         };
         let (source, target) = match direction {
             CopyDirection::Save => (&self.state, &self.audited),

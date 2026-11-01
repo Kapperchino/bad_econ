@@ -115,28 +115,32 @@ pub fn times(a: Ticks, b: u32) -> CheckedTicks {
 #[cube]
 pub fn divide(a: Ticks, b: u32) -> Ticks {
     let mut quotient = zero();
-    let mut remainder = zero();
-    for step in 0..TICK_BITS {
-        let bit = (TICK_BITS - 1) - step;
-        let digit = (select(bit >= WORD_BITS, a.extract(HIGH_WORD), a.extract(LOW_WORD))
-            >> (bit & WORD_TOP_BIT))
-            & 1;
-        remainder = ticks(
-            (remainder.extract(LOW_WORD) << 1) | digit,
-            (remainder.extract(HIGH_WORD) << 1) | (remainder.extract(LOW_WORD) >> WORD_TOP_BIT),
-        );
-        if !lt(remainder, ticks(b, 0)) {
-            remainder = minus(remainder, ticks(b, 0));
-            quotient.insert(
-                HIGH_WORD,
-                quotient.extract(HIGH_WORD)
-                    | select(bit >= WORD_BITS, 1u32 << (bit & WORD_TOP_BIT), 0),
+    if a.extract(HIGH_WORD) == 0 && b != 0 {
+        quotient = ticks(a.extract(LOW_WORD) / b, 0);
+    } else {
+        let mut remainder = zero();
+        for step in 0..TICK_BITS {
+            let bit = (TICK_BITS - 1) - step;
+            let digit = (select(bit >= WORD_BITS, a.extract(HIGH_WORD), a.extract(LOW_WORD))
+                >> (bit & WORD_TOP_BIT))
+                & 1;
+            remainder = ticks(
+                (remainder.extract(LOW_WORD) << 1) | digit,
+                (remainder.extract(HIGH_WORD) << 1) | (remainder.extract(LOW_WORD) >> WORD_TOP_BIT),
             );
-            quotient.insert(
-                LOW_WORD,
-                quotient.extract(LOW_WORD)
-                    | select(bit < WORD_BITS, 1u32 << (bit & WORD_TOP_BIT), 0),
-            );
+            if !lt(remainder, ticks(b, 0)) {
+                remainder = minus(remainder, ticks(b, 0));
+                quotient.insert(
+                    HIGH_WORD,
+                    quotient.extract(HIGH_WORD)
+                        | select(bit >= WORD_BITS, 1u32 << (bit & WORD_TOP_BIT), 0),
+                );
+                quotient.insert(
+                    LOW_WORD,
+                    quotient.extract(LOW_WORD)
+                        | select(bit < WORD_BITS, 1u32 << (bit & WORD_TOP_BIT), 0),
+                );
+            }
         }
     }
     quotient
@@ -309,6 +313,7 @@ mod tests {
                     _ if (index as usize) < edges.len().pow(2) => {
                         edges[index as usize % edges.len()]
                     }
+                    _ if index % 2 == 0 => u64::from(draw as u32),
                     _ => draw,
                 };
                 let b = match index {

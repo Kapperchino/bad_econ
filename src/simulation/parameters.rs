@@ -12,6 +12,8 @@ pub struct EconomyParameters {
     pub offset: u32,
     pub count: u32,
     pub status_start: u32,
+    pub sort_source: u32,
+    pub sort_width: u32,
 }
 impl EconomyParameters {
     pub fn launch(self) -> EconomyParametersLaunch {
@@ -22,6 +24,8 @@ impl EconomyParameters {
             offset: self.offset,
             count: self.count,
             status_start: self.status_start,
+            sort_source: self.sort_source,
+            sort_width: self.sort_width,
         }
     }
 }

@@ -1,7 +1,8 @@
 use super::{
     flags::{
-        ActorKind, CONSTRUCTED_EVENTS_WORD, CONTROL_WORDS, EventStatus, FaultFlags,
+        ActorKind, COMPLETED_WORD, CONSTRUCTED_EVENTS_WORD, CONTROL_WORDS, EventStatus, FaultFlags,
         KernelActorKind, KernelAuthorization, KernelEventStatus, KernelFaults, MarketFlag,
+        PROGRESS_WORD,
     },
     households::{
         KernelCapacity, KernelFatigue, KernelHealth, KernelObservation, ObservationKind,
@@ -14,6 +15,7 @@ use super::{
     parameters::EconomyParameters,
     payroll::PayrollAccrual,
     policy::*,
+    scheduler::apply,
     words::*,
 };
 use crate::{
@@ -21,6 +23,9 @@ use crate::{
     ledger::{AuthorizationFlags, EMPTY, LEG_WORDS, LegLayout, MAX_LEGS},
 };
 use cubecl::prelude::*;
+mod clearing;
+use super::scheduler::Posting;
+use clearing::{PeerBalances, PeerOffer, actor_settlement};
 
 #[cube]
 fn at(config: &[u32], field: u32, actor: u32) -> u32 {
@@ -703,6 +708,12 @@ impl EventBuilder {
     }
 }
 
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum EventStorage {
+    Buffer,
+    Local,
+}
+
 #[cube]
 fn construct(
     state: &mut [u32],
@@ -713,11 +724,16 @@ fn construct(
     control: &[Atomic<u32>],
     parameters: &EconomyParameters,
     id: u32,
+    #[comptime] storage: EventStorage,
 ) {
     if id < parameters.count {
+        let event_id = match comptime!(storage) {
+            EventStorage::Buffer => id,
+            EventStorage::Local => 0,
+        };
         for slot in 0u32..MAX_LEGS as u32 {
             for word in 0..LEG_WORDS {
-                bundles[id as usize * EVENT_WORDS + slot as usize * LEG_WORDS + word] =
+                bundles[event_id as usize * EVENT_WORDS + slot as usize * LEG_WORDS + word] =
                     select(word == LegLayout::COORDINATE, EMPTY, 0u32);
             }
         }
@@ -729,9 +745,11 @@ fn construct(
         );
         let trip = proposals[actor as usize * ProposalLayout::WORDS + ProposalLayout::DISTANCE];
         let zero = ticks(0u32, 0u32);
-        let mut event = EventBuilder::new(id);
+        let mut event = EventBuilder::new(event_id);
         if other != NO_ACTOR {
-            control[CONSTRUCTED_EVENTS_WORD].fetch_add(1u32);
+            if comptime!(storage == EventStorage::Buffer) {
+                control[CONSTRUCTED_EVENTS_WORD].fetch_add(1u32);
+            }
             match comptime!(parameters.market) {
                 MarketFlag::Labor => {
                     let mut offered_wage =
@@ -1435,11 +1453,17 @@ pub enum EconomyStage {
     IndexFill,
     Local,
     Propose,
+    MarketActivity,
     Construct,
     Summarize,
     Reduce,
     Inspect,
     CopyState,
+    GroupInitialize,
+    GroupMerge,
+    GroupExecute,
+    GroupPrepare,
+    GroupFinalize,
 }
 
 #[cube(launch)]
@@ -1472,8 +1496,55 @@ pub fn economy(
         EconomyStage::Propose => propose(
             state, actors, config, spatial, proposals, control, parameters, id,
         ),
+        EconomyStage::MarketActivity => {
+            let mut active = 0u32;
+            for actor in id * 256..min((id + 1) * 256, config[ConfigLayout::ACTORS]) {
+                active |= u32::cast_from(
+                    proposals[actor as usize * ProposalLayout::WORDS + ProposalLayout::ACTOR]
+                        != NO_ACTOR,
+                );
+            }
+            if active != 0 {
+                control[CONSTRUCTED_EVENTS_WORD].fetch_or(active);
+            }
+        }
         EconomyStage::Construct => construct(
+            state,
+            actors,
+            config,
+            proposals,
+            bundles,
+            control,
+            parameters,
+            id,
+            comptime!(EventStorage::Buffer),
+        ),
+        EconomyStage::GroupInitialize => group_initialize(proposals, bundles, parameters, id),
+        EconomyStage::GroupMerge => group_merge(bundles, parameters, id),
+        EconomyStage::GroupExecute => group_execute(
             state, actors, config, proposals, bundles, control, parameters, id,
+        ),
+        EconomyStage::GroupPrepare => actor_settlement(
+            state,
+            actors,
+            config,
+            proposals,
+            bundles,
+            control,
+            parameters,
+            id,
+            comptime!(Posting::CheckActor),
+        ),
+        EconomyStage::GroupFinalize => actor_settlement(
+            state,
+            actors,
+            config,
+            proposals,
+            bundles,
+            control,
+            parameters,
+            id,
+            comptime!(Posting::ApplyActor),
         ),
         EconomyStage::Summarize => summarize(state, actors, config, bundles, control, id),
         EconomyStage::Reduce => reduce(config, proposals, bundles, control, id),
@@ -1503,13 +1574,133 @@ fn discoverable(
         MarketFlag::Payroll | MarketFlag::Distribution => false,
     }
 }
+
 #[cube]
-fn firm_cell(actors: &[u32], config: &[u32], firm: u32) -> u32 {
-    actors[firm as usize * ActorLayout::WORDS + ActorLayout::Y]
-        / config[ConfigLayout::SEARCH_RADIUS]
-        * config[ConfigLayout::SPATIAL_SIDE]
-        + actors[firm as usize * ActorLayout::WORDS + ActorLayout::X]
-            / config[ConfigLayout::SEARCH_RADIUS]
+fn group_initialize(
+    proposals: &mut [u32],
+    scratch: &mut [u32],
+    parameters: &EconomyParameters,
+    id: u32,
+) {
+    let count = parameters.count;
+    if id < count {
+        scratch[id as usize] = proposals
+            [(parameters.offset + id) as usize * ProposalLayout::WORDS + ProposalLayout::ACTOR];
+        scratch[(count + id) as usize] = id;
+        KernelEventStatus::new(comptime!(EventStatus::Inactive)).store(scratch, 4 * count + id);
+    }
+}
+
+#[cube]
+fn group_merge(scratch: &mut [u32], parameters: &EconomyParameters, id: u32) {
+    let count = parameters.count;
+    if id < count {
+        let width = parameters.sort_width;
+        let source = parameters.sort_source;
+        let destination = 2 * count - source;
+        let base = id / (width * 2) * width * 2;
+        let middle = min(base + width, count);
+        let end = min(base + width * 2, count);
+        let first = id < middle;
+        let start = select(first, middle, base);
+        let stop = select(first, end, middle);
+        let key = scratch[(source + id) as usize];
+        let item = scratch[(source + count + id) as usize];
+        let mut low = start;
+        let mut high = stop;
+        while low < high {
+            let probe = (low + high) / 2;
+            let other_key = scratch[(source + probe) as usize];
+            let other_item = scratch[(source + count + probe) as usize];
+            let precedes = other_key < key || (other_key == key && other_item < item);
+            low = select(precedes, probe + 1, low);
+            high = select(precedes, high, probe);
+        }
+        let target = destination + base + id - select(first, base, middle) + low - start;
+        scratch[target as usize] = key;
+        scratch[(target + count) as usize] = item;
+    }
+}
+
+#[cube]
+fn group_execute(
+    state: &mut [u32],
+    actors: &[u32],
+    config: &[u32],
+    proposals: &mut [u32],
+    scratch: &mut [u32],
+    control: &[Atomic<u32>],
+    parameters: &EconomyParameters,
+    id: u32,
+) {
+    let count = parameters.count;
+    let peers = match comptime!(parameters.market) {
+        MarketFlag::Distribution => config[ConfigLayout::HOUSEHOLDS],
+        _ => config[ConfigLayout::FIRMS],
+    };
+    if id < peers {
+        let source = parameters.sort_source;
+        let key = match comptime!(parameters.market) {
+            MarketFlag::Distribution => id,
+            _ => id + config[ConfigLayout::HOUSEHOLDS],
+        };
+        let mut low = 0;
+        let mut high = count;
+        while low < high {
+            let probe = (low + high) / 2;
+            let precedes = scratch[(source + probe) as usize] < key;
+            low = select(precedes, probe + 1, low);
+            high = select(precedes, high, probe);
+        }
+        if low < count {
+            let mut cursor = low;
+            let mut active = true;
+            let mut event = Array::<u32>::new(EVENT_WORDS);
+            let mut peer = PeerBalances::new(state, actors, config, parameters, key);
+            while cursor < count && active {
+                active = scratch[(source + cursor) as usize] == key;
+                if active {
+                    let actor = scratch[(source + count + cursor) as usize];
+                    if comptime!(
+                        parameters.market == MarketFlag::Payroll
+                            || parameters.market == MarketFlag::Distribution
+                    ) {
+                        construct(
+                            state,
+                            actors,
+                            config,
+                            proposals,
+                            &mut event[..],
+                            control,
+                            parameters,
+                            actor,
+                            comptime!(EventStorage::Local),
+                        );
+                        apply(state, &event[..], control, 0).store(scratch, 4 * count + actor);
+                    } else {
+                        let prior = KernelEventStatus::load(scratch, 4 * count + actor);
+                        peer.offer(
+                            actors,
+                            config,
+                            proposals,
+                            control,
+                            parameters,
+                            PeerOffer {
+                                actor: actor + parameters.offset,
+                                peer: key,
+                                status: prior,
+                            },
+                        )
+                        .store(scratch, 4 * count + actor);
+                    }
+                    cursor += 1;
+                }
+            }
+            control[PROGRESS_WORD].fetch_max(cursor - low);
+            control[COMPLETED_WORD].fetch_add(cursor - low);
+            peer.store(state, actors, config, parameters, key);
+        }
+    }
 }
 #[cube]
 fn index_count(
@@ -1520,12 +1711,13 @@ fn index_count(
     parameters: &EconomyParameters,
     cell: u32,
 ) {
-    if cell < config[ConfigLayout::SPATIAL_SIDE] * config[ConfigLayout::SPATIAL_SIDE] {
+    let cells = config[ConfigLayout::SPATIAL_SIDE] * config[ConfigLayout::SPATIAL_SIDE];
+    if cell < cells {
         let mut count = 0u32;
-        for firm in config[ConfigLayout::HOUSEHOLDS]..config[ConfigLayout::ACTORS] {
-            if firm_cell(actors, config, firm) == cell {
-                count += u32::cast_from(discoverable(state, actors, config, parameters, firm));
-            }
+        let segment = cells + 1 + config[ConfigLayout::FIRMS];
+        for member in spatial[(segment + cell) as usize]..spatial[(segment + cell + 1) as usize] {
+            let firm = spatial[(segment + cells + 1 + member) as usize];
+            count += u32::cast_from(discoverable(state, actors, config, parameters, firm));
         }
         spatial[cell as usize] = count;
     }
@@ -1556,10 +1748,10 @@ fn index_fill(
     let cells = config[ConfigLayout::SPATIAL_SIDE] * config[ConfigLayout::SPATIAL_SIDE];
     if cell < cells {
         let mut offset = spatial[cell as usize];
-        for firm in config[ConfigLayout::HOUSEHOLDS]..config[ConfigLayout::ACTORS] {
-            if firm_cell(actors, config, firm) == cell
-                && discoverable(state, actors, config, parameters, firm)
-            {
+        let segment = cells + 1 + config[ConfigLayout::FIRMS];
+        for member in spatial[(segment + cell) as usize]..spatial[(segment + cell + 1) as usize] {
+            let firm = spatial[(segment + cells + 1 + member) as usize];
+            if discoverable(state, actors, config, parameters, firm) {
                 spatial[(cells + 1 + offset) as usize] = firm;
                 offset += 1;
             }

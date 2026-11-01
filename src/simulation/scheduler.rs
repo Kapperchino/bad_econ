@@ -187,20 +187,51 @@ pub fn schedule(
 }
 
 #[cube]
-fn post(
+pub(super) fn post(
     balances: &mut [u32],
     events: &[u32],
     control: &[Atomic<u32>],
     id: u32,
 ) -> KernelEventStatus {
     control[COMPLETED_WORD].fetch_add(1);
+    apply(balances, events, control, id)
+}
+
+#[cube]
+pub(super) fn apply(
+    balances: &mut [u32],
+    events: &[u32],
+    control: &[Atomic<u32>],
+    id: u32,
+) -> KernelEventStatus {
+    settle(balances, events, control, id, 0, 1, comptime!(Posting::All))
+}
+
+#[derive(Clone, Copy, PartialEq, Eq)]
+pub(super) enum Posting {
+    All,
+    CheckActor,
+    ApplyActor,
+}
+
+#[cube]
+pub(super) fn settle(
+    balances: &mut [u32],
+    events: &[u32],
+    control: &[Atomic<u32>],
+    id: u32,
+    actor: u32,
+    actors: u32,
+    #[comptime] posting: Posting,
+) -> KernelEventStatus {
     let mut valid = true;
     let mut faults = KernelFaults::none();
     let mut after = Array::<u32>::new(MAX_LEGS * TICK_WORDS);
     for slot in 0..MAX_LEGS as u32 {
         let base = (id * MAX_LEGS as u32 + slot) * LEG_WORDS as u32;
         let cell = events[base as usize + LegLayout::COORDINATE];
-        if cell != EMPTY {
+        let relevant = comptime!(posting == Posting::All) || cell % actors == actor;
+        if cell != EMPTY && relevant {
             if cell < balances.len() as u32 / TICK_WORDS as u32 {
                 let balance = load(balances, cell);
                 let debit = ticks(
@@ -240,10 +271,13 @@ fn post(
         status.set(comptime!(EventStatus::Faulted));
         faults.record(control);
     }
-    if status.contains(comptime!(EventStatus::Accepted)) {
+    if comptime!(posting != Posting::CheckActor)
+        && status.contains(comptime!(EventStatus::Accepted))
+    {
         for slot in 0..MAX_LEGS as u32 {
             let cell = events[((id * MAX_LEGS as u32 + slot) * LEG_WORDS as u32) as usize];
-            if cell != EMPTY {
+            let relevant = comptime!(posting == Posting::All) || cell % actors == actor;
+            if cell != EMPTY && relevant {
                 store(
                     balances,
                     cell,

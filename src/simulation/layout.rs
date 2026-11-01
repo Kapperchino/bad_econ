@@ -2,7 +2,7 @@ use super::flags::{ActorKind, ControlLayout};
 use super::negotiation::PolicyLayout;
 use crate::{
     arithmetic::PRICE_TABLE,
-    domain::{Actor, Good, MAX_TAX_BRACKETS, Scenario, Technique},
+    domain::{Actor, Good, MAX_TAX_BRACKETS, Scenario, State, Technique},
     ledger::{LEG_WORDS, MAX_LEGS, TickLayout},
 };
 use anyhow::{Context, Result};
@@ -24,6 +24,33 @@ pub const EVENT_WORDS: usize = MAX_LEGS * LEG_WORDS;
 pub const NO_ACTOR: u32 = u32::MAX;
 pub const NO_PREDECESSOR: u32 = u32::MAX;
 pub const NO_SUCCESSOR: u32 = u32::MAX;
+
+pub struct SpatialIndex {
+    pub words: Vec<u32>,
+}
+impl SpatialIndex {
+    pub fn new(scenario: &Scenario, state: &State) -> Self {
+        let config = scenario.config();
+        let side = config.map_size.div_ceil(config.search_radius);
+        let cells = (side * side) as usize;
+        let segment = cells + 1 + config.firms as usize;
+        let cell = |index: usize| {
+            let position = state.actors[index].position;
+            (position.y / config.search_radius * side + position.x / config.search_radius) as usize
+        };
+        let mut firms = (config.households as usize..scenario.actors()).collect::<Vec<_>>();
+        firms.sort_by_key(|&index| cell(index));
+        let mut words = vec![0; 2 * segment];
+        for (slot, &firm) in firms.iter().enumerate() {
+            words[segment + cell(firm) + 1] += 1;
+            words[segment + cells + 1 + slot] = firm as u32;
+        }
+        for index in 1..=cells {
+            words[segment + index] += words[segment + index - 1];
+        }
+        Self { words }
+    }
+}
 
 #[repr(C)]
 #[derive(Clone, Copy, Pod, Zeroable)]
