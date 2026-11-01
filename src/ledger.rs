@@ -147,10 +147,36 @@ pub struct EventKey {
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(try_from = "BundleDefinition", into = "BundleDefinition")]
 pub struct Bundle {
     key: EventKey,
     legs: Vec<Leg>,
 }
+
+#[derive(Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct BundleDefinition {
+    key: EventKey,
+    legs: Vec<Leg>,
+}
+
+impl TryFrom<BundleDefinition> for Bundle {
+    type Error = anyhow::Error;
+
+    fn try_from(value: BundleDefinition) -> Result<Self> {
+        Self::new(value.key, value.legs)
+    }
+}
+
+impl From<Bundle> for BundleDefinition {
+    fn from(value: Bundle) -> Self {
+        Self {
+            key: value.key,
+            legs: value.legs,
+        }
+    }
+}
+
 impl Bundle {
     pub fn new(key: EventKey, legs: impl IntoIterator<Item = Leg>) -> Result<Self> {
         let grouped = legs.into_iter().try_fold(

@@ -5,10 +5,12 @@ mod request;
 mod retained;
 pub use retained::*;
 mod sensitivity;
+mod valuation;
 pub use accounts::*;
 pub use matrices::*;
 pub use request::*;
 pub use sensitivity::*;
+pub use valuation::*;
 
 use super::{
     Device,
@@ -240,10 +242,7 @@ impl From<Contraction> for ContractionDefinition {
 
 impl Contraction {
     pub fn new(numerator: u32, denominator: u32, weights: Vec<u32>) -> Result<Self> {
-        match numerator < denominator
-            && !weights.is_empty()
-            && weights.iter().all(|&weight| weight > 0)
-        {
+        match numerator < denominator && weights.iter().all(|&weight| weight > 0) {
             true => Ok(Self {
                 numerator,
                 denominator,
@@ -482,16 +481,15 @@ impl DeviceOperator {
             && rhs.length == self.rows
             && initial.length == self.rows
             && certificate.weights.len() == self.rows
-            && self.rows > 0
             && budget.iterations <= 100_000;
         match admitted {
             false => Err(anyhow!(
                 "certified solve dimensions or iteration budget are invalid"
             )),
             true => {
-                let weights = device.tensor(&certificate.weights);
+                let weights = device.tensor(&padded(certificate.weights.clone()));
                 let control = device.tensor(&[0; CONTROL_WORDS]);
-                let rows = device.empty(self.rows * 2);
+                let rows = device.empty((self.rows * 2).max(2));
                 kernels::certificate_rows::launch(
                     &device.client,
                     count(device, self.rows),
@@ -518,7 +516,11 @@ impl DeviceOperator {
                     length: initial.length,
                 };
                 let mut next = DeviceVector::empty(device, self.rows);
-                for _ in 0..budget.iterations {
+                let iterations = match self.rows {
+                    0 => 0,
+                    _ => budget.iterations,
+                };
+                for _ in 0..iterations {
                     kernels::iterate::launch(
                         &device.client,
                         count(device, self.rows),
@@ -533,7 +535,7 @@ impl DeviceOperator {
                     );
                     std::mem::swap(&mut previous, &mut next);
                 }
-                let residuals = device.empty(self.rows * TICK_WORDS);
+                let residuals = device.empty((self.rows * TICK_WORDS).max(TICK_WORDS));
                 kernels::residual::launch(
                     &device.client,
                     count(device, self.rows),
@@ -578,7 +580,7 @@ impl DeviceOperator {
                     values: output,
                     control,
                     error,
-                    iterations: budget.iterations,
+                    iterations,
                 })
             }
         }

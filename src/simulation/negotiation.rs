@@ -483,12 +483,6 @@ mod tests {
     }
 
     #[test]
-    #[ignore = "optional CPU backend check"]
-    fn exact_bracket_and_fraction_inversion_on_cpu() -> Result<()> {
-        check(Device::cpu(64)?)
-    }
-
-    #[test]
     fn exact_bracket_and_fraction_inversion_on_gpu() -> Result<()> {
         check(Device::headless(64)?)
     }

@@ -1,5 +1,6 @@
 # Agent standards
 
+## Code base guidelines
 - Prefer a functional approach whenever possible.
 - Use explicit state machines for stateful workflows.
 - Avoid nested if else statements whenever possible, replace with concrete states represented by enums.
@@ -12,3 +13,6 @@
 - Code you write should be as simple as possible, avoid complications.
 - Do not use booleans in function parameters, use enums or use two functions, simplify states as much as possible.
 - Do not have multiple if conditions, instead encapsulate them into states, rust has enums for a reason.
+
+## Testing
+- Make sure to only test on the gpu, it runs much faster

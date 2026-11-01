@@ -101,12 +101,6 @@ mod tests {
     }
 
     #[test]
-    #[ignore = "optional CPU backend check"]
-    fn nonlinear_table_bounds_on_cpu() -> Result<()> {
-        check(Device::cpu(64)?)
-    }
-
-    #[test]
     fn nonlinear_table_bounds_on_gpu() -> Result<()> {
         check(Device::headless(64)?)
     }

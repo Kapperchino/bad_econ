@@ -112,6 +112,14 @@ pub struct PlanAccount {
 }
 
 impl DeviceAccounts {
+    pub fn occupational_hours(
+        &self,
+        device: &Device,
+        gross_requirements: &DeviceVector,
+    ) -> Result<DeviceVector> {
+        self.labor.apply(device, gross_requirements)
+    }
+
     pub fn external_values(
         &self,
         device: &Device,

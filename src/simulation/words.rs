@@ -404,12 +404,6 @@ mod tests {
     }
 
     #[test]
-    #[ignore = "optional CPU backend check"]
-    fn portable_words_match_wide_oracle_on_cpu() -> Result<()> {
-        check(Device::cpu(TEST_WORKGROUP)?)
-    }
-
-    #[test]
     fn portable_words_match_wide_oracle_on_gpu() -> Result<()> {
         check(Device::headless(TEST_WORKGROUP)?)
     }

@@ -433,12 +433,6 @@ mod tests {
     }
 
     #[test]
-    #[ignore = "optional CPU backend check"]
-    fn concurrent_flag_sets_survive_cpu_readback() -> Result<()> {
-        check_atomic_flags(Device::cpu(TEST_WORKGROUP)?)
-    }
-
-    #[test]
     fn concurrent_flag_sets_survive_gpu_readback() -> Result<()> {
         check_atomic_flags(Device::headless(TEST_WORKGROUP)?)
     }

@@ -429,16 +429,15 @@ impl LaborTruncation {
         contraction: &Contraction,
         terms: NeumannTerms,
     ) -> Result<Diagnostic<Self>> {
-        let admitted = goods.rows > 0
-            && goods.rows == goods.columns
+        let admitted = goods.rows == goods.columns
             && labor.columns == goods.rows
             && contraction.weights.len() == goods.rows;
         match admitted {
             false => Err(anyhow!("labor truncation dimensions or witness disagree")),
             true => {
                 let sparse = DeviceOperator::new(device, goods);
-                let weights = device.tensor(&contraction.weights);
-                let certificate_rows = device.empty(goods.rows * 2);
+                let weights = device.tensor(&padded(contraction.weights.clone()));
+                let certificate_rows = device.empty((goods.rows * 2).max(2));
                 let control = device.tensor(&[0; CONTROL_WORDS]);
                 kernels::certificate_rows::launch(
                     &device.client,

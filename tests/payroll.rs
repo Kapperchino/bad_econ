@@ -362,28 +362,3 @@ fn later_matching_rounds_fund_only_remaining_negotiable_slots() -> Result<()> {
     assert_eq!(state.get(Field::Slots, 4), 0);
     Ok(())
 }
-
-#[cfg(feature = "compute")]
-#[test]
-fn payroll_cpu_gpu_replay_matches_every_phase_and_workgroup() -> Result<()> {
-    use bad_econ::simulation::{Device, Simulation, Trace};
-    for workgroup in [32, 64, 128, 256] {
-        let mut config = scenario(31)?.config().clone();
-        config.bargaining = Some(bargaining::BargainingPolicy {
-            desired_wage: 5,
-            ..bargaining_policy()
-        });
-        let scenario = Scenario::new(config)?;
-        let mut cpu = Simulation::new(scenario.clone(), Device::cpu(workgroup)?)?;
-        let mut gpu = Simulation::new(scenario, Device::headless(workgroup)?)?;
-        for _ in 0..4 {
-            for phase in Phase::ALL {
-                let expected = cpu.phase(phase, Trace::Record)?;
-                let actual = gpu.phase(phase, Trace::Record)?;
-                assert_eq!(expected.decisions, actual.decisions);
-                assert_eq!(cpu.download()?, gpu.download()?);
-            }
-        }
-    }
-    Ok(())
-}

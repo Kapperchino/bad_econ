@@ -82,6 +82,68 @@ fn gross_affordability_repeated_legs_and_atomic_overflow() -> Result<()> {
 }
 
 #[test]
+fn serialized_bundles_preserve_grouped_gross_debits_and_authorization() -> Result<()> {
+    let key = event(1, &[]).key();
+    let definition = |legs: Vec<Leg>| serde_json::json!({ "key": key, "legs": legs });
+    let bundle: Bundle = serde_json::from_value(definition(vec![
+        transfer(0, 3, 0),
+        transfer(0, 3, 0),
+        transfer(1, 0, 6),
+    ]))?;
+    let mut state = [5, 0];
+    assert_eq!(bundle.apply(&mut state)?, Decision::Rejected);
+    assert_eq!(state, [5, 0]);
+    assert_eq!(bundle.legs().len(), 2);
+    assert_eq!(
+        serde_json::from_str::<Bundle>(&serde_json::to_string(&bundle)?)?,
+        bundle
+    );
+    assert!(
+        serde_json::from_value::<Bundle>(definition(vec![
+            transfer(0, u64::MAX, 0),
+            transfer(0, 1, 0),
+        ]))
+        .is_err()
+    );
+    assert!(
+        serde_json::from_value::<Bundle>(definition(vec![
+            Leg::read(Coordinate(0), 1),
+            Leg::read(Coordinate(0), 2),
+        ]))
+        .is_err()
+    );
+    assert!(
+        serde_json::from_value::<Bundle>(definition(
+            (0..=MAX_LEGS)
+                .map(|index| transfer(index as u32, 1, 0))
+                .collect(),
+        ))
+        .is_err()
+    );
+    Ok(())
+}
+
+#[test]
+fn serialized_probabilities_reject_invalid_domains() -> Result<()> {
+    for (numerator, denominator) in [(0, 0), (4, 3)] {
+        assert!(
+            serde_json::from_value::<Probability>(serde_json::json!({
+                "numerator": numerator,
+                "denominator": denominator,
+            }))
+            .is_err()
+        );
+    }
+    let probability: Probability = serde_json::from_str(r#"{"numerator":1,"denominator":3}"#)?;
+    assert_eq!(probability, Probability::new(1, 3)?);
+    assert_eq!(
+        serde_json::from_str::<Probability>(&serde_json::to_string(&probability)?)?,
+        probability
+    );
+    Ok(())
+}
+
+#[test]
 fn authorization_reads_create_dependencies() -> Result<()> {
     let mut state = vec![1, 0, 0];
     let events = [

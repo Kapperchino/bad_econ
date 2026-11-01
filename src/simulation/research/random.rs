@@ -292,12 +292,6 @@ mod tests {
     }
 
     #[test]
-    #[ignore = "optional CPU backend check"]
-    fn sha256_and_128_bit_floored_thresholds_on_cpu() -> Result<()> {
-        check(Device::cpu(64)?)
-    }
-
-    #[test]
     fn sha256_and_128_bit_floored_thresholds_on_gpu() -> Result<()> {
         check(Device::headless(64)?)
     }

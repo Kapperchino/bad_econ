@@ -152,6 +152,13 @@
       ]
     }
   },
+  "valuation": {
+    "activities": [0, 1],
+    "capabilities": {
+      "labels": [1, 2],
+      "dependencies": "InputSupport"
+    }
+  },
   "comparator": {
     "context": {
       "population": "teaching example",

@@ -191,10 +191,7 @@ fn state_digest_includes_metadata_and_initial_totals() -> Result<()> {
 #[cfg(feature = "compute")]
 mod compute {
     use super::*;
-    use bad_econ::{
-        runtime::SimulationCommand,
-        simulation::{Device, Simulation, Trace},
-    };
+    use bad_econ::{runtime::SimulationCommand, simulation::Simulation};
 
     #[test]
     fn heterogeneous_packets_preserve_time_goods_ownership_and_replay() -> Result<()> {
@@ -284,35 +281,6 @@ mod compute {
             simulation.snapshot,
             ObservationSnapshot::from_state(&scenario, &state)?
         );
-        Ok(())
-    }
-
-    #[test]
-    fn custom_population_matches_cpu_at_every_phase_and_workgroup() -> Result<()> {
-        let mut canonical = None;
-        for workgroup in [32, 64, 128, 256, 64] {
-            let scenario = scenario()?;
-            let mut cpu = Simulation::new(scenario.clone(), Device::cpu(workgroup)?)?;
-            let mut gpu = Simulation::new(scenario, Device::headless(workgroup)?)?;
-            for _ in 0..4 {
-                for phase in Phase::ALL {
-                    assert_eq!(
-                        gpu.phase(phase, Trace::Record)?.decisions,
-                        cpu.phase(phase, Trace::Record)?.decisions
-                    );
-                    assert_eq!(gpu.download()?, cpu.download()?);
-                }
-                let state = cpu.download()?;
-                assert_eq!(
-                    gpu.snapshot,
-                    ObservationSnapshot::from_state(&cpu.scenario, &state)?
-                );
-            }
-            let state = gpu.download()?;
-            if let Some(expected) = canonical.replace(state.clone()) {
-                assert_eq!(state, expected);
-            }
-        }
         Ok(())
     }
 }

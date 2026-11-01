@@ -42,6 +42,8 @@ pub struct AnalysisRequest {
     pub reproduction: Option<ReproductionRequest>,
     #[serde(default)]
     pub comparator: Option<ComparatorRequest>,
+    #[serde(default)]
+    pub valuation: Option<ValuationRequest>,
 }
 
 #[derive(Clone, Debug, Serialize)]
@@ -58,6 +60,7 @@ pub struct AnalysisReport {
     pub normalized_coupled: Diagnostic<Vec<Interval>>,
     pub residual_scale: Diagnostic<Vec<Interval>>,
     pub comparator: Diagnostic<ComparatorReport>,
+    pub valuations: Diagnostic<Vec<ValuationRecord>>,
 }
 
 impl AnalysisRequest {
@@ -230,6 +233,12 @@ impl AnalysisRequest {
                     normalized_coupled: read_diagnostic(device, normalized)?,
                     residual_scale: read_diagnostic(device, residual_scale)?,
                     comparator,
+                    valuations: match &self.valuation {
+                        Some(request) => {
+                            Diagnostic::Available(request.records(device, self, &account)?)
+                        }
+                        None => Diagnostic::Inapplicable,
+                    },
                 })
             }
         }

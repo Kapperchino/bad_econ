@@ -319,6 +319,73 @@ fn analytical_admission_and_context_versions_reject_invalid_inputs() -> Result<(
 }
 
 #[test]
+fn empty_accounts_have_vacuous_certificates_and_exact_zero_hours() -> Result<()> {
+    let device = support::device(64)?;
+    let goods = SparseMatrix::new(0, 0, Vec::new())?;
+    let labor = SparseMatrix::new(2, 0, Vec::new())?;
+    let certificate = Contraction::new(0, 1, Vec::new())?;
+    let budget = SolveBudget {
+        iterations: 16,
+        weighted_tolerance: 0,
+    };
+    let operator = DeviceOperator::new(&device, &goods);
+    let solution = operator.solve(
+        &device,
+        &DeviceVector::exact(&device, &[])?,
+        &certificate,
+        budget,
+    )?;
+    let report = available(solution.read(&device)?)?;
+    assert!(report.values.is_empty());
+    assert_eq!(report.weighted_error, 0);
+    assert_eq!(report.iterations, 0);
+    let account = AccountModel::new(goods.clone(), labor.clone())?.upload(&device)?;
+    match solution.values(&device)? {
+        Diagnostic::Available(values) => {
+            exact(
+                &account.occupational_hours(&device, values)?,
+                &device,
+                &[0, 0],
+            )?;
+        }
+        _ => Err(anyhow!("empty solution unavailable"))?,
+    }
+    match operator.inverse(&device, 1000, &certificate, budget)? {
+        Diagnostic::Available(inverse) => {
+            assert_eq!((inverse.rows(), inverse.columns()), (0, 0));
+            assert!(inverse.read(&device)?.is_empty());
+        }
+        _ => Err(anyhow!("empty inverse unavailable"))?,
+    }
+    match LaborTruncation::new(
+        &device,
+        &goods,
+        &DeviceMatrix::new(&device, &labor, 1000)?,
+        &certificate,
+        NeumannTerms::new(3)?,
+    )? {
+        Diagnostic::Available(truncation) => {
+            let report = truncation.read(&device)?;
+            assert!(report.partial.is_empty());
+            assert!(report.enclosure.is_empty());
+            assert_eq!(report.weighted_tail, 0);
+        }
+        _ => Err(anyhow!("empty truncation unavailable"))?,
+    }
+    assert!(
+        DeviceOperator::new(&device, &labor)
+            .inverse(&device, 1000, &certificate, budget)
+            .is_err()
+    );
+    assert!(
+        operator
+            .inverse(&device, 1000, &Contraction::new(0, 1, vec![1])?, budget)
+            .is_err()
+    );
+    Ok(())
+}
+
+#[test]
 fn grain_coupled_fixed_point_fixture() -> Result<()> {
     let device = support::device(64)?;
     let matrix = SparseMatrix::coupled(
@@ -657,6 +724,7 @@ fn serialized_analysis_request_runs_complete_device_account() -> Result<()> {
             },
             living: 15000,
         }),
+        valuation: None,
     };
     let restored: AnalysisRequest = serde_json::from_str(&serde_json::to_string(&request)?)?;
     let report = restored.run(&device)?;

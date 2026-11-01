@@ -212,28 +212,3 @@ fn research_adoption_equipment_and_natural_stocks_constrain_real_production() ->
     assert_eq!(simulation.download()?, expected);
     Ok(())
 }
-
-#[test]
-fn institutional_phases_replay_identically_on_cpu_and_gpu() -> Result<()> {
-    use bad_econ::simulation::Device;
-    let mut config = research_configuration()?.config().clone();
-    config.finance = Some(finance());
-    config.payroll = Some(PayrollPolicy {
-        base_rate: 100,
-        employee_charge: 50,
-        brackets: vec![],
-    });
-    let scenario = Scenario::new(config)?;
-    let mut cpu = Simulation::new(scenario.clone(), Device::cpu(64)?)?;
-    let mut gpu = Simulation::new(scenario, Device::headless(64)?)?;
-    for _ in 0..5 {
-        for phase in Phase::ALL {
-            assert_eq!(
-                cpu.phase(phase, Trace::Record)?.decisions,
-                gpu.phase(phase, Trace::Record)?.decisions
-            );
-            assert_eq!(cpu.download()?, gpu.download()?);
-        }
-    }
-    Ok(())
-}

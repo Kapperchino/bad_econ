@@ -238,6 +238,15 @@ impl DeviceOperator {
         certificate: &Contraction,
         budget: SolveBudget,
     ) -> Result<Diagnostic<DeviceMatrix>> {
+        match self.rows == self.columns
+            && certificate.weights.len() == self.rows
+            && budget.iterations <= 100_000
+        {
+            true => Ok(()),
+            false => Err(anyhow!(
+                "certified inverse dimensions or iteration budget are invalid"
+            )),
+        }?;
         let output = DeviceMatrix::empty(device, self.rows, self.columns, scale)?;
         let mut result = Diagnostic::Available(());
         for column in 0..self.columns {
