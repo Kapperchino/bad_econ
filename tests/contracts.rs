@@ -242,9 +242,8 @@ fn transport_ownership_time_budgets_and_checkpoint_replay() -> Result<()> {
 }
 
 #[test]
-fn scenario_rejects_invalid_configuration_and_enforces_memory_budget() -> Result<()> {
+fn scenario_rejects_invalid_configuration() -> Result<()> {
     let scenario = Scenario::baseline(1_000_000, 42, Experiment::Baseline)?;
-    assert!(scenario.memory_estimate() < MEMORY_BUDGET);
     let mut config = scenario.config().clone();
     config.shipment_speed = 0;
     assert!(Scenario::new(config).is_err());

@@ -155,7 +155,7 @@ fn run(scenario: Scenario, args: &Cli) -> Result<()> {
     })?;
     output(
         &args.output,
-        &serde_json::json!({"backend":simulation.device.name,"seconds":start.elapsed().as_secs_f64(),"snapshot":simulation.snapshot,"last_day_phases":simulation.timings,"readback_bytes":simulation.readback_bytes,"memory":simulation.memory_usage()}),
+        &serde_json::json!({"backend":simulation.device.name,"seconds":start.elapsed().as_secs_f64(),"snapshot":simulation.snapshot,"last_day_phases":simulation.timings,"readback_bytes":simulation.readback_bytes,"memory":simulation.memory_usage(),"memory_budget_bytes":simulation.device.memory_budget.bytes(),"memory_budget":simulation.device.memory_budget}),
     )?;
     if let Some(path) = &args.checkpoint {
         std::fs::write(path, serde_json::to_vec(&simulation.checkpoint()?)?)?;
@@ -234,16 +234,12 @@ fn benchmark(scenario: Scenario, args: &Cli) -> Result<()> {
                 day_start.elapsed().as_secs_f64(),
                 memory.bytes_reserved
             );
-            match memory.bytes_reserved <= MEMORY_BUDGET {
-                true => Ok(()),
-                false => Err(anyhow!("GPU memory exceeded 4 GiB")),
-            }?;
             daily.push(serde_json::json!({"day":simulation.snapshot.day,"seconds":day_start.elapsed().as_secs_f64(),"phases":simulation.timings,"memory":memory}));
         }
         let seconds = start.elapsed().as_secs_f64();
         let readback_bytes = simulation.readback_bytes - readback_before;
         let state_hash = simulation.download()?.digest();
-        reports.push(serde_json::json!({"households":households,"firms":simulation.scenario.config().firms,"scenario":simulation.scenario.config(),"scenario_hash":fingerprint,"device":simulation.device.name,"workgroup":args.workgroup,"days":args.days,"warmup_days":args.warmup,"seconds":seconds,"days_per_second":f64::from(args.days)/seconds,"readback_bytes":readback_bytes,"final_state_hash":state_hash,"state_hash_version":STATE_HASH_VERSION,"profile":bad_econ::arithmetic::PROFILE,"policy_table_hash":bad_econ::arithmetic::table_hash(),"estimated_bytes":estimate,"memory_budget_bytes":MEMORY_BUDGET,"daily":daily,"snapshot":simulation.snapshot}));
+        reports.push(serde_json::json!({"households":households,"firms":simulation.scenario.config().firms,"scenario":simulation.scenario.config(),"scenario_hash":fingerprint,"device":simulation.device.name,"workgroup":args.workgroup,"days":args.days,"warmup_days":args.warmup,"seconds":seconds,"days_per_second":f64::from(args.days)/seconds,"readback_bytes":readback_bytes,"final_state_hash":state_hash,"state_hash_version":STATE_HASH_VERSION,"profile":bad_econ::arithmetic::PROFILE,"policy_table_hash":bad_econ::arithmetic::table_hash(),"estimated_bytes":estimate,"memory_budget_bytes":simulation.device.memory_budget.bytes(),"memory_budget":simulation.device.memory_budget,"daily":daily,"snapshot":simulation.snapshot}));
         output(&args.output, &serde_json::to_value(&reports)?)?;
     }
     Ok(())

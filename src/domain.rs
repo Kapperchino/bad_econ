@@ -26,7 +26,6 @@ pub const USED_FIELDS: usize = Field::ActiveMethod as usize + 1;
 pub const TRANSIT_FIELDS: usize = USED_FIELDS + Good::COUNT;
 pub const CONSUMPTION_FIELDS: usize = TRANSIT_FIELDS + Good::COUNT;
 pub const BASE_FIELDS: usize = CONSUMPTION_FIELDS + Good::COUNT;
-pub const MEMORY_BUDGET: u64 = 4 * 1024 * 1024 * 1024;
 
 #[repr(u32)]
 #[derive(Clone, Copy, Debug, Serialize, Deserialize, PartialEq, Eq)]
@@ -472,11 +471,9 @@ impl Scenario {
                     .config
                     .map_size
                     .div_ceil(scenario.config.search_radius);
-                match side <= 256 && ring <= 65 && scenario.memory_estimate() <= MEMORY_BUDGET {
+                match side <= 256 && ring <= 65 {
                     true => Ok(scenario),
-                    false => Err(anyhow!(
-                        "scenario exceeds transit, cash, or 4 GiB memory capacity"
-                    )),
+                    false => Err(anyhow!("scenario exceeds transit or spatial capacity")),
                 }
             }
         }

@@ -1,11 +1,66 @@
 #![cfg(feature = "compute")]
-use anyhow::Result;
+use anyhow::{Context, Result};
 use bad_econ::{
     domain::*,
     ledger::*,
-    simulation::{self, Device, Simulation, Trace},
+    simulation::{self, Device, MemoryBudget, Simulation, Trace},
 };
 use std::collections::{BTreeMap, btree_map::Entry};
+
+#[test]
+fn gpu_memory_budget_rejects_scenarios_before_allocation() -> Result<()> {
+    let scenario = Scenario::baseline(1_000_000, 42, Experiment::Transport)?;
+    assert!(scenario.memory_estimate() > 4 * 1024 * 1024 * 1024);
+    let mut device = Device::headless(64)?;
+    eprintln!("{} memory budget: {:?}", device.name, device.memory_budget);
+    assert!(matches!(
+        device.memory_budget,
+        MemoryBudget::Reported { .. }
+    ));
+    assert!(device.memory_budget.bytes() > 0);
+    device.memory_budget = MemoryBudget::Reported {
+        available_bytes: (scenario.memory_estimate() - 1) * 2,
+    };
+    let client = device.client.clone();
+    let reserved = client
+        .memory_report(cubecl::MemoryScope::Device)
+        .usage()
+        .bytes_reserved;
+    let error = Simulation::new(scenario, device)
+        .err()
+        .context("scenario should exceed the selected device budget")?;
+    assert!(
+        error
+            .to_string()
+            .contains("exceeding the device memory budget")
+    );
+    assert_eq!(
+        client
+            .memory_report(cubecl::MemoryScope::Device)
+            .usage()
+            .bytes_reserved,
+        reserved
+    );
+    Ok(())
+}
+
+#[test]
+fn gpu_memory_budget_survives_restore_and_faults_on_excess_usage() -> Result<()> {
+    use bad_econ::runtime::{RuntimeState, SimulationCommand};
+
+    let scenario = Scenario::baseline(48, 42, Experiment::Baseline)?;
+    let device = Device::headless(64)?;
+    let budget = device.memory_budget.bytes();
+    let mut simulation = Simulation::new(scenario, device)?;
+    let checkpoint = simulation.checkpoint()?;
+    simulation.advance()?;
+    simulation.command(SimulationCommand::Restore(checkpoint.into()))?;
+    assert_eq!(simulation.device.memory_budget.bytes(), budget);
+    simulation.device.memory_budget = MemoryBudget::Reported { available_bytes: 2 };
+    assert!(simulation.advance().is_err());
+    assert!(matches!(simulation.status, RuntimeState::Fault { .. }));
+    Ok(())
+}
 
 fn event(identity: u64, legs: &[Leg]) -> Bundle {
     Bundle::new(

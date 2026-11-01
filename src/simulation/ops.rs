@@ -1,6 +1,7 @@
 use super::{
     economy::{self, EconomyStage},
     layout::WORD_BYTES,
+    memory::MemoryBudget,
     parameters::{EconomyParameters, SchedulerParameters},
     scheduler::{self, SchedulerStage},
 };
@@ -23,6 +24,7 @@ pub struct Device {
     pub cube: cubecl::Device,
     pub name: String,
     pub workgroup: u32,
+    pub memory_budget: MemoryBudget,
 }
 impl Device {
     pub fn headless(workgroup: u32) -> Result<Self> {
@@ -53,6 +55,7 @@ impl Device {
         match WORKGROUP_SIZES.contains(&workgroup) {
             true => {
                 let name = format!("{} / {:?}", setup.adapter.get_info().name, setup.backend);
+                let memory_budget = MemoryBudget::gpu(&setup.adapter);
                 let imported =
                     burn_wgpu::try_init_device(setup, burn_wgpu::RuntimeOptions::default())
                         .map_err(|e| anyhow::anyhow!("{e}"))?;
@@ -63,6 +66,7 @@ impl Device {
                     cube,
                     name,
                     workgroup,
+                    memory_budget,
                 })
             }
             false => Err(anyhow!("workgroup must be one of {WORKGROUP_SIZES:?}")),
@@ -139,6 +143,7 @@ impl Device {
                 cube,
                 name: "CubeCL CPU / LLVM".into(),
                 workgroup,
+                memory_budget: MemoryBudget::Unreported,
             }),
             false => Err(anyhow!("workgroup must be one of {WORKGROUP_SIZES:?}")),
         }

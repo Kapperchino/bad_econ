@@ -711,6 +711,7 @@ name = "bad_econ"
 version = "0.1.0"
 dependencies = [
  "anyhow",
+ "ash",
  "bevy",
  "bitflags 2.13.2",
  "burn",
@@ -719,10 +720,13 @@ dependencies = [
  "clap",
  "cubecl",
  "enumflags2",
+ "objc2-metal 0.3.2",
  "pollster",
  "serde",
  "serde_json",
  "sha2 0.11.1",
+ "sysinfo",
+ "windows",
 ]
 
 [[package]]

@@ -5,6 +5,7 @@ pub mod finance;
 mod flags;
 pub mod households;
 mod layout;
+mod memory;
 pub mod negotiation;
 mod ops;
 mod parameters;
@@ -29,6 +30,7 @@ use flags::{
     SchedulerControl,
 };
 use layout::*;
+pub use memory::MemoryBudget;
 pub use ops::Device;
 use ops::{EconomyBuffers, EconomyOps, SchedulerBuffers};
 use parameters::{EconomyParameters, SchedulerParameters};
@@ -94,10 +96,26 @@ impl Simulation {
             .usage()
     }
     pub fn new(scenario: Scenario, device: Device) -> Result<Self> {
+        match scenario.memory_estimate() <= device.memory_budget.bytes() {
+            true => Ok(()),
+            false => Err(anyhow!(
+                "scenario needs an estimated {} bytes, exceeding the device memory budget of {} bytes",
+                scenario.memory_estimate(),
+                device.memory_budget.bytes()
+            )),
+        }?;
         let initial = scenario.initial()?;
         Self::from_state(scenario, initial, device)
     }
     fn from_state(scenario: Scenario, mut initial: State, device: Device) -> Result<Self> {
+        match scenario.memory_estimate() <= device.memory_budget.bytes() {
+            true => Ok(()),
+            false => Err(anyhow!(
+                "scenario needs an estimated {} bytes, exceeding the device memory budget of {} bytes",
+                scenario.memory_estimate(),
+                device.memory_budget.bytes()
+            )),
+        }?;
         let snapshot = ObservationSnapshot::from_state(&scenario, &initial)?;
         let c = scenario.config();
         let configuration = ConfigLayout::new(&scenario);
@@ -202,7 +220,13 @@ impl Simulation {
         };
         simulation.snapshot = simulation.observe()?;
         simulation.copy_audited(CopyDirection::Save)?;
-        Ok(simulation)
+        match simulation.memory_usage().bytes_reserved <= simulation.device.memory_budget.bytes() {
+            true => Ok(simulation),
+            false => Err(anyhow!(
+                "simulation memory exceeded the device memory budget of {} bytes",
+                simulation.device.memory_budget.bytes()
+            )),
+        }
     }
     fn parameters(
         &self,
@@ -273,9 +297,12 @@ impl Simulation {
         let previous = self.snapshot.clone();
         self.status = RuntimeState::Advancing(phase);
         let result = self.execute_phase(phase, trace).and_then(|evidence| {
-            match self.memory_usage().bytes_reserved <= MEMORY_BUDGET {
+            match self.memory_usage().bytes_reserved <= self.device.memory_budget.bytes() {
                 true => Ok(evidence),
-                false => Err(anyhow!("simulation memory exceeded 4 GiB")),
+                false => Err(anyhow!(
+                    "simulation memory exceeded the device memory budget of {} bytes",
+                    self.device.memory_budget.bytes()
+                )),
             }
         });
         match result {
@@ -847,6 +874,7 @@ impl Simulation {
             cube: self.device.cube.clone(),
             name: self.device.name.clone(),
             workgroup: self.device.workgroup,
+            memory_budget: self.device.memory_budget,
         };
         *self = Self::from_state(scenario, state, device)?;
         Ok(())
