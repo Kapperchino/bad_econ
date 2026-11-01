@@ -31,14 +31,11 @@ impl ControlLayout {
     }
 }
 
-#[enumflags2::bitflags]
-#[repr(u32)]
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub enum MarketFlag {
     Labor,
-    GrainInput,
-    FlourInput,
-    BreadInput,
+    Input(Good),
+    Consumer(Good),
     Household,
     Payroll,
     Distribution,
@@ -47,9 +44,8 @@ impl From<Market> for MarketFlag {
     fn from(market: Market) -> Self {
         match market {
             Market::Labor => Self::Labor,
-            Market::Input(Good::Grain) => Self::GrainInput,
-            Market::Input(Good::Flour) => Self::FlourInput,
-            Market::Input(Good::Bread) => Self::BreadInput,
+            Market::Input(good) => Self::Input(good),
+            Market::Consumer(good) => Self::Consumer(good),
             Market::Household => Self::Household,
             Market::Payroll => Self::Payroll,
             Market::Distribution => Self::Distribution,
@@ -59,41 +55,21 @@ impl From<Market> for MarketFlag {
 impl MarketFlag {
     pub fn good(self) -> Option<Good> {
         match self {
-            Self::GrainInput => Some(Good::Grain),
-            Self::FlourInput => Some(Good::Flour),
-            Self::BreadInput | Self::Household => Some(Good::Bread),
-            Self::Labor | Self::Payroll | Self::Distribution => None,
+            Self::Input(good) | Self::Consumer(good) => Some(good),
+            Self::Household => Some(Good::Bread),
+            _ => None,
         }
     }
 }
 
-#[enumflags2::bitflags]
 #[repr(u32)]
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum ActorKind {
-    Household,
-    Farm,
-    Mill,
-    Bakery,
+    Household = 0,
 }
 impl ActorKind {
-    pub const HOUSEHOLD_BITS: u32 = Self::Household as u32;
-    pub const FARM_BITS: u32 = Self::Farm as u32;
-    pub const MILL_BITS: u32 = Self::Mill as u32;
-    pub const BAKERY_BITS: u32 = Self::Bakery as u32;
-
-    pub fn new(kind: u32) -> Result<Self> {
-        match kind {
-            0 => Ok(Self::Household),
-            code => Ok(match Good::from_index(code)? {
-                Good::Grain => Self::Farm,
-                Good::Flour => Self::Mill,
-                Good::Bread => Self::Bakery,
-            }),
-        }
-    }
+    pub const HOUSEHOLD_BITS: u32 = 0;
 }
-
 #[derive(CubeType, Clone, Copy)]
 pub struct KernelActorKind {
     bits: u32,
@@ -107,26 +83,10 @@ impl KernelActorKind {
         self.bits
     }
     pub fn is(&self, #[comptime] kind: ActorKind) -> bool {
-        self.bits == comptime!(BitFlags::from_flag(kind).bits())
-    }
-    pub fn processes_input(&self) -> bool {
-        self.bits & comptime!((ActorKind::Mill | ActorKind::Bakery).bits()) != 0
+        self.bits == comptime!(kind as u32)
     }
     pub fn output(&self) -> u32 {
-        match self.bits {
-            ActorKind::FARM_BITS => comptime!(Good::Grain as u32),
-            ActorKind::MILL_BITS => comptime!(Good::Flour as u32),
-            ActorKind::BAKERY_BITS => comptime!(Good::Bread as u32),
-            _ => 0u32,
-        }
-    }
-    pub fn input(&self) -> u32 {
-        match self.bits {
-            ActorKind::HOUSEHOLD_BITS => comptime!(Good::Bread as u32),
-            ActorKind::MILL_BITS => comptime!(Good::Grain as u32),
-            ActorKind::BAKERY_BITS => comptime!(Good::Flour as u32),
-            _ => 0u32,
-        }
+        self.bits
     }
 }
 

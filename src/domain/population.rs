@@ -74,6 +74,7 @@ pub struct HouseholdSeed {
     pub identity: u64,
     pub position: Position,
     pub cash: u64,
+    #[serde(deserialize_with = "super::industry::goods_array")]
     pub inventories: [u64; Good::COUNT],
     pub health: u32,
     pub fatigue: u32,
@@ -87,6 +88,7 @@ pub struct FirmSeed {
     pub owner: u64,
     pub good: Good,
     pub cash: u64,
+    #[serde(deserialize_with = "super::industry::goods_array")]
     pub inventories: [u64; Good::COUNT],
     pub capacity: u32,
     pub technique: Technique,
@@ -116,9 +118,9 @@ impl Population {
             .iter()
             .all(|actor| position(actor.position) && actor.health <= 1000 && actor.fatigue <= 1000);
         let firms = population.firms.iter().all(|actor| {
-            let input = match actor.good {
-                Good::Grain => actor.technique.input_ticks == 0,
-                Good::Flour | Good::Bread => actor.technique.input_ticks > 0,
+            let input = match actor.good.inputs()[0] {
+                None => actor.technique.input_ticks == 0,
+                Some(_) => actor.technique.input_ticks > 0,
             };
             position(actor.position)
                 && population
@@ -215,7 +217,7 @@ impl Population {
             actors: (0..count).map(|index| self.actor(index)).collect(),
             values: vec![0; scenario.fields() * count],
             initial_cash: 0,
-            initial_goods: [0; 3],
+            initial_goods: [0; Good::COUNT],
             research: None,
         };
         self.households
@@ -225,7 +227,8 @@ impl Population {
                 state.set(Field::Cash, index, seed.cash);
                 state.set(Field::Health, index, seed.health.into());
                 state.set(Field::Fatigue, index, seed.fatigue.into());
-                [Field::Grain, Field::Flour, Field::Bread]
+                Good::ALL
+                    .map(Field::inventory)
                     .into_iter()
                     .zip(seed.inventories)
                     .for_each(|(field, value)| state.set(field, index, value));
@@ -241,7 +244,8 @@ impl Population {
                 index,
                 u64::from(seed.capacity) * u64::from(seed.technique.output_ticks),
             );
-            [Field::Grain, Field::Flour, Field::Bread]
+            Good::ALL
+                .map(Field::inventory)
                 .into_iter()
                 .zip(seed.inventories)
                 .for_each(|(field, value)| state.set(field, index, value));
@@ -265,11 +269,14 @@ impl Population {
             .try_fold(InitialTotals::default(), |total, next| {
                 Ok(InitialTotals {
                     cash: add(total.cash, next.cash)?,
-                    goods: [
-                        add(total.goods[0], next.goods[0])?,
-                        add(total.goods[1], next.goods[1])?,
-                        add(total.goods[2], next.goods[2])?,
-                    ],
+                    goods: total
+                        .goods
+                        .into_iter()
+                        .zip(next.goods)
+                        .map(|(a, b)| add(a, b))
+                        .collect::<Result<Vec<_>>>()?
+                        .try_into()
+                        .expect("goods count"),
                 })
             })
     }

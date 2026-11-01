@@ -31,7 +31,7 @@ fn base_config() -> Result<ScenarioConfig> {
                 identity,
                 position,
                 cash: 0,
-                inventories: [0, 0, 10],
+                inventories: Good::food([0, 0, 10]),
                 health: 1000,
                 fatigue: 0,
             })
@@ -46,7 +46,7 @@ fn base_config() -> Result<ScenarioConfig> {
                     0 => 100_000,
                     _ => 0,
                 },
-                inventories: [5, 0, 5],
+                inventories: Good::food([5, 0, 5]),
                 capacity: 5,
                 wage: 1,
                 price: 100,
@@ -59,6 +59,7 @@ fn base_config() -> Result<ScenarioConfig> {
 
 fn lab() -> ResearchLab {
     ResearchLab {
+        methods: Vec::new(),
         owner: 100,
         researcher: 1,
         discovered: 0,
@@ -72,7 +73,7 @@ fn lab() -> ResearchLab {
             identity: 900,
             prerequisites: 0,
             outcomes: 1,
-            inputs: [1, 0, 0],
+            inputs: Good::food([1, 0, 0]),
             labor_minutes: 100,
             minimum_effort: 1,
             pioneer_effort: 1,
@@ -171,7 +172,7 @@ fn research_consumes_inputs_and_time_before_granting_production_readiness() -> R
     let state = simulation.download()?;
     assert_eq!(simulation.snapshot.research.attempts, 1);
     assert_eq!(simulation.snapshot.research.discoveries, 1);
-    assert_eq!(simulation.snapshot.research.consumed, [1, 0, 0]);
+    assert_eq!(simulation.snapshot.research.consumed, Good::food([1, 0, 0]));
     assert_eq!(state.get(Field::ResearchMinutes, 0), 100);
     assert_eq!(state.get(Field::Time, 0), 380);
     assert_eq!(state.get(Field::Grain, 6), 4);
@@ -206,7 +207,7 @@ fn failed_research_consumes_inputs_but_missing_consent_and_time_do_not() -> Resu
         assert_eq!(simulation.snapshot.research.discoveries, 0);
         assert_eq!(
             simulation.snapshot.research.consumed,
-            [expected_attempts, 0, 0]
+            Good::food([expected_attempts, 0, 0])
         );
         assert_eq!(simulation.download()?.get(Field::Produced, 6), 0);
     }
@@ -243,7 +244,7 @@ fn equipment_lifetime_and_renewable_stock_constrain_executed_production() -> Res
     assert_eq!(state.get(Field::Produced, 6), 2);
     assert_eq!(simulation.snapshot.research.remaining_service, 0);
     assert_eq!(simulation.snapshot.research.natural_stock, 6);
-    assert_eq!(simulation.snapshot.research.consumed, [0, 0, 1]);
+    assert_eq!(simulation.snapshot.research.consumed, Good::food([0, 0, 1]));
     simulation.advance()?;
     assert_eq!(simulation.download()?.get(Field::Produced, 6), 2);
     assert_eq!(simulation.snapshot.research.remaining_service, 0);
@@ -611,7 +612,7 @@ fn strike_participation_and_research_share_the_actual_household_clock() -> Resul
     assert_eq!(state.get(Field::Hours, 1), 60);
     assert_eq!(saved.project(config, 0, 0)?.outcome, AttemptOutcome::NoTime);
     assert_eq!(saved.summary.attempts, 0);
-    assert_eq!(saved.summary.consumed, [0; 3]);
+    assert_eq!(saved.summary.consumed, [0; Good::COUNT]);
     Ok(())
 }
 
@@ -627,7 +628,7 @@ fn research_rows_preserve_multiple_records_and_checkpoint_replay() -> Result<()>
         identity: 901,
         outcomes: 2,
         exposure: 300,
-        inputs: [0, 0, 1],
+        inputs: Good::food([0, 0, 1]),
         ..first.projects[0].clone()
     });
     let mut second = lab();

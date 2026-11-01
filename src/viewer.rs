@@ -151,7 +151,7 @@ pub fn run(scenario: Scenario, workgroup: u32, mode: ViewMode) -> Result<()> {
         DefaultPlugins
             .set(WindowPlugin {
                 primary_window: Some(Window {
-                    title: "Spatial economy | grain / flour / bread".into(),
+                    title: "Spatial industrial economy".into(),
                     resolution: (1280, 840).into(),
                     ..Default::default()
                 }),
@@ -249,7 +249,7 @@ fn setup(
         Transform::from_xyz(-600.0, 390.0, 2.0),
     ));
     commands.spawn((
-        Text2d::new("Regional shortages | amber grain / blue flour / green bread"),
+        Text2d::new("Regional bread shortages | colored industry locations"),
         TextFont {
             font_size: FontSize::Px(15.0),
             ..Default::default()
@@ -614,13 +614,13 @@ fn draw(
                             i.gross_income, i.income_tax, i.employee_charges, i.payroll_reserve
                         ),
                         _ => format!(
-                            "Owner {} | wage {} | price {}\nCapacity {} | planned {} | open {}",
+                            "Owner {} | wage {} | price {}\nCapacity {} | planned {} | open {}\nMethod {:?} | {} output / {} min",
                             i.owner_identity,
                             i.wage,
                             i.price,
                             i.actor.capacity,
                             i.planned_packets,
-                            i.open_slots
+                            i.open_slots, i.production_method, i.output_ticks, i.labor_minutes
                         ),
                     };
                     format!(
@@ -655,20 +655,21 @@ fn draw(
             let quotes = s
                 .markets
                 .iter()
-                .zip(["Grain", "Flour", "Bread"])
+                .zip(Good::ALL)
                 .map(|(market, name)| {
                     format!(
-                        "{name}: {:.1} +/- {:.1} / {:.1} +/- {:.1}",
+                        "{name:?}: {:.0} / {:.0}",
                         market.prices.mean(),
-                        market.prices.deviation(),
                         market.wages.mean(),
-                        market.wages.deviation()
                     )
                 })
                 .collect::<Vec<_>>()
+                .chunks(2)
+                .map(|pair| pair.join(" | "))
+                .collect::<Vec<_>>()
                 .join("\n");
             let text = format!(
-                "{} | seed {}\nDay {} | target {}\nUnemployment {:.1}% | unmet bread {}\nCash {}\nStocks G/F/B {:?}\nIn transit {:?}\nTax {} | charges {} | payroll reserve {}\nBank/support cash {} | loan principal {}\nLoans {} active / {} overdue | interest {}\nResearch {} attempts / {} successes | strikes {}\n\nPrice / wage | mean +/- standard deviation\n{}\n\n{}\n\n{}\n{}",
+                "{} | seed {}\nDay {} | target {}\nUnemployment {:.1}% | unmet bread {}\nCash {}\nFood stocks {:?} | other stocks {}\nIn transit {}\nTax {} | charges {} | payroll reserve {}\nBank/support cash {} | loan principal {}\nLoans {} active / {} overdue | interest {}\nResearch {} attempts / {} successes | strikes {}\n\nPrice / wage | means\n{}\n\n{}\n\n{}\n{}",
                 display.status.label(),
                 display.seed,
                 s.day,
@@ -676,8 +677,15 @@ fn draw(
                 unemployment,
                 s.shortages,
                 s.cash,
-                s.inventories,
-                s.transit,
+                &s.inventories[..3],
+                s.inventories[3..]
+                    .iter()
+                    .map(|&value| u128::from(value))
+                    .sum::<u128>(),
+                s.transit
+                    .iter()
+                    .map(|&value| u128::from(value))
+                    .sum::<u128>(),
                 s.income_tax,
                 s.employee_charges,
                 s.payroll_reserves,
@@ -705,7 +713,7 @@ fn draw(
                     "Current seed {} | faint seed {}",
                     display.seed, reference.seed
                 ),
-                None => "Grain amber | flour blue | bread green".into(),
+                None => "Colors follow the goods catalogue".into(),
             };
             let title = format!("G: {}\n{}", dashboard.chart.label(), reference_label);
             labels.iter_mut().for_each(|(kind, mut label)| {
@@ -722,11 +730,7 @@ fn draw(
                     Color::srgb(0.08 + heat * 0.65, 0.16 - heat * 0.08, 0.19 - heat * 0.10);
             });
             display.firms.iter().for_each(|firm| {
-                let color = match firm.kind {
-                    1 => Color::srgb(0.95, 0.73, 0.25),
-                    2 => Color::srgb(0.40, 0.70, 0.95),
-                    _ => Color::srgb(0.45, 0.90, 0.65),
-                };
+                let color = chart_color(Chart::Prices, firm.kind.saturating_sub(1) as usize);
                 let point = Vec2::new(
                     -599.5 + firm.position.x as f32 / display.map_size as f32 * 624.0,
                     324.5 - firm.position.y as f32 / display.map_size as f32 * 624.0,
@@ -744,7 +748,8 @@ fn chart_color(chart: Chart, series: usize) -> Color {
         (Chart::Employment, _) => Color::srgb(0.95, 0.35, 0.30),
         (_, 0) => Color::srgb(0.95, 0.73, 0.25),
         (_, 1) => Color::srgb(0.40, 0.70, 0.95),
-        _ => Color::srgb(0.45, 0.90, 0.65),
+        (_, 2) => Color::srgb(0.45, 0.90, 0.65),
+        _ => Color::hsl((series as f32 * 137.5) % 360.0, 0.65, 0.65),
     }
 }
 fn draw_chart(display: &Display, chart: Chart, range: &ChartRange, gizmos: &mut Gizmos) {

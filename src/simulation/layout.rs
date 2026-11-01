@@ -1,9 +1,9 @@
-use super::flags::{ActorKind, ControlLayout};
+use super::flags::ControlLayout;
 use super::negotiation::PolicyLayout;
 use super::rows::row_layout;
 use crate::{
     arithmetic::PRICE_TABLE,
-    domain::{Actor, Good, MAX_TAX_BRACKETS, Scenario, State, Technique},
+    domain::{Actor, Good, MAX_TAX_BRACKETS, Scenario, State},
     ledger::{LEG_WORDS, MAX_LEGS, TickLayout},
 };
 use anyhow::{Context, Result};
@@ -59,22 +59,16 @@ row_layout!(ActorMetadataRows, ActorLayout {
     kind: u32 => KIND,
     owner: u32 => OWNER,
     capacity: u32 => CAPACITY,
-    labor_minutes: u32 => LABOR_MINUTES,
-    input_ticks: u32 => INPUT_TICKS,
-    output_ticks: u32 => OUTPUT_TICKS,
 });
 impl ActorLayout {
-    pub fn new(actor: &Actor, technique: Technique) -> Result<Self> {
-        Ok(Self {
+    pub fn new(actor: &Actor) -> Self {
+        Self {
             x: actor.position.x,
             y: actor.position.y,
-            kind: enumflags2::BitFlags::from_flag(ActorKind::new(actor.kind)?).bits(),
+            kind: actor.kind,
             owner: actor.owner,
             capacity: actor.capacity,
-            labor_minutes: technique.labor_minutes,
-            input_ticks: technique.input_ticks,
-            output_ticks: technique.output_ticks,
-        })
+        }
     }
 }
 
@@ -91,6 +85,8 @@ pub struct ConfigLayout {
     commute_speed: u32,
     shipment_speed: u32,
     household_need: u32,
+    industrial: u32,
+    consumption_intervals: [u32; Good::COUNT],
     capacity: u32,
     packet_output: u32,
     packet_minutes: u32,
@@ -137,6 +133,8 @@ impl ConfigLayout {
     pub const MAP_SIZE: usize = offset_of!(Self, map_size) / WORD_BYTES;
     pub const COMMUTE_SPEED: usize = offset_of!(Self, commute_speed) / WORD_BYTES;
     pub const SHIPMENT_SPEED: usize = offset_of!(Self, shipment_speed) / WORD_BYTES;
+    pub const CONSUMPTION_INTERVALS: usize = offset_of!(Self, consumption_intervals) / WORD_BYTES;
+    pub const INDUSTRIAL: usize = offset_of!(Self, industrial) / WORD_BYTES;
     pub const HOUSEHOLD_NEED: usize = offset_of!(Self, household_need) / WORD_BYTES;
     pub const WORK_CAP: usize = offset_of!(Self, work_cap) / WORD_BYTES;
     pub const RESERVED_MINUTES: usize = offset_of!(Self, reserved_minutes) / WORD_BYTES;
@@ -184,6 +182,8 @@ impl ConfigLayout {
             commute_speed: config.commute_speed,
             shipment_speed: config.shipment_speed,
             household_need: config.household_need,
+            industrial: u32::from(config.economy == crate::domain::Economy::Industrial),
+            consumption_intervals: Good::ALL.map(Good::consumption_interval),
             capacity: config.capacity,
             packet_output: config.packet_output,
             packet_minutes: config.packet_minutes,
@@ -314,6 +314,7 @@ pub struct SummaryLayout {
     pub produced: [TickLayout; Good::COUNT],
     pub used: [TickLayout; Good::COUNT],
     pub consumed: TickLayout,
+    pub consumption: [TickLayout; Good::COUNT],
     pub minimum_wage: TickLayout,
     pub maximum_wage: TickLayout,
     pub minimum_price: TickLayout,
@@ -339,6 +340,7 @@ impl SummaryLayout {
     pub const TRANSIT: u32 = (offset_of!(Self, transit) / TICK_BYTES) as u32;
     pub const PRODUCED: u32 = (offset_of!(Self, produced) / TICK_BYTES) as u32;
     pub const USED: u32 = (offset_of!(Self, used) / TICK_BYTES) as u32;
+    pub const CONSUMPTION: u32 = (offset_of!(Self, consumption) / TICK_BYTES) as u32;
     pub const CONSUMED: u32 = (offset_of!(Self, consumed) / TICK_BYTES) as u32;
     pub const MINIMUM_WAGE: u32 = (offset_of!(Self, minimum_wage) / TICK_BYTES) as u32;
     pub const MAXIMUM_WAGE: u32 = (offset_of!(Self, maximum_wage) / TICK_BYTES) as u32;

@@ -1,3 +1,4 @@
+use crate::domain::Good;
 pub mod capabilities;
 mod kernels;
 mod layout;
@@ -35,7 +36,7 @@ pub struct LabObservation {
     pub mastered: u32,
     pub permitted: u32,
     pub adopted: u32,
-    pub consumed: [u64; 3],
+    pub consumed: [u64; Good::COUNT],
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -220,11 +221,29 @@ impl EncodedResearch {
                 .context("unknown research actor")
         };
         let mut labs = LabLayoutRows::default();
+        let mut methods = MethodLayoutRows::default();
         let mut lab_states = LabStateRows::default();
         let mut projects = ProjectLayoutRows::default();
         let mut project_states = ProjectStateRows::default();
         for lab in &config.labs {
+            let first_method = methods.len() as u32;
+            let firm = actor_index(lab.owner)?;
+            let good = Good::from_index(initial.actors.at(firm).kind)?;
+            for method in &lab.methods {
+                let recipe = method.recipe(good, scenario.technique(firm));
+                methods.push(MethodLayout {
+                    identity: *method as u32,
+                    requirements: method.technology() as u32,
+                    labor_minutes: recipe.technique.labor_minutes,
+                    input_ticks: recipe.technique.input_ticks,
+                    output_ticks: recipe.technique.output_ticks,
+                    first_input: recipe.inputs[0].map_or(0, |good| good as u32),
+                    second_input: recipe.inputs[1].map_or(0, |good| good as u32),
+                });
+            }
             labs.push(LabLayout {
+                first_method,
+                method_count: methods.len() as u32 - first_method,
                 owner: actor_index(lab.owner)? as u32,
                 researcher: actor_index(lab.researcher)? as u32,
                 first_project: projects.len() as u32,
@@ -277,7 +296,6 @@ impl EncodedResearch {
                 let firm = actor_index(machine.firm)?;
                 Ok(MachineLayout {
                     firm: firm as u32,
-                    output_ticks: scenario.technique(firm).output_ticks,
                     initial_service: machine.remaining_service.into(),
                     maximum_packets: initial.actors.at(firm).capacity,
                     nameplate: machine.nameplate,
@@ -305,7 +323,6 @@ impl EncodedResearch {
                 let firm = actor_index(stock.firm)?;
                 Ok(StockLayout {
                     firm: firm as u32,
-                    output_ticks: scenario.technique(firm).output_ticks,
                     maximum_packets: initial.actors.at(firm).capacity,
                     capacity: stock.capacity,
                     renewal: stock.renewal_rate,
@@ -350,6 +367,8 @@ impl EncodedResearch {
             stock_count: stocks.len() as u32,
             strike_count: strikes.len() as u32,
             labs: append(&mut configuration, &labs.words())?,
+            methods: append(&mut configuration, &methods.words())?,
+            method_count: methods.len() as u32,
             projects: append(&mut configuration, &projects.words())?,
             machines: append(&mut configuration, &machines.words())?,
             stocks: append(&mut configuration, &stocks.words())?,
@@ -375,7 +394,7 @@ impl EncodedResearch {
         .max()
         .unwrap_or(1);
         let mut hash = Sha256::new();
-        hash.update(b"bad-econ/research-configuration/ResearchFixedV2\0");
+        hash.update(b"bad-econ/research-configuration/ResearchFixedV3\0");
         hash.update(serde_json::to_vec(&config)?);
         for &word in configuration.iter().chain(&state) {
             hash.update(word.to_le_bytes());

@@ -4,7 +4,7 @@ use serde::{Deserialize, Serialize};
 use std::collections::{BTreeMap, BTreeSet};
 
 pub const RESEARCH_SCALE: u32 = 1000;
-pub const RESEARCH_PROFILE: &str = "ResearchFixedV2";
+pub const RESEARCH_PROFILE: &str = "ResearchFixedV3";
 pub const MAX_RESEARCH_RECORDS: usize = 100_000;
 
 #[derive(Clone, Copy, Debug, Default, Serialize, Deserialize, PartialEq, Eq)]
@@ -26,7 +26,8 @@ pub struct ResearchProject {
     pub identity: u64,
     pub prerequisites: u32,
     pub outcomes: u32,
-    pub inputs: [u32; 3],
+    #[serde(deserialize_with = "super::industry::goods_array")]
+    pub inputs: [u32; Good::COUNT],
     pub labor_minutes: u32,
     pub minimum_effort: u32,
     pub pioneer_effort: u32,
@@ -40,6 +41,8 @@ pub struct ResearchProject {
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(deny_unknown_fields)]
 pub struct ResearchLab {
+    #[serde(default)]
+    pub methods: Vec<super::ProductionMethod>,
     pub owner: u64,
     pub researcher: u64,
     pub discovered: u32,
@@ -141,12 +144,22 @@ impl ResearchConfig {
         for lab in &mut config.labs {
             let owner = actor(lab.owner)?;
             let researcher = actor(lab.researcher)?;
-            let admitted = owner.kind != 0
-                && researcher.kind == 0
-                && owners.insert(lab.owner)
-                && researchers.insert(lab.researcher)
-                && lab.mastered & !lab.discovered == 0
-                && lab.adopted & !(lab.mastered & lab.permitted) == 0;
+            let admitted =
+                lab.methods.iter().all(|method| {
+                    Good::from_index(owner.kind).is_ok_and(|good| method.supports(good))
+                }) && owner.kind != 0
+                    && lab
+                        .methods
+                        .iter()
+                        .map(|method| *method as u32)
+                        .collect::<BTreeSet<_>>()
+                        .len()
+                        == lab.methods.len()
+                    && researcher.kind == 0
+                    && owners.insert(lab.owner)
+                    && researchers.insert(lab.researcher)
+                    && lab.mastered & !lab.discovered == 0
+                    && lab.adopted & !(lab.mastered & lab.permitted) == 0;
             match admitted {
                 true => (),
                 false => Err(anyhow!(
@@ -226,6 +239,11 @@ impl ResearchConfig {
             }
         }
         let count = config.labs.len()
+            + config
+                .labs
+                .iter()
+                .map(|lab| lab.methods.len())
+                .sum::<usize>()
             + projects.len()
             + config.equipment.len()
             + config.natural_stocks.len()
@@ -249,7 +267,7 @@ pub struct ResearchSnapshot {
 
 #[derive(Clone, Debug, Default, Serialize, Deserialize, PartialEq, Eq)]
 pub struct ResearchSummary {
-    pub consumed: [u64; 3],
+    pub consumed: [u64; Good::COUNT],
     pub attempts: u64,
     pub discoveries: u64,
     pub remaining_service: u64,

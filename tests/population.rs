@@ -23,7 +23,7 @@ fn scenario() -> Result<Scenario> {
                 identity,
                 position: Position { x: 0, y: 0 },
                 cash: 1000,
-                inventories: [0, 0, 10],
+                inventories: Good::food([0, 0, 10]),
                 health: 1000,
                 fatigue: 0,
             })
@@ -35,7 +35,7 @@ fn scenario() -> Result<Scenario> {
                 good: Good::Bread,
                 cash: 10_000,
                 position: Position { x: 0, y: 0 },
-                inventories: [0, 3, 0],
+                inventories: Good::food([0, 3, 0]),
                 capacity: 1,
                 technique: Technique::new(240, 3, 2)?,
                 wage: 3,
@@ -47,7 +47,7 @@ fn scenario() -> Result<Scenario> {
                 good: Good::Grain,
                 cash: 10_000,
                 position: Position { x: 0, y: 0 },
-                inventories: [0, 0, 0],
+                inventories: Good::food([0, 0, 0]),
                 capacity: 1,
                 technique: Technique::new(120, 0, 5)?,
                 wage: 1,
@@ -59,7 +59,7 @@ fn scenario() -> Result<Scenario> {
                 good: Good::Flour,
                 cash: 10_000,
                 position: Position { x: 0, y: 0 },
-                inventories: [2, 0, 0],
+                inventories: Good::food([2, 0, 0]),
                 capacity: 1,
                 technique: Technique::new(180, 2, 3)?,
                 wage: 2,
@@ -84,7 +84,7 @@ fn population_admission_checks_identity_ownership_resources_and_policy() -> Resu
     );
     assert_eq!(state.next_identity, 8001);
     assert_eq!(state.initial_cash, 33_000);
-    assert_eq!(state.initial_goods, [2, 3, 30]);
+    assert_eq!(state.initial_goods, Good::food([2, 3, 30]));
     assert!(InspectionRequest::new(1, &scenario).is_err());
     assert!(InspectionRequest::new(5000, &scenario).is_ok());
     let mut config = scenario.config().clone();
@@ -212,8 +212,8 @@ mod compute {
         let mut simulation = Simulation::new(scenario.clone(), support::device(64)?)?;
         simulation.advance()?;
         let state = simulation.download()?;
-        assert_eq!(simulation.snapshot.produced, [5, 3, 2]);
-        assert_eq!(simulation.snapshot.used, [2, 3, 0]);
+        assert_eq!(simulation.snapshot.produced, Good::food([5, 3, 2]));
+        assert_eq!(simulation.snapshot.used, Good::food([2, 3, 0]));
         assert_eq!(simulation.snapshot.employed, 3);
         assert_eq!(state.get(Field::Hours, 0), 240);
         assert_eq!(state.get(Field::Time, 0), 240);

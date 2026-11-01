@@ -105,9 +105,8 @@ impl Simulation {
         let actor_layouts = initial
             .actors
             .iter()
-            .enumerate()
-            .map(|(index, actor)| ActorLayout::new(&actor, scenario.technique(index)))
-            .collect::<Result<ActorMetadataRows>>()?;
+            .map(|actor| ActorLayout::new(&actor))
+            .collect::<ActorMetadataRows>();
         let actors = device.tensor(&actor_layouts.words());
         let spatial = device.tensor(&SpatialIndex::new(&scenario, &initial).words);
         let state = device.tensor(bytemuck::cast_slice(&encode(&initial.values)));
@@ -339,16 +338,13 @@ impl Simulation {
                 .try_for_each(|_| self.market(Market::Labor, phase, trace, &mut evidence)),
             Phase::WorkPayment => self.market(Market::Payroll, phase, trace, &mut evidence),
             Phase::ProvisionPurchase => {
-                [
-                    Market::Input(Good::Grain),
-                    Market::Input(Good::Flour),
-                    Market::Household,
-                ]
-                .into_iter()
-                .try_for_each(|market| {
-                    (0..MATCHING_ROUNDS)
-                        .try_for_each(|_| self.market(market, phase, trace, &mut evidence))
-                })?;
+                self.scenario
+                    .goods_markets()
+                    .into_iter()
+                    .try_for_each(|market| {
+                        (0..MATCHING_ROUNDS)
+                            .try_for_each(|_| self.market(market, phase, trace, &mut evidence))
+                    })?;
                 self.apply_feedback()
             }
             Phase::AccountsDecisions => {
@@ -448,7 +444,7 @@ impl Simulation {
         );
         let parameters = self.parameters(phase, market, 0, self.scenario.actors())?;
         match market {
-            Market::Labor | Market::Input(_) | Market::Household => {
+            Market::Labor | Market::Input(_) | Market::Consumer(_) | Market::Household => {
                 let side = self
                     .scenario
                     .config()
@@ -538,7 +534,7 @@ impl Simulation {
             );
         };
         launch(EconomyStage::GroupInitialize, &parameters);
-        if let Market::Labor | Market::Input(_) | Market::Household = market {
+        if let Market::Labor | Market::Input(_) | Market::Consumer(_) | Market::Household = market {
             launch(EconomyStage::GroupPrepare, &parameters);
         }
         let mut width = 1;
@@ -549,7 +545,7 @@ impl Simulation {
             width *= 2;
         }
         launch(EconomyStage::GroupExecute, &parameters);
-        if let Market::Labor | Market::Input(_) | Market::Household = market {
+        if let Market::Labor | Market::Input(_) | Market::Consumer(_) | Market::Household = market {
             launch(EconomyStage::GroupFinalize, &parameters);
         }
         let words = self.device.read_range(&self.control, 0, CONTROL_WORDS)?;
@@ -559,7 +555,7 @@ impl Simulation {
         evidence.frontier_depth = evidence.frontier_depth.max(counters.progress as usize);
         evidence.events += counters.completed as usize;
         parameters.status_start = 4 * count as u32;
-        if let Market::Input(_) | Market::Household = market {
+        if let Market::Input(_) | Market::Consumer(_) | Market::Household = market {
             self.feedback_operation(EconomyStage::RecordFeedback, count, &parameters);
         }
         if let Trace::Record = trace {
@@ -620,7 +616,9 @@ impl Simulation {
                         trace,
                     )?,
                 };
-                if let (Market::Input(_) | Market::Household, 1..) = (market, result.events) {
+                if let (Market::Input(_) | Market::Consumer(_) | Market::Household, 1..) =
+                    (market, result.events)
+                {
                     let parameters = EconomyParameters {
                         status_start: result.status_start as u32,
                         ..parameters
@@ -698,6 +696,7 @@ impl Simulation {
             produced: totals.produced.map(u64::from),
             used: totals.used.map(u64::from),
             consumed: totals.consumed.into(),
+            consumption: totals.consumption.map(u64::from),
             minimum_wage: totals.minimum_wage.into(),
             maximum_wage: totals.maximum_wage.into(),
             minimum_price: totals.minimum_price.into(),
@@ -890,6 +889,9 @@ impl Simulation {
         )?);
         self.readback_bytes += (values.len() * TICK_BYTES) as u64;
         Ok(Inspection {
+            production_method: ProductionMethod::from_index(values[Field::ActiveMethod as usize])?,
+            labor_minutes: values[Field::LaborMinutes as usize],
+            output_ticks: values[Field::OutputTicks as usize],
             actor: self.metadata.actors.at(actor),
             day: self.day,
             cash: values[Field::Cash as usize],

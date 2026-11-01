@@ -19,7 +19,7 @@ use super::{
     words::*,
 };
 use crate::{
-    domain::{BASE_FIELDS, Field, Good, Phase},
+    domain::{BASE_FIELDS, CONSUMPTION_FIELDS, Field, Good, Phase, TRANSIT_FIELDS, USED_FIELDS},
     ledger::{AuthorizationFlags, EMPTY, LEG_WORDS, LegLayout, MAX_LEGS},
 };
 use cubecl::prelude::*;
@@ -114,42 +114,28 @@ fn local(
         let phase = comptime!(parameters.phase);
         match phase {
             Phase::Opening => {
-                let slot = BASE_FIELDS as u32 + parameters.day % config[ConfigLayout::RING];
-                let delivery = value(state, config, slot, id);
-                match k.bits() {
-                    ActorKind::HOUSEHOLD_BITS => {
-                        increase(
-                            state,
-                            config,
-                            control,
-                            comptime!(Field::Bread as u32),
-                            id,
-                            delivery,
-                        );
+                for good in 1u32..Good::COUNT as u32 + 1 {
+                    let slot = BASE_FIELDS as u32
+                        + (good - 1) * config[ConfigLayout::RING]
+                        + parameters.day % config[ConfigLayout::RING];
+                    let delivery = value(state, config, slot, id);
+                    increase(state, config, control, good, id, delivery);
+                    let transit_field = TRANSIT_FIELDS as u32 + good - 1;
+                    let available = value(state, config, transit_field, id);
+                    if lt(available, delivery) {
+                        KernelFaults::new(comptime!(FaultFlags::TRANSIT_UNDERFLOW)).record(control);
                     }
-                    ActorKind::MILL_BITS | ActorKind::BAKERY_BITS => {
-                        increase(state, config, control, k.input(), id, delivery);
-                    }
-                    _ => {}
+                    set(state, config, transit_field, id, minus(available, delivery));
+                    let total = value(state, config, comptime!(Field::Transit as u32), id);
+                    set(
+                        state,
+                        config,
+                        comptime!(Field::Transit as u32),
+                        id,
+                        minus(total, delivery),
+                    );
+                    set32(state, config, slot, id, 0u32);
                 }
-                if lt(
-                    value(state, config, comptime!(Field::Transit as u32), id),
-                    delivery,
-                ) {
-                    KernelFaults::new(comptime!(FaultFlags::TRANSIT_UNDERFLOW)).record(control);
-                }
-                let remaining = minus(
-                    value(state, config, comptime!(Field::Transit as u32), id),
-                    delivery,
-                );
-                set(
-                    state,
-                    config,
-                    comptime!(Field::Transit as u32),
-                    id,
-                    remaining,
-                );
-                set32(state, config, slot, id, 0u32);
                 set32(state, config, comptime!(Field::Employed as u32), id, 0u32);
                 set32(state, config, comptime!(Field::Employer as u32), id, 0u32);
                 set32(state, config, comptime!(Field::Sales as u32), id, 0u32);
@@ -193,15 +179,12 @@ fn local(
                             control,
                             desired,
                             ticks(
-                                actors[ActorLayout::OUTPUT_TICKS
-                                    * (actors.len() / ActorLayout::WORDS)
-                                    + id as usize]
+                                number(state, config, comptime!(Field::OutputTicks as u32), id)
                                     - 1u32,
                                 0u32,
                             ),
                         ),
-                        actors[ActorLayout::OUTPUT_TICKS * (actors.len() / ActorLayout::WORDS)
-                            + id as usize],
+                        number(state, config, comptime!(Field::OutputTicks as u32), id),
                     );
                     let mut planned = minimum(
                         quotient,
@@ -211,16 +194,22 @@ fn local(
                             0u32,
                         ),
                     );
-                    if k.processes_input() {
-                        planned = minimum(
-                            planned,
-                            divide(
-                                value(state, config, k.input(), id),
-                                actors[ActorLayout::INPUT_TICKS
-                                    * (actors.len() / ActorLayout::WORDS)
-                                    + id as usize],
-                            ),
+                    for input in 0u32..2 {
+                        let good = number(
+                            state,
+                            config,
+                            comptime!(Field::FirstInput as u32) + input,
+                            id,
                         );
+                        if good > 0 {
+                            planned = minimum(
+                                planned,
+                                divide(
+                                    value(state, config, good, id),
+                                    number(state, config, comptime!(Field::InputTicks as u32), id),
+                                ),
+                            );
+                        }
                     }
                     let mut planning_wage =
                         number(state, config, comptime!(Field::Wage as u32), id);
@@ -233,9 +222,7 @@ fn local(
                         divide(
                             value(state, config, comptime!(Field::Cash as u32), id),
                             planning_wage
-                                * actors[ActorLayout::LABOR_MINUTES
-                                    * (actors.len() / ActorLayout::WORDS)
-                                    + id as usize],
+                                * number(state, config, comptime!(Field::LaborMinutes as u32), id),
                         ),
                     );
                     set(state, config, comptime!(Field::Slots as u32), id, planned);
@@ -261,6 +248,33 @@ fn local(
                         id,
                         consumed,
                     );
+                    increase(
+                        state,
+                        config,
+                        control,
+                        CONSUMPTION_FIELDS as u32 + comptime!(Good::Bread as u32) - 1,
+                        id,
+                        consumed,
+                    );
+                    if config[ConfigLayout::INDUSTRIAL] != 0 {
+                        for offset in 0..Good::COUNT {
+                            let interval = config[ConfigLayout::CONSUMPTION_INTERVALS + offset];
+                            if interval > 1 && (parameters.day + id) % max(interval, 1) == 0 {
+                                let good = offset as u32 + 1;
+                                let stock = value(state, config, good, id);
+                                let used = minimum(stock, ticks(1, 0));
+                                set(state, config, good, id, minus(stock, used));
+                                increase(
+                                    state,
+                                    config,
+                                    control,
+                                    CONSUMPTION_FIELDS as u32 + offset as u32,
+                                    id,
+                                    used,
+                                );
+                            }
+                        }
+                    }
                     let shortage =
                         config[ConfigLayout::HOUSEHOLD_NEED] - consumed.extract(LOW_WORD);
                     set32(
@@ -396,9 +410,7 @@ fn local(
                     let cap = divide(
                         divide(
                             value(state, config, comptime!(Field::Cash as u32), id),
-                            actors[ActorLayout::LABOR_MINUTES
-                                * (actors.len() / ActorLayout::WORDS)
-                                + id as usize],
+                            number(state, config, comptime!(Field::LaborMinutes as u32), id),
                         ),
                         max(
                             number(state, config, comptime!(Field::Plan as u32), id),
@@ -460,17 +472,23 @@ fn propose(
                 search = k.is(comptime!(ActorKind::Household))
                     && number(state, config, comptime!(Field::Employed as u32), id) == 0u32;
             }
-            MarketFlag::GrainInput | MarketFlag::FlourInput | MarketFlag::BreadInput => {
+            MarketFlag::Input(_) => {
                 good = comptime!(market.good().expect("input market") as u32);
-                search = k.processes_input() && k.input() == good;
+                search = !k.is(comptime!(ActorKind::Household))
+                    && (number(state, config, comptime!(Field::FirstInput as u32), id) == good
+                        || number(state, config, comptime!(Field::SecondInput as u32), id) == good);
                 wanted = ticks(
                     actors
                         [ActorLayout::CAPACITY * (actors.len() / ActorLayout::WORDS) + id as usize]
-                        * actors[ActorLayout::INPUT_TICKS * (actors.len() / ActorLayout::WORDS)
-                            + id as usize]
+                        * number(state, config, comptime!(Field::InputTicks as u32), id)
                         * config[ConfigLayout::COVERAGE],
                     0u32,
                 );
+            }
+            MarketFlag::Consumer(_) => {
+                good = comptime!(market.good().expect("consumer market") as u32);
+                search = k.is(comptime!(ActorKind::Household));
+                wanted = ticks(1, 0);
             }
             MarketFlag::Household => {
                 good = comptime!(Good::Bread as u32);
@@ -514,7 +532,7 @@ fn propose(
                 add_checked(
                     control,
                     value(state, config, good, id),
-                    value(state, config, comptime!(Field::Transit as u32), id),
+                    value(state, config, TRANSIT_FIELDS as u32 + good - 1, id),
                 ),
             );
         }
@@ -593,9 +611,12 @@ fn propose(
                                             ),
                                         ),
                                         candidate_wage: wage,
-                                        payable_minutes: actors[ActorLayout::LABOR_MINUTES
-                                            * (actors.len() / ActorLayout::WORDS)
-                                            + firm as usize],
+                                        payable_minutes: number(
+                                            state,
+                                            config,
+                                            comptime!(Field::LaborMinutes as u32),
+                                            firm,
+                                        ),
                                     },
                                     config,
                                     control,
@@ -607,10 +628,10 @@ fn propose(
                                 wage = negotiation.wage.extract(LOW_WORD);
                                 amount = negotiation.wage;
                             }
-                            let duration = actors[ActorLayout::LABOR_MINUTES
-                                * (actors.len() / ActorLayout::WORDS)
-                                + firm as usize]
-                                + ceildiv(dist, config[ConfigLayout::COMMUTE_SPEED]) * COMMUTE_LEGS;
+                            let duration =
+                                number(state, config, comptime!(Field::LaborMinutes as u32), firm)
+                                    + ceildiv(dist, config[ConfigLayout::COMMUTE_SPEED])
+                                        * COMMUTE_LEGS;
                             eligible = eligible
                                 && number(state, config, comptime!(Field::Slots as u32), firm)
                                     > 0u32
@@ -618,9 +639,12 @@ fn propose(
                                     >= duration;
                             score = divide(
                                 times32(
-                                    wage * actors[ActorLayout::LABOR_MINUTES
-                                        * (actors.len() / ActorLayout::WORDS)
-                                        + firm as usize],
+                                    wage * number(
+                                        state,
+                                        config,
+                                        comptime!(Field::LaborMinutes as u32),
+                                        firm,
+                                    ),
                                     POLICY_SCALE,
                                 ),
                                 duration,
@@ -634,6 +658,7 @@ fn propose(
                                 ),
                             );
                             eligible = eligible
+                                && firm != id
                                 && kind(actors, firm).output() == good
                                 && quote > 0u32
                                 && !equal(amount, ticks(0u32, 0u32));
@@ -733,7 +758,7 @@ enum EventStorage {
 #[cube]
 fn construct(
     state: &mut [u32],
-    actors: &[u32],
+    _actors: &[u32],
     config: &[u32],
     proposals: &mut [u32],
     bundles: &mut [u32],
@@ -775,8 +800,7 @@ fn construct(
                     }
                     let wage = times32(
                         offered_wage,
-                        actors[ActorLayout::LABOR_MINUTES * (actors.len() / ActorLayout::WORDS)
-                            + other as usize],
+                        number(state, config, comptime!(Field::LaborMinutes as u32), other),
                     );
                     event.transfer(
                         config,
@@ -808,9 +832,7 @@ fn construct(
                         comptime!(Field::Time as u32),
                         actor,
                         ticks(
-                            actors[ActorLayout::LABOR_MINUTES
-                                * (actors.len() / ActorLayout::WORDS)
-                                + other as usize]
+                            number(state, config, comptime!(Field::LaborMinutes as u32), other)
                                 + ceildiv(trip, config[ConfigLayout::COMMUTE_SPEED]) * COMMUTE_LEGS,
                             0u32,
                         ),
@@ -853,9 +875,7 @@ fn construct(
                         actor,
                         zero,
                         ticks(
-                            actors[ActorLayout::LABOR_MINUTES
-                                * (actors.len() / ActorLayout::WORDS)
-                                + other as usize],
+                            number(state, config, comptime!(Field::LaborMinutes as u32), other),
                             0u32,
                         ),
                     );
@@ -866,8 +886,7 @@ fn construct(
                         other,
                         zero,
                         ticks(
-                            actors[ActorLayout::OUTPUT_TICKS * (actors.len() / ActorLayout::WORDS)
-                                + other as usize],
+                            number(state, config, comptime!(Field::OutputTicks as u32), other),
                             0u32,
                         ),
                     );
@@ -885,34 +904,37 @@ fn construct(
                             guard: value(state, config, comptime!(Field::Wage as u32), other),
                         },
                     );
-                    if kind(actors, other).processes_input() {
-                        event.transfer(
+                    let mut total_used = zero;
+                    for input in 0u32..2 {
+                        let good = number(
+                            state,
                             config,
-                            bundles,
-                            kind(actors, other).input(),
+                            comptime!(Field::FirstInput as u32) + input,
                             other,
-                            ticks(
-                                actors[ActorLayout::INPUT_TICKS
-                                    * (actors.len() / ActorLayout::WORDS)
-                                    + other as usize],
-                                0u32,
-                            ),
-                            zero,
                         );
-                        event.transfer(
-                            config,
-                            bundles,
-                            comptime!(Field::Used as u32),
-                            other,
-                            zero,
-                            ticks(
-                                actors[ActorLayout::INPUT_TICKS
-                                    * (actors.len() / ActorLayout::WORDS)
-                                    + other as usize],
-                                0u32,
-                            ),
-                        );
+                        if good > 0 {
+                            let amount =
+                                value(state, config, comptime!(Field::InputTicks as u32), other);
+                            event.transfer(config, bundles, good, other, amount, zero);
+                            event.transfer(
+                                config,
+                                bundles,
+                                USED_FIELDS as u32 + good - 1,
+                                other,
+                                zero,
+                                amount,
+                            );
+                            total_used = add_checked(control, total_used, amount);
+                        }
                     }
+                    event.transfer(
+                        config,
+                        bundles,
+                        comptime!(Field::Used as u32),
+                        other,
+                        zero,
+                        total_used,
+                    );
                 }
                 MarketFlag::Payroll => {
                     let mut net = quantity;
@@ -1033,6 +1055,7 @@ fn construct(
                         number(state, config, comptime!(Field::Price as u32), other),
                     );
                     let slot = BASE_FIELDS as u32
+                        + (good - 1) * config[ConfigLayout::RING]
                         + (parameters.day
                             + max(ceildiv(trip, config[ConfigLayout::SHIPMENT_SPEED]), 1u32))
                             % config[ConfigLayout::RING];
@@ -1054,6 +1077,14 @@ fn construct(
                     );
                     event.transfer(config, bundles, good, other, quantity, zero);
                     event.transfer(config, bundles, slot, actor, zero, quantity);
+                    event.transfer(
+                        config,
+                        bundles,
+                        TRANSIT_FIELDS as u32 + good - 1,
+                        actor,
+                        zero,
+                        quantity,
+                    );
                     event.transfer(
                         config,
                         bundles,
@@ -1200,10 +1231,8 @@ fn summarize(
                 KernelFaults::new(comptime!(FaultFlags::UNSETTLED_COMMITMENTS)).record(control);
             }
             let k = kind(actors, actor);
-            let mut input = 0u32;
             match k.bits() {
                 ActorKind::HOUSEHOLD_BITS => {
-                    input = k.input();
                     totals[SummaryLayout::EMPLOYED as usize] = add_checked(
                         control,
                         totals[SummaryLayout::EMPLOYED as usize],
@@ -1247,9 +1276,6 @@ fn summarize(
                         ));
                 }
                 _ => {
-                    if k.processes_input() {
-                        input = k.input();
-                    }
                     totals[(SummaryLayout::INVENTORIES + k.output() - 1) as usize] = add_checked(
                         control,
                         totals[(SummaryLayout::INVENTORIES + k.output() - 1) as usize],
@@ -1322,25 +1348,41 @@ fn summarize(
                     );
                 }
             }
-            if input > 0u32 {
-                totals[(SummaryLayout::TRANSIT + input - 1u32) as usize] = add_checked(
-                    control,
-                    totals[(SummaryLayout::TRANSIT + input - 1u32) as usize],
-                    value(state, config, comptime!(Field::Transit as u32), actor),
-                );
-                totals[(SummaryLayout::USED + input - 1u32) as usize] = add_checked(
-                    control,
-                    totals[(SummaryLayout::USED + input - 1u32) as usize],
-                    value(state, config, comptime!(Field::Used as u32), actor),
-                );
-            }
             let mut transit = ticks(0u32, 0u32);
-            for slot in 0u32..config[ConfigLayout::RING] {
-                transit = add_checked(
+            for good in 0u32..Good::COUNT as u32 {
+                let held = value(state, config, TRANSIT_FIELDS as u32 + good, actor);
+                totals[(SummaryLayout::TRANSIT + good) as usize] = add_checked(
                     control,
-                    transit,
-                    value(state, config, BASE_FIELDS as u32 + slot, actor),
+                    totals[(SummaryLayout::TRANSIT + good) as usize],
+                    held,
                 );
+                totals[(SummaryLayout::USED + good) as usize] = add_checked(
+                    control,
+                    totals[(SummaryLayout::USED + good) as usize],
+                    value(state, config, USED_FIELDS as u32 + good, actor),
+                );
+                totals[(SummaryLayout::CONSUMPTION + good) as usize] = add_checked(
+                    control,
+                    totals[(SummaryLayout::CONSUMPTION + good) as usize],
+                    value(state, config, CONSUMPTION_FIELDS as u32 + good, actor),
+                );
+                let mut in_ring = zero();
+                for slot in 0u32..config[ConfigLayout::RING] {
+                    in_ring = add_checked(
+                        control,
+                        in_ring,
+                        value(
+                            state,
+                            config,
+                            BASE_FIELDS as u32 + good * config[ConfigLayout::RING] + slot,
+                            actor,
+                        ),
+                    );
+                }
+                if !equal(in_ring, held) {
+                    KernelFaults::new(comptime!(FaultFlags::TRANSIT_MISMATCH)).record(control);
+                }
+                transit = add_checked(control, transit, held);
             }
             if !equal(
                 transit,
@@ -1588,10 +1630,7 @@ fn discoverable(
     let market = comptime!(parameters.market);
     match market {
         MarketFlag::Labor => number(state, config, comptime!(Field::Slots as u32), firm) > 0,
-        MarketFlag::GrainInput
-        | MarketFlag::FlourInput
-        | MarketFlag::BreadInput
-        | MarketFlag::Household => {
+        MarketFlag::Input(_) | MarketFlag::Consumer(_) | MarketFlag::Household => {
             let good = comptime!(market.good().expect("goods market") as u32);
             kind(actors, firm).output() == good && !equal(value(state, config, good, firm), zero())
         }
@@ -1704,7 +1743,7 @@ fn group_execute(
                     } else {
                         let prior = KernelEventStatus::load(scratch, 4 * count + actor);
                         peer.offer(
-                            actors,
+                            state,
                             config,
                             proposals,
                             control,

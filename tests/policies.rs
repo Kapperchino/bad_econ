@@ -20,7 +20,7 @@ fn planning_scenario() -> Result<Scenario> {
                 identity,
                 position,
                 cash: 2000,
-                inventories: [0, 0, 2],
+                inventories: Good::food([0, 0, 2]),
                 health: 1000,
                 fatigue: 0,
             })
@@ -32,7 +32,7 @@ fn planning_scenario() -> Result<Scenario> {
                 owner: 1,
                 good: Good::Grain,
                 cash: 120,
-                inventories: [0, 0, 0],
+                inventories: Good::food([0, 0, 0]),
                 capacity: 7,
                 technique: Technique::new(60, 0, 3)?,
                 wage: 2,
@@ -44,7 +44,7 @@ fn planning_scenario() -> Result<Scenario> {
                 owner: 2,
                 good: Good::Grain,
                 cash: 100_000,
-                inventories: [0, 0, 0],
+                inventories: Good::food([0, 0, 0]),
                 capacity: 2,
                 technique: Technique::new(90, 0, 5)?,
                 wage: 2,
@@ -56,7 +56,7 @@ fn planning_scenario() -> Result<Scenario> {
                 owner: 3,
                 good: Good::Flour,
                 cash: 100_000,
-                inventories: [1, 0, 0],
+                inventories: Good::food([1, 0, 0]),
                 capacity: 20,
                 technique: Technique::new(120, 2, 3)?,
                 wage: 3,
@@ -68,7 +68,7 @@ fn planning_scenario() -> Result<Scenario> {
                 owner: 4,
                 good: Good::Flour,
                 cash: 100_000,
-                inventories: [20, 115, 0],
+                inventories: Good::food([20, 115, 0]),
                 capacity: 20,
                 technique: Technique::new(180, 2, 3)?,
                 wage: 3,
@@ -80,7 +80,7 @@ fn planning_scenario() -> Result<Scenario> {
                 owner: 5,
                 good: Good::Bread,
                 cash: 100_000,
-                inventories: [0, 15, 0],
+                inventories: Good::food([0, 15, 0]),
                 capacity: 20,
                 technique: Technique::new(240, 3, 2)?,
                 wage: 4,
@@ -92,7 +92,7 @@ fn planning_scenario() -> Result<Scenario> {
                 owner: 6,
                 good: Good::Bread,
                 cash: 100_000,
-                inventories: [0, 15, 1000],
+                inventories: Good::food([0, 15, 1000]),
                 capacity: 20,
                 technique: Technique::new(300, 3, 2)?,
                 wage: 4,
@@ -114,15 +114,15 @@ fn planned_packets(scenario: &Scenario, state: &State, index: usize) -> Result<u
     let requested = demand
         .saturating_sub(available)
         .div_ceil(u128::from(technique.output_ticks));
-    let inputs = match output {
-        Good::Grain => u128::MAX,
-        Good::Flour => {
-            u128::from(state.get(Field::Grain, index)) / u128::from(technique.input_ticks)
-        }
-        Good::Bread => {
-            u128::from(state.get(Field::Flour, index)) / u128::from(technique.input_ticks)
-        }
-    };
+    let inputs = output
+        .inputs()
+        .into_iter()
+        .flatten()
+        .map(|good| {
+            u128::from(state.get(Field::inventory(good), index)) / u128::from(technique.input_ticks)
+        })
+        .min()
+        .unwrap_or(u128::MAX);
     let funding = u128::from(state.get(Field::Cash, index))
         / (u128::from(state.get(Field::Wage, index)) * u128::from(technique.labor_minutes));
     Ok(u64::try_from(
@@ -216,7 +216,7 @@ fn commuting_rounds_up_and_can_exclude_a_higher_wage() -> Result<()> {
                 identity,
                 position: Position { x: 0, y: 0 },
                 cash: 2000,
-                inventories: [0, 0, 2],
+                inventories: Good::food([0, 0, 2]),
                 health: 1000,
                 fatigue: 0,
             })
@@ -228,7 +228,7 @@ fn commuting_rounds_up_and_can_exclude_a_higher_wage() -> Result<()> {
                 owner: 1,
                 good: Good::Grain,
                 cash: 100_000,
-                inventories: [0, 0, 0],
+                inventories: Good::food([0, 0, 0]),
                 capacity: 3,
                 technique: Technique::new(460, 0, 3)?,
                 wage: 1,
@@ -240,7 +240,7 @@ fn commuting_rounds_up_and_can_exclude_a_higher_wage() -> Result<()> {
                 owner: 2,
                 good: Good::Flour,
                 cash: 15_000_000,
-                inventories: [9, 0, 0],
+                inventories: Good::food([9, 0, 0]),
                 capacity: 3,
                 technique: Technique::new(460, 3, 3)?,
                 wage: 10_000,
@@ -252,7 +252,7 @@ fn commuting_rounds_up_and_can_exclude_a_higher_wage() -> Result<()> {
                 owner: 3,
                 good: Good::Bread,
                 cash: 100_000,
-                inventories: [0, 0, 0],
+                inventories: Good::food([0, 0, 0]),
                 capacity: 3,
                 technique: Technique::new(480, 3, 3)?,
                 wage: 2,

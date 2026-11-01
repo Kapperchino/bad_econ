@@ -1,3 +1,4 @@
+use crate::domain::Good;
 use crate::ledger::TickLayout;
 use crate::simulation::rows::row_layout;
 use bytemuck::{Pod, Zeroable};
@@ -23,6 +24,8 @@ layout!(Header {
     stock_count: u32 => STOCK_COUNT,
     strike_count: u32 => STRIKE_COUNT,
     labs: u32 => LABS,
+    methods: u32 => METHODS,
+    method_count: u32 => METHOD_COUNT,
     projects: u32 => PROJECTS,
     machines: u32 => MACHINES,
     stocks: u32 => STOCKS,
@@ -37,6 +40,8 @@ layout!(Header {
 
 row_layout!(LabLayoutRows, LabLayout {
     owner: u32 => OWNER,
+    first_method: u32 => FIRST_METHOD,
+    method_count: u32 => METHOD_COUNT,
     researcher: u32 => RESEARCHER,
     first_project: u32 => FIRST_PROJECT,
     project_count: u32 => PROJECT_COUNT,
@@ -53,7 +58,7 @@ row_layout!(ProjectLayoutRows, ProjectLayout {
     identity: TickLayout => IDENTITY,
     prerequisites: u32 => PREREQUISITES,
     outcomes: u32 => OUTCOMES,
-    inputs: [u32; 3] => INPUTS,
+    inputs: [u32; Good::COUNT] => INPUTS,
     labor_minutes: u32 => LABOR_MINUTES,
     minimum_effort: u32 => MINIMUM_EFFORT,
     pioneer_effort: u32 => PIONEER_EFFORT,
@@ -65,7 +70,6 @@ row_layout!(ProjectLayoutRows, ProjectLayout {
 
 row_layout!(MachineLayoutRows, MachineLayout {
     firm: u32 => FIRM,
-    output_ticks: u32 => OUTPUT_TICKS,
     initial_service: TickLayout => INITIAL_SERVICE,
     maximum_packets: u32 => MAXIMUM_PACKETS,
     nameplate: u32 => NAMEPLATE,
@@ -78,7 +82,6 @@ row_layout!(MachineLayoutRows, MachineLayout {
 
 row_layout!(StockLayoutRows, StockLayout {
     firm: u32 => FIRM,
-    output_ticks: u32 => OUTPUT_TICKS,
     maximum_packets: u32 => MAXIMUM_PACKETS,
     capacity: u32 => CAPACITY,
     renewal: u32 => RENEWAL,
@@ -102,7 +105,7 @@ row_layout!(LabStateRows, LabState {
     mastered: u32 => MASTERED,
     permitted: u32 => PERMITTED,
     adopted: u32 => ADOPTED,
-    consumed: [TickLayout; 3] => CONSUMED,
+    consumed: [TickLayout; Good::COUNT] => CONSUMED,
 });
 
 row_layout!(ProjectStateRows, ProjectState {
@@ -134,7 +137,7 @@ row_layout!(StrikeStateRows, StrikeState {
 });
 
 layout!(SummaryLayout {
-    consumed: [TickLayout; 3] => CONSUMED,
+    consumed: [TickLayout; Good::COUNT] => CONSUMED,
     attempts: TickLayout => ATTEMPTS,
     discoveries: TickLayout => DISCOVERIES,
     remaining_service: TickLayout => REMAINING_SERVICE,
@@ -236,3 +239,13 @@ fn read_row<T: Pod>(words: &[u32], offset: usize, index: usize) -> anyhow::Resul
         .context("incomplete research observation")?;
     Ok(bytemuck::pod_read_unaligned(bytemuck::cast_slice(value)))
 }
+
+row_layout!(MethodLayoutRows, MethodLayout {
+    identity: u32 => IDENTITY,
+    requirements: u32 => REQUIREMENTS,
+    labor_minutes: u32 => LABOR_MINUTES,
+    input_ticks: u32 => INPUT_TICKS,
+    output_ticks: u32 => OUTPUT_TICKS,
+    first_input: u32 => FIRST_INPUT,
+    second_input: u32 => SECOND_INPUT,
+});

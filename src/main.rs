@@ -8,7 +8,7 @@ use std::path::PathBuf;
 use std::time::Instant;
 
 #[derive(Parser)]
-#[command(about = "An exact spatial grain–flour–bread economy", version)]
+#[command(about = "An exact spatial industrial economy", version)]
 struct Cli {
     #[arg(value_enum, default_value_t = Mode::Run)]
     mode: Mode,
@@ -18,6 +18,8 @@ struct Cli {
     seed: u64,
     #[arg(long, value_enum, default_value_t = ExperimentArg::Baseline)]
     experiment: ExperimentArg,
+    #[arg(long, value_enum, default_value_t = EconomyArg::Industrial)]
+    economy: EconomyArg,
     #[arg(long)]
     scenario: Option<PathBuf>,
     #[arg(long)]
@@ -55,6 +57,19 @@ enum Backend {
     Gpu,
 }
 #[derive(Clone, Copy, ValueEnum)]
+enum EconomyArg {
+    Industrial,
+    Agrarian,
+}
+impl EconomyArg {
+    fn scenario(self, households: u32, seed: u64, experiment: Experiment) -> Result<Scenario> {
+        match self {
+            Self::Industrial => Scenario::industrial(households, seed, experiment),
+            Self::Agrarian => Scenario::baseline(households, seed, experiment),
+        }
+    }
+}
+#[derive(Clone, Copy, ValueEnum)]
 enum ExperimentArg {
     Baseline,
     Shortage,
@@ -88,7 +103,9 @@ fn main() -> Result<()> {
 fn scenario(args: &Cli) -> Result<Scenario> {
     match &args.scenario {
         Some(path) => Scenario::new(serde_json::from_slice(&std::fs::read(path)?)?),
-        None => Scenario::baseline(args.households, args.seed, args.experiment.into()),
+        None => args
+            .economy
+            .scenario(args.households, args.seed, args.experiment.into()),
     }
 }
 #[cfg(feature = "compute")]
@@ -187,7 +204,10 @@ fn benchmark(scenario: Scenario, args: &Cli) -> Result<()> {
         None => args
             .sizes
             .iter()
-            .map(|&households| Scenario::baseline(households, args.seed, args.experiment.into()))
+            .map(|&households| {
+                args.economy
+                    .scenario(households, args.seed, args.experiment.into())
+            })
             .collect::<Result<Vec<_>>>()?,
     };
     let mut reports = Vec::new();

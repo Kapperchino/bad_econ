@@ -239,6 +239,7 @@ fn arithmetic_fault_rolls_back_and_reset_recovers() -> Result<()> {
     state.set(Field::Grain, 1, 0);
     state.set(Field::Produced, 1, u64::MAX);
     state.set(Field::Used, 2, u64::MAX);
+    state.values[USED_FIELDS * state.actors.len() + 2] = u64::MAX;
     let checkpoint = Checkpoint::new(&scenario, &state)?;
     let mut simulation = Simulation::new(scenario.clone(), support::device(64)?)?;
     simulation.command(SimulationCommand::Restore(checkpoint.clone().into()))?;

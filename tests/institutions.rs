@@ -24,7 +24,7 @@ fn configuration() -> Result<ScenarioConfig> {
                 identity,
                 position: Position { x: 0, y: 0 },
                 cash: 0,
-                inventories: [0; 3],
+                inventories: Good::food([0; 3]),
                 health: 1000,
                 fatigue: 0,
             })
@@ -36,7 +36,7 @@ fn configuration() -> Result<ScenarioConfig> {
                 owner: 1,
                 good: Good::Grain,
                 cash: 0,
-                inventories: [0; 3],
+                inventories: Good::food([0; 3]),
                 capacity: 1,
                 technique: Technique {
                     labor_minutes: 80,
@@ -138,6 +138,7 @@ fn research_configuration() -> Result<Scenario> {
     };
     config.research = Some(ResearchConfig {
         labs: vec![ResearchLab {
+            methods: Vec::new(),
             owner: 4,
             researcher: 1,
             discovered: 0,
@@ -151,7 +152,7 @@ fn research_configuration() -> Result<Scenario> {
                 identity: 300,
                 prerequisites: 0,
                 outcomes: 1,
-                inputs: [1, 0, 0],
+                inputs: Good::food([1, 0, 0]),
                 labor_minutes: 16,
                 minimum_effort: 1,
                 pioneer_effort: 1,
@@ -192,7 +193,7 @@ fn research_adoption_equipment_and_natural_stocks_constrain_real_production() ->
     assert_eq!(simulation.snapshot.produced[1], 0);
     assert_eq!(simulation.snapshot.research.attempts, 1);
     assert_eq!(simulation.snapshot.research.discoveries, 1);
-    assert_eq!(simulation.snapshot.research.consumed, [1, 0, 0]);
+    assert_eq!(simulation.snapshot.research.consumed, Good::food([1, 0, 0]));
     let checkpoint = simulation.checkpoint()?;
     simulation.phase(Phase::Opening, Trace::Discard)?;
     simulation.phase(Phase::Observation, Trace::Discard)?;

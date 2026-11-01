@@ -60,6 +60,9 @@ pub(super) struct PeerBalances {
     cash: Ticks,
     escrow: Ticks,
     slots: Ticks,
+    second_stock: Ticks,
+    first_used: Ticks,
+    second_used: Ticks,
     stock: Ticks,
     pipeline: Ticks,
     used: Ticks,
@@ -71,7 +74,7 @@ pub(super) struct PeerBalances {
 impl PeerBalances {
     pub fn new(
         state: &mut [u32],
-        actors: &[u32],
+        _actors: &[u32],
         config: &[u32],
         parameters: &EconomyParameters,
         peer: u32,
@@ -80,6 +83,9 @@ impl PeerBalances {
             cash: zero(),
             escrow: zero(),
             slots: zero(),
+            second_stock: zero(),
+            first_used: zero(),
+            second_used: zero(),
             stock: zero(),
             pipeline: zero(),
             used: zero(),
@@ -93,9 +99,18 @@ impl PeerBalances {
                 balances.slots = value(state, config, comptime!(Field::Slots as u32), peer);
                 balances.pipeline = value(state, config, comptime!(Field::Pipeline as u32), peer);
                 balances.quote = number(state, config, comptime!(Field::Wage as u32), peer);
-                if kind(actors, peer).processes_input() {
-                    balances.stock = value(state, config, kind(actors, peer).input(), peer);
-                    balances.used = value(state, config, comptime!(Field::Used as u32), peer);
+                balances.used = value(state, config, comptime!(Field::Used as u32), peer);
+                let first = number(state, config, comptime!(Field::FirstInput as u32), peer);
+                let second = number(state, config, comptime!(Field::SecondInput as u32), peer);
+                if first > 0 {
+                    balances.stock = value(state, config, first, peer);
+                    balances.first_used =
+                        value(state, config, USED_FIELDS as u32 + first - 1, peer);
+                }
+                if second > 0 {
+                    balances.second_stock = value(state, config, second, peer);
+                    balances.second_used =
+                        value(state, config, USED_FIELDS as u32 + second - 1, peer);
                 }
             }
             MarketFlag::Payroll | MarketFlag::Distribution => (),
@@ -112,7 +127,7 @@ impl PeerBalances {
 
     pub fn offer(
         &mut self,
-        actors: &[u32],
+        state: &mut [u32],
         config: &[u32],
         proposals: &mut [u32],
         control: &[Atomic<u32>],
@@ -132,6 +147,9 @@ impl PeerBalances {
         let mut next_escrow = self.escrow;
         let mut next_slots = self.slots;
         let mut next_stock = self.stock;
+        let mut next_second_stock = self.second_stock;
+        let mut next_first_used = self.first_used;
+        let mut next_second_used = self.second_used;
         let mut next_pipeline = self.pipeline;
         let mut next_used = self.used;
         let mut next_sales = self.sales;
@@ -143,12 +161,10 @@ impl PeerBalances {
                 }
                 let wage = times32(
                     rate,
-                    actors[ActorLayout::LABOR_MINUTES * (actors.len() / ActorLayout::WORDS)
-                        + peer as usize],
+                    number(state, config, comptime!(Field::LaborMinutes as u32), peer),
                 );
                 let output = ticks(
-                    actors[ActorLayout::OUTPUT_TICKS * (actors.len() / ActorLayout::WORDS)
-                        + peer as usize],
+                    number(state, config, comptime!(Field::OutputTicks as u32), peer),
                     0,
                 );
                 let escrow = plus(self.escrow, wage);
@@ -159,18 +175,29 @@ impl PeerBalances {
                 next_escrow = escrow.value;
                 next_slots = minus(self.slots, ticks(1, 0));
                 next_pipeline = pipeline.value;
-                if kind(actors, peer).processes_input() {
-                    let input = ticks(
-                        actors[ActorLayout::INPUT_TICKS * (actors.len() / ActorLayout::WORDS)
-                            + peer as usize],
-                        0,
-                    );
-                    let used = plus(self.used, input);
+                let input = value(state, config, comptime!(Field::InputTicks as u32), peer);
+                let first = number(state, config, comptime!(Field::FirstInput as u32), peer);
+                let second = number(state, config, comptime!(Field::SecondInput as u32), peer);
+                let mut total_input = zero();
+                if first > 0 {
+                    let used = plus(self.first_used, input);
                     faults.insert(used.faults);
                     valid = valid && !lt(self.stock, input);
                     next_stock = minus(self.stock, input);
-                    next_used = used.value;
+                    next_first_used = used.value;
+                    total_input = input;
                 }
+                if second > 0 {
+                    let used = plus(self.second_used, input);
+                    faults.insert(used.faults);
+                    valid = valid && !lt(self.second_stock, input);
+                    next_second_stock = minus(self.second_stock, input);
+                    next_second_used = used.value;
+                    total_input = add_checked(control, total_input, input);
+                }
+                let used = plus(self.used, total_input);
+                faults.insert(used.faults);
+                next_used = used.value;
             }
             MarketFlag::Payroll | MarketFlag::Distribution => (),
             _ => {
@@ -197,6 +224,9 @@ impl PeerBalances {
             self.escrow = next_escrow;
             self.slots = next_slots;
             self.stock = next_stock;
+            self.second_stock = next_second_stock;
+            self.first_used = next_first_used;
+            self.second_used = next_second_used;
             self.pipeline = next_pipeline;
             self.used = next_used;
             self.sales = next_sales;
@@ -207,7 +237,7 @@ impl PeerBalances {
     pub fn store(
         &self,
         state: &mut [u32],
-        actors: &[u32],
+        _actors: &[u32],
         config: &[u32],
         parameters: &EconomyParameters,
         peer: u32,
@@ -242,14 +272,33 @@ impl PeerBalances {
                     peer,
                     self.pipeline,
                 );
-                if kind(actors, peer).processes_input() {
-                    set(state, config, kind(actors, peer).input(), peer, self.stock);
+                let first = number(state, config, comptime!(Field::FirstInput as u32), peer);
+                let second = number(state, config, comptime!(Field::SecondInput as u32), peer);
+                set(
+                    state,
+                    config,
+                    comptime!(Field::Used as u32),
+                    peer,
+                    self.used,
+                );
+                if first > 0 {
+                    set(state, config, first, peer, self.stock);
                     set(
                         state,
                         config,
-                        comptime!(Field::Used as u32),
+                        USED_FIELDS as u32 + first - 1,
                         peer,
-                        self.used,
+                        self.first_used,
+                    );
+                }
+                if second > 0 {
+                    set(state, config, second, peer, self.second_stock);
+                    set(
+                        state,
+                        config,
+                        USED_FIELDS as u32 + second - 1,
+                        peer,
+                        self.second_used,
                     );
                 }
             }

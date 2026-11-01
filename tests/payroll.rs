@@ -98,7 +98,7 @@ fn scenario(minutes: u32) -> Result<Scenario> {
                 identity,
                 position: Position { x: 0, y: 0 },
                 cash: 0,
-                inventories: [0; 3],
+                inventories: Good::food([0; 3]),
                 health: 1000,
                 fatigue: 0,
             })
@@ -110,7 +110,7 @@ fn scenario(minutes: u32) -> Result<Scenario> {
                 owner: 1,
                 good: Good::Grain,
                 cash: 100_000,
-                inventories: [0; 3],
+                inventories: Good::food([0; 3]),
                 capacity: 1,
                 technique: Technique {
                     labor_minutes: minutes,
@@ -310,7 +310,7 @@ fn empty_funded_wage_intervals_prevent_labor_commitments() -> Result<()> {
     let mut simulation = Simulation::new(Scenario::new(config)?, support::device(64)?)?;
     simulation.advance()?;
     assert_eq!(simulation.snapshot.employed, 0);
-    assert_eq!(simulation.snapshot.produced, [0; 3]);
+    assert_eq!(simulation.snapshot.produced, Good::food([0; 3]));
     Ok(())
 }
 

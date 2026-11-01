@@ -1,5 +1,19 @@
 use super::*;
 
+#[test]
+fn industrial_recipes_match_coordinate_scheduler() -> Result<()> {
+    let mut config = Scenario::industrial(64, 42, Experiment::Concentrated)?
+        .config()
+        .clone();
+    config.batch_size = 13;
+    for lab in &mut config.research.as_mut().expect("industrial research").labs {
+        lab.discovered = 31;
+        lab.mastered = 31;
+        lab.adopted = 31;
+    }
+    compare_market_execution(Scenario::new(config)?, 4)
+}
+
 fn compare_market_execution(scenario: Scenario, days: usize) -> Result<()> {
     let mut grouped = Simulation::new(scenario.clone(), Device::headless(64)?)?;
     let mut reference = Simulation::new(scenario, Device::headless(64)?)?;

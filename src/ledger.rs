@@ -4,7 +4,7 @@ use bytemuck::{Pod, Zeroable};
 use serde::{Deserialize, Serialize};
 use std::{collections::BTreeMap, mem::offset_of};
 
-pub const MAX_LEGS: usize = 12;
+pub const MAX_LEGS: usize = 16;
 pub const LEG_WORDS: usize = size_of::<LegLayout>() / size_of::<u32>();
 pub const EMPTY: u32 = u32::MAX;
 

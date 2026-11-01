@@ -3,7 +3,7 @@ use super::super::{
     words::*,
 };
 use super::{layout::*, nonlinear::*, random::*};
-use crate::domain::{Field, Phase, research::RESEARCH_SCALE};
+use crate::domain::{Field, Good, Phase, research::RESEARCH_SCALE};
 use crate::simulation::rows::RowIndex;
 use cubecl::prelude::*;
 
@@ -153,17 +153,22 @@ fn attempt(
         state[saved.field(ProjectState::PROBABILITY, 1usize)] = probability;
         let mut outcome = u32::new(comptime!(AttemptOutcome::Failed as i64));
         let required = config[item.field(ProjectLayout::PREREQUISITES, 1usize)];
+        let outcomes = config[item.field(ProjectLayout::OUTCOMES, 1usize)];
         if (access(state, &lab_state) & required) != required
+            || state[lab_state.field(LabState::DISCOVERED, 1usize)] & outcomes == outcomes
             || config[base.field(LabLayout::CONSENT, 1usize)] == 0
         {
             outcome = comptime!(AttemptOutcome::Ineligible as u32);
         }
-        for good in 0..3 {
+        for good in 0..Good::COUNT {
             let available = read(main, main_coordinate(config, good as u32 + 1, owner));
             if outcome == comptime!(AttemptOutcome::Failed as u32)
                 && lt(
                     available,
-                    ticks(config[item.field(ProjectLayout::INPUTS, 3usize) + good], 0),
+                    ticks(
+                        config[item.field(ProjectLayout::INPUTS, Good::COUNT) + good],
+                        0,
+                    ),
                 )
             {
                 outcome = comptime!(AttemptOutcome::MissingResources as u32);
@@ -190,14 +195,17 @@ fn attempt(
                 },
                 constants,
             );
-            for good in 0..3 {
+            for good in 0..Good::COUNT {
                 let coordinate = main_coordinate(config, good as u32 + 1, owner);
-                let used = ticks(config[item.field(ProjectLayout::INPUTS, 3usize) + good], 0);
+                let used = ticks(
+                    config[item.field(ProjectLayout::INPUTS, Good::COUNT) + good],
+                    0,
+                );
                 let remaining = minus(read(main, coordinate), used);
                 write(main, coordinate, remaining);
                 increment(
                     state,
-                    lab_state.field(LabState::CONSUMED, 6usize) + good * 2,
+                    lab_state.field(LabState::CONSUMED, Good::COUNT * 2) + good * 2,
                     used,
                     control,
                 );
@@ -264,6 +272,61 @@ pub fn research(
             }
         }
         ResearchStage::Opening => {
+            if id < config[Header::LAB_COUNT] as usize {
+                let lab = RowIndex::new(
+                    config[Header::LABS] as usize,
+                    config[Header::LAB_COUNT] as usize,
+                    id,
+                );
+                let saved = RowIndex::new(
+                    config[Header::LAB_STATE] as usize,
+                    config[Header::LAB_COUNT] as usize,
+                    id,
+                );
+                let owner = config[lab.field(LabLayout::OWNER, 1usize)];
+                let first = config[lab.field(LabLayout::FIRST_METHOD, 1usize)];
+                let end = first + config[lab.field(LabLayout::METHOD_COUNT, 1usize)];
+                for index in first..end {
+                    let method = RowIndex::new(
+                        config[Header::METHODS] as usize,
+                        config[Header::METHOD_COUNT] as usize,
+                        index as usize,
+                    );
+                    let required = config[method.field(MethodLayout::REQUIREMENTS, 1usize)];
+                    if access(state, &saved) & required == required {
+                        write(
+                            main,
+                            main_coordinate(config, comptime!(Field::ActiveMethod as u32), owner),
+                            ticks(config[method.field(MethodLayout::IDENTITY, 1usize)], 0),
+                        );
+                        write(
+                            main,
+                            main_coordinate(config, comptime!(Field::LaborMinutes as u32), owner),
+                            ticks(config[method.field(MethodLayout::LABOR_MINUTES, 1usize)], 0),
+                        );
+                        write(
+                            main,
+                            main_coordinate(config, comptime!(Field::InputTicks as u32), owner),
+                            ticks(config[method.field(MethodLayout::INPUT_TICKS, 1usize)], 0),
+                        );
+                        write(
+                            main,
+                            main_coordinate(config, comptime!(Field::OutputTicks as u32), owner),
+                            ticks(config[method.field(MethodLayout::OUTPUT_TICKS, 1usize)], 0),
+                        );
+                        write(
+                            main,
+                            main_coordinate(config, comptime!(Field::FirstInput as u32), owner),
+                            ticks(config[method.field(MethodLayout::FIRST_INPUT, 1usize)], 0),
+                        );
+                        write(
+                            main,
+                            main_coordinate(config, comptime!(Field::SecondInput as u32), owner),
+                            ticks(config[method.field(MethodLayout::SECOND_INPUT, 1usize)], 0),
+                        );
+                    }
+                }
+            }
             if id < config[Header::MACHINE_COUNT] as usize {
                 let item = RowIndex::new(
                     config[Header::MACHINES] as usize,
@@ -523,12 +586,28 @@ pub fn research(
                 let before = read(state, saved.field(MachineState::PRODUCED_BEFORE, 2usize));
                 let used = divide(
                     positive(produced, before),
-                    config[item.field(MachineLayout::OUTPUT_TICKS, 1usize)],
+                    read(
+                        main,
+                        main_coordinate(
+                            config,
+                            comptime!(Field::OutputTicks as u32),
+                            config[item.field(MachineLayout::FIRM, 1usize)],
+                        ),
+                    )
+                    .extract(0usize),
                 );
                 let remaining = read(state, saved.field(MachineState::REMAINING, 2usize));
                 let reproduced = times(
                     used,
-                    config[item.field(MachineLayout::OUTPUT_TICKS, 1usize)],
+                    read(
+                        main,
+                        main_coordinate(
+                            config,
+                            comptime!(Field::OutputTicks as u32),
+                            config[item.field(MachineLayout::FIRM, 1usize)],
+                        ),
+                    )
+                    .extract(0usize),
                 );
                 reproduced.faults.record(control);
                 if lt(remaining, used)
@@ -580,12 +659,31 @@ pub fn research(
                 let before = read(state, saved.field(StockState::PRODUCED_BEFORE, 2usize));
                 let used = divide(
                     positive(produced, before),
-                    config[item.field(StockLayout::OUTPUT_TICKS, 1usize)],
+                    read(
+                        main,
+                        main_coordinate(
+                            config,
+                            comptime!(Field::OutputTicks as u32),
+                            config[item.field(StockLayout::FIRM, 1usize)],
+                        ),
+                    )
+                    .extract(0usize),
                 );
                 let extraction = times(used, config[item.field(StockLayout::EXTRACTION, 1usize)]);
                 extraction.faults.record(control);
                 let stock = state[saved.field(StockState::STOCK, 1usize)];
-                let reproduced = times(used, config[item.field(StockLayout::OUTPUT_TICKS, 1usize)]);
+                let reproduced = times(
+                    used,
+                    read(
+                        main,
+                        main_coordinate(
+                            config,
+                            comptime!(Field::OutputTicks as u32),
+                            config[item.field(StockLayout::FIRM, 1usize)],
+                        ),
+                    )
+                    .extract(0usize),
+                );
                 reproduced.faults.record(control);
                 if lt(ticks(stock, 0), extraction.value)
                     || lt(produced, before)
@@ -619,7 +717,7 @@ pub fn research(
             if id < SummaryLayout::WORDS / 2 {
                 let mut total = zero();
                 for lab in 0..config[Header::LAB_COUNT] as usize {
-                    if id < SummaryLayout::CONSUMED / 2 + 3 {
+                    if id < SummaryLayout::CONSUMED / 2 + Good::COUNT {
                         total = add(
                             control,
                             total,
@@ -630,7 +728,7 @@ pub fn research(
                                     config[Header::LAB_COUNT] as usize,
                                     lab,
                                 )
-                                .field(LabState::CONSUMED, 6usize)
+                                .field(LabState::CONSUMED, Good::COUNT * 2)
                                     + id * 2,
                             ),
                         );
@@ -668,7 +766,7 @@ pub fn research(
                         config[Header::MACHINE_COUNT] as usize,
                         machine,
                     );
-                    if id < SummaryLayout::CONSUMED / 2 + 3
+                    if id < SummaryLayout::CONSUMED / 2 + Good::COUNT
                         && config[item.field(MachineLayout::MAINTENANCE_GOOD, 1usize)]
                             == id as u32 + 1
                     {
