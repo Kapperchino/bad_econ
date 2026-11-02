@@ -6,8 +6,8 @@ use burn_wgpu::CubeTensor;
 use bytemuck::{Pod, Zeroable};
 use cubecl::{CubeCount, CubeDim, prelude::BufferArg};
 pub use kernels::{
-    KernelCapacity, KernelDeficit, KernelFatigue, KernelHealth, KernelObservation,
-    available_minutes, next_fatigue, next_health, observed_blend, service_deficit,
+    KernelCapacity, KernelDeficit, KernelFatigue, KernelObservation, available_minutes,
+    next_fatigue, observed_blend, service_deficit,
 };
 use serde::{Deserialize, Serialize};
 use std::mem::offset_of;
@@ -50,12 +50,8 @@ pub struct HouseholdObservation {
     pub services: Vec<DeliveredService>,
     pub participation: Participation,
     pub capacity_minutes: u32,
-    pub health: u32,
     pub fatigue: u32,
     pub reserved_minutes: u32,
-    pub recovery: u32,
-    pub deficit_damage: u32,
-    pub fatigue_damage: u32,
     pub fatigue_response: u32,
     pub exertion_minutes: u32,
     pub rest_minutes: u32,
@@ -73,12 +69,8 @@ struct RequestLayout {
     service_count: u32,
     participation: u32,
     capacity: u32,
-    health: u32,
     fatigue: u32,
     reserved: u32,
-    recovery: u32,
-    deficit_damage: u32,
-    fatigue_damage: u32,
     fatigue_response: u32,
     exertion: u32,
     rest: u32,
@@ -94,12 +86,8 @@ impl RequestLayout {
     const SERVICE_COUNT: usize = offset_of!(Self, service_count) / WORD_BYTES;
     const PARTICIPATION: usize = offset_of!(Self, participation) / WORD_BYTES;
     const CAPACITY: usize = offset_of!(Self, capacity) / WORD_BYTES;
-    const HEALTH: usize = offset_of!(Self, health) / WORD_BYTES;
     const FATIGUE: usize = offset_of!(Self, fatigue) / WORD_BYTES;
     const RESERVED: usize = offset_of!(Self, reserved) / WORD_BYTES;
-    const RECOVERY: usize = offset_of!(Self, recovery) / WORD_BYTES;
-    const DEFICIT_DAMAGE: usize = offset_of!(Self, deficit_damage) / WORD_BYTES;
-    const FATIGUE_DAMAGE: usize = offset_of!(Self, fatigue_damage) / WORD_BYTES;
     const FATIGUE_RESPONSE: usize = offset_of!(Self, fatigue_response) / WORD_BYTES;
     const EXERTION: usize = offset_of!(Self, exertion) / WORD_BYTES;
     const REST: usize = offset_of!(Self, rest) / WORD_BYTES;
@@ -108,11 +96,7 @@ impl RequestLayout {
 
     fn new(request: &HouseholdObservation, service_offset: u32) -> Result<Self> {
         let fractions = [
-            request.health,
             request.fatigue,
-            request.recovery,
-            request.deficit_damage,
-            request.fatigue_damage,
             request.fatigue_response,
             request.observation_weight,
         ];
@@ -145,12 +129,8 @@ impl RequestLayout {
                 service_count: request.services.len() as u32,
                 participation: request.participation as u32,
                 capacity: request.capacity_minutes,
-                health: request.health,
                 fatigue: request.fatigue,
                 reserved: request.reserved_minutes,
-                recovery: request.recovery,
-                deficit_damage: request.deficit_damage,
-                fatigue_damage: request.fatigue_damage,
                 fatigue_response: request.fatigue_response,
                 exertion: request.exertion_minutes,
                 rest: request.rest_minutes,
@@ -185,7 +165,6 @@ struct ResultLayout {
     deficit_lower: u32,
     deficit_upper: u32,
     available: u32,
-    health: u32,
     fatigue: u32,
 }
 impl ResultLayout {
@@ -194,7 +173,6 @@ impl ResultLayout {
     const DEFICIT_LOWER: usize = offset_of!(Self, deficit_lower) / WORD_BYTES;
     const DEFICIT_UPPER: usize = offset_of!(Self, deficit_upper) / WORD_BYTES;
     const AVAILABLE: usize = offset_of!(Self, available) / WORD_BYTES;
-    const HEALTH: usize = offset_of!(Self, health) / WORD_BYTES;
     const FATIGUE: usize = offset_of!(Self, fatigue) / WORD_BYTES;
 }
 
@@ -203,7 +181,6 @@ pub struct HouseholdPolicyResult {
     pub deficit_lower: u32,
     pub deficit_upper: u32,
     pub available_minutes: u32,
-    pub health: u32,
     pub fatigue: u32,
     pub forecast: u64,
 }
@@ -255,7 +232,6 @@ pub fn evaluate(
             deficit_lower: result.deficit_lower,
             deficit_upper: result.deficit_upper,
             available_minutes: result.available,
-            health: result.health,
             fatigue: result.fatigue,
             forecast: result.forecast.into(),
         })

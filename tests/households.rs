@@ -20,12 +20,8 @@ fn observed() -> HouseholdObservation {
         ],
         participation: Participation::Available,
         capacity_minutes: 480,
-        health: 500,
         fatigue: 200,
         reserved_minutes: 960,
-        recovery: 100,
-        deficit_damage: 200,
-        fatigue_damage: 50,
         fatigue_response: 100,
         exertion_minutes: 80,
         rest_minutes: 480,
@@ -49,8 +45,7 @@ fn lean_weighted_need_missing_observation_and_shared_clock() -> Result<()> {
         HouseholdPolicyResult {
             deficit_lower: 250,
             deficit_upper: 250,
-            available_minutes: 192,
-            health: 477,
+            available_minutes: 384,
             fatigue: 116,
             forecast: 11,
         }
@@ -170,7 +165,7 @@ fn household_admission_rejects_unbounded_active_weights_and_invalid_time() -> Re
     too_heavy.services[0].weight = 501;
     assert!(evaluate(&device, &[too_heavy]).is_err());
     let mut invalid = observed();
-    invalid.health = 1001;
+    invalid.fatigue = 1001;
     assert!(evaluate(&device, &[invalid]).is_err());
     let mut invalid = observed();
     invalid.rest_minutes = 961;

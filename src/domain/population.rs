@@ -30,8 +30,6 @@ impl Technique {
 #[derive(Clone, Copy, Debug, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(deny_unknown_fields)]
 pub struct BehaviorPolicy {
-    pub health_recovery: u32,
-    pub hunger_damage: u32,
     pub work_fatigue: u32,
     pub rest_recovery: u32,
     pub wage_increment: u32,
@@ -40,8 +38,6 @@ pub struct BehaviorPolicy {
 impl Default for BehaviorPolicy {
     fn default() -> Self {
         Self {
-            health_recovery: 5,
-            hunger_damage: 20,
             work_fatigue: 10,
             rest_recovery: 20,
             wage_increment: 1,
@@ -52,8 +48,6 @@ impl Default for BehaviorPolicy {
 impl BehaviorPolicy {
     pub fn new(policy: Self) -> Result<Self> {
         let scaled = [
-            policy.health_recovery,
-            policy.hunger_damage,
             policy.work_fatigue,
             policy.rest_recovery,
             policy.price_response,
@@ -76,7 +70,6 @@ pub struct HouseholdSeed {
     pub cash: u64,
     #[serde(deserialize_with = "super::industry::goods_array")]
     pub inventories: [u64; Good::COUNT],
-    pub health: u32,
     pub fatigue: u32,
 }
 
@@ -116,7 +109,7 @@ impl Population {
         let households = population
             .households
             .iter()
-            .all(|actor| position(actor.position) && actor.health <= 1000 && actor.fatigue <= 1000);
+            .all(|actor| position(actor.position) && actor.fatigue <= 1000);
         let firms = population.firms.iter().all(|actor| {
             let input = match actor.good.inputs()[0] {
                 None => actor.technique.input_ticks == 0,
@@ -219,13 +212,15 @@ impl Population {
             initial_cash: 0,
             initial_goods: [0; Good::COUNT],
             research: None,
+            people: Vec::new(),
+            initial_population: 0,
+            ownership: Vec::new(),
         };
         self.households
             .iter()
             .enumerate()
             .for_each(|(index, seed)| {
                 state.set(Field::Cash, index, seed.cash);
-                state.set(Field::Health, index, seed.health.into());
                 state.set(Field::Fatigue, index, seed.fatigue.into());
                 Good::ALL
                     .map(Field::inventory)
@@ -236,7 +231,6 @@ impl Population {
         self.firms.iter().enumerate().for_each(|(offset, seed)| {
             let index = offset + self.households.len();
             state.set(Field::Cash, index, seed.cash);
-            state.set(Field::Health, index, 1000);
             state.set(Field::Wage, index, seed.wage.into());
             state.set(Field::Price, index, seed.price.into());
             state.set(
@@ -282,7 +276,7 @@ impl Population {
     }
 }
 
-#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize)]
 pub struct InitialTotals {
     pub cash: u64,
     pub goods: [u64; Good::COUNT],
