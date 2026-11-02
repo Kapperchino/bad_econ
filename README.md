@@ -14,9 +14,15 @@ cargo run -- analyze --analysis scenarios/analysis.json --output /tmp/accounts.j
 
 GPU and the industrial economy are the defaults. `--economy agrarian` selects the original food economy; loaded scenarios retain their own economy setting. `--seed` controls generated populations and resource geography, `--output PATH` saves JSON, and `--checkpoint PATH` / `--restore PATH` save and resume audited state. See `cargo run -- --help` for all options.
 
+On Windows, Smart App Control can block locally compiled build scripts with error 4551. The development profile leaves `icu_normalizer_data` and `icu_segmenter_data` unoptimized, which resolved the blocked ICU build scripts on the audited Windows setup. Other dependencies retain their optimization settings. This workaround leaves Windows security settings unchanged; future unsigned outputs can still be blocked. See [Microsoft's Smart App Control guidance](https://support.microsoft.com/en-us/windows/security/threat-malware-protection/smart-app-control-frequently-asked-questions).
+
 State stores actor metadata, active recipes, per-good deliveries and consumption, bank and loan balances, and research records in field rows on the host and GPU. Checkpoints use format 5 with the `ResearchFixedV3` research layout and state-hash version 6; checkpoints from earlier formats must be regenerated. Scenario format remains version 1. Existing three-good scenario files still load, with additional inventories and research inputs initialized to zero, and omitted resource maps default to generated geography.
 
 The viewer starts paused: Space toggles running, N advances one day, R resets, G changes the display, and C compares the next seed. Simulation runs on a worker; the viewer renders aggregate snapshots rather than household entities.
+
+A status banner confirms completed controls and reports failures, with short sound cues and a subtle 240 ms color pulse confined to the banner. Automatic days stay quiet. M toggles sound; V reduces flashes to a static tint. Feedback preferences survive reset. The generated WAV cues are embedded in the executable, so launching from another directory needs no asset setup. The Linux viewer additionally needs ALSA development libraries for audio.
+
+Presentation geometry and statistics refresh when the published display or selected chart changes. Worker publications wake the window immediately; between changes, it updates at most every 250 ms when focused or 500 ms when unfocused, with 60 Hz updates during the brief pulse. The simulation worker and audit cadence are independent of rendering. Windows measurement commands and raw results are in [the performance evidence](docs/performance/windows/README.md).
 
 ## Model
 

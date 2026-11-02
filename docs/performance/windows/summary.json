@@ -1,0 +1,103 @@
+{
+  "platform": {
+    "os": "Windows 11 Pro 10.0.26200",
+    "cpu": "AMD Ryzen 9 9950X3D, 16 cores / 32 logical processors",
+    "gpu": "NVIDIA GeForce RTX 3090, 24 GiB",
+    "driver": "616.56",
+    "graphics_backend": "Vulkan",
+    "rust": "1.97.1",
+    "cargo_profile": "dev; application opt-level 1; dependency opt-level 2"
+  },
+  "baseline_commit": "e6eefb5836ff013c9f5ef81b0fdcb05e844de348",
+  "baseline_adjustment": "The two audited ICU dev-profile overrides were required to build the baseline on this Windows setup; runtime source was unchanged.",
+  "viewer_cpu": {
+    "households": 100000,
+    "samples_per_binary": 3,
+    "sample_seconds": 20,
+    "warmup_seconds": 5,
+    "before_median_cpu_seconds": 12,
+    "after_median_cpu_seconds": 0.1875,
+    "reduction_percent": 98.4375,
+    "before_cpu_seconds": [
+      21.46875,
+      6.703125,
+      12
+    ],
+    "after_cpu_seconds": [
+      0.203125,
+      0.1875,
+      0.15625
+    ]
+  },
+  "warmed_headless": [
+    {
+      "households": 1000,
+      "warmup_days": 20,
+      "measured_days": 20,
+      "before_median_day_ms": 31.924950000000003,
+      "after_median_day_ms": 35.35645,
+      "final_state_hash": "212b913a432167e13a78b9df1050b4acf476e8410c159f920cb0716a20a9bf36",
+      "scenario_hash": "70a766a026ead9a017a7fde9e35554cef2ea3e46efbae3df5036ad4b78250807",
+      "readback_bytes": 100688,
+      "state_hash_match": true,
+      "readback_match": true
+    },
+    {
+      "households": 10000,
+      "warmup_days": 20,
+      "measured_days": 20,
+      "before_median_day_ms": 57.6071,
+      "after_median_day_ms": 52.47225,
+      "final_state_hash": "6f8fbf9a723d0055f23d416fa1c3a1c4c79e6a477783b17345ef5e1e49cceabd",
+      "scenario_hash": "778f4452c37db91242af11b0bdc26f31093fa2c557bc354e02c7047e18baeae0",
+      "readback_bytes": 103536,
+      "state_hash_match": true,
+      "readback_match": true
+    }
+  ],
+  "checks": {
+    "gpu_tests_passed": 4,
+    "gpu_tests_failed": 0,
+    "viewer_check": "Passed shared GPU device, reset/step/comparison feedback, audited day, household and firm inspection, all chart screenshots.",
+    "clippy_all_targets": "Passed with -D warnings",
+    "viewer_build": "Passed",
+    "manual_keyboard_and_audio": "Not completed: Computer Use remained interrupted after an Escape stop; no claim of human listening verification."
+  },
+  "audio_assets": [
+    {
+      "asset": "assets/cues/confirm.wav",
+      "sample_rate": 22050,
+      "channels": 1,
+      "duration_seconds": 0.10997732426303855,
+      "peak_sample": 9990,
+      "rms": 4329.747493458874
+    },
+    {
+      "asset": "assets/cues/error.wav",
+      "sample_rate": 22050,
+      "channels": 1,
+      "duration_seconds": 0.18997732426303854,
+      "peak_sample": 9997,
+      "rms": 4329.760726712836
+    },
+    {
+      "asset": "assets/cues/pause.wav",
+      "sample_rate": 22050,
+      "channels": 1,
+      "duration_seconds": 0.11496598639455782,
+      "peak_sample": 9998,
+      "rms": 4329.7626491105875
+    }
+  ],
+  "dependency_audit": {
+    "locked_vulnerability_advisories": 4,
+    "enabled_windows_viewer_vulnerability_advisories": [],
+    "enabled_warnings": [
+      {
+        "package": "paste",
+        "advisory": "RUSTSEC-2024-0436"
+      }
+    ]
+  },
+  "scope": "Measured improvement concerns paused viewer CPU usage. Headless timings vary; no headless throughput improvement is claimed. This is a single Windows/Vulkan machine, not a cross-platform performance guarantee."
+}

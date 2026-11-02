@@ -1,0 +1,10 @@
+2026-11-02T06:00:24.245299Z  INFO bevy_render::renderer: AdapterInfo { name: "NVIDIA GeForce RTX 3090", vendor: 4318, device: 8708, device_type: DiscreteGpu, device_pci_bus_id: "0000:01:00.0", driver: "NVIDIA", driver_info: "616.56", backend: Vulkan, subgroup_min_size: 32, subgroup_max_size: 32, transient_saves_memory: Some(false), limit_bucket: None }
+2026-11-02T06:00:24.325290Z  INFO bevy_winit::system: Creating new window Spatial industrial economy (65v0)
+2026-11-02T06:00:24.405360Z  INFO bevy_render::batching::gpu_preprocessing: GPU preprocessing is fully supported on this device.
+viewer feedback captured <temp>/bad-econ-viewer-step-feedback.ppm
+viewer captured <temp>/bad-econ-viewer-employment.ppm
+viewer captured <temp>/bad-econ-viewer-prices.ppm
+viewer captured <temp>/bad-econ-viewer-wages.ppm
+viewer captured <temp>/bad-econ-viewer-inventories.ppm
+viewer captured <temp>/bad-econ-viewer-cash.ppm
+viewer verification passed: shared device, reset/step/comparison feedback, audited day, household and firm inspection, same-day seed comparison, all charts captured

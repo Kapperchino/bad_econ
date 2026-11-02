@@ -1,0 +1,2 @@
+   Compiling bad_econ v0.1.0 (<workspace>)
+    Finished `dev` profile [optimized + debuginfo] target(s) in 24.26s
