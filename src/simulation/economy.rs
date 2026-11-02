@@ -4,26 +4,28 @@ use super::{
         KernelActorKind, KernelAuthorization, KernelEventStatus, KernelFaults, MarketFlag,
         PROGRESS_WORD,
     },
-    households::{
-        KernelCapacity, KernelFatigue, KernelHealth, KernelObservation, ObservationKind,
-        Participation, available_minutes, next_fatigue, next_health, observed_blend,
-    },
+    households::{KernelFatigue, KernelObservation, ObservationKind, next_fatigue, observed_blend},
     layout::*,
     negotiation::{
         NegotiationRequest, NegotiationStatus, PolicyLayout, legal_grid_rate, negotiate,
     },
-    parameters::EconomyParameters,
+    parameters::{Discovery, EconomyParameters},
     payroll::PayrollAccrual,
     policy::*,
     scheduler::apply,
     words::*,
 };
 use crate::{
-    domain::{BASE_FIELDS, CONSUMPTION_FIELDS, Field, Good, Phase, TRANSIT_FIELDS, USED_FIELDS},
+    domain::{
+        BASE_FIELDS, CONSUMPTION_FIELDS, Field, Good, PRODUCTION_FIELDS, Phase, TRANSIT_FIELDS,
+        USED_FIELDS,
+    },
     ledger::{AuthorizationFlags, EMPTY, LEG_WORDS, LegLayout, MAX_LEGS},
 };
 use cubecl::prelude::*;
 mod clearing;
+pub(super) mod enterprises;
+mod household_production;
 use super::scheduler::Posting;
 use clearing::{PeerBalances, PeerOffer, actor_settlement};
 
@@ -146,25 +148,24 @@ fn local(
                 set32(
                     state,
                     config,
+                    comptime!(Field::HomeMinutes as u32),
+                    id,
+                    0u32,
+                );
+                set32(
+                    state,
+                    config,
                     comptime!(Field::ResearchMinutes as u32),
                     id,
                     0u32,
                 );
             }
-            Phase::Observation => {
-                if k.is(comptime!(ActorKind::Household)) {
-                    let capacity = available_minutes(KernelCapacity {
-                        participation: comptime!(Participation::Available as u32),
-                        capacity_minutes: config[ConfigLayout::WORK_CAP],
-                        health: number(state, config, comptime!(Field::Health as u32), id),
-                        fatigue: number(state, config, comptime!(Field::Fatigue as u32), id),
-                        reserved_minutes: config[ConfigLayout::RESERVED_MINUTES],
-                    });
-                    set32(state, config, comptime!(Field::Time as u32), id, capacity);
-                }
-            }
+            Phase::Observation => {}
             Phase::Proposal => {
                 if !k.is(comptime!(ActorKind::Household)) {
+                    if config[ConfigLayout::HOME] > 0 {
+                        enterprises::available_method(state, actors, config, control, id);
+                    }
                     let desired = proposed_starts(
                         KernelStarts {
                             coverage: config[ConfigLayout::COVERAGE],
@@ -226,15 +227,79 @@ fn local(
                                 * number(state, config, comptime!(Field::LaborMinutes as u32), id),
                         ),
                     );
+                    let distributor =
+                        number(state, config, comptime!(Field::EnterpriseModel as u32), id) == 1;
+                    if distributor {
+                        let stock = value(state, config, k.output(), id);
+                        let demand = maximum(
+                            value(state, config, comptime!(Field::Demand as u32), id),
+                            ticks(1, 0),
+                        );
+                        let units = max(
+                            number(state, config, comptime!(Field::OutputTicks as u32), id),
+                            1,
+                        );
+                        let shifts = divide(
+                            add_checked(control, minimum(stock, demand), ticks(units - 1, 0)),
+                            units,
+                        );
+                        let funded = divide(
+                            value(state, config, comptime!(Field::Cash as u32), id),
+                            planning_wage
+                                * number(state, config, comptime!(Field::LaborMinutes as u32), id),
+                        );
+                        let capacity = ticks(
+                            actors[ActorLayout::CAPACITY * (actors.len() / ActorLayout::WORDS)
+                                + id as usize],
+                            0,
+                        );
+                        planned = minimum(minimum(shifts, funded), capacity);
+                    }
+                    if config[ConfigLayout::HOME] > 0 {
+                        let status =
+                            number(state, config, comptime!(Field::EnterpriseStatus as u32), id);
+                        planned = select(
+                            status
+                                == comptime!(
+                                    crate::domain::enterprise::EnterpriseState::Operating as u32
+                                ),
+                            planned,
+                            zero(),
+                        );
+                    }
                     set(state, config, comptime!(Field::Slots as u32), id, planned);
                     set(state, config, comptime!(Field::Plan as u32), id, planned);
+                }
+            }
+            Phase::WorkPayment => {
+                if number(state, config, comptime!(Field::EnterpriseModel as u32), id) == 1 {
+                    let services = number(state, config, comptime!(Field::Pipeline as u32), id);
+                    set32(
+                        state,
+                        config,
+                        comptime!(Field::RetailOpen as u32),
+                        id,
+                        services,
+                    );
+                    set32(state, config, comptime!(Field::Pipeline as u32), id, 0);
+                }
+                if k.is(comptime!(ActorKind::Household))
+                    && config[ConfigLayout::HOME] > 0
+                    && number(state, config, comptime!(Field::LivingMembers as u32), id) > 0
+                {
+                    enterprises::expand(state, actors, config, control, id);
+                    enterprises::construct_home(state, config, control, id);
+                    household_production::produce(state, config, control, id, parameters.day);
                 }
             }
             Phase::PhysicalClose => match k.bits() {
                 ActorKind::HOUSEHOLD_BITS => {
                     let consumed = minimum(
                         value(state, config, comptime!(Field::Bread as u32), id),
-                        ticks(config[ConfigLayout::HOUSEHOLD_NEED], 0u32),
+                        ticks(
+                            number(state, config, comptime!(Field::FoodNeed as u32), id),
+                            0u32,
+                        ),
                     );
                     let remaining = minus(
                         value(state, config, comptime!(Field::Bread as u32), id),
@@ -260,7 +325,11 @@ fn local(
                     if config[ConfigLayout::INDUSTRIAL] != 0 {
                         for offset in 0..Good::COUNT {
                             let interval = config[ConfigLayout::CONSUMPTION_INTERVALS + offset];
-                            if interval > 1 && (parameters.day + id) % max(interval, 1) == 0 {
+                            if interval > 1
+                                && (parameters.day + id) % max(interval, 1) == 0
+                                && number(state, config, comptime!(Field::LivingMembers as u32), id)
+                                    > 0
+                            {
                                 let good = offset as u32 + 1;
                                 let stock = value(state, config, good, id);
                                 let used = minimum(stock, ticks(1, 0));
@@ -276,8 +345,8 @@ fn local(
                             }
                         }
                     }
-                    let shortage =
-                        config[ConfigLayout::HOUSEHOLD_NEED] - consumed.extract(LOW_WORD);
+                    let shortage = number(state, config, comptime!(Field::FoodNeed as u32), id)
+                        - consumed.extract(LOW_WORD);
                     set32(
                         state,
                         config,
@@ -285,17 +354,6 @@ fn local(
                         id,
                         shortage,
                     );
-                    let mut health = min(
-                        number(state, config, comptime!(Field::Health as u32), id)
-                            + config[ConfigLayout::HEALTH_RECOVERY],
-                        POLICY_SCALE,
-                    );
-                    if shortage > 0u32 {
-                        health = max(
-                            number(state, config, comptime!(Field::Health as u32), id),
-                            config[ConfigLayout::HUNGER_DAMAGE],
-                        ) - config[ConfigLayout::HUNGER_DAMAGE];
-                    }
                     let mut fatigue = min(
                         number(state, config, comptime!(Field::Fatigue as u32), id)
                             + config[ConfigLayout::WORK_FATIGUE],
@@ -308,20 +366,8 @@ fn local(
                         ) - config[ConfigLayout::REST_RECOVERY];
                     }
                     if config[ConfigLayout::HOUSEHOLD_POLICY_ENABLED] != 0 {
-                        let previous_health =
-                            number(state, config, comptime!(Field::Health as u32), id);
                         let previous_fatigue =
                             number(state, config, comptime!(Field::Fatigue as u32), id);
-                        let deficit =
-                            shortage * POLICY_SCALE / config[ConfigLayout::HOUSEHOLD_NEED];
-                        health = next_health(KernelHealth {
-                            health: previous_health,
-                            fatigue: previous_fatigue,
-                            deficit,
-                            recovery: config[ConfigLayout::HOUSEHOLD_RECOVERY],
-                            deficit_damage: config[ConfigLayout::DEFICIT_DAMAGE],
-                            fatigue_damage: config[ConfigLayout::FATIGUE_DAMAGE],
-                        });
                         let exertion = number(state, config, comptime!(Field::Hours as u32), id)
                             + number(state, config, comptime!(Field::ResearchMinutes as u32), id);
                         fatigue = next_fatigue(KernelFatigue {
@@ -331,7 +377,6 @@ fn local(
                             rest_minutes: config[ConfigLayout::REST_MINUTES],
                         });
                     }
-                    set32(state, config, comptime!(Field::Health as u32), id, health);
                     set32(state, config, comptime!(Field::Fatigue as u32), id, fatigue);
                 }
                 _ => {
@@ -349,7 +394,17 @@ fn local(
                 }
             },
             Phase::AccountsDecisions => {
+                if k.is(comptime!(ActorKind::Household)) && config[ConfigLayout::HOME] > 0 {
+                    enterprises::household_quote(state, config, id);
+                    enterprises::investment(state, config, id);
+                }
                 if !k.is(comptime!(ActorKind::Household)) {
+                    if config[ConfigLayout::HOME] > 0 {
+                        let packets = number(state, config, comptime!(Field::Plan as u32), id)
+                            - number(state, config, comptime!(Field::Slots as u32), id);
+                        enterprises::maintain(state, config, control, id, packets);
+                        enterprises::lifecycle(state, config, id);
+                    }
                     let old = value(state, config, comptime!(Field::Demand as u32), id);
                     let signal = add_checked(
                         control,
@@ -390,7 +445,7 @@ fn local(
                                 value(state, config, comptime!(Field::Price as u32), id),
                                 config[(ConfigLayout::PRICE_TABLE as u32 + table_index) as usize],
                             ),
-                            ticks(PRICE_SCALE - 1, 0u32),
+                            ticks(select(positive_sign, PRICE_SCALE - 1, 0), 0u32),
                         ),
                         PRICE_SCALE,
                     );
@@ -408,6 +463,8 @@ fn local(
                         ),
                     );
                     set(state, config, comptime!(Field::Demand as u32), id, demand);
+                    enterprises::operating_plan(state, config, control, id);
+
                     let cap = divide(
                         divide(
                             value(state, config, comptime!(Field::Cash as u32), id),
@@ -418,12 +475,40 @@ fn local(
                             1u32,
                         ),
                     );
-                    let offered = number(state, config, comptime!(Field::Wage as u32), id)
-                        + select(
-                            number(state, config, comptime!(Field::Slots as u32), id) > 0u32,
-                            config[ConfigLayout::WAGE_INCREMENT],
-                            0u32,
+                    if number(state, config, comptime!(Field::EnterpriseModel as u32), id) == 1 {
+                        let replacement =
+                            number(state, config, comptime!(Field::ReplacementCost as u32), id);
+                        let margin =
+                            number(state, config, comptime!(Field::RetailMargin as u32), id);
+                        let labor = number(state, config, comptime!(Field::Wage as u32), id)
+                            * number(state, config, comptime!(Field::LaborMinutes as u32), id);
+                        let quote = replacement * (1000 + margin) / 1000
+                            + ceildiv(
+                                labor,
+                                max(
+                                    number(state, config, comptime!(Field::OutputTicks as u32), id),
+                                    1,
+                                ),
+                            );
+                        set32(
+                            state,
+                            config,
+                            comptime!(Field::Price as u32),
+                            id,
+                            min(
+                                max(quote, config[ConfigLayout::MINIMUM_PRICE]),
+                                config[ConfigLayout::MAXIMUM_PRICE],
+                            ),
                         );
+                    }
+                    let wage = number(state, config, comptime!(Field::Wage as u32), id);
+                    let unstaffed = number(state, config, comptime!(Field::Slots as u32), id) > 0;
+                    let increment = config[ConfigLayout::WAGE_INCREMENT];
+                    let offered = select(
+                        unstaffed,
+                        wage + increment,
+                        max(wage, increment + MINIMUM_WAGE) - increment,
+                    );
                     set32(
                         state,
                         config,
@@ -457,10 +542,19 @@ fn propose(
     proposals: &mut [u32],
     control: &[Atomic<u32>],
     parameters: &EconomyParameters,
-    id: u32,
+    invocation: u32,
 ) {
-    if id < config[ConfigLayout::ACTORS] {
+    if invocation < config[ConfigLayout::ACTORS] {
         let market = comptime!(parameters.market);
+        let mut id = invocation;
+        if comptime!(market == MarketFlag::Household && parameters.discovery == Discovery::Indexed)
+        {
+            let cells = config[ConfigLayout::SPATIAL_SIDE] * config[ConfigLayout::SPATIAL_SIDE];
+            let base = 3 * (cells + 1 + config[ConfigLayout::ACTORS])
+                + ceildiv(config[ConfigLayout::ACTORS], DISCOVERY_BLOCK)
+                + 1;
+            id = spatial[(base + invocation) as usize];
+        }
         let k = kind(actors, id);
         let mut chosen = u32::new(comptime!(i64::from(NO_ACTOR)));
         let mut quantity = ticks(0u32, 0u32);
@@ -468,6 +562,16 @@ fn propose(
         let mut search = false;
         let mut good = 0u32;
         let mut wanted = ticks(0u32, 0u32);
+        let mut seen_supply = false;
+        let mut empty_seller = u32::new(comptime!(i64::from(NO_ACTOR)));
+        let mut empty_quantity = zero();
+        let mut empty_trip = 0u32;
+        let mut empty_score = ticks(u32::MAX, u32::MAX);
+        let mut missing_supply = false;
+        let mut purchasing_power = value(state, config, comptime!(Field::Cash as u32), id);
+        if comptime!(matches!(market, MarketFlag::Input(_))) {
+            purchasing_power = enterprises::purchasing_power(state, actors, config, control, id);
+        }
         match market {
             MarketFlag::Labor => {
                 search = k.is(comptime!(ActorKind::Household))
@@ -485,17 +589,134 @@ fn propose(
                         * config[ConfigLayout::COVERAGE],
                     0u32,
                 );
+                if number(state, config, comptime!(Field::EnterpriseModel as u32), id) == 1 {
+                    search = good == k.output();
+                    let forecast = maximum(
+                        value(state, config, comptime!(Field::Demand as u32), id),
+                        ticks(1, 0),
+                    );
+                    wanted = multiply(
+                        control,
+                        forecast,
+                        number(state, config, comptime!(Field::StockCoverage as u32), id)
+                            + config[ConfigLayout::RING],
+                    );
+                }
+                if !k.is(comptime!(ActorKind::Household))
+                    && number(state, config, comptime!(Field::EnterpriseModel as u32), id) == 0
+                    && config[ConfigLayout::HOME] > 0
+                {
+                    let horizon = config[ConfigLayout::COVERAGE] + config[ConfigLayout::RING];
+                    let packets = divide(
+                        add_checked(
+                            control,
+                            multiply(
+                                control,
+                                value(state, config, comptime!(Field::Demand as u32), id),
+                                horizon,
+                            ),
+                            ticks(
+                                number(state, config, comptime!(Field::OutputTicks as u32), id) - 1,
+                                0,
+                            ),
+                        ),
+                        max(
+                            number(state, config, comptime!(Field::OutputTicks as u32), id),
+                            1,
+                        ),
+                    );
+                    wanted = multiply(
+                        control,
+                        packets,
+                        number(state, config, comptime!(Field::InputTicks as u32), id),
+                    );
+                }
+                if k.is(comptime!(ActorKind::Household))
+                    && config[ConfigLayout::HOME] > 0
+                    && good == comptime!(Good::Grain as u32)
+                    && number(state, config, comptime!(Field::LivingMembers as u32), id) > 0
+                {
+                    search = true;
+                    wanted = ticks(
+                        number(state, config, comptime!(Field::FoodNeed as u32), id)
+                            * (config[ConfigLayout::COVERAGE] + config[ConfigLayout::RING]),
+                        0,
+                    );
+                }
+                let investment =
+                    number(state, config, comptime!(Field::InvestmentGood as u32), id) > 0;
+                if k.is(comptime!(ActorKind::Household))
+                    && investment
+                    && number(state, config, comptime!(Field::LivingMembers as u32), id) > 0
+                    && config[ConfigLayout::HOME] > 0
+                    && (good == comptime!(Good::Tools as u32)
+                        || good == comptime!(Good::Wood as u32))
+                {
+                    search = true;
+                    wanted = ticks(select(good == comptime!(Good::Tools as u32), 2u32, 5u32), 0);
+                }
+                if !k.is(comptime!(ActorKind::Household))
+                    && config[ConfigLayout::HOME] > 0
+                    && good == comptime!(Good::Wood as u32)
+                    && number(state, config, comptime!(Field::Slots as u32), id) == 0
+                    && number(state, config, comptime!(Field::Plan as u32), id) > 0
+                    && !lt(
+                        value(state, config, comptime!(Field::Cash as u32), id),
+                        ticks(10_000, 0),
+                    )
+                {
+                    wanted = select(search, maximum(wanted, ticks(5, 0)), ticks(5, 0));
+                    search = true;
+                }
+                if !k.is(comptime!(ActorKind::Household))
+                    && good == comptime!(Good::Tools as u32)
+                    && config[ConfigLayout::HOME] > 0
+                {
+                    wanted = select(search, maximum(wanted, ticks(2, 0)), ticks(2, 0));
+                    search = true;
+                }
             }
             MarketFlag::Consumer(_) => {
                 good = comptime!(market.good().expect("consumer market") as u32);
-                search = k.is(comptime!(ActorKind::Household));
+                let interval = config[ConfigLayout::CONSUMPTION_INTERVALS + good as usize - 1];
+                let until_due =
+                    (interval - (parameters.day + id) % max(interval, 1)) % max(interval, 1);
+                search = k.is(comptime!(ActorKind::Household))
+                    && number(state, config, comptime!(Field::LivingMembers as u32), id) > 0
+                    && until_due <= config[ConfigLayout::COVERAGE] + config[ConfigLayout::RING];
+                let reserve = ticks(
+                    number(state, config, comptime!(Field::FoodNeed as u32), id)
+                        * (config[ConfigLayout::COVERAGE] + config[ConfigLayout::RING]),
+                    0,
+                );
+                let food = add_checked(
+                    control,
+                    value(state, config, comptime!(Field::Bread as u32), id),
+                    value(
+                        state,
+                        config,
+                        TRANSIT_FIELDS as u32 + comptime!(Good::Bread as u32) - 1,
+                        id,
+                    ),
+                );
+                let cash_reserve = multiply(
+                    control,
+                    reserve,
+                    number(state, config, comptime!(Field::Price as u32), id),
+                );
+                search = search
+                    && !lt(food, reserve)
+                    && lt(
+                        cash_reserve,
+                        value(state, config, comptime!(Field::Cash as u32), id),
+                    );
                 wanted = ticks(1, 0);
             }
             MarketFlag::Household => {
                 good = comptime!(Good::Bread as u32);
                 search = k.is(comptime!(ActorKind::Household));
                 wanted = ticks(
-                    config[ConfigLayout::HOUSEHOLD_NEED]
+                    number(state, config, comptime!(Field::FoodNeed as u32), id)
                         * (config[ConfigLayout::COVERAGE] + config[ConfigLayout::RING] - 1u32),
                     0u32,
                 );
@@ -512,9 +733,12 @@ fn propose(
                         control,
                         positive(
                             value(state, config, comptime!(Field::Cash as u32), id),
-                            ticks(
-                                config[ConfigLayout::RESERVE_LOW],
-                                config[ConfigLayout::RESERVE_HIGH],
+                            maximum(
+                                ticks(
+                                    config[ConfigLayout::RESERVE_LOW],
+                                    config[ConfigLayout::RESERVE_HIGH],
+                                ),
+                                value(state, config, comptime!(Field::OperatingReserve as u32), id),
                             ),
                         ),
                         config[ConfigLayout::DISTRIBUTION_RATE],
@@ -541,18 +765,14 @@ fn propose(
             && number(state, config, comptime!(Field::Time as u32), id)
                 >= select(comptime!(market == MarketFlag::Labor), 1u32, 0);
         if good > 0 {
-            search = search
-                && !equal(wanted, zero())
-                && !equal(
-                    value(state, config, comptime!(Field::Cash as u32), id),
-                    zero(),
-                );
+            search = search && !equal(wanted, zero()) && !equal(purchasing_power, zero());
         }
         if search {
-            let cx = actors[ActorLayout::X * (actors.len() / ActorLayout::WORDS) + id as usize]
-                / config[ConfigLayout::SEARCH_RADIUS];
-            let cy = actors[ActorLayout::Y * (actors.len() / ActorLayout::WORDS) + id as usize]
-                / config[ConfigLayout::SEARCH_RADIUS];
+            let px = actors[ActorLayout::X * (actors.len() / ActorLayout::WORDS) + id as usize];
+            let py = actors[ActorLayout::Y * (actors.len() / ActorLayout::WORDS) + id as usize];
+            let radius = config[ConfigLayout::SEARCH_RADIUS];
+            let cx = px / radius;
+            let cy = py / radius;
             let side = config[ConfigLayout::SPATIAL_SIDE];
             let mut best = ticks(u32::MAX, u32::MAX);
             if comptime!(market == MarketFlag::Labor) {
@@ -565,123 +785,323 @@ fn propose(
                 while x <= min(cx + 1u32, side - 1u32) && considered < DISCOVERY_CANDIDATES {
                     let cell = y * side + x;
                     let mut j = spatial[cell as usize];
+                    let nearest = max(px, x * radius) - min(px, (x + 1) * radius - 1)
+                        + max(py, y * radius)
+                        - min(py, (y + 1) * radius - 1);
+                    if nearest > radius {
+                        j = spatial[(cell + 1) as usize];
+                    }
                     while j < spatial[(cell + 1) as usize] && considered < DISCOVERY_CANDIDATES {
-                        let firm = spatial[(side * side + 1u32 + j) as usize];
-                        let dist = distance(actors, id, firm);
-                        let mut wage = number(state, config, comptime!(Field::Wage as u32), firm);
-                        let quote = number(state, config, comptime!(Field::Price as u32), firm);
-                        let mut eligible = dist <= config[ConfigLayout::SEARCH_RADIUS];
-                        let mut score = ticks(
-                            quote
-                                + max(ceildiv(dist, config[ConfigLayout::SHIPMENT_SPEED]), 1u32)
-                                    * config[ConfigLayout::DELIVERY_PENALTY],
-                            0u32,
-                        );
-                        let mut amount = ticks(1u32, 0u32);
-                        if comptime!(market == MarketFlag::Labor) {
-                            if config[ConfigLayout::BARGAINING + PolicyLayout::ENABLED] != 0 {
-                                let negotiation = negotiate(
-                                    NegotiationRequest {
-                                        prior_gross: value(
-                                            state,
-                                            config,
-                                            comptime!(Field::GrossIncome as u32),
-                                            id,
-                                        ),
-                                        household_cash: value(
-                                            state,
-                                            config,
-                                            comptime!(Field::Cash as u32),
-                                            id,
-                                        ),
-                                        funded_per_packet: divide(
-                                            value(
+                        let begin = spatial[cell as usize];
+                        let length = spatial[(cell + 1) as usize] - begin;
+                        let rotated = begin + (j - begin + parameters.day + id) % max(length, 1);
+                        let mut skipped = 0u32;
+                        if comptime!(
+                            market.good() == Some(Good::Bread)
+                                && parameters.discovery == Discovery::Indexed
+                        ) {
+                            let block = rotated / DISCOVERY_BLOCK;
+                            let base = 3 * (side * side + 1 + config[ConfigLayout::ACTORS]);
+                            let quote = spatial[(base + block) as usize];
+                            let cash = purchasing_power;
+                            if lt(cash, ticks(quote, 0)) {
+                                skipped = min(
+                                    min((block + 1) * DISCOVERY_BLOCK, begin + length) - rotated,
+                                    begin + length - j,
+                                );
+                            }
+                            let mut offset = 0;
+                            while offset < skipped && !seen_supply {
+                                let seller = spatial[(side * side + 1 + rotated + offset) as usize];
+                                seen_supply = distance(actors, id, seller)
+                                    <= config[ConfigLayout::SEARCH_RADIUS]
+                                    && household_production::offers(
+                                        state, actors, config, seller, good,
+                                    );
+                                offset += 1;
+                            }
+                        }
+                        if skipped == 0 {
+                            let firm = spatial[(side * side + 1u32 + rotated) as usize];
+                            let dist = distance(actors, id, firm);
+                            if dist <= config[ConfigLayout::SEARCH_RADIUS] {
+                                let mut wage =
+                                    number(state, config, comptime!(Field::Wage as u32), firm);
+                                let quote =
+                                    number(state, config, comptime!(Field::Price as u32), firm);
+                                let mut inspect = true;
+                                if comptime!(market != MarketFlag::Labor) {
+                                    let cash = purchasing_power;
+                                    inspect = !lt(cash, ticks(max(quote, 1), 0));
+                                    if !inspect {
+                                        seen_supply = seen_supply
+                                            || household_production::offers(
+                                                state, actors, config, firm, good,
+                                            );
+                                    }
+                                }
+                                if inspect {
+                                    let mut eligible = dist <= config[ConfigLayout::SEARCH_RADIUS];
+
+                                    let mut score = ticks(
+                                        quote
+                                            + max(
+                                                ceildiv(dist, config[ConfigLayout::SHIPMENT_SPEED]),
+                                                1u32,
+                                            ) * config[ConfigLayout::DELIVERY_PENALTY],
+                                        0u32,
+                                    );
+                                    let mut amount = ticks(1u32, 0u32);
+                                    if comptime!(market == MarketFlag::Labor) {
+                                        if config[ConfigLayout::BARGAINING + PolicyLayout::ENABLED]
+                                            != 0
+                                        {
+                                            let negotiation = negotiate(
+                                                NegotiationRequest {
+                                                    prior_gross: value(
+                                                        state,
+                                                        config,
+                                                        comptime!(Field::GrossIncome as u32),
+                                                        id,
+                                                    ),
+                                                    household_cash: value(
+                                                        state,
+                                                        config,
+                                                        comptime!(Field::Cash as u32),
+                                                        id,
+                                                    ),
+                                                    funded_per_packet: divide(
+                                                        value(
+                                                            state,
+                                                            config,
+                                                            comptime!(Field::Cash as u32),
+                                                            firm,
+                                                        ),
+                                                        max(
+                                                            number(
+                                                                state,
+                                                                config,
+                                                                comptime!(Field::Slots as u32),
+                                                                firm,
+                                                            ),
+                                                            1,
+                                                        ),
+                                                    ),
+                                                    candidate_wage: wage,
+                                                    payable_minutes: number(
+                                                        state,
+                                                        config,
+                                                        comptime!(Field::LaborMinutes as u32),
+                                                        firm,
+                                                    ),
+                                                },
+                                                config,
+                                                control,
+                                                comptime!(ConfigLayout::BARGAINING),
+                                            );
+                                            eligible = eligible
+                                                && negotiation.status
+                                                    == comptime!(NegotiationStatus::Agreed as u32);
+                                            wage = negotiation.wage.extract(LOW_WORD);
+                                            amount = negotiation.wage;
+                                        }
+                                        let duration =
+                                            number(
                                                 state,
                                                 config,
-                                                comptime!(Field::Cash as u32),
+                                                comptime!(Field::LaborMinutes as u32),
                                                 firm,
+                                            ) + ceildiv(dist, config[ConfigLayout::COMMUTE_SPEED])
+                                                * COMMUTE_LEGS;
+                                        eligible = eligible
+                                            && number(
+                                                state,
+                                                config,
+                                                comptime!(Field::Slots as u32),
+                                                firm,
+                                            ) > 0u32
+                                            && number(
+                                                state,
+                                                config,
+                                                comptime!(Field::Time as u32),
+                                                id,
+                                            ) >= duration;
+                                        score = divide(
+                                            times32(
+                                                wage * number(
+                                                    state,
+                                                    config,
+                                                    comptime!(Field::LaborMinutes as u32),
+                                                    firm,
+                                                ),
+                                                POLICY_SCALE,
                                             ),
-                                            max(
+                                            duration,
+                                        );
+                                        if config[ConfigLayout::HOME] > 0 {
+                                            let conditions = 500
+                                                + number(
+                                                    state,
+                                                    config,
+                                                    comptime!(Field::EquipmentCondition as u32),
+                                                    firm,
+                                                ) / 2
+                                                + number(
+                                                    state,
+                                                    config,
+                                                    comptime!(Field::SafetyProvision as u32),
+                                                    firm,
+                                                ) / 4;
+                                            score = scaled(control, score, conditions, 1000);
+                                            let need = number(
+                                                state,
+                                                config,
+                                                comptime!(Field::FoodNeed as u32),
+                                                id,
+                                            );
+                                            let bread = number(
+                                                state,
+                                                config,
+                                                comptime!(Field::Bread as u32),
+                                                id,
+                                            );
+                                            let missing = max(need, bread) - bread;
+                                            let minutes = missing
+                                                * (config[ConfigLayout::HOME]
+                                                    + config[ConfigLayout::HOME + 1]);
+                                            let time = number(
+                                                state,
+                                                config,
+                                                comptime!(Field::Time as u32),
+                                                id,
+                                            );
+                                            let remaining = max(time, duration) - duration
+                                                + number(
+                                                    state,
+                                                    config,
+                                                    comptime!(Field::HomeTime as u32),
+                                                    id,
+                                                );
+                                            let self_provision = missing > 0
+                                                && !lt(
+                                                    value(
+                                                        state,
+                                                        config,
+                                                        comptime!(Field::Grain as u32),
+                                                        id,
+                                                    ),
+                                                    ticks(missing, 0),
+                                                );
+                                            let paid = times32(
+                                                wage,
                                                 number(
                                                     state,
                                                     config,
-                                                    comptime!(Field::Slots as u32),
+                                                    comptime!(Field::LaborMinutes as u32),
                                                     firm,
                                                 ),
-                                                1,
+                                            );
+                                            let food_cost = times32(
+                                                missing,
+                                                number(
+                                                    state,
+                                                    config,
+                                                    comptime!(Field::Price as u32),
+                                                    id,
+                                                ),
+                                            );
+                                            eligible = eligible
+                                                && !(self_provision
+                                                    && remaining < minutes
+                                                    && lt(paid, food_cost));
+                                        }
+                                    } else {
+                                        let affordable = minimum(
+                                            wanted,
+                                            divide(purchasing_power, max(quote, 1u32)),
+                                        );
+                                        let offered = household_production::offers(
+                                            state, actors, config, firm, good,
+                                        );
+                                        seen_supply = seen_supply || (eligible && offered);
+                                        let known_producer = !kind(actors, firm)
+                                            .is(comptime!(ActorKind::Household))
+                                            && kind(actors, firm).output() == good;
+                                        if eligible
+                                            && firm != id
+                                            && known_producer
+                                            && !offered
+                                            && quote > 0
+                                            && !equal(affordable, zero())
+                                            && lt(score, empty_score)
+                                        {
+                                            empty_seller = firm;
+                                            empty_quantity = affordable;
+                                            empty_trip = dist;
+                                            empty_score = score;
+                                        }
+                                        amount = minimum(
+                                            minimum(
+                                                wanted,
+                                                positive(
+                                                    value(state, config, good, firm),
+                                                    household_production::reserve(
+                                                        state, actors, config, firm, good,
+                                                    ),
+                                                ),
                                             ),
-                                        ),
-                                        candidate_wage: wage,
-                                        payable_minutes: number(
-                                            state,
-                                            config,
-                                            comptime!(Field::LaborMinutes as u32),
-                                            firm,
-                                        ),
-                                    },
-                                    config,
-                                    control,
-                                    comptime!(ConfigLayout::BARGAINING),
-                                );
-                                eligible = eligible
-                                    && negotiation.status
-                                        == comptime!(NegotiationStatus::Agreed as u32);
-                                wage = negotiation.wage.extract(LOW_WORD);
-                                amount = negotiation.wage;
+                                            divide(purchasing_power, max(quote, 1u32)),
+                                        );
+                                        eligible = eligible
+                                            && firm != id
+                                            && household_production::offers(
+                                                state, actors, config, firm, good,
+                                            )
+                                            && quote > 0u32
+                                            && !equal(amount, ticks(0u32, 0u32));
+                                    }
+                                    let mut improves = lt(score, best);
+                                    if comptime!(market == MarketFlag::Labor) {
+                                        improves = lt(best, score);
+                                    }
+                                    improves = improves || chosen == NO_ACTOR;
+                                    considered += u32::cast_from(eligible);
+                                    if eligible && improves {
+                                        chosen = firm;
+                                        quantity = amount;
+                                        trip = dist;
+                                        best = score;
+                                    }
+                                }
                             }
-                            let duration =
-                                number(state, config, comptime!(Field::LaborMinutes as u32), firm)
-                                    + ceildiv(dist, config[ConfigLayout::COMMUTE_SPEED])
-                                        * COMMUTE_LEGS;
-                            eligible = eligible
-                                && number(state, config, comptime!(Field::Slots as u32), firm)
-                                    > 0u32
-                                && number(state, config, comptime!(Field::Time as u32), id)
-                                    >= duration;
-                            score = divide(
-                                times32(
-                                    wage * number(
-                                        state,
-                                        config,
-                                        comptime!(Field::LaborMinutes as u32),
-                                        firm,
-                                    ),
-                                    POLICY_SCALE,
-                                ),
-                                duration,
-                            );
-                        } else {
-                            amount = minimum(
-                                minimum(wanted, value(state, config, good, firm)),
-                                divide(
-                                    value(state, config, comptime!(Field::Cash as u32), id),
-                                    max(quote, 1u32),
-                                ),
-                            );
-                            eligible = eligible
-                                && firm != id
-                                && kind(actors, firm).output() == good
-                                && quote > 0u32
-                                && !equal(amount, ticks(0u32, 0u32));
+                            j += 1;
                         }
-                        let mut improves = lt(score, best);
-                        if comptime!(market == MarketFlag::Labor) {
-                            improves = lt(best, score);
-                        }
-                        improves = improves || (equal(score, best) && firm < chosen);
-                        considered += u32::cast_from(eligible);
-                        if eligible && improves {
-                            chosen = firm;
-                            quantity = amount;
-                            trip = dist;
-                            best = score;
-                        }
-                        j += 1;
+                        j += skipped;
                     }
                     x += 1;
                 }
                 y += 1;
             }
+        }
+        if chosen == NO_ACTOR && empty_seller != NO_ACTOR {
+            chosen = empty_seller;
+            quantity = empty_quantity;
+            trip = empty_trip;
+            missing_supply = true;
+        }
+        if comptime!(market == MarketFlag::Household) {
+            let cash = value(state, config, comptime!(Field::Cash as u32), id);
+            let mut failure = u32::cast_from(missing_supply);
+            if !equal(wanted, zero()) && chosen == NO_ACTOR {
+                failure = select(seen_supply || equal(cash, zero()), 2u32, 1u32);
+            }
+            set32(
+                state,
+                config,
+                comptime!(Field::FoodAccess as u32),
+                id,
+                failure,
+            );
         }
         proposals[id as usize * ProposalLayout::WORDS + ProposalLayout::ACTOR] = chosen;
         proposals[id as usize * ProposalLayout::WORDS + ProposalLayout::QUANTITY_LOW] =
@@ -759,7 +1179,7 @@ enum EventStorage {
 #[cube]
 fn construct(
     state: &mut [u32],
-    _actors: &[u32],
+    actors: &[u32],
     config: &[u32],
     proposals: &mut [u32],
     bundles: &mut [u32],
@@ -939,27 +1359,26 @@ fn construct(
                 }
                 MarketFlag::Payroll => {
                     let mut net = quantity;
+                    let prior = value(state, config, comptime!(Field::GrossIncome as u32), actor);
+                    event.leg(
+                        config,
+                        bundles,
+                        KernelLeg {
+                            field: comptime!(Field::GrossIncome as u32),
+                            actor,
+                            debit: zero,
+                            credit: quantity,
+                            authorization: KernelAuthorization::new(comptime!(
+                                AuthorizationFlags::EQUAL
+                            )),
+                            guard: prior,
+                        },
+                    );
                     if config[ConfigLayout::PAYROLL_ENABLED] != 0 {
-                        let prior =
-                            value(state, config, comptime!(Field::GrossIncome as u32), actor);
                         let accrued = add_checked(control, prior, quantity);
                         let before = PayrollAccrual::new(prior, config, control);
                         let after = PayrollAccrual::new(accrued, config, control);
                         net = minus(after.net, before.net);
-                        event.leg(
-                            config,
-                            bundles,
-                            KernelLeg {
-                                field: comptime!(Field::GrossIncome as u32),
-                                actor,
-                                debit: zero,
-                                credit: quantity,
-                                authorization: KernelAuthorization::new(comptime!(
-                                    AuthorizationFlags::EQUAL
-                                )),
-                                guard: prior,
-                            },
-                        );
                         event.leg(
                             config,
                             bundles,
@@ -1076,8 +1495,63 @@ fn construct(
                         zero,
                         cost,
                     );
-                    event.transfer(config, bundles, good, other, quantity, zero);
+                    let retained =
+                        household_production::reserve(state, actors, config, other, good);
+                    event.leg(
+                        config,
+                        bundles,
+                        KernelLeg {
+                            field: good,
+                            actor: other,
+                            debit: quantity,
+                            credit: zero,
+                            authorization: KernelAuthorization::new(comptime!(
+                                AuthorizationFlags::AT_LEAST
+                            )),
+                            guard: add_checked(control, retained, quantity),
+                        },
+                    );
                     event.transfer(config, bundles, slot, actor, zero, quantity);
+                    for input in 0u32..2 {
+                        if number(
+                            state,
+                            config,
+                            comptime!(Field::FirstInput as u32) + input,
+                            actor,
+                        ) == good
+                        {
+                            let cost_field = comptime!(Field::FirstInputCost as u32) + input;
+                            event.transfer(
+                                config,
+                                bundles,
+                                cost_field,
+                                actor,
+                                value(state, config, cost_field, actor),
+                                value(state, config, comptime!(Field::Price as u32), other),
+                            );
+                        }
+                    }
+                    if number(
+                        state,
+                        config,
+                        comptime!(Field::EnterpriseModel as u32),
+                        actor,
+                    ) == 1
+                    {
+                        event.transfer(
+                            config,
+                            bundles,
+                            comptime!(Field::ReplacementCost as u32),
+                            actor,
+                            value(
+                                state,
+                                config,
+                                comptime!(Field::ReplacementCost as u32),
+                                actor,
+                            ),
+                            value(state, config, comptime!(Field::Price as u32), other),
+                        );
+                    }
                     event.transfer(
                         config,
                         bundles,
@@ -1287,6 +1761,36 @@ fn summarize(
                         totals[(SummaryLayout::PRODUCED + k.output() - 1) as usize],
                         value(state, config, comptime!(Field::Produced as u32), actor),
                     );
+                    totals[SummaryLayout::DISTRIBUTORS as usize] = add_checked(
+                        control,
+                        totals[SummaryLayout::DISTRIBUTORS as usize],
+                        ticks(
+                            u32::cast_from(
+                                number(
+                                    state,
+                                    config,
+                                    comptime!(Field::EnterpriseModel as u32),
+                                    actor,
+                                ) == 1,
+                            ),
+                            0,
+                        ),
+                    );
+                    totals[SummaryLayout::CLOSURES as usize] = add_checked(
+                        control,
+                        totals[SummaryLayout::CLOSURES as usize],
+                        ticks(
+                            u32::cast_from(
+                                number(
+                                    state,
+                                    config,
+                                    comptime!(Field::EnterpriseStatus as u32),
+                                    actor,
+                                ) == 4,
+                            ),
+                            0,
+                        ),
+                    );
                     let good = k.output() - 1;
                     let wage = value(state, config, comptime!(Field::Wage as u32), actor);
                     let price = value(state, config, comptime!(Field::Price as u32), actor);
@@ -1356,6 +1860,17 @@ fn summarize(
                     control,
                     totals[(SummaryLayout::TRANSIT + good) as usize],
                     held,
+                );
+                let household_output = value(state, config, PRODUCTION_FIELDS as u32 + good, actor);
+                totals[(SummaryLayout::HOUSEHOLD_PRODUCTION + good) as usize] = add_checked(
+                    control,
+                    totals[(SummaryLayout::HOUSEHOLD_PRODUCTION + good) as usize],
+                    household_output,
+                );
+                totals[(SummaryLayout::PRODUCED + good) as usize] = add_checked(
+                    control,
+                    totals[(SummaryLayout::PRODUCED + good) as usize],
+                    household_output,
                 );
                 totals[(SummaryLayout::USED + good) as usize] = add_checked(
                     control,
@@ -1517,7 +2032,9 @@ pub enum EconomyStage {
     ApplyFeedback,
     IndexCount,
     IndexPrefix,
+    IndexOffsets,
     IndexFill,
+    IndexPrices,
     Local,
     Propose,
     MarketActivity,
@@ -1553,12 +2070,14 @@ pub fn economy(
             }
         }
         EconomyStage::RecordFeedback => {
-            record_feedback(config, proposals, bundles, control, parameters, id)
+            record_feedback(state, config, proposals, bundles, control, parameters, id)
         }
         EconomyStage::ApplyFeedback => apply_feedback(state, config, control, id),
         EconomyStage::IndexCount => index_count(state, actors, config, spatial, parameters, id),
-        EconomyStage::IndexPrefix => index_prefix(config, spatial, id),
+        EconomyStage::IndexPrefix => index_prefix(config, spatial, parameters, id),
+        EconomyStage::IndexOffsets => index_offsets(state, actors, config, spatial, parameters, id),
         EconomyStage::IndexFill => index_fill(state, actors, config, spatial, parameters, id),
+        EconomyStage::IndexPrices => index_prices(state, config, spatial, id),
         EconomyStage::Local => local(state, actors, config, control, parameters, id),
         EconomyStage::Propose => propose(
             state, actors, config, spatial, proposals, control, parameters, id,
@@ -1566,13 +2085,13 @@ pub fn economy(
         EconomyStage::MarketActivity => {
             let mut active = 0u32;
             for actor in id * 256..min((id + 1) * 256, config[ConfigLayout::ACTORS]) {
-                active |= u32::cast_from(
+                active += u32::cast_from(
                     proposals[actor as usize * ProposalLayout::WORDS + ProposalLayout::ACTOR]
                         != NO_ACTOR,
                 );
             }
             if active != 0 {
-                control[CONSTRUCTED_EVENTS_WORD].fetch_or(active);
+                control[CONSTRUCTED_EVENTS_WORD].fetch_add(active);
             }
         }
         EconomyStage::Construct => construct(
@@ -1586,7 +2105,9 @@ pub fn economy(
             id,
             comptime!(EventStorage::Buffer),
         ),
-        EconomyStage::GroupInitialize => group_initialize(proposals, bundles, parameters, id),
+        EconomyStage::GroupInitialize => {
+            group_initialize(proposals, bundles, control, parameters, id)
+        }
         EconomyStage::GroupMerge => group_merge(bundles, parameters, id),
         EconomyStage::GroupExecute => group_execute(
             state, actors, config, proposals, bundles, control, parameters, id,
@@ -1633,7 +2154,29 @@ fn discoverable(
         MarketFlag::Labor => number(state, config, comptime!(Field::Slots as u32), firm) > 0,
         MarketFlag::Input(_) | MarketFlag::Consumer(_) | MarketFlag::Household => {
             let good = comptime!(market.good().expect("goods market") as u32);
-            kind(actors, firm).output() == good && !equal(value(state, config, good, firm), zero())
+            let distributor = number(
+                state,
+                config,
+                comptime!(Field::EnterpriseModel as u32),
+                firm,
+            ) == 1;
+            let k = kind(actors, firm);
+            let status = number(
+                state,
+                config,
+                comptime!(Field::EnterpriseStatus as u32),
+                firm,
+            );
+            let producer = !k.is(comptime!(ActorKind::Household))
+                && k.output() == good
+                && status
+                    < comptime!(crate::domain::enterprise::EnterpriseState::Liquidating as u32);
+            let mut available =
+                producer || household_production::offers(state, actors, config, firm, good);
+            if comptime!(matches!(market, MarketFlag::Input(_))) {
+                available = available && !distributor;
+            }
+            available
         }
         MarketFlag::Payroll | MarketFlag::Distribution => false,
     }
@@ -1643,14 +2186,19 @@ fn discoverable(
 fn group_initialize(
     proposals: &mut [u32],
     scratch: &mut [u32],
+    control: &[Atomic<u32>],
     parameters: &EconomyParameters,
     id: u32,
 ) {
     let count = parameters.count;
     if id < count {
-        scratch[id as usize] = proposals
+        let peer = proposals
             [(parameters.offset + id) as usize * ProposalLayout::WORDS + ProposalLayout::ACTOR];
-        scratch[(count + id) as usize] = id;
+        if peer != NO_ACTOR {
+            let slot = control[CONSTRUCTED_EVENTS_WORD].fetch_add(1);
+            scratch[slot as usize] = peer;
+            scratch[(count + slot) as usize] = id;
+        }
         KernelEventStatus::new(comptime!(EventStatus::Inactive)).store(scratch, 4 * count + id);
     }
 }
@@ -1658,13 +2206,14 @@ fn group_initialize(
 #[cube]
 fn group_merge(scratch: &mut [u32], parameters: &EconomyParameters, id: u32) {
     let count = parameters.count;
-    if id < count {
+    let active = parameters.sort_count;
+    if id < active {
         let width = parameters.sort_width;
         let source = parameters.sort_source;
         let destination = 2 * count - source;
         let base = id / (width * 2) * width * 2;
-        let middle = min(base + width, count);
-        let end = min(base + width * 2, count);
+        let middle = min(base + width, active);
+        let end = min(base + width * 2, active);
         let first = id < middle;
         let start = select(first, middle, base);
         let stop = select(first, end, middle);
@@ -1676,7 +2225,10 @@ fn group_merge(scratch: &mut [u32], parameters: &EconomyParameters, id: u32) {
             let probe = (low + high) / 2;
             let other_key = scratch[(source + probe) as usize];
             let other_item = scratch[(source + count + probe) as usize];
-            let precedes = other_key < key || (other_key == key && other_item < item);
+            let rotation = parameters.settlement_rotation % max(count, 1);
+            let priority = (item + count - rotation) % max(count, 1);
+            let other_priority = (other_item + count - rotation) % max(count, 1);
+            let precedes = other_key < key || (other_key == key && other_priority < priority);
             low = select(precedes, probe + 1, low);
             high = select(precedes, high, probe);
         }
@@ -1698,30 +2250,21 @@ fn group_execute(
     id: u32,
 ) {
     let count = parameters.count;
-    let peers = match comptime!(parameters.market) {
-        MarketFlag::Distribution => config[ConfigLayout::HOUSEHOLDS],
-        _ => config[ConfigLayout::FIRMS],
-    };
-    if id < peers {
+    let active_count = parameters.sort_count;
+    if id < active_count {
         let source = parameters.sort_source;
-        let key = match comptime!(parameters.market) {
-            MarketFlag::Distribution => id,
-            _ => id + config[ConfigLayout::HOUSEHOLDS],
-        };
-        let mut low = 0;
-        let mut high = count;
-        while low < high {
-            let probe = (low + high) / 2;
-            let precedes = scratch[(source + probe) as usize] < key;
-            low = select(precedes, probe + 1, low);
-            high = select(precedes, high, probe);
+        let key = scratch[(source + id) as usize];
+        let mut first = id == 0;
+        if id > 0 {
+            first = scratch[(source + id - 1) as usize] != key;
         }
-        if low < count {
+        if first {
+            let low = id;
             let mut cursor = low;
             let mut active = true;
             let mut event = Array::<u32>::new(EVENT_WORDS);
             let mut peer = PeerBalances::new(state, actors, config, parameters, key);
-            while cursor < count && active {
+            while cursor < active_count && active {
                 active = scratch[(source + cursor) as usize] == key;
                 if active {
                     let actor = scratch[(source + count + cursor) as usize];
@@ -1773,31 +2316,68 @@ fn index_count(
     config: &[u32],
     spatial: &mut [u32],
     parameters: &EconomyParameters,
-    cell: u32,
+    block: u32,
 ) {
     let cells = config[ConfigLayout::SPATIAL_SIDE] * config[ConfigLayout::SPATIAL_SIDE];
-    if cell < cells {
+    let segment = index_segment(config, parameters);
+    let members = spatial[(segment + cells) as usize];
+    if block * DISCOVERY_BLOCK < members {
         let mut count = 0u32;
-        let segment = cells + 1 + config[ConfigLayout::FIRMS];
-        for member in spatial[(segment + cell) as usize]..spatial[(segment + cell + 1) as usize] {
+        for member in block * DISCOVERY_BLOCK..min((block + 1) * DISCOVERY_BLOCK, members) {
             let firm = spatial[(segment + cells + 1 + member) as usize];
             count += u32::cast_from(discoverable(state, actors, config, parameters, firm));
         }
-        spatial[cell as usize] = count;
+        let base = 3 * (cells + 1 + config[ConfigLayout::ACTORS]);
+        spatial[(base + block) as usize] = count;
     }
 }
 #[cube]
-fn index_prefix(config: &[u32], spatial: &mut [u32], id: u32) {
+fn index_segment(config: &[u32], parameters: &EconomyParameters) -> u32 {
+    let cells = config[ConfigLayout::SPATIAL_SIDE] * config[ConfigLayout::SPATIAL_SIDE];
+    (cells + 1 + config[ConfigLayout::ACTORS])
+        * comptime!(if parameters.market.good() == Some(Good::Bread) {
+            1u32
+        } else {
+            2u32
+        })
+}
+#[cube]
+fn index_prefix(config: &[u32], spatial: &mut [u32], parameters: &EconomyParameters, id: u32) {
     if id == 0 {
+        let cells = config[ConfigLayout::SPATIAL_SIDE] * config[ConfigLayout::SPATIAL_SIDE];
+        let segment = index_segment(config, parameters);
+        let blocks = ceildiv(spatial[(segment + cells) as usize], DISCOVERY_BLOCK);
+        let base = 3 * (cells + 1 + config[ConfigLayout::ACTORS]);
         let mut offset = 0u32;
-        for cell in 0..config[ConfigLayout::SPATIAL_SIDE] * config[ConfigLayout::SPATIAL_SIDE] {
-            let count = spatial[cell as usize];
-            spatial[cell as usize] = offset;
+        for block in 0..blocks {
+            let count = spatial[(base + block) as usize];
+            spatial[(base + block) as usize] = offset;
             offset += count;
         }
-        spatial
-            [(config[ConfigLayout::SPATIAL_SIDE] * config[ConfigLayout::SPATIAL_SIDE]) as usize] =
-            offset;
+        spatial[(base + blocks) as usize] = offset;
+    }
+}
+#[cube]
+fn index_offsets(
+    state: &mut [u32],
+    actors: &[u32],
+    config: &[u32],
+    spatial: &mut [u32],
+    parameters: &EconomyParameters,
+    cell: u32,
+) {
+    let cells = config[ConfigLayout::SPATIAL_SIDE] * config[ConfigLayout::SPATIAL_SIDE];
+    if cell <= cells {
+        let segment = index_segment(config, parameters);
+        let member = spatial[(segment + cell) as usize];
+        let block = member / DISCOVERY_BLOCK;
+        let base = 3 * (cells + 1 + config[ConfigLayout::ACTORS]);
+        let mut offset = spatial[(base + block) as usize];
+        for candidate in block * DISCOVERY_BLOCK..member {
+            let firm = spatial[(segment + cells + 1 + candidate) as usize];
+            offset += u32::cast_from(discoverable(state, actors, config, parameters, firm));
+        }
+        spatial[cell as usize] = offset;
     }
 }
 #[cube]
@@ -1807,19 +2387,39 @@ fn index_fill(
     config: &[u32],
     spatial: &mut [u32],
     parameters: &EconomyParameters,
-    cell: u32,
+    block: u32,
 ) {
     let cells = config[ConfigLayout::SPATIAL_SIDE] * config[ConfigLayout::SPATIAL_SIDE];
-    if cell < cells {
-        let mut offset = spatial[cell as usize];
-        let segment = cells + 1 + config[ConfigLayout::FIRMS];
-        for member in spatial[(segment + cell) as usize]..spatial[(segment + cell + 1) as usize] {
+    let segment = index_segment(config, parameters);
+    let members = spatial[(segment + cells) as usize];
+    if block * DISCOVERY_BLOCK < members {
+        let base = 3 * (cells + 1 + config[ConfigLayout::ACTORS]);
+        let mut offset = spatial[(base + block) as usize];
+        for member in block * DISCOVERY_BLOCK..min((block + 1) * DISCOVERY_BLOCK, members) {
             let firm = spatial[(segment + cells + 1 + member) as usize];
             if discoverable(state, actors, config, parameters, firm) {
                 spatial[(cells + 1 + offset) as usize] = firm;
                 offset += 1;
             }
         }
+    }
+}
+
+#[cube]
+fn index_prices(state: &mut [u32], config: &[u32], spatial: &mut [u32], block: u32) {
+    let cells = config[ConfigLayout::SPATIAL_SIDE] * config[ConfigLayout::SPATIAL_SIDE];
+    let count = spatial[cells as usize];
+    if block * DISCOVERY_BLOCK < count {
+        let mut quote = u32::new(comptime!(i64::from(u32::MAX)));
+        for member in block * DISCOVERY_BLOCK..min((block + 1) * DISCOVERY_BLOCK, count) {
+            let actor = spatial[(cells + 1 + member) as usize];
+            quote = min(
+                quote,
+                number(state, config, comptime!(Field::Price as u32), actor),
+            );
+        }
+        let base = 3 * (cells + 1 + config[ConfigLayout::ACTORS]);
+        spatial[(base + block) as usize] = quote;
     }
 }
 
@@ -1835,6 +2435,7 @@ fn scaled(control: &[Atomic<u32>], value: Ticks, numerator: u32, denominator: u3
 )]
 #[cube]
 fn record_feedback(
+    state: &mut [u32],
     config: &[u32],
     proposals: &mut [u32],
     outcomes: &mut [u32],
@@ -1846,8 +2447,12 @@ fn record_feedback(
         let status = KernelEventStatus::load(outcomes, parameters.status_start + id);
         if status.contains(comptime!(EventStatus::Rejected)) {
             let actor = parameters.offset + id;
-            let firm = proposals[actor as usize * ProposalLayout::WORDS + ProposalLayout::ACTOR]
-                - config[ConfigLayout::HOUSEHOLDS];
+            if comptime!(parameters.market == MarketFlag::Household)
+                && number(state, config, comptime!(Field::FoodAccess as u32), actor) == 0
+            {
+                set32(state, config, comptime!(Field::FoodAccess as u32), actor, 3);
+            }
+            let firm = proposals[actor as usize * ProposalLayout::WORDS + ProposalLayout::ACTOR];
             let base = CONTROL_WORDS as u32 + firm * TICK_WORDS as u32;
             let quantity =
                 proposals[actor as usize * ProposalLayout::WORDS + ProposalLayout::QUANTITY_LOW];
@@ -1865,13 +2470,13 @@ fn record_feedback(
 }
 #[cube]
 fn apply_feedback(state: &mut [u32], config: &[u32], feedback: &[Atomic<u32>], id: u32) {
-    if id < config[ConfigLayout::FIRMS] {
+    if id < config[ConfigLayout::ACTORS] {
         let base = CONTROL_WORDS as u32 + id * TICK_WORDS as u32;
         set(
             state,
             config,
             comptime!(Field::Unfilled as u32),
-            config[ConfigLayout::HOUSEHOLDS] + id,
+            id,
             ticks(
                 feedback[base as usize].load(),
                 feedback[(base + 1) as usize].load(),

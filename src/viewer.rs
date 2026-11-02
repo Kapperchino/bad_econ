@@ -56,6 +56,7 @@ enum VerificationState {
     Start,
     AwaitDay,
     AwaitInspection,
+    AwaitInspectionRefresh,
     AwaitComparison,
     AwaitFirmInspection,
     Frames(u32),
@@ -75,6 +76,7 @@ struct Display {
     comparison: Option<ComparisonRun>,
     inspection: Option<Inspection>,
     firms: Vec<Actor>,
+    identities: Vec<u64>,
     status: DisplayState,
     error: Option<String>,
     seed: u64,
@@ -200,6 +202,7 @@ fn setup(
         comparison: None,
         inspection: None,
         firms: Vec::new(),
+        identities: Vec::new(),
         status: DisplayState::Initializing,
         error: None,
         seed: launch.scenario.config().seed,
@@ -261,7 +264,7 @@ fn setup(
         PanelLabel::Statistics,
         Text2d::new("Initializing..."),
         TextFont {
-            font_size: FontSize::Px(15.0),
+            font_size: FontSize::Px(12.0),
             ..Default::default()
         },
         Anchor::TOP_LEFT,
@@ -439,12 +442,24 @@ fn verify(
                         VerificationState::AwaitInspection
                     }
                     VerificationState::AwaitInspection if display.inspection.is_some() => {
+                        let _ = dashboard
+                            .sender
+                            .send(Control::command(SimulationCommand::AdvanceDay));
+                        VerificationState::AwaitInspectionRefresh
+                    }
+                    VerificationState::AwaitInspectionRefresh
+                        if display.snapshot.day == 2
+                            && display
+                                .inspection
+                                .as_ref()
+                                .is_some_and(|record| record.day == 2) =>
+                    {
                         let _ = dashboard.sender.send(Control::Compare);
                         VerificationState::AwaitComparison
                     }
                     VerificationState::AwaitComparison
                         if Some(display.seed) == launch.scenario.config().seed.checked_add(1)
-                            && display.snapshot.day == 1
+                            && display.snapshot.day == 2
                             && matches!(
                                 display.status,
                                 DisplayState::Active(RuntimeState::Paused)
@@ -486,22 +501,52 @@ fn publish(
     data: &Arc<Mutex<Display>>,
     publication: Publication,
 ) -> Result<()> {
-    let firms = match publication {
-        Publication::Restart => Some(
-            simulation
+    let request = match publication {
+        Publication::Restart => None,
+        Publication::Snapshot => {
+            let display = data.lock().expect("dashboard lock");
+            display
+                .inspection
+                .as_ref()
+                .filter(|inspection| inspection.day != simulation.snapshot.day)
+                .map(|inspection| {
+                    InspectionRequest::from_registry(inspection.actor.identity, &display.identities)
+                })
+                .transpose()?
+        }
+    };
+    let refreshed = request
+        .map(|request| simulation.inspect(request))
+        .transpose()?;
+    let mut display = data.lock().expect("dashboard lock");
+    if let Some(inspection) = refreshed {
+        display.inspection = Some(inspection);
+    }
+    display.firms = simulation
+        .actors()
+        .iter()
+        .filter(|actor| actor.kind > 0)
+        .collect();
+    match publication {
+        Publication::Restart => {
+            display.map_size = simulation.scenario.config().map_size;
+            display.history.clear();
+            display.inspection = None;
+            display.identities = simulation
                 .actors()
                 .iter()
-                .filter(|actor| actor.kind > 0)
-                .collect(),
-        ),
-        Publication::Snapshot => None,
-    };
-    let mut display = data.lock().expect("dashboard lock");
-    if let Some(firms) = firms {
-        display.firms = firms;
-        display.map_size = simulation.scenario.config().map_size;
-        display.history.clear();
-        display.inspection = None;
+                .map(|actor| actor.identity)
+                .collect();
+        }
+        Publication::Snapshot => {
+            if display.identities.len() != simulation.actors().len() {
+                display.identities = simulation
+                    .actors()
+                    .iter()
+                    .map(|actor| actor.identity)
+                    .collect();
+            }
+        }
     }
     match display.history.back().map(|s| s.day) {
         Some(day) if day == simulation.snapshot.day => (),
@@ -570,16 +615,30 @@ fn controls(
                     .expect("first firm");
             }
             if keys.just_pressed(KeyCode::Tab) {
-                let index = launch.scenario.index_of(dashboard.selected).unwrap_or(0);
-                dashboard.selected = launch
-                    .scenario
-                    .identity((index + 1) % launch.scenario.actors())
-                    .expect("next actor");
+                let selected = {
+                    let display = dashboard.data.lock().expect("dashboard lock");
+                    let index = display
+                        .identities
+                        .iter()
+                        .position(|&identity| identity == dashboard.selected)
+                        .unwrap_or(0);
+                    display
+                        .identities
+                        .get((index + 1) % display.identities.len().max(1))
+                        .copied()
+                        .unwrap_or(dashboard.selected)
+                };
+                dashboard.selected = selected;
             }
             let inspection = [KeyCode::KeyH, KeyCode::KeyF, KeyCode::Tab]
                 .into_iter()
                 .any(|key| keys.just_pressed(key))
-                .then(|| InspectionRequest::new(dashboard.selected, &launch.scenario));
+                .then(|| {
+                    InspectionRequest::from_registry(
+                        dashboard.selected,
+                        &dashboard.data.lock().expect("dashboard lock").identities,
+                    )
+                });
             if let Some(Ok(request)) = inspection {
                 controls.push(Control::Inspect(request));
             }
@@ -601,36 +660,39 @@ fn draw(
         Some(dashboard) => {
             let display = dashboard.data.lock().expect("dashboard lock");
             let s = &display.snapshot;
-            let unemployment = 100.0 * (s.households.saturating_sub(s.employed)) as f64
-                / s.households.max(1) as f64;
             let inspection = display
                 .inspection
                 .as_ref()
                 .map(|i| {
                     let detail = match i.actor.kind {
                         0 => format!(
-                            "Health {} | fatigue {} | labor {} min\nEmployer {} | gross paid {}\nTax {} | charges {} | payroll reserve {}",
-                            i.health, i.fatigue, i.available_minutes, i.employer,
+                            "Members {} | fatigue {} | labor {} min\nEmployer {} | gross paid {}\nTax {} | charges {} | payroll reserve {}",
+                            i.living_members, i.fatigue, i.available_minutes, i.employer,
                             i.gross_income, i.income_tax, i.employee_charges, i.payroll_reserve
                         ),
                         _ => format!(
-                            "Owner {} | wage {} | price {}\nCapacity {} | planned {} | open {}\nMethod {:?} | {} output / {} min",
+                            "{} {:?} | building {} min\nCondition {} | safety {}\nOwner {} | wage {} | price {}\nCapacity {} (+{}) | planned {} | open {}\nMethod {:?} | {} output / {} min",
+                            i.enterprise_state.map(|state| format!("{state:?}")).unwrap_or_default(),
+                            i.enterprise_model, i.construction_minutes_remaining,
+                            i.equipment_condition, i.safety_provision,
                             i.owner_identity,
                             i.wage,
                             i.price,
                             i.actor.capacity,
+                            i.pending_capacity,
                             i.planned_packets,
                             i.open_slots, i.production_method, i.output_ticks, i.labor_minutes
                         ),
                     };
                     format!(
-                        "Actor {} | day {} | kind {}\nCash {} | stock {:?} | transit {}\n{}",
+                        "Actor {} | day {} | kind {}\nCash {} | transit {}\nFood {:?} | other stock {}\n{}",
                         i.actor.identity,
                         i.day,
                         i.actor.kind,
                         i.cash,
-                        i.inventory,
                         i.transit,
+                        &i.inventory[..3],
+                        i.inventory[3..].iter().map(|&stock| u128::from(stock)).sum::<u128>(),
                         detail
                     )
                 })
@@ -640,7 +702,7 @@ fn draw(
                 .as_ref()
                 .map(|reference| match reference.at_day(s.day) {
                     Some(prior) => format!(
-                        "Seed {} | same day {}\nEmployment change {:+} | unmet bread change {:+}",
+                        "Seed {} | same day {}\nPaid household change {:+} | unmet bread change {:+}",
                         reference.seed,
                         s.day,
                         i128::from(s.employed) - i128::from(prior.employed),
@@ -669,13 +731,21 @@ fn draw(
                 .collect::<Vec<_>>()
                 .join("\n");
             let text = format!(
-                "{} | seed {}\nDay {} | target {}\nUnemployment {:.1}% | unmet bread {}\nCash {}\nFood stocks {:?} | other stocks {}\nIn transit {}\nTax {} | charges {} | payroll reserve {}\nBank/support cash {} | loan principal {}\nLoans {} active / {} overdue | interest {}\nResearch {} attempts / {} successes | strikes {}\n\nPrice / wage | means\n{}\n\n{}\n\n{}\n{}",
+                "{} | seed {}\nDay {} | target {}\nPaid households {} | unmet bread {}\nPopulation {} | births {}\nDeaths background/work/famine {:?}\nFirms {} | entries {} | closed {} | stores {}\nHousehold food output {:?}\nCash {}\nFood stocks {:?} | other stocks {}\nIn transit {}\nTax {} | charges {} | payroll reserve {}\nBank/support cash {} | loan principal {}\nLoans {} active / {} overdue | interest {}\nResearch {} attempts / {} successes | strikes {}\n\nPrice / wage | means\n{}\n\n{}\n\n{}\n{}",
                 display.status.label(),
                 display.seed,
                 s.day,
                 display.speed.label(),
-                unemployment,
+                s.employed,
                 s.shortages,
+                s.population.living,
+                s.population.births,
+                s.population.deaths,
+                s.firms,
+                s.firm_entries,
+                s.firm_closures,
+                s.distributors,
+                &s.household_production[..3],
                 s.cash,
                 &s.inventories[..3],
                 s.inventories[3..]
@@ -877,7 +947,7 @@ fn capture_verified_frame(
             match chart {
                 Chart::Cash => {
                     eprintln!(
-                        "viewer verification passed: shared device, audited day, household and firm inspection, same-day seed comparison, all charts captured"
+                        "viewer verification passed: shared device, audited day, household and firm inspection, inspection refresh after stepping, same-day seed comparison, all charts captured"
                     );
                     verification.state = VerificationState::Complete;
                     exit.write(AppExit::Success);
