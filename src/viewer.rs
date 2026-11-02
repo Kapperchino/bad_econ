@@ -1,4 +1,5 @@
 mod model;
+mod pacing;
 mod presentation;
 mod worker;
 use crate::{
@@ -16,6 +17,7 @@ use bevy::{
         view::screenshot::{Screenshot, ScreenshotCaptured},
     },
     sprite::Anchor,
+    winit::{EventLoopProxyWrapper, WinitUserEvent},
 };
 use model::{Chart, ChartRange, ComparisonRun, DisplayState, RunTarget};
 use std::{
@@ -82,6 +84,7 @@ struct Display {
     seed: u64,
     map_size: u32,
     speed: Speed,
+    revision: u64,
 }
 enum Control {
     Simulation(Box<SimulationCommand>),
@@ -164,9 +167,13 @@ pub fn run(scenario: Scenario, workgroup: u32, mode: ViewMode) -> Result<()> {
                 ..Default::default()
             }),
     )
-    .add_plugins(SharedGpu)
+    .add_plugins((
+        SharedGpu,
+        presentation::PresentationPlugin,
+        pacing::PacingPlugin,
+    ))
     .add_systems(Startup, setup)
-    .add_systems(Update, (controls, presentation::draw));
+    .add_systems(Update, controls);
     if let ViewMode::Verify = mode {
         app.insert_resource(Verification {
             state: VerificationState::Start,
@@ -187,6 +194,7 @@ fn setup(
     adapter: Res<RenderAdapter>,
     device: Res<RenderDevice>,
     queue: Res<RenderQueue>,
+    event_loop: Res<EventLoopProxyWrapper>,
 ) {
     commands.spawn(Camera2d);
     let setup = burn_wgpu::WgpuSetup {
@@ -207,6 +215,7 @@ fn setup(
         seed: launch.scenario.config().seed,
         map_size: launch.scenario.config().map_size,
         speed: Speed::Normal,
+        revision: 0,
     }));
     let (sender, receiver) = mpsc::channel();
     commands.insert_resource(Dashboard {
@@ -217,15 +226,23 @@ fn setup(
     });
     let scenario = launch.scenario.clone();
     let workgroup = launch.workgroup;
+    let wake = (**event_loop).clone();
     std::thread::spawn(move || {
+        let worker_wake = wake.clone();
         let result = Device::import(setup, workgroup)
             .and_then(|device| Simulation::new(scenario, device))
-            .and_then(|simulation| worker::run(simulation, receiver, &data));
+            .and_then(|simulation| {
+                worker::run(simulation, receiver, data.clone(), move || {
+                    let _ = worker_wake.send_event(WinitUserEvent::WakeUp);
+                })
+            });
         match result {
             Ok(()) => (),
             Err(error) => {
-                data.lock().expect("dashboard lock").status =
-                    DisplayState::Unavailable(error.to_string());
+                let mut display = data.lock().expect("dashboard lock");
+                display.status = DisplayState::Unavailable(error.to_string());
+                display.revision = display.revision.wrapping_add(1);
+                let _ = wake.send_event(WinitUserEvent::WakeUp);
             }
         }
     });

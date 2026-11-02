@@ -12,16 +12,40 @@ use std::{
     time::{Duration, Instant},
 };
 
+struct Publisher<F> {
+    data: Arc<Mutex<Display>>,
+    wake: F,
+}
+
+impl<F: Fn()> Publisher<F> {
+    fn update(&self, update: impl FnOnce(&mut Display)) {
+        let mut display = self.data.lock().expect("dashboard lock");
+        update(&mut display);
+        display.revision = display.revision.wrapping_add(1);
+        drop(display);
+        (self.wake)();
+    }
+
+    fn error(&self, simulation: &Simulation, error: anyhow::Error) {
+        self.update(|display| {
+            display.error = Some(error.to_string());
+            display.status = DisplayState::Active(simulation.status.clone());
+        });
+    }
+}
+
 pub(super) fn run(
     mut simulation: Simulation,
     receiver: mpsc::Receiver<Control>,
-    data: &Arc<Mutex<Display>>,
+    data: Arc<Mutex<Display>>,
+    wake: impl Fn(),
 ) -> Result<()> {
+    let publisher = Publisher { data, wake };
     let mut speed = Speed::Normal;
     let mut workflow = WorkerState::Active;
     let mut next_day = Instant::now();
     let mut target = RunTarget::Open;
-    publish(&mut simulation, data, Publication::Restart)?;
+    publish(&mut simulation, &publisher, Publication::Restart)?;
     while matches!(workflow, WorkerState::Active) {
         let timeout = match simulation.status {
             RuntimeState::Running => next_day
@@ -40,21 +64,21 @@ pub(super) fn run(
                 simulation.command(*command).and_then(|()| {
                     if let Publication::Restart = publication {
                         target = RunTarget::Open;
-                        data.lock().expect("dashboard lock").comparison = None;
+                        publisher.update(|display| display.comparison = None);
                     }
-                    publish(&mut simulation, data, publication)
+                    publish(&mut simulation, &publisher, publication)
                 })
             }
             Ok(Control::Inspect(request)) => simulation.inspect(request).map(|inspection| {
-                data.lock().expect("dashboard lock").inspection = Some(inspection)
+                publisher.update(|display| display.inspection = Some(inspection))
             }),
             Ok(Control::Speed(value)) => {
                 speed = value;
-                data.lock().expect("dashboard lock").speed = speed;
+                publisher.update(|display| display.speed = speed);
                 next_day = Instant::now();
                 Ok(())
             }
-            Ok(Control::Compare) => compare(&mut simulation, data).map(|next| {
+            Ok(Control::Compare) => compare(&mut simulation, &publisher).map(|next| {
                 target = next;
                 next_day = Instant::now();
             }),
@@ -65,14 +89,12 @@ pub(super) fn run(
             Err(mpsc::RecvTimeoutError::Timeout) => Ok(()),
         };
         if let Err(error) = result {
-            let mut display = data.lock().expect("dashboard lock");
-            display.error = Some(error.to_string());
-            display.status = DisplayState::Active(simulation.status.clone());
+            publisher.error(&simulation, error);
         }
         if target.reached(simulation.snapshot.day) {
             simulation.command(SimulationCommand::Pause)?;
             target = RunTarget::Open;
-            publish(&mut simulation, data, Publication::Snapshot)?;
+            publish(&mut simulation, &publisher, Publication::Snapshot)?;
         }
         if let (WorkerState::Active, RuntimeState::Running, true) =
             (&workflow, &simulation.status, Instant::now() >= next_day)
@@ -82,12 +104,10 @@ pub(super) fn run(
                     simulation.command(SimulationCommand::Pause)?;
                     target = RunTarget::Open;
                 }
-                publish(&mut simulation, data, Publication::Snapshot)
+                publish(&mut simulation, &publisher, Publication::Snapshot)
             });
             if let Err(error) = result {
-                let mut display = data.lock().expect("dashboard lock");
-                display.error = Some(error.to_string());
-                display.status = DisplayState::Active(simulation.status.clone());
+                publisher.error(&simulation, error);
             }
             next_day = Instant::now() + speed.period();
         }
@@ -95,7 +115,7 @@ pub(super) fn run(
     Ok(())
 }
 
-fn compare(simulation: &mut Simulation, data: &Arc<Mutex<Display>>) -> Result<RunTarget> {
+fn compare(simulation: &mut Simulation, publisher: &Publisher<impl Fn()>) -> Result<RunTarget> {
     let mut config = simulation.scenario.config().clone();
     config.seed = config
         .seed
@@ -106,10 +126,15 @@ fn compare(simulation: &mut Simulation, data: &Arc<Mutex<Display>>) -> Result<Ru
     let reference = ComparisonRun {
         seed: simulation.scenario.config().seed,
         horizon,
-        history: data.lock().expect("dashboard lock").history.clone(),
+        history: publisher
+            .data
+            .lock()
+            .expect("dashboard lock")
+            .history
+            .clone(),
     };
     simulation.command(SimulationCommand::Reset(scenario.into()))?;
-    data.lock().expect("dashboard lock").comparison = Some(reference);
+    publisher.update(|display| display.comparison = Some(reference));
     let target = match horizon {
         0 => RunTarget::Open,
         _ => {
@@ -117,13 +142,13 @@ fn compare(simulation: &mut Simulation, data: &Arc<Mutex<Display>>) -> Result<Ru
             RunTarget::UntilDay(horizon)
         }
     };
-    publish(simulation, data, Publication::Restart)?;
+    publish(simulation, publisher, Publication::Restart)?;
     Ok(target)
 }
 
 fn publish(
     simulation: &mut Simulation,
-    data: &Arc<Mutex<Display>>,
+    publisher: &Publisher<impl Fn()>,
     publication: Publication,
 ) -> Result<()> {
     let firms = match publication {
@@ -136,25 +161,26 @@ fn publish(
         ),
         Publication::Snapshot => None,
     };
-    let mut display = data.lock().expect("dashboard lock");
-    if let Some(firms) = firms {
-        display.firms = firms;
-        display.map_size = simulation.scenario.config().map_size;
-        display.history.clear();
-        display.inspection = None;
-    }
-    match display.history.back().map(|s| s.day) {
-        Some(day) if day == simulation.snapshot.day => (),
-        _ => {
-            display.history.push_back(simulation.snapshot.clone());
-            if display.history.len() > 160 {
-                display.history.pop_front();
+    publisher.update(|display| {
+        if let Some(firms) = firms {
+            display.firms = firms;
+            display.map_size = simulation.scenario.config().map_size;
+            display.history.clear();
+            display.inspection = None;
+        }
+        match display.history.back().map(|s| s.day) {
+            Some(day) if day == simulation.snapshot.day => (),
+            _ => {
+                display.history.push_back(simulation.snapshot.clone());
+                if display.history.len() > 160 {
+                    display.history.pop_front();
+                }
             }
         }
-    }
-    display.snapshot = simulation.snapshot.clone();
-    display.status = DisplayState::Active(simulation.status.clone());
-    display.seed = simulation.scenario.config().seed;
-    display.error = None;
+        display.snapshot = simulation.snapshot.clone();
+        display.status = DisplayState::Active(simulation.status.clone());
+        display.seed = simulation.scenario.config().seed;
+        display.error = None;
+    });
     Ok(())
 }
