@@ -248,15 +248,11 @@ fn explicit_maps_replace_generated_maps_and_legacy_scenarios_default_to_generati
     let checkpoint = Checkpoint::new(&scenario, &state)?;
     assert_eq!(checkpoint.restore()?.scenario, scenario);
     let mut encoded = serde_json::to_value(checkpoint)?;
-    assert_eq!(encoded["version"], 5);
-    assert_eq!(encoded["scenario"]["version"], 1);
-    assert_eq!(STATE_HASH_VERSION, "bad-econ/state/DeterministicV1/v6");
+    assert_eq!(encoded["version"], 6);
+    assert_eq!(encoded["scenario"]["version"], 2);
+    assert_eq!(STATE_HASH_VERSION, "bad-econ/state/DeterministicV1/v7");
     encoded["version"] = serde_json::json!(4);
-    assert!(
-        serde_json::from_value::<Checkpoint>(encoded)?
-            .restore()
-            .is_err()
-    );
+    assert!(serde_json::from_value::<Checkpoint>(encoded).is_err());
     Ok(())
 }
 
@@ -281,8 +277,6 @@ mod compute {
         config.distribution_rate = 0;
         config.resources = ResourceMap::Explicit { regions: vec![] };
         config.behavior = BehaviorPolicy {
-            health_recovery: 0,
-            hunger_damage: 0,
             work_fatigue: 0,
             rest_recovery: 0,
             wage_increment: 0,
@@ -300,7 +294,6 @@ mod compute {
                     position,
                     cash: 0,
                     inventories: Good::food([0, 0, 30]),
-                    health: 1000,
                     fatigue: 0,
                 })
                 .collect(),
@@ -394,7 +387,7 @@ mod compute {
     fn every_natural_good_requires_matching_geography_and_labor_on_gpu() -> Result<()> {
         struct Case {
             resource: Option<Good>,
-            health: u32,
+            fatigue: u32,
             plan: u64,
             packets: u64,
         }
@@ -409,25 +402,25 @@ mod compute {
             for case in [
                 Case {
                     resource: Some(good),
-                    health: 1000,
+                    fatigue: 0,
                     plan: 2,
                     packets: 2,
                 },
                 Case {
                     resource: Some(good),
-                    health: 0,
+                    fatigue: 1000,
                     plan: 2,
                     packets: 0,
                 },
                 Case {
                     resource: Some(wrong),
-                    health: 1000,
+                    fatigue: 0,
                     plan: 0,
                     packets: 0,
                 },
                 Case {
                     resource: None,
-                    health: 1000,
+                    fatigue: 0,
                     plan: 0,
                     packets: 0,
                 },
@@ -437,7 +430,7 @@ mod compute {
                     local_resource(&mut config, resource)?;
                 }
                 for household in &mut config.population.as_mut().unwrap().households {
-                    household.health = case.health;
+                    household.fatigue = case.fatigue;
                 }
                 let scenario = Scenario::new(config)?;
                 let initial = scenario.initial()?;
@@ -479,7 +472,7 @@ mod compute {
                     Supply::Available => 2,
                     Supply::NoLabor => {
                         for household in &mut population.households {
-                            household.health = 0;
+                            household.fatigue = 1000;
                         }
                         0
                     }

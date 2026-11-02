@@ -17,8 +17,6 @@ fn base_config() -> Result<ScenarioConfig> {
     config.forecast_weight = 0;
     config.distribution_rate = 0;
     config.behavior = BehaviorPolicy {
-        health_recovery: 0,
-        hunger_damage: 0,
         work_fatigue: 0,
         rest_recovery: 0,
         wage_increment: 0,
@@ -43,7 +41,6 @@ fn base_config() -> Result<ScenarioConfig> {
                 position,
                 cash: 0,
                 inventories: Good::food([0, 0, 10]),
-                health: 1000,
                 fatigue: 0,
             })
             .collect(),

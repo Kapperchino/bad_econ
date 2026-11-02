@@ -1,7 +1,7 @@
 #![cfg(feature = "compute")]
 mod support;
 
-use anyhow::Result;
+use anyhow::{Context, Result};
 use bad_econ::{
     domain::{finance::*, research::*, *},
     runtime::SimulationCommand,
@@ -15,7 +15,6 @@ fn configuration() -> Result<ScenarioConfig> {
     config.distribution_rate = 0;
     config.forecast_weight = 0;
     config.coverage = 30;
-    config.behavior.hunger_damage = 0;
     config.behavior.work_fatigue = 0;
     config.behavior.wage_increment = 0;
     config.resources = ResourceMap::Explicit {
@@ -36,7 +35,6 @@ fn configuration() -> Result<ScenarioConfig> {
                 position: Position { x: 0, y: 0 },
                 cash: 0,
                 inventories: Good::food([0; 3]),
-                health: 1000,
                 fatigue: 0,
             })
             .collect(),
@@ -116,8 +114,18 @@ fn bank_credit_funds_real_production_and_support_uses_real_household_cash() -> R
     simulation.advance()?;
     let state = simulation.download()?;
     assert_eq!(state.get(Field::Produced, 3), 1);
-    assert_eq!(state.get(Field::Cash, 0), 68);
-    assert_eq!(state.get(Field::Cash, 1) + state.get(Field::Cash, 2), 6);
+    let worker = (0..3)
+        .find(|&household| state.get(Field::Employed, household) > 0)
+        .context("funded work must pay a household")?;
+    assert_eq!(state.get(Field::Cash, worker), 68);
+    assert_eq!(state.get(Field::GrossIncome, worker), 80);
+    assert_eq!(
+        (0..3)
+            .filter(|&household| household != worker)
+            .map(|household| state.get(Field::Cash, household))
+            .sum::<u64>(),
+        6
+    );
     assert_eq!(simulation.snapshot.financial_cash, 20);
     assert_eq!(simulation.snapshot.loan_principal, 80);
     assert_eq!(simulation.snapshot.active_loans, 1);

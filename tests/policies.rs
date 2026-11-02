@@ -32,7 +32,6 @@ fn planning_scenario() -> Result<Scenario> {
                 position,
                 cash: 2000,
                 inventories: Good::food([0, 0, 2]),
-                health: 1000,
                 fatigue: 0,
             })
             .collect(),
@@ -195,11 +194,14 @@ fn proposal_and_decision_kernels_match_independent_policy_formulas() -> Result<(
                 u64::from(scenario.config().minimum_price),
                 u64::from(scenario.config().maximum_price),
             )?;
-            let increment = match before.get(Field::Slots, firm) {
-                0 => 0,
-                _ => u64::from(scenario.config().behavior.wage_increment),
+            let increment = u64::from(scenario.config().behavior.wage_increment);
+            let offered = match before.get(Field::Slots, firm) {
+                0 => before
+                    .get(Field::Wage, firm)
+                    .saturating_sub(increment)
+                    .max(1),
+                _ => before.get(Field::Wage, firm) + increment,
             };
-            let offered = before.get(Field::Wage, firm) + increment;
             let funded = before.get(Field::Cash, firm)
                 / u64::from(scenario.technique(firm).labor_minutes)
                 / before.get(Field::Plan, firm).max(1);
@@ -228,7 +230,6 @@ fn commuting_rounds_up_and_can_exclude_a_higher_wage() -> Result<()> {
                 position: Position { x: 0, y: 0 },
                 cash: 2000,
                 inventories: Good::food([0, 0, 2]),
-                health: 1000,
                 fatigue: 0,
             })
             .collect(),

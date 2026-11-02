@@ -1,7 +1,4 @@
-use super::{Chart, ChartRange, Dashboard, Display, PanelLabel, Region};
-use crate::domain::{Good, ObservationSnapshot};
-use bevy::prelude::*;
-use std::collections::VecDeque;
+use super::*;
 
 pub(super) fn draw(
     dashboard: Option<Res<Dashboard>>,
@@ -14,36 +11,39 @@ pub(super) fn draw(
         Some(dashboard) => {
             let display = dashboard.data.lock().expect("dashboard lock");
             let s = &display.snapshot;
-            let unemployment = 100.0 * (s.households.saturating_sub(s.employed)) as f64
-                / s.households.max(1) as f64;
             let inspection = display
                 .inspection
                 .as_ref()
                 .map(|i| {
                     let detail = match i.actor.kind {
                         0 => format!(
-                            "Health {} | fatigue {} | labor {} min\nEmployer {} | gross paid {}\nTax {} | charges {} | payroll reserve {}",
-                            i.health, i.fatigue, i.available_minutes, i.employer,
+                            "Members {} | fatigue {} | labor {} min\nEmployer {} | gross paid {}\nTax {} | charges {} | payroll reserve {}",
+                            i.living_members, i.fatigue, i.available_minutes, i.employer,
                             i.gross_income, i.income_tax, i.employee_charges, i.payroll_reserve
                         ),
                         _ => format!(
-                            "Owner {} | wage {} | price {}\nCapacity {} | planned {} | open {}\nMethod {:?} | {} output / {} min",
+                            "{} {:?} | building {} min\nCondition {} | safety {}\nOwner {} | wage {} | price {}\nCapacity {} (+{}) | planned {} | open {}\nMethod {:?} | {} output / {} min",
+                            i.enterprise_state.map(|state| format!("{state:?}")).unwrap_or_default(),
+                            i.enterprise_model, i.construction_minutes_remaining,
+                            i.equipment_condition, i.safety_provision,
                             i.owner_identity,
                             i.wage,
                             i.price,
                             i.actor.capacity,
+                            i.pending_capacity,
                             i.planned_packets,
                             i.open_slots, i.production_method, i.output_ticks, i.labor_minutes
                         ),
                     };
                     format!(
-                        "Actor {} | day {} | kind {}\nCash {} | stock {:?} | transit {}\n{}",
+                        "Actor {} | day {} | kind {}\nCash {} | transit {}\nFood {:?} | other stock {}\n{}",
                         i.actor.identity,
                         i.day,
                         i.actor.kind,
                         i.cash,
-                        i.inventory,
                         i.transit,
+                        &i.inventory[..3],
+                        i.inventory[3..].iter().map(|&stock| u128::from(stock)).sum::<u128>(),
                         detail
                     )
                 })
@@ -53,7 +53,7 @@ pub(super) fn draw(
                 .as_ref()
                 .map(|reference| match reference.at_day(s.day) {
                     Some(prior) => format!(
-                        "Seed {} | same day {}\nEmployment change {:+} | unmet bread change {:+}",
+                        "Seed {} | same day {}\nPaid household change {:+} | unmet bread change {:+}",
                         reference.seed,
                         s.day,
                         i128::from(s.employed) - i128::from(prior.employed),
@@ -82,13 +82,21 @@ pub(super) fn draw(
                 .collect::<Vec<_>>()
                 .join("\n");
             let text = format!(
-                "{} | seed {}\nDay {} | target {}\nUnemployment {:.1}% | unmet bread {}\nCash {}\nFood stocks {:?} | other stocks {}\nIn transit {}\nTax {} | charges {} | payroll reserve {}\nBank/support cash {} | loan principal {}\nLoans {} active / {} overdue | interest {}\nResearch {} attempts / {} successes | strikes {}\n\nPrice / wage | means\n{}\n\n{}\n\n{}\n{}",
+                "{} | seed {}\nDay {} | target {}\nPaid households {} | unmet bread {}\nPopulation {} | births {}\nDeaths background/work/famine {:?}\nFirms {} | entries {} | closed {} | stores {}\nHousehold food output {:?}\nCash {}\nFood stocks {:?} | other stocks {}\nIn transit {}\nTax {} | charges {} | payroll reserve {}\nBank/support cash {} | loan principal {}\nLoans {} active / {} overdue | interest {}\nResearch {} attempts / {} successes | strikes {}\n\nPrice / wage | means\n{}\n\n{}\n\n{}\n{}",
                 display.status.label(),
                 display.seed,
                 s.day,
                 display.speed.label(),
-                unemployment,
+                s.employed,
                 s.shortages,
+                s.population.living,
+                s.population.births,
+                s.population.deaths,
+                s.firms,
+                s.firm_entries,
+                s.firm_closures,
+                s.distributors,
+                &s.household_production[..3],
                 s.cash,
                 &s.inventories[..3],
                 s.inventories[3..]

@@ -76,7 +76,7 @@ impl Chart {
     }
     pub fn label(self) -> &'static str {
         match self {
-            Self::Employment => "Employment (green) / unmet bread (red)",
+            Self::Employment => "Paid households (green) / unmet bread (red)",
             Self::Prices => "Mean prices | all goods",
             Self::Wages => "Mean wages | all industries",
             Self::Inventories => "Available stocks | all goods",
