@@ -1,3 +1,4 @@
+use super::feedback::Cue;
 use super::{
     ComparisonRun, Control, Display, DisplayState, Publication, RunTarget, Speed, WorkerState,
 };
@@ -30,6 +31,7 @@ impl<F: Fn()> Publisher<F> {
         self.update(|display| {
             display.error = Some(error.to_string());
             display.status = DisplayState::Active(simulation.status.clone());
+            display.cues.push_back(Cue::Error);
         });
     }
 }
@@ -45,7 +47,12 @@ pub(super) fn run(
     let mut workflow = WorkerState::Active;
     let mut next_day = Instant::now();
     let mut target = RunTarget::Open;
-    publish(&mut simulation, &publisher, Publication::Restart)?;
+    publish(
+        &mut simulation,
+        &publisher,
+        Publication::Restart,
+        Some(Cue::Ready),
+    )?;
     while matches!(workflow, WorkerState::Active) {
         let timeout = match simulation.status {
             RuntimeState::Running => next_day
@@ -55,6 +62,12 @@ pub(super) fn run(
         };
         let result = match receiver.recv_timeout(timeout) {
             Ok(Control::Simulation(command)) => {
+                let cue = match &*command {
+                    SimulationCommand::Pause => Cue::Paused,
+                    SimulationCommand::Resume => Cue::Running,
+                    SimulationCommand::AdvanceDay => Cue::Stepped,
+                    SimulationCommand::Reset(_) | SimulationCommand::Restore(_) => Cue::Reset,
+                };
                 let publication = match &*command {
                     SimulationCommand::Reset(_) | SimulationCommand::Restore(_) => {
                         Publication::Restart
@@ -66,7 +79,7 @@ pub(super) fn run(
                         target = RunTarget::Open;
                         publisher.update(|display| display.comparison = None);
                     }
-                    publish(&mut simulation, &publisher, publication)
+                    publish(&mut simulation, &publisher, publication, Some(cue))
                 })
             }
             Ok(Control::Inspect(request)) => simulation.inspect(request).map(|inspection| {
@@ -94,17 +107,26 @@ pub(super) fn run(
         if target.reached(simulation.snapshot.day) {
             simulation.command(SimulationCommand::Pause)?;
             target = RunTarget::Open;
-            publish(&mut simulation, &publisher, Publication::Snapshot)?;
+            publish(
+                &mut simulation,
+                &publisher,
+                Publication::Snapshot,
+                Some(Cue::Compared),
+            )?;
         }
         if let (WorkerState::Active, RuntimeState::Running, true) =
             (&workflow, &simulation.status, Instant::now() >= next_day)
         {
             let result = simulation.advance().and_then(|()| {
-                if target.reached(simulation.snapshot.day) {
-                    simulation.command(SimulationCommand::Pause)?;
-                    target = RunTarget::Open;
-                }
-                publish(&mut simulation, &publisher, Publication::Snapshot)
+                let cue = match target.reached(simulation.snapshot.day) {
+                    true => {
+                        simulation.command(SimulationCommand::Pause)?;
+                        target = RunTarget::Open;
+                        Some(Cue::Compared)
+                    }
+                    false => None,
+                };
+                publish(&mut simulation, &publisher, Publication::Snapshot, cue)
             });
             if let Err(error) = result {
                 publisher.error(&simulation, error);
@@ -142,7 +164,15 @@ fn compare(simulation: &mut Simulation, publisher: &Publisher<impl Fn()>) -> Res
             RunTarget::UntilDay(horizon)
         }
     };
-    publish(simulation, publisher, Publication::Restart)?;
+    publish(
+        simulation,
+        publisher,
+        Publication::Restart,
+        match target {
+            RunTarget::Open => Some(Cue::Compared),
+            RunTarget::UntilDay(_) => None,
+        },
+    )?;
     Ok(target)
 }
 
@@ -150,6 +180,7 @@ fn publish(
     simulation: &mut Simulation,
     publisher: &Publisher<impl Fn()>,
     publication: Publication,
+    cue: Option<Cue>,
 ) -> Result<()> {
     let firms = match publication {
         Publication::Restart => Some(
@@ -181,6 +212,7 @@ fn publish(
         display.status = DisplayState::Active(simulation.status.clone());
         display.seed = simulation.scenario.config().seed;
         display.error = None;
+        display.cues.extend(cue);
     });
     Ok(())
 }

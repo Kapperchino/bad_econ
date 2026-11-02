@@ -20,7 +20,9 @@ State stores actor metadata, active recipes, per-good deliveries and consumption
 
 The viewer starts paused: Space toggles running, N advances one day, R resets, G changes the display, and C compares the next seed. Simulation runs on a worker; the viewer renders aggregate snapshots rather than household entities.
 
-Presentation geometry and statistics refresh when the published display or selected chart changes. Worker publications wake the window immediately; between changes, it updates at most every 250 ms when focused or 500 ms when unfocused. The simulation worker and audit cadence are independent of rendering.
+A status banner confirms completed controls and reports failures, with short sound cues and a subtle 240 ms color pulse confined to the banner. Automatic days stay quiet. M toggles sound; V reduces flashes to a static tint. Feedback preferences survive reset. The generated WAV cues are embedded in the executable, so launching from another directory needs no asset setup. The Linux viewer additionally needs ALSA development libraries for audio.
+
+Presentation geometry and statistics refresh when the published display or selected chart changes. Worker publications wake the window immediately; between changes, it updates at most every 250 ms when focused or 500 ms when unfocused. Banner pulses temporarily use 60 Hz updates. The simulation worker and audit cadence are independent of rendering.
 
 ## Model
 
