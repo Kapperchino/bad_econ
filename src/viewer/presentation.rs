@@ -1,15 +1,67 @@
-use super::*;
+use super::{Chart, Dashboard, Display, PanelLabel, Region, model::ChartRange};
+use crate::domain::{Good, ObservationSnapshot};
+use bevy::{
+    gizmos::{GizmoAsset, retained::Gizmo},
+    prelude::*,
+};
+use std::collections::VecDeque;
 
-pub(super) fn draw(
+pub(super) struct PresentationPlugin;
+impl Plugin for PresentationPlugin {
+    fn build(&self, app: &mut App) {
+        app.add_systems(Startup, setup)
+            .add_systems(Update, draw.after(super::controls).run_if(needs_refresh));
+    }
+}
+
+#[derive(Resource)]
+struct Presentation {
+    geometry: Handle<GizmoAsset>,
+}
+
+#[derive(Clone, Copy, PartialEq, Eq)]
+struct PresentationVersion {
+    revision: u64,
+    chart: Chart,
+}
+
+fn setup(mut commands: Commands, mut assets: ResMut<Assets<GizmoAsset>>) {
+    let geometry = assets.add(GizmoAsset::default());
+    commands.spawn(Gizmo {
+        handle: geometry.clone(),
+        ..Default::default()
+    });
+    commands.insert_resource(Presentation { geometry });
+}
+
+fn needs_refresh(
+    dashboard: Option<Res<Dashboard>>,
+    mut previous: Local<Option<PresentationVersion>>,
+) -> bool {
+    let current = dashboard.map(|dashboard| {
+        let display = dashboard.data.lock().expect("dashboard lock");
+        PresentationVersion {
+            revision: display.revision,
+            chart: dashboard.chart,
+        }
+    });
+    let changed = current != *previous;
+    *previous = current;
+    changed
+}
+
+fn draw(
     dashboard: Option<Res<Dashboard>>,
     mut labels: Query<(&PanelLabel, &mut Text2d)>,
     mut regions: Query<(&Region, &mut Sprite)>,
-    mut gizmos: Gizmos,
+    geometry: Res<Presentation>,
+    mut assets: ResMut<Assets<GizmoAsset>>,
 ) {
     match dashboard {
         None => (),
         Some(dashboard) => {
             let display = dashboard.data.lock().expect("dashboard lock");
+            let mut gizmos = GizmoAsset::default();
             let s = &display.snapshot;
             let inspection = display
                 .inspection
@@ -159,6 +211,7 @@ pub(super) fn draw(
                 gizmos.circle_2d(point, 2.0, color);
             });
             draw_chart(&display, dashboard.chart, &range, &mut gizmos);
+            *assets.get_mut(&geometry.geometry).expect("viewer geometry") = gizmos;
         }
     }
 }
@@ -173,7 +226,7 @@ fn chart_color(chart: Chart, series: usize) -> Color {
         _ => Color::hsl((series as f32 * 137.5) % 360.0, 0.65, 0.65),
     }
 }
-fn draw_chart(display: &Display, chart: Chart, range: &ChartRange, gizmos: &mut Gizmos) {
+fn draw_chart(display: &Display, chart: Chart, range: &ChartRange, gizmos: &mut GizmoAsset) {
     let baseline = -315.0;
     gizmos.line_2d(
         Vec2::new(80.0, baseline),
@@ -231,7 +284,7 @@ fn draw_history(
     chart: Chart,
     range: &ChartRange,
     style: LineStyle,
-    gizmos: &mut Gizmos,
+    gizmos: &mut GizmoAsset,
 ) {
     let visible = history
         .iter()
@@ -263,7 +316,7 @@ fn draw_cash(
     snapshot: &ObservationSnapshot,
     range: &ChartRange,
     color: Color,
-    gizmos: &mut Gizmos,
+    gizmos: &mut GizmoAsset,
 ) {
     let width = 480.0 / (range.last_bin + 1) as f32;
     snapshot
