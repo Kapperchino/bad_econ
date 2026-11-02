@@ -1,3 +1,4 @@
+mod feedback;
 mod model;
 mod pacing;
 mod presentation;
@@ -19,6 +20,7 @@ use bevy::{
     sprite::Anchor,
     winit::{EventLoopProxyWrapper, WinitUserEvent},
 };
+use feedback::Cue;
 use model::{Chart, ComparisonRun, DisplayState, RunTarget};
 use std::{
     collections::VecDeque,
@@ -58,7 +60,10 @@ struct Verification {
 #[derive(Clone, Copy)]
 enum VerificationState {
     Start,
+    AwaitReset,
     AwaitDay,
+    AwaitFeedbackCapture,
+    InspectHousehold,
     AwaitInspection,
     AwaitInspectionRefresh,
     AwaitComparison,
@@ -87,6 +92,7 @@ struct Display {
     map_size: u32,
     speed: Speed,
     revision: u64,
+    cues: VecDeque<Cue>,
 }
 enum Control {
     Simulation(Box<SimulationCommand>),
@@ -173,6 +179,7 @@ pub fn run(scenario: Scenario, workgroup: u32, mode: ViewMode) -> Result<()> {
         SharedGpu,
         presentation::PresentationPlugin,
         pacing::PacingPlugin,
+        feedback::FeedbackPlugin,
     ))
     .add_systems(Startup, setup)
     .add_systems(Update, controls);
@@ -181,7 +188,7 @@ pub fn run(scenario: Scenario, workgroup: u32, mode: ViewMode) -> Result<()> {
             state: VerificationState::Start,
             deadline: Instant::now() + Duration::from_secs(60),
         })
-        .add_systems(Update, verify);
+        .add_systems(Update, verify.after(feedback::FeedbackSystems));
     }
     match app.run() {
         AppExit::Success => Ok(()),
@@ -219,6 +226,7 @@ fn setup(
         map_size: launch.scenario.config().map_size,
         speed: Speed::Normal,
         revision: 0,
+        cues: VecDeque::new(),
     }));
     let (sender, receiver) = mpsc::channel();
     commands.insert_resource(Dashboard {
@@ -244,6 +252,7 @@ fn setup(
             Err(error) => {
                 let mut display = data.lock().expect("dashboard lock");
                 display.status = DisplayState::Unavailable(error.to_string());
+                display.cues.push_back(Cue::Error);
                 display.revision = display.revision.wrapping_add(1);
                 let _ = wake.send_event(WinitUserEvent::WakeUp);
             }
@@ -309,13 +318,14 @@ fn setup(
         Anchor::TOP_LEFT,
         Transform::from_xyz(75.0, -325.0, 2.0),
     ));
-    commands.spawn((Text2d::new("SPACE pause/resume    N step    R reset    1/2/3 speed    H household    F firm    TAB next    C compare    G chart"), TextFont { font_size: FontSize::Px(15.0), ..Default::default() }, Anchor::TOP_LEFT, Transform::from_xyz(-600.0, -365.0, 2.0)));
+    commands.spawn((Text2d::new("SPACE pause/resume    N step    R reset    1/2/3 speed    H household    F firm    TAB next    C compare    G chart"), TextFont { font_size: FontSize::Px(15.0), ..Default::default() }, Anchor::TOP_LEFT, Transform::from_xyz(-600.0, -360.0, 2.0)));
 }
 
 fn verify(
     mut verification: ResMut<Verification>,
     dashboard: Option<Res<Dashboard>>,
     launch: Res<Launch>,
+    feedback: Res<feedback::Feedback>,
     mut commands: Commands,
     mut exit: MessageWriter<AppExit>,
 ) {
@@ -339,10 +349,25 @@ fn verify(
                     VerificationState::Start => {
                         let _ = dashboard
                             .sender
+                            .send(Control::command(SimulationCommand::Reset(
+                                launch.scenario.clone().into(),
+                            )));
+                        VerificationState::AwaitReset
+                    }
+                    VerificationState::AwaitReset if feedback.current() == Some(Cue::Reset) => {
+                        let _ = dashboard
+                            .sender
                             .send(Control::command(SimulationCommand::AdvanceDay));
                         VerificationState::AwaitDay
                     }
-                    VerificationState::AwaitDay if display.snapshot.day == 1 => {
+                    VerificationState::AwaitDay if feedback.current() == Some(Cue::Stepped) => {
+                        assert_eq!(display.snapshot.day, 1);
+                        commands
+                            .spawn(Screenshot::primary_window())
+                            .observe(capture_step_feedback);
+                        VerificationState::AwaitFeedbackCapture
+                    }
+                    VerificationState::InspectHousehold => {
                         let request = InspectionRequest::new(
                             launch.scenario.identity(0).expect("first household"),
                             &launch.scenario,
@@ -373,7 +398,8 @@ fn verify(
                             && matches!(
                                 display.status,
                                 DisplayState::Active(RuntimeState::Paused)
-                            ) =>
+                            )
+                            && feedback.current() == Some(Cue::Compared) =>
                     {
                         let identity = launch
                             .scenario
@@ -491,6 +517,24 @@ fn controls(
     }
 }
 
+fn capture_step_feedback(
+    captured: On<ScreenshotCaptured>,
+    mut verification: ResMut<Verification>,
+    mut exit: MessageWriter<AppExit>,
+) {
+    match save_verified_frame(&captured.image, "step-feedback") {
+        Ok(path) => {
+            eprintln!("viewer feedback captured {}", path.display());
+            verification.state = VerificationState::InspectHousehold;
+        }
+        Err(error) => {
+            eprintln!("viewer feedback capture failed: {error}");
+            verification.state = VerificationState::Complete;
+            exit.write(AppExit::error());
+        }
+    }
+}
+
 fn capture_verified_frame(
     captured: On<ScreenshotCaptured>,
     mut dashboard: ResMut<Dashboard>,
@@ -498,14 +542,14 @@ fn capture_verified_frame(
     mut exit: MessageWriter<AppExit>,
 ) {
     let chart = dashboard.chart;
-    let result = save_verified_frame(&captured.image, chart);
+    let result = save_verified_frame(&captured.image, chart.file_label());
     match result {
         Ok(path) => {
             eprintln!("viewer captured {}", path.display());
             match chart {
                 Chart::Cash => {
                     eprintln!(
-                        "viewer verification passed: shared device, audited day, household and firm inspection, inspection refresh after stepping, same-day seed comparison, all charts captured"
+                        "viewer verification passed: shared device, reset/step/comparison feedback, audited day, household and firm inspection, inspection refresh after stepping, same-day seed comparison, all charts captured"
                     );
                     verification.state = VerificationState::Complete;
                     exit.write(AppExit::Success);
@@ -523,7 +567,7 @@ fn capture_verified_frame(
         }
     }
 }
-fn save_verified_frame(image: &Image, chart: Chart) -> Result<std::path::PathBuf> {
+fn save_verified_frame(image: &Image, label: &str) -> Result<std::path::PathBuf> {
     let pixels =
         Context::context(image.clone().try_into_dynamic(), "read rendered frame")?.into_rgb8();
     let first = Context::context(pixels.pixels().next(), "empty rendered frame")?;
@@ -531,7 +575,7 @@ fn save_verified_frame(image: &Image, chart: Chart) -> Result<std::path::PathBuf
         true => Ok(()),
         false => Err(anyhow::anyhow!("rendered frame contains only a flat color")),
     }?;
-    let path = std::env::temp_dir().join(format!("bad-econ-viewer-{}.ppm", chart.file_label()));
+    let path = std::env::temp_dir().join(format!("bad-econ-viewer-{label}.ppm"));
     let mut file = std::fs::File::create(&path)?;
     write!(file, "P6\n{} {}\n255\n", pixels.width(), pixels.height())?;
     file.write_all(pixels.as_raw())?;
