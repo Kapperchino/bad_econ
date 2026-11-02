@@ -15,6 +15,9 @@ use cubecl::{CubeCount, CubeDim, client::Client, prelude::BufferArg};
 
 const WORKGROUP_SIZES: [u32; 4] = [32, 64, 128, 256];
 const MAX_DISPATCH_GROUPS_PER_AXIS: u32 = u16::MAX as u32;
+const DEDICATED_BUFFER_BYTES: usize = 1024 * 1024;
+const MAX_READBACK_WORDS: usize = 4 * 1024 * 1024;
+const DIRECT_READBACK_WORDS: usize = 1024;
 
 #[cfg(test)]
 pub const TEST_WORKGROUP: u32 = 64;
@@ -37,6 +40,9 @@ impl Device {
         let descriptor = wgpu::DeviceDescriptor {
             label: Some("bad-econ simulation"),
             required_limits: limits,
+            required_features: adapter.features()
+                & (wgpu::Features::TIMESTAMP_QUERY
+                    | wgpu::Features::TIMESTAMP_QUERY_INSIDE_ENCODERS),
             ..Default::default()
         };
         let (device, queue) = pollster::block_on(adapter.request_device(&descriptor))?;
@@ -73,47 +79,69 @@ impl Device {
         }
     }
     pub fn tensor(&self, words: &[u32]) -> CubeTensor {
-        let bytes = words
+        #[cfg(target_endian = "little")]
+        let bytes: &[u8] = bytemuck::cast_slice(words);
+        #[cfg(target_endian = "big")]
+        let encoded = words
             .iter()
             .flat_map(|word| word.to_le_bytes())
             .collect::<Vec<_>>();
+        #[cfg(target_endian = "big")]
+        let bytes = encoded.as_slice();
+        let handle = match bytes.len() {
+            size if size >= DEDICATED_BUFFER_BYTES => self
+                .client
+                .memory_dedicated_allocation(bytes, |bytes| self.client.create_from_slice(bytes)),
+            _ => self.client.create_from_slice(bytes),
+        };
         CubeTensor::new_contiguous(
             self.client.clone(),
             self.cube.clone(),
             Shape::new([words.len()]),
-            self.client.create_from_slice(&bytes),
+            handle,
             DType::U32,
         )
     }
     pub fn empty(&self, words: usize) -> CubeTensor {
+        let handle = match words * WORD_BYTES {
+            bytes if bytes >= DEDICATED_BUFFER_BYTES => self
+                .client
+                .memory_dedicated_allocation(bytes, |bytes| self.client.empty(bytes)),
+            bytes => self.client.empty(bytes),
+        };
         CubeTensor::new_contiguous(
             self.client.clone(),
             self.cube.clone(),
             Shape::new([words]),
-            self.client.empty(words * WORD_BYTES),
+            handle,
             DType::U32,
         )
     }
     pub fn read(&self, tensor: &CubeTensor) -> Result<Vec<u32>> {
-        Ok(self
-            .client
-            .read_one(tensor.handle.clone())?
-            .chunks_exact(WORD_BYTES)
-            .map(|bytes| u32::from_le_bytes(bytes.try_into().expect("four bytes")))
-            .collect())
+        self.read_range(tensor, 0, tensor.meta.shape()[0])
     }
     pub fn read_range(&self, tensor: &CubeTensor, start: usize, length: usize) -> Result<Vec<u32>> {
-        let handle = tensor.handle.clone();
-        let size = handle.size_in_used();
-        let handle = handle
-            .offset_start((start * WORD_BYTES) as u64)
-            .offset_end(size - ((start + length) * WORD_BYTES) as u64);
-        Ok(self
-            .client
-            .read_one(handle)?
-            .chunks_exact(WORD_BYTES)
-            .map(|bytes| u32::from_le_bytes(bytes.try_into().expect("four bytes")))
-            .collect())
+        let chunk = match length {
+            0..=DIRECT_READBACK_WORDS => length.max(1),
+            _ => (1usize << length.ilog2()).min(MAX_READBACK_WORDS),
+        };
+        let mut words = Vec::with_capacity(length);
+        for offset in (0..length).step_by(chunk) {
+            let base = offset.min(length - chunk);
+            let handle = tensor.handle.clone();
+            let size = handle.size_in_used();
+            let handle = handle
+                .offset_start(((start + base) * WORD_BYTES) as u64)
+                .offset_end(size - ((start + base + chunk) * WORD_BYTES) as u64);
+            let bytes = self.client.read_one(handle)?;
+            words.extend(
+                bytes
+                    .chunks_exact(WORD_BYTES)
+                    .skip(offset - base)
+                    .map(|bytes| u32::from_le_bytes(bytes.try_into().expect("four bytes"))),
+            );
+        }
+        Ok(words)
     }
     pub fn write(&self, tensor: &CubeTensor, words: &[u32]) {
         self.client.write(
@@ -128,6 +156,18 @@ impl Device {
     }
     pub fn sync(&self) -> Result<()> {
         pollster::block_on(self.client.sync()).map_err(Into::into)
+    }
+    pub(super) fn reclaim_memory(&self, additional_bytes: u64) -> Result<()> {
+        let reserved = self
+            .client
+            .memory_report(cubecl::MemoryScope::Device)
+            .usage()
+            .bytes_reserved;
+        if reserved.saturating_add(additional_bytes) > self.memory_budget.bytes() {
+            self.sync()?;
+            self.client.memory_cleanup()?;
+        }
+        Ok(())
     }
     fn count(&self, count: usize) -> CubeCount {
         let groups = (count as u32).div_ceil(self.workgroup).max(1);

@@ -7,6 +7,8 @@ use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 
 pub mod bargaining;
+pub mod demography;
+pub mod enterprise;
 pub mod finance;
 mod households;
 pub mod industry;
@@ -16,18 +18,20 @@ pub use households::HouseholdPolicy;
 pub use industry::{Economy, ProductionMethod, Technology};
 mod population;
 mod resources;
+mod supply;
 pub use payroll::{MAX_TAX_BRACKETS, PAYROLL_SCALE, PayrollPolicy, TaxBracket};
 pub use population::{
     BehaviorPolicy, FirmSeed, HouseholdSeed, InitialTotals, Population, Technique,
 };
 pub use resources::{ProductionSite, ResourceMap, ResourceRegion};
 
-pub const SCENARIO_VERSION: u32 = 1;
-pub const STATE_HASH_VERSION: &str = "bad-econ/state/DeterministicV1/v6";
-pub const USED_FIELDS: usize = Field::ActiveMethod as usize + 1;
+pub const SCENARIO_VERSION: u32 = 2;
+pub const STATE_HASH_VERSION: &str = "bad-econ/state/DeterministicV1/v7";
+pub const USED_FIELDS: usize = Field::PendingCapacity as usize + 1;
 pub const TRANSIT_FIELDS: usize = USED_FIELDS + Good::COUNT;
 pub const CONSUMPTION_FIELDS: usize = TRANSIT_FIELDS + Good::COUNT;
-pub const BASE_FIELDS: usize = CONSUMPTION_FIELDS + Good::COUNT;
+pub const PRODUCTION_FIELDS: usize = CONSUMPTION_FIELDS + Good::COUNT;
+pub const BASE_FIELDS: usize = PRODUCTION_FIELDS + Good::COUNT;
 
 #[repr(u32)]
 #[derive(Clone, Copy, Debug, Serialize, Deserialize, PartialEq, Eq)]
@@ -56,7 +60,6 @@ pub enum Field {
     Demand,
     Pipeline,
     Time,
-    Health,
     Fatigue,
     Employer,
     Due,
@@ -82,6 +85,49 @@ pub enum Field {
     FirstInput,
     SecondInput,
     ActiveMethod,
+    FoodNeed,
+    FoodFraction,
+    LivingMembers,
+    Worker,
+    EquipmentCondition,
+    SafetyProvision,
+    HomeMinutes,
+    LandPlots,
+    CropWork,
+    HarvestYear,
+    EnterpriseStatus,
+    InvestmentGood,
+    InvestmentFirm,
+    ConstructionRemaining,
+    IdleDays,
+    InstalledCapital,
+    EnterpriseModel,
+    StockCoverage,
+    RetailMargin,
+    ReplacementCost,
+    RetailOpen,
+    SplitPerson,
+    MoveTarget,
+    MoveDue,
+    MoveX,
+    MoveY,
+    ParentHousehold,
+    EstateSettled,
+    BasicLaborMinutes,
+    BasicInputTicks,
+    BasicOutputTicks,
+    BasicFirstInput,
+    BasicSecondInput,
+    FoodAccess,
+    HomeTime,
+    FirstInputCost,
+    SecondInputCost,
+    OperatingReserve,
+    HouseholdBudget,
+    EquityInvested,
+    PreviousX,
+    PreviousY,
+    PendingCapacity,
 }
 impl Field {
     pub fn inventory(good: Good) -> Self {
@@ -238,7 +284,7 @@ pub enum Experiment {
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
-#[serde(deny_unknown_fields)]
+#[serde(try_from = "ScenarioDocument", deny_unknown_fields)]
 pub struct ScenarioConfig {
     #[serde(default)]
     pub economy: Economy,
@@ -286,6 +332,18 @@ pub struct ScenarioConfig {
     pub research: Option<research::ResearchConfig>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub bargaining: Option<bargaining::BargainingPolicy>,
+    #[serde(default)]
+    pub demography: demography::DemographicPolicy,
+    #[serde(default)]
+    pub household_production: enterprise::HouseholdProduction,
+    #[serde(default)]
+    pub distributors: Vec<enterprise::Distributor>,
+    #[serde(default)]
+    pub ownership: Vec<enterprise::Ownership>,
+    #[serde(default)]
+    pub land_access: Option<enterprise::LandAccess>,
+    #[serde(default)]
+    pub working_conditions: Vec<enterprise::FirmConditions>,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -293,16 +351,40 @@ pub struct Scenario {
     config: ScenarioConfig,
     totals: InitialTotals,
     resources: resources::ResourceGeography,
+    capacities: [u32; Good::COUNT],
+    starting_stocks: [u64; Good::COUNT],
+    retailers: std::collections::BTreeMap<u64, enterprise::Distributor>,
+    retail_demand: [u64; Good::COUNT],
+    initial_actors: std::sync::Arc<ActorRows>,
 }
 impl Scenario {
     pub fn industrial(households: u32, seed: u64, experiment: Experiment) -> Result<Self> {
         let mut config = Self::baseline(households, seed, experiment)?.config;
         config.economy = Economy::Industrial;
+        config.demography.initial_household_members = 3;
+        config.household_production = enterprise::HouseholdProduction::industrial();
         config.firms = config.firms.max(3 * Good::COUNT as u32);
         config.packet_minutes = 240;
         config.packet_output = 20;
         config.prices = [15, 30, 45];
+        config.distributors = (0..config.firms)
+            .filter(|&firm| generated_good(&config, firm as usize) == Good::Bread && firm % 3 == 0)
+            .map(|firm| enterprise::Distributor {
+                firm: u64::from(households + firm + 1),
+                good: Good::Bread,
+                handling_minutes: 60,
+                units_per_shift: 24,
+                reserve_days: 3,
+                margin_per_mille: 250,
+            })
+            .collect();
         let labs = (0..config.firms.min(households))
+            .filter(|&firm| {
+                !config
+                    .distributors
+                    .iter()
+                    .any(|store| store.firm == u64::from(households + firm + 1))
+            })
             .map(|firm| research::ResearchLab {
                 owner: u64::from(households + firm + 1),
                 researcher: u64::from(firm + 1),
@@ -313,7 +395,7 @@ impl Scenario {
                 consent: research::ResearchConsent::Granted,
                 production_requirements: 0,
                 adoption: research::AdoptionPolicy::MasterAndAdoptPermitted,
-                methods: ProductionMethod::for_good(Good::ALL[firm as usize % Good::COUNT]),
+                methods: ProductionMethod::for_good(generated_good(&config, firm as usize)),
                 projects: Technology::ALL
                     .into_iter()
                     .enumerate()
@@ -363,6 +445,18 @@ impl Scenario {
                 }
             }
         }
+        inputs.extend(
+            self.config
+                .distributors
+                .iter()
+                .map(|store| store.good as u32),
+        );
+        inputs.insert(Good::Bread as u32);
+        inputs.insert(Good::Tools as u32);
+        inputs.insert(Good::Wood as u32);
+        if self.config.economy == Economy::Industrial {
+            inputs.extend(Good::ALL.map(|good| good as u32));
+        }
         inputs
             .into_iter()
             .map(|index| Market::Input(Good::from_index(index).expect("catalogue good")))
@@ -379,6 +473,26 @@ impl Scenario {
             .collect()
     }
     pub fn new(mut config: ScenarioConfig) -> Result<Self> {
+        config.ownership = config
+            .ownership
+            .into_iter()
+            .map(enterprise::Ownership::new)
+            .collect::<Result<Vec<_>>>()?;
+        config.distributors = config
+            .distributors
+            .into_iter()
+            .map(enterprise::Distributor::new)
+            .collect::<Result<Vec<_>>>()?;
+        config.land_access = config
+            .land_access
+            .map(enterprise::LandAccess::new)
+            .transpose()?;
+        for setting in &mut config.working_conditions {
+            setting.conditions = enterprise::WorkingConditions::new(setting.conditions)?;
+        }
+        config.demography = demography::DemographicPolicy::new(config.demography)?;
+        config.household_production =
+            enterprise::HouseholdProduction::new(config.household_production)?;
         config.bargaining = config
             .bargaining
             .take()
@@ -430,27 +544,86 @@ impl Scenario {
         match bounds.into_iter().all(std::convert::identity) {
             false => Err(anyhow!("scenario parameter outside DeterministicV1 bounds")),
             true => {
+                let retailers = config
+                    .distributors
+                    .iter()
+                    .cloned()
+                    .map(|store| (store.firm, store))
+                    .collect::<std::collections::BTreeMap<_, _>>();
+                match retailers.len() == config.distributors.len() {
+                    true => (),
+                    false => Err(anyhow!("distributor identities must be unique"))?,
+                }
+                let mut firm_counts = [0u32; Good::COUNT];
+                for firm in 0..config.firms as usize {
+                    if !retailers.contains_key(&(u64::from(config.households) + firm as u64 + 1)) {
+                        firm_counts[generated_good(&config, firm) as usize - 1] += 1;
+                    }
+                }
+                let demand = supply::StartingDemand::new(&config);
+                let daily = std::array::from_fn::<_, { Good::COUNT }, _>(|good| {
+                    demand.daily[good]
+                        .div_ceil(u64::from(firm_counts[good].max(1)))
+                        .max(1)
+                });
+                let capacities = std::array::from_fn(|good| match config.economy {
+                    Economy::Agrarian => config.capacity,
+                    Economy::Industrial => (daily[good].div_ceil(config.packet_output.into())
+                        as u32)
+                        .max(1)
+                        .min(config.capacity),
+                });
+                let starting_stocks = std::array::from_fn(|good| match config.economy {
+                    Economy::Agrarian => {
+                        u64::from(config.capacity)
+                            * u64::from(config.packet_output)
+                            * u64::from(config.buffer_days)
+                    }
+                    Economy::Industrial => daily[good] * u64::from(config.buffer_days),
+                });
                 let totals = match &config.population {
                     Some(population) => population.totals()?,
                     None => {
                         let cash = u128::from(config.household_cash)
                             * u128::from(config.households)
                             + u128::from(config.firm_cash) * u128::from(config.firms);
-                        let stock = u64::from(config.capacity)
-                            * u64::from(config.packet_output)
-                            * u64::from(config.buffer_days);
+
                         let mut goods = [0; Good::COUNT];
                         goods[Good::Bread as usize - 1] = u64::from(config.households)
                             * u64::from(config.household_need)
+                            * u64::from(config.demography.initial_household_members)
                             * u64::from(config.buffer_days);
-                        let count = match config.economy {
-                            Economy::Agrarian => 3,
-                            Economy::Industrial => Good::COUNT,
-                        };
+                        if let enterprise::HouseholdProduction::Available {
+                            annual_yield_per_plot,
+                            ..
+                        } = config.household_production
+                        {
+                            let farms = u64::from(config.households.div_ceil(2));
+                            goods[Good::Grain as usize - 1] = farms
+                                * u64::from(annual_yield_per_plot)
+                                * u64::from(
+                                    config.demography.initial_household_members.div_ceil(2),
+                                );
+                            goods[Good::Tools as usize - 1] = farms;
+                        }
                         for firm in 0..config.firms as usize {
-                            let good = Good::ALL[firm % count];
+                            let good = generated_good(&config, firm);
+                            let retailer =
+                                retailers.get(&(u64::from(config.households) + firm as u64 + 1));
+                            let stock = match retailer {
+                                Some(store) => {
+                                    daily[good as usize - 1]
+                                        * u64::from(config.buffer_days.min(store.reserve_days))
+                                }
+                                None => starting_stocks[good as usize - 1],
+                            };
                             goods[good as usize - 1] = add(goods[good as usize - 1], stock)?;
-                            for input in good.inputs().into_iter().flatten() {
+                            for input in good
+                                .inputs()
+                                .into_iter()
+                                .flatten()
+                                .filter(|_| retailer.is_none())
+                            {
                                 goods[input as usize - 1] = add(goods[input as usize - 1], stock)?;
                             }
                         }
@@ -466,7 +639,17 @@ impl Scenario {
                     config,
                     totals,
                     resources,
+                    capacities,
+                    starting_stocks,
+                    retailers,
+                    retail_demand: daily,
+                    initial_actors: std::sync::Arc::default(),
                 };
+                scenario.initial_actors = std::sync::Arc::new(
+                    (0..scenario.actors())
+                        .map(|index| scenario.actor(index))
+                        .collect(),
+                );
                 if scenario.config.finance.is_some() || scenario.config.research.is_some() {
                     let actors = (0..scenario.actors())
                         .map(|index| scenario.actor(index))
@@ -523,7 +706,7 @@ impl Scenario {
         };
         let mut config = ScenarioConfig {
             economy: Economy::Agrarian,
-            version: 1,
+            version: SCENARIO_VERSION,
             seed,
             households,
             firms,
@@ -559,6 +742,12 @@ impl Scenario {
             finance: None,
             research: None,
             bargaining: None,
+            demography: demography::DemographicPolicy::default(),
+            household_production: enterprise::HouseholdProduction::Unavailable,
+            distributors: Vec::new(),
+            ownership: Vec::new(),
+            land_access: None,
+            working_conditions: Vec::new(),
         };
         match experiment {
             Experiment::Shortage => config.buffer_days = 0,
@@ -570,6 +759,9 @@ impl Scenario {
     pub fn config(&self) -> &ScenarioConfig {
         &self.config
     }
+    pub fn opening_totals(&self) -> &InitialTotals {
+        &self.totals
+    }
     pub fn resource_regions(&self) -> &[ResourceRegion] {
         self.resources.regions()
     }
@@ -580,8 +772,8 @@ impl Scenario {
         self.resources.production_site(good, position)
     }
     pub fn geographic_capacity(&self, actor: &Actor) -> u32 {
-        match actor.kind {
-            0 => actor.capacity,
+        match (actor.kind, self.retailers.contains_key(&actor.identity)) {
+            (0, _) | (_, true) => actor.capacity,
             _ => match self.production_site(
                 Good::from_index(actor.kind).expect("validated firm good"),
                 actor.position,
@@ -628,7 +820,14 @@ impl Scenario {
                 .research
                 .as_ref()
                 .map_or(0, research::ResearchConfig::memory_estimate)
-            + actors * 64
+            + actors * 72
+            + (actors.div_ceil(128) + 1) * 4
+            + self.config.demography.people.len().max(
+                self.config.households as usize
+                    * self.config.demography.initial_household_members as usize,
+            ) as u64
+                * 144
+            + actors * 24
             + batch * (16 * 8 * 4 + 16 * 4 * 3 + 28)
             + 128 * 1024 * 1024
     }
@@ -722,9 +921,151 @@ impl Scenario {
                 },
             );
         }
+        state.ownership = state
+            .actors
+            .iter()
+            .filter(|actor| actor.kind > 0)
+            .map(|actor| enterprise::Ownership {
+                firm: actor.identity,
+                shares: vec![enterprise::OwnershipShare {
+                    household: state.actors.at(actor.owner as usize).identity,
+                    units: 1_000_000,
+                }],
+            })
+            .collect();
+        for ownership in &self.config.ownership {
+            let index = state
+                .ownership
+                .iter()
+                .position(|entry| entry.firm == ownership.firm)
+                .context("unknown ownership firm")?;
+            for share in &ownership.shares {
+                match self
+                    .index_of(share.household)
+                    .is_some_and(|index| state.actors.at(index).kind == 0)
+                {
+                    true => (),
+                    false => Err(anyhow!("ownership references a missing household"))?,
+                }
+            }
+            state.ownership[index] = ownership.clone();
+        }
+        for actor in self.config.households as usize..self.actors() {
+            state.set(
+                Field::EnterpriseStatus,
+                actor,
+                enterprise::EnterpriseState::Operating as u64,
+            );
+            let owner = state.actors.at(actor).owner as usize;
+            state.set(Field::InvestmentFirm, owner, actor as u64 + 1);
+        }
+        for distributor in &self.config.distributors {
+            let firm = self
+                .index_of(distributor.firm)
+                .context("unknown distributor identity")?;
+            match state.actors.at(firm).kind == distributor.good as u32 {
+                true => (),
+                false => Err(anyhow!("distributor inventory good must match its firm"))?,
+            }
+            state.set(
+                Field::EnterpriseModel,
+                firm,
+                enterprise::EnterpriseModel::Distributor as u64,
+            );
+            state.set(Field::StockCoverage, firm, distributor.reserve_days.into());
+            state.set(
+                Field::RetailMargin,
+                firm,
+                distributor.margin_per_mille.into(),
+            );
+            state.set(Field::ReplacementCost, firm, state.get(Field::Price, firm));
+            state.set(
+                Field::Demand,
+                firm,
+                u64::from(state.actors.at(firm).capacity) * u64::from(distributor.units_per_shift),
+            );
+            state.set_recipe(
+                firm,
+                industry::Recipe {
+                    technique: Technique::new(
+                        distributor.handling_minutes,
+                        0,
+                        distributor.units_per_shift,
+                    )?,
+                    inputs: [None, None],
+                },
+            );
+        }
+        for actor in self.config.households as usize..self.actors() {
+            state.retain_basic_recipe(actor);
+            for (field, input) in [
+                (Field::FirstInputCost, Field::FirstInput),
+                (Field::SecondInputCost, Field::SecondInput),
+            ] {
+                let good = state.get(input, actor);
+                if good > 0 {
+                    let price = match good {
+                        1..=3 => self.config.prices[good as usize - 1],
+                        _ => Good::from_index(good as u32)?.initial_price(),
+                    };
+                    state.set(field, actor, price.into());
+                }
+            }
+        }
+        if let Some(land) = &self.config.land_access {
+            for index in 0..state.actors.len() {
+                state.set(Field::LandPlots, index, 0);
+            }
+            for grant in &land.allocations {
+                let index = self
+                    .index_of(grant.household)
+                    .filter(|&index| state.actors.at(index).kind == 0)
+                    .context("land grant references a missing household")?;
+                state.set(Field::LandPlots, index, grant.plots.into());
+            }
+        }
+        state.people = self.config.demography.initial(&state)?;
+        state.initial_population = state.people.len() as u64;
+        for actor in 0..state.actors.len() {
+            state.set(Field::EquipmentCondition, actor, 1000);
+            if state.actors.at(actor).kind == 0 {
+                state.set(Field::Price, actor, self.config.prices[2].into());
+            }
+        }
+        for setting in &self.config.working_conditions {
+            let firm = self
+                .index_of(setting.firm)
+                .filter(|&index| state.actors.at(index).kind > 0)
+                .context("working conditions reference a missing firm")?;
+            state.set(
+                Field::EquipmentCondition,
+                firm,
+                setting.conditions.equipment_condition.into(),
+            );
+            state.set(
+                Field::SafetyProvision,
+                firm,
+                setting.conditions.safety_provision.into(),
+            );
+        }
+        state.next_identity = state
+            .people
+            .iter()
+            .map(|person| person.identity)
+            .max()
+            .unwrap_or(0)
+            .max(state.next_identity - 1)
+            .checked_add(1)
+            .context("person identity capacity exhausted")?;
         Ok(state)
     }
     fn actor(&self, index: usize) -> Actor {
+        match self.initial_actors.get(index) {
+            Some(actor) => actor,
+            None => self.generate_actor(index),
+        }
+    }
+    fn generate_actor(&self, index: usize) -> Actor {
         match &self.config.population {
             Some(population) => population.actor(index),
             None => {
@@ -732,13 +1073,7 @@ impl Scenario {
                 let identity = index as u64 + 1;
                 let kind = match index < config.households as usize {
                     true => 0,
-                    false => {
-                        1 + (index as u32 - config.households)
-                            % match config.economy {
-                                Economy::Agrarian => 3,
-                                Economy::Industrial => Good::COUNT as u32,
-                            }
-                    }
+                    false => generated_good(config, index - config.households as usize) as u32,
                 };
                 let position = match config.experiment {
                     Experiment::Concentrated => Position {
@@ -761,8 +1096,15 @@ impl Scenario {
                         }
                     }
                 };
-                let position = match kind {
-                    0 => position,
+                let retailer = self.retailers.get(&identity);
+                let position = match (kind, retailer) {
+                    (0, _) => match (config.household_production, index % 2) {
+                        (enterprise::HouseholdProduction::Available { .. }, 0) => self
+                            .resources
+                            .place(Good::Grain, identity, config, position),
+                        _ => position,
+                    },
+                    (_, Some(_)) => position,
                     _ => self.resources.place(
                         Good::from_index(kind).expect("generated firm good"),
                         identity,
@@ -775,7 +1117,15 @@ impl Scenario {
                     position,
                     kind,
                     owner: index as u32 % config.households,
-                    capacity: config.capacity,
+                    capacity: match (kind, retailer) {
+                        (0, _) => 1,
+                        (_, Some(store)) => self.retail_demand[kind as usize - 1]
+                            .div_ceil(u64::from(store.units_per_shift))
+                            .max(1)
+                            .min(u64::from(config.capacity))
+                            as u32,
+                        _ => self.capacities[kind as usize - 1],
+                    },
                 }
             }
         }
@@ -794,23 +1144,58 @@ impl Scenario {
             initial_cash: 0,
             initial_goods: [0; Good::COUNT],
             research: None,
+            people: Vec::new(),
+            initial_population: 0,
+            ownership: Vec::new(),
         };
         (0..actors).try_for_each(|actor| -> Result<()> {
             let kind = state.actors.at(actor).kind;
+            let retailer = self.retailers.get(&state.actors.at(actor).identity);
             let cash = match kind {
                 0 => config.household_cash,
                 _ => config.firm_cash,
             };
             state.set(Field::Cash, actor, cash);
-            state.set(Field::Health, actor, 1000);
+            if let (
+                0,
+                enterprise::HouseholdProduction::Available {
+                    annual_yield_per_plot,
+                    ..
+                },
+                0,
+            ) = (kind, config.household_production, actor % 2)
+            {
+                let plots = u64::from(config.demography.initial_household_members.div_ceil(2));
+                let harvest = u64::from(annual_yield_per_plot) * plots;
+                state.set(Field::Grain, actor, harvest);
+                state.set(Field::Tools, actor, 1);
+                state.set(Field::LandPlots, actor, plots);
+                state.initial_goods[Good::Grain as usize - 1] =
+                    add(state.initial_goods[Good::Grain as usize - 1], harvest)?;
+                state.initial_goods[Good::Tools as usize - 1] =
+                    add(state.initial_goods[Good::Tools as usize - 1], 1)?;
+            }
+            state.set(
+                Field::EnterpriseStatus,
+                actor,
+                enterprise::EnterpriseState::Operating as u64,
+            );
+            if kind == 0 {
+                state.set(Field::Price, actor, config.prices[2].into());
+            }
+
             state.set(Field::Wage, actor, u64::from(config.wage));
-            let stock = match kind {
-                0 => u64::from(config.household_need) * u64::from(config.buffer_days),
-                _ => {
-                    u64::from(config.capacity)
-                        * u64::from(config.packet_output)
+            let stock = match (kind, retailer) {
+                (0, _) => {
+                    u64::from(config.household_need)
+                        * u64::from(config.demography.initial_household_members)
                         * u64::from(config.buffer_days)
                 }
+                (_, Some(store)) => {
+                    self.retail_demand[kind as usize - 1]
+                        * u64::from(config.buffer_days.min(store.reserve_days))
+                }
+                _ => self.starting_stocks[kind as usize - 1],
             };
             let output = match kind {
                 0 => Good::Bread,
@@ -819,7 +1204,12 @@ impl Scenario {
             state.set(Field::inventory(output), actor, stock);
             state.initial_goods[output as usize - 1] =
                 add(state.initial_goods[output as usize - 1], stock)?;
-            for input in output.inputs().into_iter().flatten().filter(|_| kind != 0) {
+            for input in output
+                .inputs()
+                .into_iter()
+                .flatten()
+                .filter(|_| kind != 0 && retailer.is_none())
+            {
                 state.set(Field::inventory(input), actor, stock);
                 state.initial_goods[input as usize - 1] =
                     add(state.initial_goods[input as usize - 1], stock)?;
@@ -840,7 +1230,8 @@ impl Scenario {
                     state.set(
                         Field::Demand,
                         actor,
-                        u64::from(config.capacity) * u64::from(config.packet_output),
+                        u64::from(state.actors.at(actor).capacity)
+                            * u64::from(config.packet_output),
                     );
                 }
             }
@@ -974,8 +1365,22 @@ pub struct State {
     pub initial_goods: [u64; Good::COUNT],
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub research: Option<research::ResearchSnapshot>,
+    pub people: Vec<demography::Person>,
+    pub initial_population: u64,
+    pub ownership: Vec<enterprise::Ownership>,
 }
 impl State {
+    pub fn retain_basic_recipe(&mut self, actor: usize) {
+        for (basic, current) in [
+            (Field::BasicLaborMinutes, Field::LaborMinutes),
+            (Field::BasicInputTicks, Field::InputTicks),
+            (Field::BasicOutputTicks, Field::OutputTicks),
+            (Field::BasicFirstInput, Field::FirstInput),
+            (Field::BasicSecondInput, Field::SecondInput),
+        ] {
+            self.set(basic, actor, self.get(current, actor));
+        }
+    }
     pub fn set_recipe(&mut self, actor: usize, recipe: industry::Recipe) {
         self.set(
             Field::LaborMinutes,
@@ -1035,6 +1440,7 @@ impl State {
         hash.update(self.day.to_le_bytes());
         hash.update(self.next_identity.to_le_bytes());
         hash.update(self.initial_cash.to_le_bytes());
+        hash.update(self.initial_population.to_le_bytes());
         self.initial_goods
             .iter()
             .for_each(|value| hash.update(value.to_le_bytes()));
@@ -1047,6 +1453,8 @@ impl State {
             hash.update(actor.owner.to_le_bytes());
             hash.update(actor.capacity.to_le_bytes());
         });
+        hash.update(serde_json::to_vec(&self.ownership).expect("serializable ownership registry"));
+        hash.update(serde_json::to_vec(&self.people).expect("serializable person registry"));
         hash.update((self.values.len() as u64).to_le_bytes());
         self.values
             .iter()
@@ -1126,7 +1534,7 @@ impl Phase {
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
-#[serde(deny_unknown_fields)]
+#[serde(try_from = "CheckpointDocument", deny_unknown_fields)]
 pub struct Checkpoint {
     version: u32,
     profile: String,
@@ -1140,7 +1548,7 @@ impl Checkpoint {
         let _ = ObservationSnapshot::from_state(scenario, state)?;
         let checksum = Self::checksum(scenario.config(), state)?;
         Ok(Self {
-            version: 5,
+            version: 6,
             profile: PROFILE.into(),
             table_hash: table_hash(),
             scenario: scenario.config.clone(),
@@ -1154,11 +1562,17 @@ impl Checkpoint {
     pub fn restore(&self) -> Result<Restored> {
         let scenario = Scenario::new(self.scenario.clone())?;
         let valid = [
-            self.version == 5,
+            self.version == 6,
             self.profile == PROFILE,
             self.table_hash == table_hash(),
-            self.state.values.len() == scenario.state_len(),
-            self.state.actors.len() == scenario.actors(),
+            self.state.values.len()
+                == self.state.actors.len() * scenario.fields()
+                    + scenario
+                        .config
+                        .finance
+                        .as_ref()
+                        .map_or(0, finance::FinanceConfig::state_len),
+            self.state.actors.len() >= scenario.actors(),
             self.checksum == Self::checksum(&self.scenario, &self.state)?,
         ];
         match valid.into_iter().all(std::convert::identity) {
@@ -1185,6 +1599,12 @@ pub struct InspectionRequest {
     identity: u64,
 }
 impl InspectionRequest {
+    pub fn from_registry(identity: u64, identities: &[u64]) -> Result<Self> {
+        match identities.contains(&identity) {
+            true => Ok(Self { identity }),
+            false => Err(anyhow!("unknown actor identity")),
+        }
+    }
     pub fn new(identity: u64, scenario: &Scenario) -> Result<Self> {
         match scenario.index_of(identity).is_some() {
             true => Ok(Self { identity }),
@@ -1209,11 +1629,17 @@ pub struct Inspection {
     pub employee_charges: u64,
     pub inventory: [u64; Good::COUNT],
     pub transit: u64,
-    pub health: u64,
     pub fatigue: u64,
     pub employer: u64,
     pub owner_identity: u64,
     pub available_minutes: u64,
+    pub living_members: u64,
+    pub equipment_condition: u64,
+    pub safety_provision: u64,
+    pub enterprise_model: enterprise::EnterpriseModel,
+    pub enterprise_state: Option<enterprise::EnterpriseState>,
+    pub construction_minutes_remaining: u64,
+    pub pending_capacity: u64,
     pub wage: u64,
     pub price: u64,
     pub planned_packets: u64,
@@ -1239,7 +1665,6 @@ impl Inspection {
             employee_charges: state.get(Field::ChargeTreasury, index),
             inventory: Good::ALL.map(|good| state.get(Field::inventory(good), index)),
             transit: state.get(Field::Transit, index),
-            health: state.get(Field::Health, index),
             fatigue: state.get(Field::Fatigue, index),
             employer: state
                 .get(Field::Employer, index)
@@ -1252,6 +1677,21 @@ impl Inspection {
                 .at(state.actors.at(index).owner as usize)
                 .identity,
             available_minutes: state.get(Field::Time, index),
+            living_members: state.get(Field::LivingMembers, index),
+            equipment_condition: state.get(Field::EquipmentCondition, index),
+            safety_provision: state.get(Field::SafetyProvision, index),
+            enterprise_model: match state.get(Field::EnterpriseModel, index) {
+                1 => enterprise::EnterpriseModel::Distributor,
+                _ => enterprise::EnterpriseModel::Producer,
+            },
+            enterprise_state: match state.actors.at(index).kind {
+                0 => None,
+                _ => Some(enterprise::EnterpriseState::from_index(
+                    state.get(Field::EnterpriseStatus, index),
+                )?),
+            },
+            construction_minutes_remaining: state.get(Field::ConstructionRemaining, index),
+            pending_capacity: state.get(Field::PendingCapacity, index),
             wage: state.get(Field::Wage, index),
             price: state.get(Field::Price, index),
             planned_packets: state.get(Field::Plan, index),
@@ -1313,7 +1753,13 @@ pub struct ObservationSnapshot {
     pub research: research::ResearchSummary,
     pub employed: u64,
     pub households: u64,
+    pub firms: u64,
+    pub firm_entries: u64,
+    pub firm_closures: u64,
+    pub distributors: u64,
+    pub household_production: [u64; Good::COUNT],
     pub shortages: u64,
+    pub population: demography::PopulationObservation,
     pub inventories: [u64; Good::COUNT],
     pub transit: [u64; Good::COUNT],
     pub produced: [u64; Good::COUNT],
@@ -1339,7 +1785,11 @@ impl ObservationSnapshot {
                 .as_ref()
                 .map(|research| research.summary.clone())
                 .unwrap_or_default(),
-            households: u64::from(scenario.config.households),
+            households: state.actors.iter().filter(|actor| actor.kind == 0).count() as u64,
+            population: demography::PopulationObservation::from_state(
+                state,
+                &scenario.config.demography,
+            ),
             minimum_wage: u64::MAX,
             minimum_price: u64::MAX,
             wealth_bins: vec![0; 64],
@@ -1392,6 +1842,11 @@ impl ObservationSnapshot {
                         snapshot.transit[good],
                         state.values[(TRANSIT_FIELDS + good) * state.actors.len() + i],
                     )?;
+                    let household_output =
+                        state.values[(PRODUCTION_FIELDS + good) * state.actors.len() + i];
+                    snapshot.household_production[good] =
+                        add(snapshot.household_production[good], household_output)?;
+                    snapshot.produced[good] = add(snapshot.produced[good], household_output)?;
                     snapshot.used[good] = add(
                         snapshot.used[good],
                         state.values[(USED_FIELDS + good) * state.actors.len() + i],
@@ -1415,6 +1870,16 @@ impl ObservationSnapshot {
                         snapshot.regions[(y * 16 + x) as usize] += state.get(Field::Shortage, i);
                     }
                     kind => {
+                        snapshot.firms += 1;
+                        snapshot.firm_entries += u64::from(i >= scenario.actors());
+                        snapshot.firm_closures += u64::from(
+                            state.get(Field::EnterpriseStatus, i)
+                                == enterprise::EnterpriseState::Closed as u64,
+                        );
+                        snapshot.distributors += u64::from(
+                            state.get(Field::EnterpriseModel, i)
+                                == enterprise::EnterpriseModel::Distributor as u64,
+                        );
                         let j = kind as usize - 1;
                         snapshot.markets[j]
                             .wages
@@ -1453,7 +1918,7 @@ impl ObservationSnapshot {
         if let Some(finance) = &scenario.config.finance {
             let view = finance::FinanceStateView::new(
                 finance,
-                finance.layout(scenario.actors() * scenario.fields())?,
+                finance.layout(state.actors.len() * scenario.fields())?,
                 &state.values,
                 state.day,
             )?;
@@ -1490,41 +1955,105 @@ impl ObservationSnapshot {
     }
 }
 
-struct AuditedState<'a> {
+pub(crate) struct AuditedState<'a> {
     state: &'a State,
 }
 impl<'a> AuditedState<'a> {
-    fn new(scenario: &Scenario, state: &'a State) -> Result<Self> {
+    pub(crate) fn new(scenario: &Scenario, state: &'a State) -> Result<Self> {
         let c = scenario.config();
-        let shape =
-            state.actors.len() == scenario.actors() && state.values.len() == scenario.state_len();
+        let _ = demography::PersonRegistry::new(state)?;
+        let _ = enterprise::OwnershipRegistry::new(state)?;
+        let shape = state.actors.len() >= scenario.actors()
+            && state.values.len()
+                == state.actors.len() * scenario.fields()
+                    + c.finance
+                        .as_ref()
+                        .map_or(0, finance::FinanceConfig::state_len);
         match shape {
             true => Ok(()),
             false => Err(anyhow!("state shape does not match scenario")),
         }?;
-        let identities = state
-            .actors
+        let ownership = state
+            .ownership
             .iter()
-            .enumerate()
-            .all(|(index, actor)| actor == scenario.actor(index));
+            .map(|entry| (entry.firm, entry))
+            .collect::<std::collections::HashMap<_, _>>();
+        let identities = state.actors.iter().enumerate().find_map(|(index, actor)| {
+            let original = match index < scenario.actors() {
+                true => {
+                    actor.identity == scenario.actor(index).identity
+                        && actor.kind == scenario.actor(index).kind
+                }
+                false => true,
+            };
+            let capacity = index >= scenario.actors()
+                || actor.capacity == scenario.actor(index).capacity
+                || state.get(Field::InstalledCapital, index) > 0
+                || state.get(Field::EnterpriseStatus, index)
+                    == enterprise::EnterpriseState::Closed as u64;
+            let position = index >= scenario.actors()
+                || actor.position == scenario.actor(index).position
+                || (u64::from(actor.position.x) == state.get(Field::MoveX, index)
+                    && u64::from(actor.position.y) == state.get(Field::MoveY, index))
+                || (state.get(Field::MoveDue, index) > 0
+                    && u64::from(actor.position.x) == state.get(Field::PreviousX, index)
+                    && u64::from(actor.position.y) == state.get(Field::PreviousY, index));
+            let owner = actor.kind == 0
+                || ownership.get(&actor.identity).is_some_and(|ownership| {
+                    ownership.shares.iter().any(|share| {
+                        state
+                            .actors
+                            .get(actor.owner as usize)
+                            .is_some_and(|owner| owner.identity == share.household)
+                    })
+                });
+            let admitted = original
+                && capacity
+                && position
+                && owner
+                && actor.kind <= Good::COUNT as u32
+                && actor.owner < state.actors.len() as u32
+                && actor.position.x < c.map_size
+                && actor.position.y < c.map_size;
+            (!admitted).then_some((actor, original, capacity, position, owner))
+        });
         match identities {
-            true => Ok(()),
-            false => Err(anyhow!("actor metadata does not match the fixed scenario")),
+            None => Ok(()),
+            Some((actor, original, capacity, position, owner)) => Err(anyhow!(
+                "invalid actor registry: {actor:?}; identity={original}, capacity={capacity}, position={position}, ownership={owner}"
+            )),
         }?;
-        let resources = (0..scenario.actors()).all(|i| {
-            let limits = state.get(Field::Health, i) <= 1000
+        let resources = (0..state.actors.len()).all(|i| {
+            let limits = state.get(Field::EquipmentCondition, i) <= 1000
+                && state.get(Field::SafetyProvision, i) <= 900
+                && state.get(Field::EnterpriseStatus, i)
+                    <= enterprise::EnterpriseState::Closed as u64
+                && state.get(Field::EnterpriseModel, i)
+                    <= enterprise::EnterpriseModel::Distributor as u64
+                && state.get(Field::FoodAccess, i)
+                    <= enterprise::FoodAccess::MatchingFailure as u64
                 && state.get(Field::Fatigue, i) <= 1000
                 && state.get(Field::Time, i) <= 1440
                 && state.get(Field::Hours, i) <= 1440
                 && state.get(Field::ResearchMinutes, i) <= 1440
                 && state.get(Field::Employed, i) <= 1
-                && state.get(Field::Employer, i) <= scenario.actors() as u64;
+                && state.get(Field::Employer, i) <= state.actors.len() as u64;
             let closed = [Field::Escrow, Field::Due, Field::Pipeline]
                 .into_iter()
                 .all(|field| state.get(field, i) == 0);
             let actor = &state.actors.at(i);
-            let recipe = match actor.kind {
-                0 => [
+            let recipe = match (actor.kind, state.get(Field::EnterpriseModel, i)) {
+                (_, 1) => {
+                    state.get(Field::FirstInput, i) == 0
+                        && state.get(Field::SecondInput, i) == 0
+                        && Technique::new(
+                            state.get(Field::LaborMinutes, i) as u32,
+                            0,
+                            state.get(Field::OutputTicks, i) as u32,
+                        )
+                        .is_ok()
+                }
+                (0, _) => [
                     Field::LaborMinutes,
                     Field::InputTicks,
                     Field::OutputTicks,
@@ -1535,7 +2064,17 @@ impl<'a> AuditedState<'a> {
                 .into_iter()
                 .all(|field| state.get(field, i) == 0),
                 _ => ProductionMethod::from_index(state.get(Field::ActiveMethod, i))
-                    .and_then(|method| scenario.production_recipe(i, method))
+                    .and_then(|method| match i < scenario.actors() {
+                        true => scenario.production_recipe(i, method),
+                        false => Ok(industry::Recipe {
+                            technique: Technique::new(
+                                state.get(Field::LaborMinutes, i) as u32,
+                                state.get(Field::InputTicks, i) as u32,
+                                state.get(Field::OutputTicks, i) as u32,
+                            )?,
+                            inputs: Good::from_index(actor.kind)?.inputs(),
+                        }),
+                    })
                     .is_ok_and(|recipe| {
                         state.get(Field::LaborMinutes, i)
                             == u64::from(recipe.technique.labor_minutes)
@@ -1556,7 +2095,7 @@ impl<'a> AuditedState<'a> {
                 && state.values
                     [(CONSUMPTION_FIELDS + Good::Bread as usize - 1) * state.actors.len() + i]
                     == state.get(Field::Consumed, i);
-            let daily_budget = u128::from(c.work_cap.min(1440 - c.reserved_minutes));
+            let daily_budget = u128::from(state.get(Field::HouseholdBudget, i));
             let labor = match (
                 actor.kind,
                 state.get(Field::Employed, i),
@@ -1565,13 +2104,11 @@ impl<'a> AuditedState<'a> {
                 (0, 0, 0) => {
                     state.get(Field::Hours, i) == 0
                         && u128::from(state.get(Field::Time, i))
+                            + u128::from(state.get(Field::HomeMinutes, i))
                             + u128::from(state.get(Field::ResearchMinutes, i))
                             <= daily_budget
                 }
-                (0, 1, employer)
-                    if (u64::from(c.households) + 1..=scenario.actors() as u64)
-                        .contains(&employer) =>
-                {
+                (0, 1, employer) if (1..=state.actors.len() as u64).contains(&employer) => {
                     let employer = (employer - 1) as usize;
                     let employer_capacity =
                         scenario.geographic_capacity(&state.actors.at(employer));
@@ -1582,9 +2119,11 @@ impl<'a> AuditedState<'a> {
                         .div_ceil(c.commute_speed)
                         * 2;
                     employer_capacity > 0
+                        && state.actors.at(employer).kind > 0
                         && state.get(Field::Hours, i) == labor_minutes
                         && u128::from(state.get(Field::Hours, i))
                             + u128::from(state.get(Field::Time, i))
+                            + u128::from(state.get(Field::HomeMinutes, i))
                             + u128::from(state.get(Field::ResearchMinutes, i))
                             + u128::from(commute)
                             <= daily_budget
@@ -1600,7 +2139,7 @@ impl<'a> AuditedState<'a> {
                 _ => true,
             };
             let role = match actor.kind {
-                0 => [Field::Slots, Field::Plan, Field::Produced, Field::Used]
+                0 => [Field::Slots, Field::Plan, Field::Produced]
                     .into_iter()
                     .all(|field| state.get(field, i) == 0),
                 _ => [Field::Consumed, Field::Shortage]
@@ -1625,6 +2164,13 @@ impl<'a> AuditedState<'a> {
             };
             let payroll = match (&c.payroll, actor.kind) {
                 (Some(_), 0) => state.get(Field::PayrollReserve, i) <= 2,
+                (None, 0) => [
+                    Field::PayrollReserve,
+                    Field::TaxTreasury,
+                    Field::ChargeTreasury,
+                ]
+                .into_iter()
+                .all(|field| state.get(field, i) == 0),
                 _ => [
                     Field::GrossIncome,
                     Field::PayrollReserve,
@@ -1646,7 +2192,25 @@ impl<'a> AuditedState<'a> {
                 && recipe
                 && accounting
         });
+        let land_limit = match &c.land_access {
+            Some(land) => u64::from(land.total_plots),
+            None => {
+                u64::from(c.households.div_ceil(2))
+                    * u64::from(c.demography.initial_household_members.div_ceil(2))
+            }
+        };
+        let land = (0..state.actors.len())
+            .map(|index| u128::from(state.get(Field::LandPlots, index)))
+            .sum::<u128>();
         let valid = resources
+            && land <= u128::from(land_limit)
+            && state.initial_population
+                == match c.demography.people.is_empty() {
+                    true => {
+                        u64::from(c.households) * u64::from(c.demography.initial_household_members)
+                    }
+                    false => c.demography.people.len() as u64,
+                }
             && match (&c.research, &state.research) {
                 (None, None) => true,
                 (Some(_), None) => state.day == 0,
@@ -1655,7 +2219,12 @@ impl<'a> AuditedState<'a> {
                 }
                 (None, Some(_)) => false,
             }
-            && state.next_identity == scenario.next_identity()
+            && state
+                .actors
+                .iter()
+                .map(|actor| actor.identity)
+                .chain(state.people.iter().map(|person| person.identity))
+                .all(|identity| identity < state.next_identity)
             && state.day <= u64::from(u32::MAX) - scenario.ring() as u64
             && state.initial_cash == scenario.totals.cash
             && state.initial_goods == scenario.totals.goods;
@@ -1694,4 +2263,212 @@ pub struct PhaseEvidence {
     pub decisions: Vec<crate::ledger::Decision>,
     pub frontier_depth: usize,
     pub events: usize,
+}
+
+#[derive(Deserialize)]
+#[serde(transparent)]
+struct ScenarioDocument(serde_json::Value);
+
+impl TryFrom<ScenarioDocument> for ScenarioConfig {
+    type Error = anyhow::Error;
+    fn try_from(document: ScenarioDocument) -> Result<Self> {
+        let mut value = document.0;
+        match value.get("version").and_then(serde_json::Value::as_u64) {
+            Some(1) => {
+                value["version"] = SCENARIO_VERSION.into();
+                if let Some(behavior) = value
+                    .get_mut("behavior")
+                    .and_then(serde_json::Value::as_object_mut)
+                {
+                    behavior.remove("health_recovery");
+                    behavior.remove("hunger_damage");
+                }
+                if let Some(policy) = value
+                    .get_mut("household_policy")
+                    .and_then(serde_json::Value::as_object_mut)
+                {
+                    policy.remove("recovery");
+                    policy.remove("deficit_damage");
+                    policy.remove("fatigue_damage");
+                }
+                if let Some(households) = value
+                    .get_mut("population")
+                    .and_then(|population| population.get_mut("households"))
+                    .and_then(serde_json::Value::as_array_mut)
+                {
+                    for household in households {
+                        if let Some(household) = household.as_object_mut() {
+                            household.remove("health");
+                        }
+                    }
+                }
+            }
+            Some(2) => (),
+            _ => Err(anyhow!(
+                "unsupported scenario format; expected version 1 or 2"
+            ))?,
+        }
+        let current: CurrentScenario = serde_json::from_value(value)?;
+        Ok(Self {
+            economy: current.economy,
+            version: current.version,
+            seed: current.seed,
+            households: current.households,
+            firms: current.firms,
+            map_size: current.map_size,
+            resources: current.resources,
+            search_radius: current.search_radius,
+            commute_speed: current.commute_speed,
+            shipment_speed: current.shipment_speed,
+            household_cash: current.household_cash,
+            firm_cash: current.firm_cash,
+            buffer_days: current.buffer_days,
+            household_need: current.household_need,
+            capacity: current.capacity,
+            packet_output: current.packet_output,
+            packet_minutes: current.packet_minutes,
+            work_cap: current.work_cap,
+            reserved_minutes: current.reserved_minutes,
+            wage: current.wage,
+            prices: current.prices,
+            reserve: current.reserve,
+            distribution_rate: current.distribution_rate,
+            forecast_weight: current.forecast_weight,
+            coverage: current.coverage,
+            minimum_price: current.minimum_price,
+            maximum_price: current.maximum_price,
+            delivery_penalty: current.delivery_penalty,
+            batch_size: current.batch_size,
+            experiment: current.experiment,
+            population: current.population,
+            behavior: current.behavior,
+            payroll: current.payroll,
+            household_policy: current.household_policy,
+            finance: current.finance,
+            research: current.research,
+            bargaining: current.bargaining,
+            demography: current.demography,
+            household_production: current.household_production,
+            distributors: current.distributors,
+            ownership: current.ownership,
+            land_access: current.land_access,
+            working_conditions: current.working_conditions,
+        })
+    }
+}
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct CurrentScenario {
+    #[serde(default)]
+    pub economy: Economy,
+    pub version: u32,
+    pub seed: u64,
+    pub households: u32,
+    pub firms: u32,
+    pub map_size: u32,
+    #[serde(default)]
+    pub resources: ResourceMap,
+    pub search_radius: u32,
+    pub commute_speed: u32,
+    pub shipment_speed: u32,
+    pub household_cash: u64,
+    pub firm_cash: u64,
+    pub buffer_days: u32,
+    pub household_need: u32,
+    pub capacity: u32,
+    pub packet_output: u32,
+    pub packet_minutes: u32,
+    pub work_cap: u32,
+    pub reserved_minutes: u32,
+    pub wage: u32,
+    pub prices: [u32; 3],
+    pub reserve: u64,
+    pub distribution_rate: u32,
+    pub forecast_weight: u32,
+    pub coverage: u32,
+    pub minimum_price: u32,
+    pub maximum_price: u32,
+    pub delivery_penalty: u32,
+    pub batch_size: u32,
+    pub experiment: Experiment,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub population: Option<Population>,
+    #[serde(default, skip_serializing_if = "BehaviorPolicy::is_default")]
+    pub behavior: BehaviorPolicy,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub payroll: Option<PayrollPolicy>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub household_policy: Option<HouseholdPolicy>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub finance: Option<finance::FinanceConfig>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub research: Option<research::ResearchConfig>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub bargaining: Option<bargaining::BargainingPolicy>,
+    #[serde(default)]
+    pub demography: demography::DemographicPolicy,
+    #[serde(default)]
+    pub household_production: enterprise::HouseholdProduction,
+    #[serde(default)]
+    pub distributors: Vec<enterprise::Distributor>,
+    #[serde(default)]
+    pub ownership: Vec<enterprise::Ownership>,
+    #[serde(default)]
+    pub land_access: Option<enterprise::LandAccess>,
+    #[serde(default)]
+    pub working_conditions: Vec<enterprise::FirmConditions>,
+}
+
+fn generated_good(config: &ScenarioConfig, firm: usize) -> Good {
+    match config.economy {
+        Economy::Agrarian => Good::ALL[firm % 3],
+        Economy::Industrial => match firm {
+            0..16 => Good::ALL[firm],
+            _ => match (firm - 16) % 20 {
+                0..=3 => Good::Grain,
+                4..=7 => Good::Flour,
+                8..=11 => Good::Bread,
+                slot => Good::ALL[3 + ((firm - 16) / 20 * 8 + slot - 12) % 13],
+            },
+        },
+    }
+}
+
+#[derive(Deserialize)]
+#[serde(transparent)]
+struct CheckpointDocument(serde_json::Value);
+
+impl TryFrom<CheckpointDocument> for Checkpoint {
+    type Error = anyhow::Error;
+    fn try_from(document: CheckpointDocument) -> Result<Self> {
+        match document
+            .0
+            .get("version")
+            .and_then(serde_json::Value::as_u64)
+        {
+            Some(6) => (),
+            _ => Err(anyhow!(
+                "unsupported checkpoint format: format 6 is required; regenerate older checkpoints"
+            ))?,
+        }
+        #[derive(Deserialize)]
+        #[serde(deny_unknown_fields)]
+        struct Current {
+            version: u32,
+            profile: String,
+            table_hash: String,
+            scenario: ScenarioConfig,
+            state: State,
+            checksum: String,
+        }
+        let current: Current = serde_json::from_value(document.0)?;
+        Ok(Self {
+            version: current.version,
+            profile: current.profile,
+            table_hash: current.table_hash,
+            scenario: current.scenario,
+            state: current.state,
+            checksum: current.checksum,
+        })
+    }
 }

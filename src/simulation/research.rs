@@ -360,7 +360,7 @@ impl EncodedResearch {
         let mut configuration = vec![0; Header::WORDS];
         let mut state = Vec::new();
         let header = Header {
-            actors: scenario.actors() as u32,
+            actors: initial.actors.len() as u32,
             lab_count: labs.len() as u32,
             project_count: projects.len() as u32,
             machine_count: machines.len() as u32,
@@ -396,7 +396,7 @@ impl EncodedResearch {
         let mut hash = Sha256::new();
         hash.update(b"bad-econ/research-configuration/ResearchFixedV3\0");
         hash.update(serde_json::to_vec(&config)?);
-        for &word in configuration.iter().chain(&state) {
+        for &word in configuration.iter().skip(1).chain(&state) {
             hash.update(word.to_le_bytes());
         }
         Ok(Self {

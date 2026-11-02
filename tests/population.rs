@@ -9,8 +9,6 @@ fn scenario() -> Result<Scenario> {
         .clone();
     config.distribution_rate = 0;
     config.behavior = BehaviorPolicy {
-        health_recovery: 7,
-        hunger_damage: 30,
         work_fatigue: 13,
         rest_recovery: 17,
         wage_increment: 0,
@@ -35,7 +33,6 @@ fn scenario() -> Result<Scenario> {
                 position: Position { x: 0, y: 0 },
                 cash: 1000,
                 inventories: Good::food([0, 0, 10]),
-                health: 1000,
                 fatigue: 0,
             })
             .collect(),
@@ -93,7 +90,7 @@ fn population_admission_checks_identity_ownership_resources_and_policy() -> Resu
             .collect::<Vec<_>>(),
         [101, 303, 901, 2000, 5000, 8000]
     );
-    assert_eq!(state.next_identity, 8001);
+    assert_eq!(state.next_identity, 8004);
     assert_eq!(state.initial_cash, 33_000);
     assert_eq!(state.initial_goods, Good::food([2, 3, 30]));
     assert!(InspectionRequest::new(1, &scenario).is_err());
@@ -266,7 +263,6 @@ mod compute {
             .iter_mut()
             .enumerate()
             .for_each(|(index, seed)| {
-                seed.health = 900;
                 seed.fatigue = 50;
                 if index == 0 {
                     seed.inventories[2] = 0;
@@ -281,8 +277,6 @@ mod compute {
         let mut simulation = Simulation::new(scenario.clone(), support::device(64)?)?;
         simulation.advance()?;
         let state = simulation.download()?;
-        assert_eq!(state.get(Field::Health, 0), 870);
-        assert_eq!(state.get(Field::Health, 1), 907);
         assert_eq!(state.get(Field::Fatigue, 0), 33);
         assert_eq!(simulation.snapshot.markets[1], MarketObservation::default());
         assert_eq!(simulation.snapshot.markets[2], MarketObservation::default());
@@ -335,10 +329,6 @@ fn actor_rows_round_trip_on_gpu_and_reject_mismatched_lengths() -> Result<()> {
     let checkpoint = simulation.checkpoint()?;
     let mut old = serde_json::to_value(&checkpoint)?;
     old["version"] = serde_json::json!(2);
-    assert!(
-        serde_json::from_value::<Checkpoint>(old)?
-            .restore()
-            .is_err()
-    );
+    assert!(serde_json::from_value::<Checkpoint>(old).is_err());
     Ok(())
 }

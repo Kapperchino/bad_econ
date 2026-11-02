@@ -57,12 +57,11 @@ pub fn price(
 ) -> Result<u64> {
     let imbalance = (i128::from(unfilled) - i128::from(excess)) * 32 / i128::from(demand.max(1));
     let index = usize::try_from(32 + imbalance.clamp(-32, 32))?;
-    quote(
-        ceil_ratio(price, u64::from(PRICE_TABLE[index]), 1_000_000)?,
-        low,
-        high,
-        1,
-    )
+    let candidate = match unfilled >= excess {
+        true => ceil_ratio(price, u64::from(PRICE_TABLE[index]), 1_000_000)?,
+        false => floor_ratio(price, u64::from(PRICE_TABLE[index]), 1_000_000)?,
+    };
+    quote(candidate, low, high, 1)
 }
 pub fn table_hash() -> String {
     hex(&Sha256::digest(

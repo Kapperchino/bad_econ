@@ -68,13 +68,14 @@ pub(super) struct PeerBalances {
     used: Ticks,
     sales: Ticks,
     quote: u32,
+    reserve: Ticks,
 }
 
 #[cube]
 impl PeerBalances {
     pub fn new(
         state: &mut [u32],
-        _actors: &[u32],
+        actors: &[u32],
         config: &[u32],
         parameters: &EconomyParameters,
         peer: u32,
@@ -91,6 +92,7 @@ impl PeerBalances {
             used: zero(),
             sales: zero(),
             quote: 0,
+            reserve: zero(),
         };
         match comptime!(parameters.market) {
             MarketFlag::Labor => {
@@ -118,6 +120,7 @@ impl PeerBalances {
                 let good = comptime!(parameters.market.good().expect("goods market") as u32);
                 balances.cash = value(state, config, comptime!(Field::Cash as u32), peer);
                 balances.stock = value(state, config, good, peer);
+                balances.reserve = household_production::reserve(state, actors, config, peer, good);
                 balances.sales = value(state, config, comptime!(Field::Sales as u32), peer);
                 balances.quote = number(state, config, comptime!(Field::Price as u32), peer);
             }
@@ -205,7 +208,7 @@ impl PeerBalances {
                 let cash = plus(self.cash, cost);
                 let sales = plus(self.sales, quantity);
                 faults.insert(cash.faults.union(sales.faults));
-                valid = valid && !lt(self.stock, quantity);
+                valid = valid && !lt(positive(self.stock, self.reserve), quantity);
                 next_cash = cash.value;
                 next_stock = minus(self.stock, quantity);
                 next_sales = sales.value;

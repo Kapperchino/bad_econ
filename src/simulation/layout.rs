@@ -25,6 +25,7 @@ pub const EVENT_WORDS: usize = MAX_LEGS * LEG_WORDS;
 pub const NO_ACTOR: u32 = u32::MAX;
 pub const NO_PREDECESSOR: u32 = u32::MAX;
 pub const NO_SUCCESSOR: u32 = u32::MAX;
+pub const DISCOVERY_BLOCK: u32 = 128;
 
 pub struct SpatialIndex {
     pub words: Vec<u32>,
@@ -34,20 +35,63 @@ impl SpatialIndex {
         let config = scenario.config();
         let side = config.map_size.div_ceil(config.search_radius);
         let cells = (side * side) as usize;
-        let segment = cells + 1 + config.firms as usize;
+        let segment = cells + 1 + state.actors.len();
         let cell = |index: usize| {
             let position = state.actors.at(index).position;
             (position.y / config.search_radius * side + position.x / config.search_radius) as usize
         };
-        let mut firms = (config.households as usize..scenario.actors()).collect::<Vec<_>>();
-        firms.sort_by_key(|&index| cell(index));
-        let mut words = vec![0; 2 * segment];
-        for (slot, &firm) in firms.iter().enumerate() {
-            words[segment + cell(firm) + 1] += 1;
-            words[segment + cells + 1 + slot] = firm as u32;
+        let mut starts = vec![0; cells + 1];
+        for actor in 0..state.actors.len() {
+            starts[cell(actor) + 1] += 1;
         }
-        for index in 1..=cells {
-            words[segment + index] += words[segment + index - 1];
+        for cell in 1..starts.len() {
+            starts[cell] += starts[cell - 1];
+        }
+        let mut members = vec![0; state.actors.len()];
+        for actor in 0..state.actors.len() {
+            let offset = &mut starts[cell(actor)];
+            members[*offset] = actor;
+            *offset += 1;
+        }
+        let firms = members
+            .iter()
+            .copied()
+            .filter(|&index| state.actors.at(index).kind > 0)
+            .collect::<Vec<_>>();
+        let mut words = vec![
+            0;
+            3 * segment
+                + state.actors.len().div_ceil(DISCOVERY_BLOCK as usize)
+                + 1
+                + state.actors.len()
+        ];
+        for (base, members) in [(segment, &members), (2 * segment, &firms)] {
+            for (slot, &actor) in members.iter().enumerate() {
+                words[base + cell(actor) + 1] += 1;
+                words[base + cells + 1 + slot] = actor as u32;
+            }
+            for index in 1..=cells {
+                words[base + index] += words[base + index - 1];
+            }
+        }
+        let tile = config.map_size.div_ceil(128);
+        let query_side = config.map_size.div_ceil(tile);
+        let query_cell = |index: usize| {
+            let position = state.actors.at(index).position;
+            (position.y / tile * query_side + position.x / tile) as usize
+        };
+        let mut offsets = vec![0; (query_side * query_side) as usize + 1];
+        for actor in 0..state.actors.len() {
+            offsets[query_cell(actor) + 1] += 1;
+        }
+        for cell in 1..offsets.len() {
+            offsets[cell] += offsets[cell - 1];
+        }
+        let query_base = 3 * segment + state.actors.len().div_ceil(DISCOVERY_BLOCK as usize) + 1;
+        for actor in 0..state.actors.len() {
+            let offset = &mut offsets[query_cell(actor)];
+            words[query_base + *offset] = actor as u32;
+            *offset += 1;
         }
         Self { words }
     }
@@ -78,8 +122,6 @@ impl ActorLayout {
 #[derive(Clone, Copy, Pod, Zeroable)]
 pub struct ConfigLayout {
     actors: u32,
-    households: u32,
-    firms: u32,
     fields: u32,
     ring: u32,
     search_radius: u32,
@@ -88,6 +130,7 @@ pub struct ConfigLayout {
     shipment_speed: u32,
     household_need: u32,
     industrial: u32,
+    home: [u32; 6],
     consumption_intervals: [u32; Good::COUNT],
     capacity: u32,
     packet_output: u32,
@@ -103,11 +146,10 @@ pub struct ConfigLayout {
     reserve_low: u32,
     reserve_high: u32,
     pub spatial_side: u32,
-    health_recovery: u32,
-    hunger_damage: u32,
     work_fatigue: u32,
     rest_recovery: u32,
     wage_increment: u32,
+    starting_wage: u32,
     price_response: u32,
     payroll_enabled: u32,
     tax_base_rate: u32,
@@ -116,9 +158,6 @@ pub struct ConfigLayout {
     tax_thresholds: [TickLayout; MAX_TAX_BRACKETS],
     tax_rates: [u32; MAX_TAX_BRACKETS],
     household_policy_enabled: u32,
-    household_recovery: u32,
-    deficit_damage: u32,
-    fatigue_damage: u32,
     fatigue_response: u32,
     rest_minutes: u32,
     bargaining: PolicyLayout,
@@ -127,8 +166,6 @@ pub struct ConfigLayout {
 }
 impl ConfigLayout {
     pub const ACTORS: usize = offset_of!(Self, actors) / WORD_BYTES;
-    pub const HOUSEHOLDS: usize = offset_of!(Self, households) / WORD_BYTES;
-    pub const FIRMS: usize = offset_of!(Self, firms) / WORD_BYTES;
     pub const FIELDS: usize = offset_of!(Self, fields) / WORD_BYTES;
     pub const RING: usize = offset_of!(Self, ring) / WORD_BYTES;
     pub const SEARCH_RADIUS: usize = offset_of!(Self, search_radius) / WORD_BYTES;
@@ -136,6 +173,7 @@ impl ConfigLayout {
     pub const COMMUTE_SPEED: usize = offset_of!(Self, commute_speed) / WORD_BYTES;
     pub const SHIPMENT_SPEED: usize = offset_of!(Self, shipment_speed) / WORD_BYTES;
     pub const CONSUMPTION_INTERVALS: usize = offset_of!(Self, consumption_intervals) / WORD_BYTES;
+    pub const HOME: usize = offset_of!(Self, home) / WORD_BYTES;
     pub const INDUSTRIAL: usize = offset_of!(Self, industrial) / WORD_BYTES;
     pub const HOUSEHOLD_NEED: usize = offset_of!(Self, household_need) / WORD_BYTES;
     pub const WORK_CAP: usize = offset_of!(Self, work_cap) / WORD_BYTES;
@@ -149,10 +187,9 @@ impl ConfigLayout {
     pub const RESERVE_LOW: usize = offset_of!(Self, reserve_low) / WORD_BYTES;
     pub const RESERVE_HIGH: usize = offset_of!(Self, reserve_high) / WORD_BYTES;
     pub const SPATIAL_SIDE: usize = offset_of!(Self, spatial_side) / WORD_BYTES;
-    pub const HEALTH_RECOVERY: usize = offset_of!(Self, health_recovery) / WORD_BYTES;
-    pub const HUNGER_DAMAGE: usize = offset_of!(Self, hunger_damage) / WORD_BYTES;
     pub const WORK_FATIGUE: usize = offset_of!(Self, work_fatigue) / WORD_BYTES;
     pub const REST_RECOVERY: usize = offset_of!(Self, rest_recovery) / WORD_BYTES;
+    pub const STARTING_WAGE: usize = offset_of!(Self, starting_wage) / WORD_BYTES;
     pub const WAGE_INCREMENT: usize = offset_of!(Self, wage_increment) / WORD_BYTES;
     pub const PRICE_RESPONSE: usize = offset_of!(Self, price_response) / WORD_BYTES;
     pub const PAYROLL_ENABLED: usize = offset_of!(Self, payroll_enabled) / WORD_BYTES;
@@ -163,20 +200,15 @@ impl ConfigLayout {
     pub const TAX_RATES: usize = offset_of!(Self, tax_rates) / WORD_BYTES;
     pub const HOUSEHOLD_POLICY_ENABLED: usize =
         offset_of!(Self, household_policy_enabled) / WORD_BYTES;
-    pub const HOUSEHOLD_RECOVERY: usize = offset_of!(Self, household_recovery) / WORD_BYTES;
-    pub const DEFICIT_DAMAGE: usize = offset_of!(Self, deficit_damage) / WORD_BYTES;
-    pub const FATIGUE_DAMAGE: usize = offset_of!(Self, fatigue_damage) / WORD_BYTES;
     pub const FATIGUE_RESPONSE: usize = offset_of!(Self, fatigue_response) / WORD_BYTES;
     pub const REST_MINUTES: usize = offset_of!(Self, rest_minutes) / WORD_BYTES;
     pub const BARGAINING: usize = offset_of!(Self, bargaining) / WORD_BYTES;
     pub const PRICE_TABLE: usize = offset_of!(Self, price_table) / WORD_BYTES;
 
-    pub fn new(scenario: &Scenario) -> Self {
+    pub fn new(scenario: &Scenario, state: &State) -> Self {
         let config = scenario.config();
         Self {
-            actors: scenario.actors() as u32,
-            households: config.households,
-            firms: config.firms,
+            actors: state.actors.len() as u32,
             fields: scenario.fields() as u32,
             ring: scenario.ring() as u32,
             search_radius: config.search_radius,
@@ -185,6 +217,24 @@ impl ConfigLayout {
             shipment_speed: config.shipment_speed,
             household_need: config.household_need,
             industrial: u32::from(config.economy == crate::domain::Economy::Industrial),
+            home: match config.household_production {
+                crate::domain::enterprise::HouseholdProduction::Unavailable => [0; 6],
+                crate::domain::enterprise::HouseholdProduction::Available {
+                    milling_minutes,
+                    baking_minutes,
+                    cultivation_minutes,
+                    harvest_start,
+                    harvest_days,
+                    annual_yield_per_plot,
+                } => [
+                    milling_minutes,
+                    baking_minutes,
+                    cultivation_minutes,
+                    harvest_start,
+                    harvest_days,
+                    annual_yield_per_plot,
+                ],
+            },
             consumption_intervals: Good::ALL.map(Good::consumption_interval),
             capacity: config.capacity,
             packet_output: config.packet_output,
@@ -200,25 +250,12 @@ impl ConfigLayout {
             reserve_low: config.reserve as u32,
             reserve_high: (config.reserve >> WORD_BITS) as u32,
             spatial_side: config.map_size.div_ceil(config.search_radius),
-            health_recovery: config.behavior.health_recovery,
-            hunger_damage: config.behavior.hunger_damage,
             work_fatigue: config.behavior.work_fatigue,
             rest_recovery: config.behavior.rest_recovery,
             wage_increment: config.behavior.wage_increment,
+            starting_wage: config.wage,
             price_response: config.behavior.price_response,
             household_policy_enabled: u32::from(config.household_policy.is_some()),
-            household_recovery: config
-                .household_policy
-                .as_ref()
-                .map_or(0, |policy| policy.recovery),
-            deficit_damage: config
-                .household_policy
-                .as_ref()
-                .map_or(0, |policy| policy.deficit_damage),
-            fatigue_damage: config
-                .household_policy
-                .as_ref()
-                .map_or(0, |policy| policy.fatigue_damage),
             fatigue_response: config
                 .household_policy
                 .as_ref()
@@ -316,6 +353,9 @@ pub struct SummaryLayout {
     pub produced: [TickLayout; Good::COUNT],
     pub used: [TickLayout; Good::COUNT],
     pub consumed: TickLayout,
+    pub household_production: [TickLayout; Good::COUNT],
+    pub distributors: TickLayout,
+    pub closures: TickLayout,
     pub consumption: [TickLayout; Good::COUNT],
     pub minimum_wage: TickLayout,
     pub maximum_wage: TickLayout,
@@ -343,6 +383,10 @@ impl SummaryLayout {
     pub const PRODUCED: u32 = (offset_of!(Self, produced) / TICK_BYTES) as u32;
     pub const USED: u32 = (offset_of!(Self, used) / TICK_BYTES) as u32;
     pub const CONSUMPTION: u32 = (offset_of!(Self, consumption) / TICK_BYTES) as u32;
+    pub const HOUSEHOLD_PRODUCTION: u32 =
+        (offset_of!(Self, household_production) / TICK_BYTES) as u32;
+    pub const DISTRIBUTORS: u32 = (offset_of!(Self, distributors) / TICK_BYTES) as u32;
+    pub const CLOSURES: u32 = (offset_of!(Self, closures) / TICK_BYTES) as u32;
     pub const CONSUMED: u32 = (offset_of!(Self, consumed) / TICK_BYTES) as u32;
     pub const MINIMUM_WAGE: u32 = (offset_of!(Self, minimum_wage) / TICK_BYTES) as u32;
     pub const MAXIMUM_WAGE: u32 = (offset_of!(Self, maximum_wage) / TICK_BYTES) as u32;

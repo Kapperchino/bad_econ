@@ -1,7 +1,5 @@
 use anyhow::{Result, anyhow};
 use bad_econ::domain::*;
-#[cfg(feature = "compute")]
-use bad_econ::runtime::SimulationCommand;
 use clap::{Parser, ValueEnum};
 use std::path::PathBuf;
 #[cfg(feature = "compute")]
@@ -38,6 +36,10 @@ struct Cli {
     checkpoint: Option<PathBuf>,
     #[arg(long)]
     output: Option<PathBuf>,
+    #[arg(long)]
+    trajectory: Option<PathBuf>,
+    #[arg(long, default_value_t = 0)]
+    checkpoint_every: u32,
     #[arg(long, value_delimiter = ',', default_value = "10000,100000,1000000")]
     sizes: Vec<u32>,
 }
@@ -131,31 +133,54 @@ fn analyze(_: &Cli) -> Result<()> {
 #[cfg(feature = "compute")]
 fn run(scenario: Scenario, args: &Cli) -> Result<()> {
     use bad_econ::simulation::{Device, Simulation};
+    let startup = Instant::now();
     let device = match args.backend {
         Backend::Cpu => Device::cpu(args.workgroup)?,
         Backend::Gpu => Device::headless(args.workgroup)?,
     };
-    let mut simulation = Simulation::new(scenario, device)?;
-    if let Some(path) = &args.restore {
-        simulation.command(SimulationCommand::Restore(serde_json::from_slice(
-            &std::fs::read(path)?,
-        )?))?;
-    }
+    let mut simulation = match &args.restore {
+        Some(path) => {
+            Simulation::from_checkpoint(serde_json::from_slice(&std::fs::read(path)?)?, device)?
+        }
+        None => Simulation::new(scenario, device)?,
+    };
+    let startup_seconds = startup.elapsed().as_secs_f64();
+    use std::io::Write;
+    let mut trajectory = args
+        .trajectory
+        .as_ref()
+        .map(std::fs::File::create)
+        .transpose()?
+        .map(std::io::BufWriter::new);
     let start = Instant::now();
     (0..args.days).try_for_each(|_| -> Result<()> {
         simulation.advance()?;
         eprintln!(
-            "day {}: employed={} shortage={} elapsed={:.3}s",
+            "day {}: living={} births={} deaths={:?} employed={} shortage={} elapsed={:.3}s",
             simulation.snapshot.day,
+            simulation.snapshot.population.living,
+            simulation.snapshot.population.births,
+            simulation.snapshot.population.deaths,
             simulation.snapshot.employed,
             simulation.snapshot.shortages,
             start.elapsed().as_secs_f64()
         );
+        if let Some(trajectory) = &mut trajectory {
+            serde_json::to_writer(&mut *trajectory, &simulation.snapshot)?;
+            trajectory.write_all(b"\n")?;
+            trajectory.flush()?;
+        }
+        if let (Some(path), interval) = (&args.checkpoint, args.checkpoint_every)
+            && interval > 0
+            && simulation.snapshot.day % u64::from(interval) == 0
+        {
+            std::fs::write(path, serde_json::to_vec(&simulation.checkpoint()?)?)?;
+        }
         Ok(())
     })?;
     output(
         &args.output,
-        &serde_json::json!({"backend":simulation.device.name,"seconds":start.elapsed().as_secs_f64(),"snapshot":simulation.snapshot,"last_day_phases":simulation.timings,"readback_bytes":simulation.readback_bytes,"memory":simulation.memory_usage(),"memory_budget_bytes":simulation.device.memory_budget.bytes(),"memory_budget":simulation.device.memory_budget}),
+        &serde_json::json!({"backend":simulation.device.name,"startup_seconds":startup_seconds,"seconds":start.elapsed().as_secs_f64(),"snapshot":simulation.snapshot,"opening":simulation.scenario.opening_totals(),"last_day_phases":simulation.timings,"readback_bytes":simulation.readback_bytes,"memory":simulation.memory_usage(),"memory_budget_bytes":simulation.device.memory_budget.bytes(),"memory_budget":simulation.device.memory_budget}),
     )?;
     if let Some(path) = &args.checkpoint {
         std::fs::write(path, serde_json::to_vec(&simulation.checkpoint()?)?)?;
@@ -199,9 +224,9 @@ fn benchmark(scenario: Scenario, args: &Cli) -> Result<()> {
         0 => Err(anyhow!("benchmark days must be positive")),
         _ => Ok(()),
     }?;
-    let scenarios = match args.scenario {
-        Some(_) => vec![scenario],
-        None => args
+    let scenarios = match (&args.scenario, &args.restore) {
+        (Some(_), _) | (_, Some(_)) => vec![scenario],
+        (None, None) => args
             .sizes
             .iter()
             .map(|&households| {
@@ -212,15 +237,23 @@ fn benchmark(scenario: Scenario, args: &Cli) -> Result<()> {
     };
     let mut reports = Vec::new();
     for scenario in scenarios {
-        let households = scenario.config().households;
-        let estimate = scenario.memory_estimate();
-        let fingerprint = scenario.fingerprint()?;
+        let startup = Instant::now();
         let device = match args.backend {
             Backend::Cpu => Device::cpu(args.workgroup)?,
             Backend::Gpu => Device::headless(args.workgroup)?,
         };
-        let mut simulation = Simulation::new(scenario, device)?;
+        let mut simulation = match &args.restore {
+            Some(path) => {
+                Simulation::from_checkpoint(serde_json::from_slice(&std::fs::read(path)?)?, device)?
+            }
+            None => Simulation::new(scenario, device)?,
+        };
+        let startup_seconds = startup.elapsed().as_secs_f64();
+        let households = simulation.scenario.config().households;
+        let estimate = simulation.scenario.memory_estimate();
+        let fingerprint = simulation.scenario.fingerprint()?;
         (0..args.warmup).try_for_each(|_| simulation.advance())?;
+        let starting_day = simulation.snapshot.day;
         let mut daily = Vec::new();
         let start = Instant::now();
         let readback_before = simulation.readback_bytes;
@@ -239,7 +272,7 @@ fn benchmark(scenario: Scenario, args: &Cli) -> Result<()> {
         let seconds = start.elapsed().as_secs_f64();
         let readback_bytes = simulation.readback_bytes - readback_before;
         let state_hash = simulation.download()?.digest();
-        reports.push(serde_json::json!({"households":households,"firms":simulation.scenario.config().firms,"scenario":simulation.scenario.config(),"scenario_hash":fingerprint,"device":simulation.device.name,"workgroup":args.workgroup,"days":args.days,"warmup_days":args.warmup,"seconds":seconds,"days_per_second":f64::from(args.days)/seconds,"readback_bytes":readback_bytes,"final_state_hash":state_hash,"state_hash_version":STATE_HASH_VERSION,"profile":bad_econ::arithmetic::PROFILE,"policy_table_hash":bad_econ::arithmetic::table_hash(),"estimated_bytes":estimate,"memory_budget_bytes":simulation.device.memory_budget.bytes(),"memory_budget":simulation.device.memory_budget,"daily":daily,"snapshot":simulation.snapshot}));
+        reports.push(serde_json::json!({"households":households,"firms":simulation.scenario.config().firms,"scenario":simulation.scenario.config(),"scenario_hash":fingerprint,"device":simulation.device.name,"workgroup":args.workgroup,"days":args.days,"starting_day":starting_day,"warmup_days":args.warmup,"startup_seconds":startup_seconds,"seconds":seconds,"days_per_second":f64::from(args.days)/seconds,"readback_bytes":readback_bytes,"final_state_hash":state_hash,"state_hash_version":STATE_HASH_VERSION,"profile":bad_econ::arithmetic::PROFILE,"policy_table_hash":bad_econ::arithmetic::table_hash(),"estimated_bytes":estimate,"memory_budget_bytes":simulation.device.memory_budget.bytes(),"memory_budget":simulation.device.memory_budget,"daily":daily,"snapshot":simulation.snapshot}));
         output(&args.output, &serde_json::to_value(&reports)?)?;
     }
     Ok(())
