@@ -21,7 +21,7 @@ use bevy::{
     winit::{EventLoopProxyWrapper, WinitUserEvent},
 };
 use feedback::Cue;
-use model::{Chart, ChartRange, ComparisonRun, DisplayState, RunTarget};
+use model::{Chart, ComparisonRun, DisplayState, RunTarget};
 use std::{
     collections::VecDeque,
     io::Write,
@@ -65,6 +65,7 @@ enum VerificationState {
     AwaitFeedbackCapture,
     InspectHousehold,
     AwaitInspection,
+    AwaitInspectionRefresh,
     AwaitComparison,
     AwaitFirmInspection,
     Frames(u32),
@@ -84,6 +85,7 @@ struct Display {
     comparison: Option<ComparisonRun>,
     inspection: Option<Inspection>,
     firms: Vec<Actor>,
+    identities: Vec<u64>,
     status: DisplayState,
     error: Option<String>,
     seed: u64,
@@ -217,6 +219,7 @@ fn setup(
         comparison: None,
         inspection: None,
         firms: Vec::new(),
+        identities: Vec::new(),
         status: DisplayState::Initializing,
         error: None,
         seed: launch.scenario.config().seed,
@@ -289,7 +292,7 @@ fn setup(
         PanelLabel::Statistics,
         Text2d::new("Initializing..."),
         TextFont {
-            font_size: FontSize::Px(15.0),
+            font_size: FontSize::Px(12.0),
             ..Default::default()
         },
         Anchor::TOP_LEFT,
@@ -374,12 +377,24 @@ fn verify(
                         VerificationState::AwaitInspection
                     }
                     VerificationState::AwaitInspection if display.inspection.is_some() => {
+                        let _ = dashboard
+                            .sender
+                            .send(Control::command(SimulationCommand::AdvanceDay));
+                        VerificationState::AwaitInspectionRefresh
+                    }
+                    VerificationState::AwaitInspectionRefresh
+                        if display.snapshot.day == 2
+                            && display
+                                .inspection
+                                .as_ref()
+                                .is_some_and(|record| record.day == 2) =>
+                    {
                         let _ = dashboard.sender.send(Control::Compare);
                         VerificationState::AwaitComparison
                     }
                     VerificationState::AwaitComparison
                         if Some(display.seed) == launch.scenario.config().seed.checked_add(1)
-                            && display.snapshot.day == 1
+                            && display.snapshot.day == 2
                             && matches!(
                                 display.status,
                                 DisplayState::Active(RuntimeState::Paused)
@@ -468,16 +483,30 @@ fn controls(
                     .expect("first firm");
             }
             if keys.just_pressed(KeyCode::Tab) {
-                let index = launch.scenario.index_of(dashboard.selected).unwrap_or(0);
-                dashboard.selected = launch
-                    .scenario
-                    .identity((index + 1) % launch.scenario.actors())
-                    .expect("next actor");
+                let selected = {
+                    let display = dashboard.data.lock().expect("dashboard lock");
+                    let index = display
+                        .identities
+                        .iter()
+                        .position(|&identity| identity == dashboard.selected)
+                        .unwrap_or(0);
+                    display
+                        .identities
+                        .get((index + 1) % display.identities.len().max(1))
+                        .copied()
+                        .unwrap_or(dashboard.selected)
+                };
+                dashboard.selected = selected;
             }
             let inspection = [KeyCode::KeyH, KeyCode::KeyF, KeyCode::Tab]
                 .into_iter()
                 .any(|key| keys.just_pressed(key))
-                .then(|| InspectionRequest::new(dashboard.selected, &launch.scenario));
+                .then(|| {
+                    InspectionRequest::from_registry(
+                        dashboard.selected,
+                        &dashboard.data.lock().expect("dashboard lock").identities,
+                    )
+                });
             if let Some(Ok(request)) = inspection {
                 controls.push(Control::Inspect(request));
             }
@@ -520,7 +549,7 @@ fn capture_verified_frame(
             match chart {
                 Chart::Cash => {
                     eprintln!(
-                        "viewer verification passed: shared device, reset/step/comparison feedback, audited day, household and firm inspection, same-day seed comparison, all charts captured"
+                        "viewer verification passed: shared device, reset/step/comparison feedback, audited day, household and firm inspection, inspection refresh after stepping, same-day seed comparison, all charts captured"
                     );
                     verification.state = VerificationState::Complete;
                     exit.write(AppExit::Success);

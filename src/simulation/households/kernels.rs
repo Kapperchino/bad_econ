@@ -61,45 +61,18 @@ pub fn service_deficit(need: Ticks, delivered: Ticks, weight: u32) -> KernelDefi
 pub struct KernelCapacity {
     pub participation: u32,
     pub capacity_minutes: u32,
-    pub health: u32,
     pub fatigue: u32,
     pub reserved_minutes: u32,
 }
 
 #[cube]
 pub fn available_minutes(request: KernelCapacity) -> u32 {
-    let physical = request.capacity_minutes * request.health * (HOUSEHOLD_SCALE - request.fatigue)
-        / (HOUSEHOLD_SCALE * HOUSEHOLD_SCALE);
+    let physical = request.capacity_minutes * (HOUSEHOLD_SCALE - request.fatigue) / HOUSEHOLD_SCALE;
     let clock = DAY_MINUTES - min(request.reserved_minutes, DAY_MINUTES);
     select(
         request.participation == comptime!(Participation::Available as u32),
         min(physical, clock),
         0,
-    )
-}
-
-#[derive(CubeType, Clone, Copy)]
-pub struct KernelHealth {
-    pub health: u32,
-    pub fatigue: u32,
-    pub deficit: u32,
-    pub recovery: u32,
-    pub deficit_damage: u32,
-    pub fatigue_damage: u32,
-}
-
-#[cube]
-pub fn next_health(request: KernelHealth) -> u32 {
-    let scale_squared = HOUSEHOLD_SCALE * HOUSEHOLD_SCALE;
-    let recovery =
-        request.recovery * (HOUSEHOLD_SCALE - request.health) * (HOUSEHOLD_SCALE - request.deficit);
-    let damage = (request.deficit_damage * request.deficit
-        + request.fatigue_damage * request.fatigue)
-        * HOUSEHOLD_SCALE;
-    let restored = request.health * scale_squared + recovery;
-    min(
-        (max(restored, damage) - damage) / scale_squared,
-        HOUSEHOLD_SCALE,
     )
 }
 
@@ -185,17 +158,8 @@ pub fn evaluate(
         let available = available_minutes(KernelCapacity {
             participation: requests[base + RequestLayout::PARTICIPATION],
             capacity_minutes: requests[base + RequestLayout::CAPACITY],
-            health: requests[base + RequestLayout::HEALTH],
             fatigue: requests[base + RequestLayout::FATIGUE],
             reserved_minutes: requests[base + RequestLayout::RESERVED],
-        });
-        let health = next_health(KernelHealth {
-            health: requests[base + RequestLayout::HEALTH],
-            fatigue: requests[base + RequestLayout::FATIGUE],
-            deficit: lower,
-            recovery: requests[base + RequestLayout::RECOVERY],
-            deficit_damage: requests[base + RequestLayout::DEFICIT_DAMAGE],
-            fatigue_damage: requests[base + RequestLayout::FATIGUE_DAMAGE],
         });
         let fatigue = next_fatigue(KernelFatigue {
             fatigue: requests[base + RequestLayout::FATIGUE],
@@ -217,7 +181,6 @@ pub fn evaluate(
         output[target + ResultLayout::DEFICIT_LOWER] = lower;
         output[target + ResultLayout::DEFICIT_UPPER] = upper;
         output[target + ResultLayout::AVAILABLE] = available;
-        output[target + ResultLayout::HEALTH] = health;
         output[target + ResultLayout::FATIGUE] = fatigue;
     }
 }

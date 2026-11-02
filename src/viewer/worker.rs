@@ -3,7 +3,7 @@ use super::{
     ComparisonRun, Control, Display, DisplayState, Publication, RunTarget, Speed, WorkerState,
 };
 use crate::{
-    domain::Scenario,
+    domain::{InspectionRequest, Scenario},
     runtime::{RuntimeState, SimulationCommand},
     simulation::Simulation,
 };
@@ -182,22 +182,52 @@ fn publish(
     publication: Publication,
     cue: Option<Cue>,
 ) -> Result<()> {
-    let firms = match publication {
-        Publication::Restart => Some(
-            simulation
-                .actors()
-                .iter()
-                .filter(|actor| actor.kind > 0)
-                .collect(),
-        ),
-        Publication::Snapshot => None,
+    let request = match publication {
+        Publication::Restart => None,
+        Publication::Snapshot => {
+            let display = publisher.data.lock().expect("dashboard lock");
+            display
+                .inspection
+                .as_ref()
+                .filter(|inspection| inspection.day != simulation.snapshot.day)
+                .map(|inspection| {
+                    InspectionRequest::from_registry(inspection.actor.identity, &display.identities)
+                })
+                .transpose()?
+        }
     };
+    let refreshed = request
+        .map(|request| simulation.inspect(request))
+        .transpose()?;
     publisher.update(|display| {
-        if let Some(firms) = firms {
-            display.firms = firms;
-            display.map_size = simulation.scenario.config().map_size;
-            display.history.clear();
-            display.inspection = None;
+        if let Some(inspection) = refreshed {
+            display.inspection = Some(inspection);
+        }
+        display.firms = simulation
+            .actors()
+            .iter()
+            .filter(|actor| actor.kind > 0)
+            .collect();
+        match publication {
+            Publication::Restart => {
+                display.map_size = simulation.scenario.config().map_size;
+                display.history.clear();
+                display.inspection = None;
+                display.identities = simulation
+                    .actors()
+                    .iter()
+                    .map(|actor| actor.identity)
+                    .collect();
+            }
+            Publication::Snapshot => {
+                if display.identities.len() != simulation.actors().len() {
+                    display.identities = simulation
+                        .actors()
+                        .iter()
+                        .map(|actor| actor.identity)
+                        .collect();
+                }
+            }
         }
         match display.history.back().map(|s| s.day) {
             Some(day) if day == simulation.snapshot.day => (),

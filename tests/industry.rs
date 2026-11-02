@@ -17,8 +17,6 @@ fn steelworks(coal: u64) -> Result<ScenarioConfig> {
     config.forecast_weight = 0;
     config.distribution_rate = 0;
     config.behavior = BehaviorPolicy {
-        health_recovery: 0,
-        hunger_damage: 0,
         work_fatigue: 0,
         rest_recovery: 0,
         wage_increment: 0,
@@ -35,7 +33,6 @@ fn steelworks(coal: u64) -> Result<ScenarioConfig> {
                 position,
                 cash: 0,
                 inventories: Good::food([0, 0, 30]),
-                health: 1000,
                 fatigue: 0,
             })
             .collect(),
@@ -196,7 +193,7 @@ fn industrial_markets_ship_consume_and_replay_all_goods_on_gpu() -> Result<()> {
     let scenario = Scenario::industrial(64, 42, Experiment::Concentrated)?;
     let mut first = Simulation::new(scenario.clone(), support::device(32)?)?;
     let mut second = Simulation::new(scenario.clone(), support::device(64)?)?;
-    for _ in 0..4 {
+    for _ in 0..12 {
         for phase in Phase::ALL {
             assert_eq!(
                 first.phase(phase, Trace::Record)?.decisions,
@@ -280,5 +277,131 @@ fn method_changes_preserve_old_shipments_and_count_equipment_packets_on_gpu() ->
     restored.advance()?;
     restored.advance()?;
     assert_eq!(restored.download()?, expected);
+    Ok(())
+}
+
+#[test]
+fn unavailable_upgrade_inputs_leave_basic_production_available_on_gpu() -> Result<()> {
+    let mut config = steelworks(0)?;
+    config.household_production = enterprise::HouseholdProduction::industrial();
+    let firms = &mut config.population.as_mut().unwrap().firms;
+    firms[0].good = Good::Tools;
+    firms[0].inventories = [0; Good::COUNT];
+    firms[0].inventories[Good::Iron as usize - 1] = 20;
+    firms[0].inventories[Good::Wood as usize - 1] = 20;
+    firms[0].inventories[Good::Tools as usize - 1] = 1;
+    let mut lab = research_lab();
+    lab.methods = vec![ProductionMethod::MachineTools];
+    lab.discovered = Technology::Steelmaking as u32;
+    lab.mastered = Technology::Steelmaking as u32;
+    lab.adopted = Technology::Steelmaking as u32;
+    config.research = Some(ResearchConfig {
+        labs: vec![lab],
+        ..Default::default()
+    });
+    let scenario = Scenario::new(config)?;
+    let mut simulation = Simulation::new(scenario.clone(), support::device(64)?)?;
+    simulation.advance()?;
+    let state = simulation.download()?;
+    assert_eq!(state.get(Field::Steel, 6), 0);
+    assert_eq!(state.get(Field::ActiveMethod, 6), 0);
+    assert_eq!(state.get(Field::FirstInput, 6), Good::Iron as u64);
+    assert!(state.get(Field::Produced, 6) > 0);
+    assert_eq!(simulation.snapshot.cash, state.initial_cash);
+    let checkpoint = simulation.checkpoint()?;
+    let mut resumed = Simulation::new(scenario, support::device(128)?)?;
+    resumed.command(SimulationCommand::Restore(Box::new(checkpoint)))?;
+    simulation.advance()?;
+    resumed.advance()?;
+    assert_eq!(simulation.download()?, resumed.download()?);
+    Ok(())
+}
+
+#[test]
+fn scarce_upgrade_inputs_do_not_displace_a_more_productive_basic_method() -> Result<()> {
+    let mut config = steelworks(0)?;
+    config.household_production = enterprise::HouseholdProduction::industrial();
+    let firm = &mut config.population.as_mut().unwrap().firms[0];
+    firm.good = Good::Tools;
+    firm.capacity = 3;
+    firm.inventories = [0; Good::COUNT];
+    firm.inventories[Good::Iron as usize - 1] = 20;
+    firm.inventories[Good::Wood as usize - 1] = 20;
+    firm.inventories[Good::Steel as usize - 1] = 2;
+    firm.inventories[Good::Tools as usize - 1] = 1;
+    let mut lab = research_lab();
+    lab.methods = vec![ProductionMethod::MachineTools];
+    lab.discovered = Technology::Steelmaking as u32;
+    lab.mastered = Technology::Steelmaking as u32;
+    lab.adopted = Technology::Steelmaking as u32;
+    config.research = Some(ResearchConfig {
+        labs: vec![lab],
+        ..Default::default()
+    });
+    let scenario = Scenario::new(config)?;
+    let mut simulation = Simulation::new(scenario.clone(), support::device(64)?)?;
+    simulation.advance()?;
+    let state = simulation.download()?;
+    assert_eq!(state.get(Field::ActiveMethod, 6), 0);
+    assert_eq!(state.get(Field::Steel, 6), 2);
+    assert_eq!(state.get(Field::Produced, 6), 9);
+    assert_eq!(
+        simulation.snapshot,
+        ObservationSnapshot::from_state(&scenario, &state)?
+    );
+    Ok(())
+}
+
+#[test]
+fn tools_required_by_an_upgrade_are_replenished_beyond_the_maintenance_reserve() -> Result<()> {
+    let mut config = steelworks(0)?;
+    config.household_production = enterprise::HouseholdProduction::industrial();
+    config.resources = ResourceMap::Explicit {
+        regions: vec![ResourceRegion::new(
+            Good::Grain,
+            Position { x: 0, y: 0 },
+            Position { x: 100, y: 100 },
+            config.map_size,
+        )?],
+    };
+    let firms = &mut config.population.as_mut().unwrap().firms;
+    firms[0].good = Good::Grain;
+    firms[0].capacity = 3;
+    firms[0].technique = Technique::new(60, 0, 20)?;
+    firms[0].inventories = [0; Good::COUNT];
+    firms[0].inventories[Good::Tools as usize - 1] = 2;
+    firms[1].good = Good::Tools;
+    firms[1].technique = Technique::new(60, 1, 3)?;
+    firms[1].inventories[Good::Tools as usize - 1] = 200;
+    firms[1].price = 10;
+    let mut lab = research_lab();
+    lab.methods = vec![ProductionMethod::MechanicalHarvesting];
+    lab.discovered = Technology::Mechanization as u32;
+    lab.mastered = Technology::Mechanization as u32;
+    lab.adopted = Technology::Mechanization as u32;
+    lab.permitted = Technology::Mechanization as u32;
+    lab.projects.clear();
+    config.research = Some(ResearchConfig {
+        labs: vec![lab],
+        ..Default::default()
+    });
+    let scenario = Scenario::new(config)?;
+    let mut simulation = Simulation::new(scenario.clone(), support::device(64)?)?;
+    simulation.advance()?;
+    let ordered = simulation.download()?;
+    let tools_in_transit =
+        ordered.values[(TRANSIT_FIELDS + Good::Tools as usize - 1) * ordered.actors.len() + 6];
+    assert!(tools_in_transit > 2);
+    simulation.advance()?;
+    let replenished = simulation.download()?;
+    assert_eq!(
+        replenished.get(Field::ActiveMethod, 6),
+        ProductionMethod::MechanicalHarvesting as u64
+    );
+    assert!(replenished.get(Field::Produced, 6) > ordered.get(Field::Produced, 6));
+    assert_eq!(
+        simulation.snapshot,
+        ObservationSnapshot::from_state(&scenario, &replenished)?
+    );
     Ok(())
 }

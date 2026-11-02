@@ -62,6 +62,141 @@ fn gpu_memory_budget_survives_restore_and_faults_on_excess_usage() -> Result<()>
     Ok(())
 }
 
+#[test]
+fn released_large_gpu_buffers_do_not_cause_a_false_capacity_fault() -> Result<()> {
+    let scenario = Scenario::industrial(48, 42, Experiment::Baseline)?;
+    let mut constrained = Simulation::new(scenario, Device::headless(64)?)?;
+    constrained.advance()?;
+    let mut reference =
+        Simulation::from_checkpoint(constrained.checkpoint()?, Device::headless(128)?)?;
+    let before = constrained.memory_usage().bytes_reserved;
+    let spare = constrained
+        .device
+        .empty((before as usize + 64 * 1024 * 1024) / size_of::<u32>());
+    constrained.device.sync()?;
+    let inflated = constrained.memory_usage().bytes_reserved;
+    drop(spare);
+    let budget = before + 32 * 1024 * 1024;
+    assert!(inflated > budget);
+    constrained.device.memory_budget = MemoryBudget::Reported {
+        available_bytes: budget * 2,
+    };
+    for _ in 0..5 {
+        constrained.advance()?;
+        reference.advance()?;
+        assert!(constrained.memory_usage().bytes_reserved <= budget);
+        assert_eq!(constrained.download()?, reference.download()?);
+    }
+    Ok(())
+}
+
+#[test]
+fn growing_gpu_readbacks_preserve_ranges_and_bound_cached_staging() -> Result<()> {
+    let device = Device::headless(64)?;
+    let before = device
+        .client
+        .memory_report(cubecl::MemoryScope::Device)
+        .usage();
+    for generation in 0..24usize {
+        let count = 4 * 1024 * 1024 + generation * 101 + 17;
+        let expected = (0..count)
+            .map(|index| index as u32 ^ 0x923a5ce1)
+            .collect::<Vec<_>>();
+        let buffer = device.tensor(&expected);
+        assert_eq!(device.read(&buffer)?, expected);
+        for (start, length) in [(13, count - 37), (count - 1027, 1027), (count, 0)] {
+            assert_eq!(
+                device.read_range(&buffer, start, length)?,
+                expected[start..start + length]
+            );
+        }
+    }
+    device.sync()?;
+    device.client.memory_cleanup()?;
+    let after = device
+        .client
+        .memory_report(cubecl::MemoryScope::Device)
+        .usage();
+    assert!(
+        after.bytes_reserved <= before.bytes_reserved + 96 * 1024 * 1024,
+        "{after:?}"
+    );
+    Ok(())
+}
+
+#[test]
+fn scarce_work_is_accessible_beyond_the_first_identity_block() -> Result<()> {
+    let mut config = Scenario::baseline(1000, 42, Experiment::Concentrated)?
+        .config()
+        .clone();
+    config.firms = 3;
+    config.distribution_rate = 0;
+    config.forecast_weight = 0;
+    config.demography.annual_births_per_million_fertile_women = 0;
+    config.demography.mortality.background_annual_ppm = [0; 5];
+    config.demography.mortality.occupational_annual_ppm = [0; Good::COUNT];
+    config.demography.mortality.famine_daily_ppm_at_thirty_days = 0;
+    config.resources = ResourceMap::Explicit {
+        regions: vec![ResourceRegion::new(
+            Good::Grain,
+            Position { x: 0, y: 0 },
+            Position { x: 1000, y: 1000 },
+            1000,
+        )?],
+    };
+    config.population = Some(Population {
+        households: (1..=1000)
+            .map(|identity| HouseholdSeed {
+                identity,
+                position: Position { x: 500, y: 500 },
+                cash: 0,
+                inventories: [0; Good::COUNT],
+                fatigue: 0,
+            })
+            .collect(),
+        firms: (1001..=1003)
+            .map(|identity| FirmSeed {
+                identity,
+                position: Position { x: 500, y: 500 },
+                owner: 1,
+                good: Good::Grain,
+                cash: if identity == 1001 { 1_000_000 } else { 0 },
+                inventories: [0; Good::COUNT],
+                capacity: 25,
+                technique: Technique {
+                    labor_minutes: 60,
+                    input_ticks: 0,
+                    output_ticks: 1,
+                },
+                wage: 1,
+                price: 1,
+            })
+            .collect(),
+    });
+    let scenario = Scenario::new(config)?;
+    let mut state = scenario.initial()?;
+    state.set(Field::Demand, 1000, 1000);
+    let checkpoint = Checkpoint::new(&scenario, &state)?;
+    let mut simulation = Simulation::from_checkpoint(checkpoint.clone(), Device::headless(64)?)?;
+    let mut replay = Simulation::from_checkpoint(checkpoint, Device::headless(128)?)?;
+    let mut worked = vec![0; 1000];
+    for _ in 0..24 {
+        simulation.advance()?;
+        replay.advance()?;
+        let state = simulation.download()?;
+        assert_eq!(state, replay.download()?);
+        assert_eq!(simulation.snapshot.employed, 25);
+        for (index, days) in worked.iter_mut().enumerate() {
+            *days += state.get(Field::Employed, index);
+        }
+    }
+    assert!(worked.iter().filter(|&&days| days > 0).count() > 200);
+    assert!(worked[750..].iter().any(|&days| days > 0));
+    assert_eq!(worked.iter().sum::<u64>(), 24 * 25);
+    simulation.checkpoint()?.restore()?;
+    Ok(())
+}
+
 fn event(identity: u64, legs: &[Leg]) -> Bundle {
     Bundle::new(
         EventKey {
