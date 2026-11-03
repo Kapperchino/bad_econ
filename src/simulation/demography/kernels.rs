@@ -604,3 +604,33 @@ pub(super) fn grow(
         }
     }
 }
+
+#[cube(launch)]
+pub(super) fn birth_prefix(births: &[u32], scratch: &mut [u32]) {
+    let actor = ABSOLUTE_POS;
+    let mut present = 0u32;
+    if actor < births.len() {
+        present = u32::cast_from(births[actor] > 0);
+    }
+    let prefix = crate::simulation::parallel::prefix_sum(present);
+    if actor < births.len() {
+        scratch[actor] = prefix.inclusive;
+    }
+    if UNIT_POS == 0 {
+        scratch[births.len() + CUBE_POS] = prefix.total;
+    }
+}
+
+#[cube(launch)]
+pub(super) fn birth_ranges(old: &[u32], births: &[u32], scratch: &[u32], ranges: &mut [u32]) {
+    let actor = ABSOLUTE_POS;
+    if actor < births.len() {
+        let birth = u32::cast_from(births[actor] > 0);
+        let mut offset = scratch[actor] - birth;
+        if CUBE_POS > 0 {
+            offset += scratch[births.len() + CUBE_POS - 1];
+        }
+        ranges[actor * 2] = old[actor * 2] + offset;
+        ranges[actor * 2 + 1] = old[actor * 2 + 1] + birth;
+    }
+}

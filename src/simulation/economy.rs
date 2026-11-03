@@ -6,6 +6,7 @@ use super::{
     },
     households::{KernelFatigue, KernelObservation, ObservationKind, next_fatigue, observed_blend},
     layout::*,
+    markets::{self, LATCH_WORD, RANGES_WORD},
     negotiation::{NegotiationRequest, NegotiationStatus, legal_grid_rate, negotiate},
     parallel::{self, Reduction},
     parameters::{Discovery, EconomyParameters},
@@ -23,9 +24,11 @@ use crate::{
     ledger::{AuthorizationFlags, EMPTY, LEG_WORDS, LegLayout, MAX_LEGS},
 };
 use cubecl::prelude::*;
+pub(super) mod audit;
 mod clearing;
 pub(super) mod enterprises;
 mod household_production;
+pub(super) mod search;
 use super::scheduler::Posting;
 use clearing::{PeerBalances, PeerOffer, actor_settlement};
 
@@ -541,8 +544,7 @@ fn propose(
     if invocation < config.actors {
         let market = comptime!(parameters.market);
         let mut id = invocation;
-        if comptime!(market == MarketFlag::Household && parameters.discovery == Discovery::Indexed)
-        {
+        if comptime!(market == MarketFlag::Household && parameters.discovery.indexed()) {
             let cells = config.spatial_side * config.spatial_side;
             let base =
                 3 * (cells + 1 + config.actors) + ceildiv(config.actors, DISCOVERY_BLOCK) + 1;
@@ -787,8 +789,7 @@ fn propose(
                         let rotated = begin + (j - begin + parameters.day + id) % max(length, 1);
                         let mut skipped = 0u32;
                         if comptime!(
-                            market.good() == Some(Good::Bread)
-                                && parameters.discovery == Discovery::Indexed
+                            market.good() == Some(Good::Bread) && parameters.discovery.indexed()
                         ) {
                             let block = rotated / DISCOVERY_BLOCK;
                             let base = 3 * (side * side + 1 + config.actors);
@@ -1930,6 +1931,14 @@ pub enum EconomyStage {
     GroupExecute,
     GroupPrepare,
     GroupFinalize,
+    MarketStart,
+    MarketBoundary,
+    GroupRanges,
+    GroupCompactCount,
+    GroupCompactFill,
+    GroupRadixLocal,
+    GroupRadixScatter,
+    SearchPrepare,
 }
 
 #[cube(launch)]
@@ -1945,82 +1954,131 @@ pub fn economy(
     #[comptime] stage: EconomyStage,
 ) {
     let id = ABSOLUTE_POS as u32;
-    match stage {
-        EconomyStage::ClearFeedback => {
-            if id < control.len() as u32 {
-                control[id as usize].store(0);
+    let guarded = comptime!(
+        parameters.discovery == Discovery::Indexed
+            && matches!(
+                stage,
+                EconomyStage::IndexCount
+                    | EconomyStage::IndexOffsets
+                    | EconomyStage::IndexFill
+                    | EconomyStage::IndexPrices
+                    | EconomyStage::Propose
+                    | EconomyStage::GroupInitialize
+                    | EconomyStage::GroupPrepare
+                    | EconomyStage::GroupSort
+                    | EconomyStage::GroupMerge
+                    | EconomyStage::GroupRanges
+                    | EconomyStage::SearchPrepare
+                    | EconomyStage::GroupCompactCount
+                    | EconomyStage::GroupCompactFill
+                    | EconomyStage::GroupRadixLocal
+                    | EconomyStage::GroupRadixScatter
+                    | EconomyStage::GroupExecute
+                    | EconomyStage::GroupFinalize
+            )
+    );
+    if !guarded || control[LATCH_WORD].load() == 0 {
+        match stage {
+            EconomyStage::MarketStart | EconomyStage::MarketBoundary => {
+                if id == 0 {
+                    control[LATCH_WORD].store(control[crate::simulation::flags::FAULT_WORD].load());
+                    if comptime!(stage == EconomyStage::MarketStart) {
+                        control[CONSTRUCTED_EVENTS_WORD].store(0);
+                        control[RANGES_WORD].store(0);
+                        control[markets::SEARCHES_WORD].store(0);
+                    }
+                }
             }
-        }
-        EconomyStage::RecordFeedback => {
-            record_feedback(state, config, proposals, bundles, control, parameters, id)
-        }
-        EconomyStage::ApplyFeedback => apply_feedback(state, config, control, id),
-        EconomyStage::IndexCount => {
-            index_count(state, actors, config, spatial, bundles, parameters, id)
-        }
-        EconomyStage::IndexOffsets => index_offsets(config, spatial, bundles, parameters, id),
-        EconomyStage::IndexFill => index_fill(config, spatial, bundles, parameters, id),
-        EconomyStage::IndexPrices => index_prices(state, config, spatial),
-        EconomyStage::Local => local(state, actors, config, control, parameters, id),
-        EconomyStage::Propose => propose(
-            state, actors, config, spatial, proposals, control, parameters, id,
-        ),
-        EconomyStage::MarketActivity => {
-            let mut active = 0u32;
-            if id < config.actors {
-                active = u32::cast_from(
-                    proposals[id as usize * ProposalLayout::WORDS + ProposalLayout::ACTOR]
-                        != NO_ACTOR,
-                );
+            EconomyStage::SearchPrepare => search::prepare(
+                state, actors, config, spatial, proposals, control, bundles, parameters, id,
+            ),
+            EconomyStage::GroupCompactCount => {
+                markets::compact_count(proposals, bundles, parameters, id)
             }
-            let total = parallel::reduce(active, comptime!(Reduction::Sum));
-            if UNIT_POS == 0 && total != 0 {
-                control[CONSTRUCTED_EVENTS_WORD].fetch_add(total);
+            EconomyStage::GroupCompactFill => {
+                markets::compact_fill(proposals, bundles, control, parameters, id)
             }
+            EconomyStage::GroupRadixLocal => markets::radix_local(bundles, control, parameters, id),
+            EconomyStage::GroupRadixScatter => {
+                markets::radix_scatter(bundles, control, parameters, id)
+            }
+            EconomyStage::GroupRanges => markets::ranges(bundles, control, parameters, id),
+            EconomyStage::ClearFeedback => {
+                if id < control.len() as u32 {
+                    control[id as usize].store(0);
+                }
+            }
+            EconomyStage::RecordFeedback => {
+                record_feedback(state, config, proposals, bundles, control, parameters, id)
+            }
+            EconomyStage::ApplyFeedback => apply_feedback(state, config, control, id),
+            EconomyStage::IndexCount => {
+                index_count(state, actors, config, spatial, bundles, parameters, id)
+            }
+            EconomyStage::IndexOffsets => index_offsets(config, spatial, bundles, parameters, id),
+            EconomyStage::IndexFill => index_fill(config, spatial, bundles, parameters, id),
+            EconomyStage::IndexPrices => index_prices(state, config, spatial),
+            EconomyStage::Local => local(state, actors, config, control, parameters, id),
+            EconomyStage::Propose => propose(
+                state, actors, config, spatial, proposals, control, parameters, id,
+            ),
+            EconomyStage::MarketActivity => {
+                let mut active = 0u32;
+                if id < config.actors {
+                    active = u32::cast_from(
+                        proposals[id as usize * ProposalLayout::WORDS + ProposalLayout::ACTOR]
+                            != NO_ACTOR,
+                    );
+                }
+                let total = parallel::reduce(active, comptime!(Reduction::Sum));
+                if UNIT_POS == 0 && total != 0 {
+                    control[CONSTRUCTED_EVENTS_WORD].fetch_add(total);
+                }
+            }
+            EconomyStage::Construct => construct(
+                state,
+                actors,
+                config,
+                proposals,
+                bundles,
+                control,
+                parameters,
+                id,
+                comptime!(EventStorage::Buffer),
+            ),
+            EconomyStage::GroupInitialize => {
+                group_initialize(proposals, bundles, control, parameters, id)
+            }
+            EconomyStage::GroupSort => group_sort(bundles, control, parameters, id),
+            EconomyStage::GroupMerge => group_merge(bundles, control, parameters, id),
+            EconomyStage::GroupExecute => group_execute(
+                state, actors, config, proposals, bundles, control, parameters, id,
+            ),
+            EconomyStage::GroupPrepare => actor_settlement(
+                state,
+                actors,
+                config,
+                proposals,
+                bundles,
+                control,
+                parameters,
+                id,
+                comptime!(Posting::CheckActor),
+            ),
+            EconomyStage::GroupFinalize => actor_settlement(
+                state,
+                actors,
+                config,
+                proposals,
+                bundles,
+                control,
+                parameters,
+                id,
+                comptime!(Posting::ApplyActor),
+            ),
+            EconomyStage::Summarize => summarize(state, actors, config, bundles, control, id),
+            EconomyStage::Inspect => inspect(state, config, proposals, parameters, id),
         }
-        EconomyStage::Construct => construct(
-            state,
-            actors,
-            config,
-            proposals,
-            bundles,
-            control,
-            parameters,
-            id,
-            comptime!(EventStorage::Buffer),
-        ),
-        EconomyStage::GroupInitialize => {
-            group_initialize(proposals, bundles, control, parameters, id)
-        }
-        EconomyStage::GroupSort => group_sort(bundles, parameters, id),
-        EconomyStage::GroupMerge => group_merge(bundles, parameters, id),
-        EconomyStage::GroupExecute => group_execute(
-            state, actors, config, proposals, bundles, control, parameters, id,
-        ),
-        EconomyStage::GroupPrepare => actor_settlement(
-            state,
-            actors,
-            config,
-            proposals,
-            bundles,
-            control,
-            parameters,
-            id,
-            comptime!(Posting::CheckActor),
-        ),
-        EconomyStage::GroupFinalize => actor_settlement(
-            state,
-            actors,
-            config,
-            proposals,
-            bundles,
-            control,
-            parameters,
-            id,
-            comptime!(Posting::ApplyActor),
-        ),
-        EconomyStage::Summarize => summarize(state, actors, config, bundles, control, id),
-        EconomyStage::Inspect => inspect(state, config, proposals, parameters, id),
     }
 }
 
@@ -2094,9 +2152,14 @@ fn group_initialize(
 }
 
 #[cube]
-fn group_sort(scratch: &mut [u32], parameters: &EconomyParameters, id: u32) {
+fn group_sort(
+    scratch: &mut [u32],
+    control: &[Atomic<u32>],
+    parameters: &EconomyParameters,
+    id: u32,
+) {
     let count = parameters.count;
-    let active = parameters.sort_count;
+    let active = markets::active(control, parameters);
     let lane = UNIT_POS as usize;
     let mut keys = Shared::<[u32]>::new_slice(256usize);
     let mut items = Shared::<[u32]>::new_slice(256usize);
@@ -2140,9 +2203,14 @@ fn group_sort(scratch: &mut [u32], parameters: &EconomyParameters, id: u32) {
 }
 
 #[cube]
-fn group_merge(scratch: &mut [u32], parameters: &EconomyParameters, id: u32) {
+fn group_merge(
+    scratch: &mut [u32],
+    control: &[Atomic<u32>],
+    parameters: &EconomyParameters,
+    id: u32,
+) {
     let count = parameters.count;
-    let active = parameters.sort_count;
+    let active = markets::active(control, parameters);
     if id < active {
         let width = parameters.sort_width;
         let source = parameters.sort_source;
@@ -2186,7 +2254,15 @@ fn group_execute(
     id: u32,
 ) {
     let count = parameters.count;
-    let active_count = parameters.sort_count;
+    let active_count = markets::active(control, parameters);
+    let mut invocation = id;
+    if comptime!(parameters.discovery == Discovery::Indexed) {
+        invocation = active_count;
+        if id < control[RANGES_WORD].load() {
+            invocation = scratch[(5 * count + id) as usize];
+        }
+    }
+    let id = invocation;
     if id < active_count {
         let source = parameters.sort_source;
         let key = scratch[(source + id) as usize];
@@ -2263,7 +2339,7 @@ fn index_count(
         let firm = spatial[(segment + cells + 1 + member) as usize];
         eligible = u32::cast_from(discoverable(state, actors, config, parameters, firm));
     }
-    let prefix = parallel::prefix_sum(eligible);
+    let prefix = parallel::scan_prefix(eligible, comptime!(parameters.scan));
     if member < config.actors {
         scratch[member as usize] = prefix.inclusive;
     }
@@ -2379,7 +2455,7 @@ fn record_feedback(
     parameters: &EconomyParameters,
     id: u32,
 ) {
-    if id < parameters.count {
+    if id < parameters.count && feedback[CONSTRUCTED_EVENTS_WORD].load() == 0 {
         let status = KernelEventStatus::load(outcomes, parameters.status_start + id);
         if status.contains(comptime!(EventStatus::Rejected)) {
             let actor = parameters.offset + id;

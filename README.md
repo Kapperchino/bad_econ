@@ -91,7 +91,7 @@ To enable an upgrade in a custom scenario, add its enum name to the owning resea
 ## Code
 
 - [Domain](src/domain.rs): scenario validation, populations, state, checkpoints, and observations.
-- [Simulation](src/simulation/): GPU/CPU kernels and phase orchestration. Markets group offers by counterparty and identity; spatial membership is rebuilt after migration or entry, while eligibility refreshes each round.
+- [Simulation](src/simulation/): GPU/CPU kernels and phase orchestration. Markets keep phase counters on the GPU, stably sort seeded offers by counterparty, and search candidates in cooperative tiles. Capacity changes preserve spatial membership; migration and entry rebuild it. Tiled integer audits retain overflow checks and audited rollback copies.
 - [Ledger](src/ledger.rs) and [arithmetic](src/arithmetic.rs): canonical transactions and exact arithmetic contracts.
 - [Analytics](src/simulation/analytics.rs): approximate f32 accounts from explicitly supplied analytical inputs, using CubeK batched matrix multiplication and reductions.
 - [Viewer](src/viewer.rs): Bevy controls, inspection, and visualization.
@@ -128,3 +128,5 @@ cargo run --release -- benchmark --restore /tmp/economy.checkpoint.json --warmup
 ```
 
 Compute tests run exclusively on GPU and compare phase states across workgroups, the original transaction scheduler, and independent integer oracles. Analytics checks use independent f64 references and f32 tolerances, including one tick for report rounding. The test helper always selects the GPU. Benchmarks record daily timings, event counts, memory, readback volume, and state hashes. Startup and checkpoint restoration are reported separately. A restored benchmark measures that checkpoint's economy; its starting day follows the requested warmup. The final state download is outside the timed interval.
+
+The [M5 Pro optimization measurements](benchmarks/gpu-speedup.json) compare three release runs per revision using seed 42, workgroup 64, two warmup days, and 60 measured days. Median time at one million households improved from 785 to 687 ms/day (1.14×); 10k and 100k improved 1.58× and 1.63×. Final hashes match and all runs fit their memory budgets. The 10× target was not reached. Goods matching and audit/registry work remain the largest costs. Single-run, ten-day ablations favored the original merge/sparse settlement over packed radix settlement; the report includes those results separately from acceptance measurements.

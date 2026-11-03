@@ -1,5 +1,6 @@
 use crate::simulation::configuration::{Configuration, EconomyConfig};
 pub(super) mod entries;
+pub(super) mod records;
 use super::{Device, layout::ActorLayout as A, words::*};
 use crate::domain::{ActorRows, Field, Position, Scenario, State};
 use anyhow::{Context, Result};
@@ -30,7 +31,20 @@ impl MigrationRegistry {
     }
 }
 
+#[derive(Clone, Copy)]
+pub(super) enum RegistryTransition {
+    Unchanged,
+    Capacity,
+    Migration,
+}
+
+pub(super) struct RegistryBuffers {
+    pub actors: CubeTensor,
+    pub spatial: CubeTensor,
+}
+
 pub(super) struct RegistryPlan {
+    pub transition: RegistryTransition,
     pub actors: Option<ActorRows>,
     pub migrations: MigrationRegistry,
 }
@@ -99,7 +113,16 @@ impl RegistryPlan {
                         _ => (),
                     }
                 }
+                let transition = match (
+                    requests.iter().any(|action| action >> 24 == 3),
+                    requests.iter().any(|action| action >> 24 == 6),
+                ) {
+                    (true, _) => RegistryTransition::Migration,
+                    (_, true) => RegistryTransition::Capacity,
+                    _ => RegistryTransition::Unchanged,
+                };
                 Ok(Some(Self {
+                    transition,
                     actors,
                     migrations: next,
                 }))
@@ -252,5 +275,38 @@ pub(super) fn apply(
             day,
             stage,
         );
+    }
+}
+
+pub(super) fn patch_capacity(
+    device: &Device,
+    actors: &CubeTensor,
+    requests: &CubeTensor,
+) -> CubeTensor {
+    let output = device.empty(actors.meta.num_elements());
+    capacity_rows::launch(
+        &device.client,
+        device.count(actors.meta.num_elements()),
+        CubeDim::new_1d(device.workgroup),
+        actors.clone().into_buffer_arg(),
+        requests.clone().into_buffer_arg(),
+        output.clone().into_buffer_arg(),
+    );
+    output
+}
+
+#[cube(launch)]
+fn capacity_rows(actors: &[u32], requests: &[u32], output: &mut [u32]) {
+    let index = ABSOLUTE_POS;
+    if index < actors.len() {
+        let count = requests.len();
+        let action = requests[index % count];
+        let mut value = actors[index];
+        let capacity = index / count == A::CAPACITY;
+        let geographic = index / count == A::GEOGRAPHIC_CAPACITY && value > 0;
+        if (capacity || geographic) && action >> 24 == 6 {
+            value += action & 0x00ffffff;
+        }
+        output[index] = value;
     }
 }

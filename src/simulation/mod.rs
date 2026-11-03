@@ -10,6 +10,7 @@ mod flags;
 pub mod households;
 mod layout;
 mod management;
+mod markets;
 mod memory;
 pub mod negotiation;
 mod ops;
@@ -54,7 +55,16 @@ const MILLISECONDS_PER_SECOND: f64 = 1000.0;
 enum MarketExecution {
     Grouped,
     #[cfg(test)]
+    Original,
+    #[cfg(test)]
     Reference,
+}
+
+#[cfg(test)]
+#[derive(Clone, Copy)]
+enum AuditExecution {
+    Tiled,
+    Original,
 }
 
 #[cfg(test)]
@@ -92,11 +102,15 @@ pub struct Simulation {
     proposals: CubeTensor,
     events: CubeTensor,
     scratch: CubeTensor,
+    searches: markets::SearchBuffers,
     #[cfg(test)]
     links: CubeTensor,
     market_execution: MarketExecution,
     control: CubeTensor,
     summary: CubeTensor,
+    audit: economy::audit::AuditBuffers,
+    #[cfg(test)]
+    audit_execution: AuditExecution,
     feedback: CubeTensor,
     finance: Option<finance::FinanceRuntime>,
     research: Option<research::ResearchRuntime>,
@@ -140,7 +154,7 @@ impl Simulation {
         let required = scenario.memory_estimate().max(
             initial.values.len() as u64 * 24
                 + initial.people.len() as u64 * 144
-                + initial.actors.len() as u64 * 96,
+                + initial.actors.len() as u64 * 160,
         );
         match required <= device.memory_budget.bytes() {
             true => Ok(()),
@@ -209,16 +223,19 @@ impl Simulation {
         initial.research = None;
         initial.people.clear();
         initial.people.shrink_to_fit();
-        let event_words = initial
-            .actors
-            .len()
-            .div_ceil(SummaryLayout::ACTORS_PER_GROUP as usize)
-            * SummaryLayout::WORDS;
-        let scratch_words = initial.actors.len() * 5;
+        let event_words =
+            initial.actors.len().div_ceil(economy::audit::TILE_ACTORS) * SummaryLayout::WORDS;
+        let scratch_words = markets::scratch_words(initial.actors.len());
         #[cfg(test)]
         let batch = (scenario.config().batch_size as usize).min(initial.actors.len());
         #[cfg(test)]
-        let event_words = event_words.max(batch * EVENT_WORDS);
+        let event_words = event_words.max(batch * EVENT_WORDS).max(
+            initial
+                .actors
+                .len()
+                .div_ceil(SummaryLayout::ACTORS_PER_GROUP as usize)
+                * SummaryLayout::WORDS,
+        );
         #[cfg(test)]
         let scratch_words = scratch_words.max(batch * ScratchLayout::WORDS_PER_EVENT);
         let events = device.empty(event_words);
@@ -239,6 +256,8 @@ impl Simulation {
         };
         let enterprise_requests = device.tensor(&vec![0; initial.actors.len()]);
         let day = initial.day;
+        let audit = economy::audit::AuditBuffers::new(&device);
+        let searches = markets::SearchBuffers::new(&device, initial.actors.len());
         let mut simulation = Self {
             scenario,
             device,
@@ -258,11 +277,15 @@ impl Simulation {
             proposals,
             events,
             scratch,
+            searches,
             #[cfg(test)]
             links,
             market_execution: MarketExecution::Grouped,
             control,
             summary,
+            audit,
+            #[cfg(test)]
+            audit_execution: AuditExecution::Tiled,
             feedback,
             finance,
             research,
@@ -304,6 +327,7 @@ impl Simulation {
             }
         }
         Ok(EconomyParameters {
+            scan: parallel::ScanMode::new(&self.device),
             day,
             settlement_rotation: (crate::arithmetic::DrawKey {
                 seed: self.scenario.config().seed,
@@ -320,6 +344,8 @@ impl Simulation {
             market: market.into(),
             discovery: match self.market_execution {
                 MarketExecution::Grouped => Discovery::Indexed,
+                #[cfg(test)]
+                MarketExecution::Original => Discovery::Original,
                 #[cfg(test)]
                 MarketExecution::Reference => Discovery::Linear,
             },
@@ -426,6 +452,10 @@ impl Simulation {
                 .assign(&self.device, &self.state, &self.config, self.day as u32);
         }
         let mut evidence = PhaseEvidence::default();
+        self.device.write(
+            &self.control,
+            bytemuck::cast_slice(&[ObservationControlLayout::zeroed()]),
+        );
         if let Some(research) = &self.research {
             research.before_phase(&self.device, &self.state, phase, self.day)?;
         }
@@ -457,12 +487,16 @@ impl Simulation {
             }
         }
         match phase {
-            Phase::Commitment => (0..MATCHING_ROUNDS).try_for_each(|round| {
-                self.matching_round = round;
-                self.market(Market::Labor, phase, trace, &mut evidence)
-            }),
+            Phase::Commitment => {
+                (0..MATCHING_ROUNDS).try_for_each(|round| {
+                    self.matching_round = round;
+                    self.market(Market::Labor, phase, trace, &mut evidence)
+                })?;
+                self.market_result(&mut evidence)
+            }
             Phase::WorkPayment => {
                 self.market(Market::Payroll, phase, trace, &mut evidence)?;
+                self.market_result(&mut evidence)?;
                 self.local(phase)
             }
             Phase::ProvisionPurchase => {
@@ -475,6 +509,7 @@ impl Simulation {
                             self.market(market, phase, trace, &mut evidence)
                         })
                     })?;
+                self.market_result(&mut evidence)?;
                 self.apply_feedback()
             }
             Phase::AccountsDecisions => {
@@ -483,7 +518,10 @@ impl Simulation {
                     Some(ownership) => {
                         ownership.distribute(&self.device, &self.state, &self.config)
                     }
-                    None => self.market(Market::Distribution, phase, trace, &mut evidence),
+                    None => {
+                        self.market(Market::Distribution, phase, trace, &mut evidence)?;
+                        self.market_result(&mut evidence)
+                    }
                 }
             }
             Phase::Audit => {
@@ -513,6 +551,29 @@ impl Simulation {
         self.account_research_readbacks();
         Ok(evidence)
     }
+    fn grow_births(&self, births: &[u32]) -> Result<demography::DemographyRuntime> {
+        #[cfg(test)]
+        let grown = match self.registry_execution {
+            RegistryExecution::Reference => {
+                self.demography
+                    .reference_births(&self.device, births, self.metadata.next_identity)
+            }
+            RegistryExecution::Gpu => self.demography.grow_births(
+                &self.device,
+                births,
+                self.metadata.next_identity,
+                &self.scratch,
+            ),
+        };
+        #[cfg(not(test))]
+        let grown = self.demography.grow_births(
+            &self.device,
+            births,
+            self.metadata.next_identity,
+            &self.scratch,
+        );
+        grown
+    }
     fn commit_enterprises(&mut self) -> Result<()> {
         enterprise::propose(
             &self.device,
@@ -523,9 +584,25 @@ impl Simulation {
             &self.enterprise_requests,
             self.day as u32,
         );
-        let requests = self.device.read(&self.enterprise_requests)?;
-        let births = self.demography.pending_births(&self.device)?;
-        self.readback_bytes += ((requests.len() + births.len()) * WORD_BYTES) as u64;
+        let pending = registry::records::PendingRecords::read(
+            &self.device,
+            &self.enterprise_requests,
+            self.demography.birth_buffer(),
+            &self.scratch,
+            &self.searches.requests,
+        )?;
+        self.readback_bytes += pending.readback_bytes;
+        let mut requests = vec![0; self.metadata.actors.len()];
+        let mut births = vec![0; self.metadata.actors.len()];
+        for record in pending.records {
+            requests[record.actor as usize] = record.request;
+            births[record.actor as usize] = record.birth;
+        }
+        #[cfg(test)]
+        if let RegistryExecution::Reference = self.registry_execution {
+            requests = self.device.read(&self.enterprise_requests)?;
+            births = self.device.read(self.demography.birth_buffer())?;
+        }
         let count = requests.iter().filter(|&&action| action > 0).count();
         let newborns = births.iter().filter(|&&birth| birth > 0).count();
         if count == 0 && newborns > 0 {
@@ -534,9 +611,7 @@ impl Simulation {
                 .next_identity
                 .checked_add(newborns as u64)
                 .context("identity capacity exhausted")?;
-            let grown =
-                self.demography
-                    .grow_births(&self.device, &births, self.metadata.next_identity)?;
+            let grown = self.grow_births(&births)?;
             let population = grown.observation(&self.device)?;
             self.device.reclaim_memory(0)?;
             match self.memory_usage().bytes_reserved <= self.device.memory_budget.bytes() {
@@ -647,7 +722,7 @@ impl Simulation {
             next_identity,
         )?;
         let count = batch.metadata.actors.len();
-        let additional = count as u64 * self.scenario.fields() as u64 * 16 + count as u64 * 128;
+        let additional = count as u64 * self.scenario.fields() as u64 * 16 + count as u64 * 192;
         self.device.reclaim_memory(additional)?;
         match self
             .memory_usage()
@@ -683,9 +758,7 @@ impl Simulation {
             .tensor(&SpatialIndex::new(&self.scenario, &metadata).words);
         let mut demography = match newborns {
             0 => self.demography.clone(),
-            _ => self
-                .demography
-                .grow_births(&self.device, births, self.metadata.next_identity)?,
+            _ => self.grow_births(births)?,
         };
         demography.extend_firms(&self.device, count);
         let research = self
@@ -696,15 +769,16 @@ impl Simulation {
         let mut transitions = entries.transitions.clone();
         transitions.resize(count, 0);
         let enterprise_requests = self.device.tensor(&transitions);
-        let scratch_words = count * 5;
-        let event_words =
-            count.div_ceil(SummaryLayout::ACTORS_PER_GROUP as usize) * SummaryLayout::WORDS;
+        let scratch_words = markets::scratch_words(count);
+        let event_words = count.div_ceil(economy::audit::TILE_ACTORS) * SummaryLayout::WORDS;
         #[cfg(test)]
         let batch_size = (self.scenario.config().batch_size as usize).min(count);
         #[cfg(test)]
         let scratch_words = scratch_words.max(batch_size * ScratchLayout::WORDS_PER_EVENT);
         #[cfg(test)]
-        let event_words = event_words.max(batch_size * EVENT_WORDS);
+        let event_words = event_words
+            .max(batch_size * EVENT_WORDS)
+            .max(count.div_ceil(SummaryLayout::ACTORS_PER_GROUP as usize) * SummaryLayout::WORDS);
         let ownership = self
             .ownership
             .as_ref()
@@ -732,11 +806,15 @@ impl Simulation {
             proposals: self.device.empty(count * ProposalLayout::WORDS),
             events: self.device.empty(event_words),
             scratch: self.device.empty(scratch_words),
+            searches: markets::SearchBuffers::new(&self.device, count),
             #[cfg(test)]
             links: self.device.empty(batch_size * LinkLayout::WORDS_PER_EVENT),
             market_execution: self.market_execution,
             control: self.control.clone(),
             summary: self.summary.clone(),
+            audit: economy::audit::AuditBuffers::new(&self.device),
+            #[cfg(test)]
+            audit_execution: self.audit_execution,
             feedback: self
                 .device
                 .tensor(&vec![0; CONTROL_WORDS + count * TICK_WORDS]),
@@ -788,11 +866,7 @@ impl Simulation {
             .context("identity capacity exhausted")?;
         let grown = match newborns {
             0 => None,
-            _ => Some(self.demography.grow_births(
-                &self.device,
-                births,
-                self.metadata.next_identity,
-            )?),
+            _ => Some(self.grow_births(births)?),
         };
         let population = grown
             .as_ref()
@@ -801,21 +875,34 @@ impl Simulation {
         let previous_actors = self.metadata.actors.clone();
         let previous_actor_buffer = self.actors.clone();
         let previous_spatial = self.spatial.clone();
-        let next_buffers = plan.actors.as_ref().map(|actors| {
-            let rows = actors
-                .iter()
-                .map(|actor| ActorLayout::new(&actor, &self.scenario))
-                .collect::<ActorMetadataRows>();
-            let metadata = State {
-                actors: actors.clone(),
-                ..self.metadata.clone()
-            };
-            (
-                self.device.tensor(&rows.words()),
-                self.device
-                    .tensor(&SpatialIndex::new(&self.scenario, &metadata).words),
-            )
-        });
+        let next_buffers = match plan.transition {
+            registry::RegistryTransition::Unchanged => None,
+            registry::RegistryTransition::Capacity => Some(registry::RegistryBuffers {
+                actors: registry::patch_capacity(
+                    &self.device,
+                    &self.actors,
+                    &self.enterprise_requests,
+                ),
+                spatial: self.spatial.clone(),
+            }),
+            registry::RegistryTransition::Migration => {
+                let actors = plan.actors.as_ref().context("missing migration actors")?;
+                let rows = actors
+                    .iter()
+                    .map(|actor| ActorLayout::new(&actor, &self.scenario))
+                    .collect::<ActorMetadataRows>();
+                let metadata = State {
+                    actors: actors.clone(),
+                    ..self.metadata.clone()
+                };
+                Some(registry::RegistryBuffers {
+                    actors: self.device.tensor(&rows.words()),
+                    spatial: self
+                        .device
+                        .tensor(&SpatialIndex::new(&self.scenario, &metadata).words),
+                })
+            }
+        };
         self.device.reclaim_memory(0)?;
         match self.memory_usage().bytes_reserved <= self.device.memory_budget.bytes() {
             true => (),
@@ -835,9 +922,9 @@ impl Simulation {
         if let Some(actors) = plan.actors {
             self.metadata.actors = actors;
         }
-        if let Some((actors, spatial)) = next_buffers {
-            self.actors = actors;
-            self.spatial = spatial;
+        if let Some(buffers) = next_buffers {
+            self.actors = buffers.actors;
+            self.spatial = buffers.spatial;
         }
         let observation = self.observe().and_then(|snapshot| {
             self.device.reclaim_memory(0)?;
@@ -931,7 +1018,192 @@ impl Simulation {
         );
         self.fault_check()
     }
+    fn market_result(&mut self, evidence: &mut PhaseEvidence) -> Result<()> {
+        match self.market_execution {
+            MarketExecution::Grouped => {
+                let words = self.device.read_range(&self.control, 0, CONTROL_WORDS)?;
+                self.readback_bytes += (CONTROL_WORDS * WORD_BYTES) as u64;
+                let counters = ControlLayout::new(&words)?;
+                FaultFlags::new(counters.faults)?.into_result()?;
+                evidence.frontier_depth = evidence.frontier_depth.max(counters.progress as usize);
+                evidence.events += counters.completed as usize;
+            }
+            #[cfg(test)]
+            _ => (),
+        }
+        Ok(())
+    }
     fn market(
+        &mut self,
+        market: Market,
+        phase: Phase,
+        trace: Trace,
+        evidence: &mut PhaseEvidence,
+    ) -> Result<()> {
+        match self.market_execution {
+            MarketExecution::Grouped => self.device_market(market, phase, trace, evidence),
+            #[cfg(test)]
+            _ => self.original_market(market, phase, trace, evidence),
+        }
+    }
+    fn device_market(
+        &mut self,
+        market: Market,
+        phase: Phase,
+        trace: Trace,
+        evidence: &mut PhaseEvidence,
+    ) -> Result<()> {
+        let count = self.metadata.actors.len();
+        let mut parameters = self.parameters(phase, market, 0, count)?;
+        let launch = |stage, invocations, parameters: &EconomyParameters| {
+            let dispatch = match stage {
+                EconomyStage::GroupExecute => {
+                    markets::dispatch(&self.searches.dispatches, markets::RANGE_DISPATCH)
+                }
+                EconomyStage::GroupPrepare
+                | EconomyStage::GroupFinalize
+                | EconomyStage::GroupRadixLocal
+                | EconomyStage::GroupRadixScatter
+                | EconomyStage::GroupRanges => {
+                    markets::dispatch(&self.searches.dispatches, markets::SORT_DISPATCH)
+                }
+                _ => self.device.count(invocations),
+            };
+            let events = match stage {
+                EconomyStage::SearchPrepare => &self.searches.requests,
+                _ => &self.scratch,
+            };
+            economy::economy::launch(
+                &self.device.client,
+                dispatch,
+                cubecl::CubeDim::new_1d(self.device.workgroup),
+                self.state.clone().into_buffer_arg(),
+                self.actors.clone().into_buffer_arg(),
+                self.config.launch(),
+                self.spatial.clone().into_buffer_arg(),
+                self.proposals.clone().into_buffer_arg(),
+                events.clone().into_buffer_arg(),
+                self.control.clone().into_buffer_arg(),
+                parameters.launch(),
+                stage,
+            );
+            if let EconomyStage::MarketBoundary = stage {
+                markets::prepare_dispatch(&self.device, &self.control, &self.searches.dispatches);
+            }
+        };
+        launch(EconomyStage::MarketStart, 1, &parameters);
+        if let Market::Labor | Market::Input(_) | Market::Consumer(_) | Market::Household = market {
+            let side = self
+                .scenario
+                .config()
+                .map_size
+                .div_ceil(self.scenario.config().search_radius);
+            launch(EconomyStage::IndexCount, count, &parameters);
+            parallel::scan(
+                &self.device,
+                &self.scratch,
+                count,
+                count.div_ceil(self.device.workgroup as usize),
+            );
+            launch(
+                EconomyStage::IndexOffsets,
+                (side * side + 1) as usize,
+                &parameters,
+            );
+            launch(EconomyStage::IndexFill, count, &parameters);
+            if matches!(
+                market,
+                Market::Household | Market::Input(Good::Bread) | Market::Consumer(Good::Bread)
+            ) {
+                launch(
+                    EconomyStage::IndexPrices,
+                    count.div_ceil(DISCOVERY_BLOCK as usize) * self.device.workgroup as usize,
+                    &parameters,
+                );
+            }
+        }
+        match market {
+            Market::Payroll | Market::Distribution => {
+                launch(EconomyStage::Propose, count, &parameters)
+            }
+            _ => {
+                launch(EconomyStage::SearchPrepare, count, &parameters);
+                launch(EconomyStage::MarketBoundary, 1, &parameters);
+                economy::search::search::launch(
+                    &self.device.client,
+                    markets::dispatch(&self.searches.dispatches, markets::SEARCH_DISPATCH),
+                    cubecl::CubeDim::new_1d(32),
+                    self.state.clone().into_buffer_arg(),
+                    self.actors.clone().into_buffer_arg(),
+                    self.config.launch(),
+                    self.spatial.clone().into_buffer_arg(),
+                    self.proposals.clone().into_buffer_arg(),
+                    self.searches.requests.clone().into_buffer_arg(),
+                    self.control.clone().into_buffer_arg(),
+                    parameters.launch(),
+                );
+            }
+        }
+        launch(EconomyStage::MarketBoundary, 1, &parameters);
+        launch(EconomyStage::GroupCompactCount, count, &parameters);
+        parallel::scan(
+            &self.device,
+            &self.scratch,
+            7 * count,
+            count.div_ceil(self.device.workgroup as usize),
+        );
+        launch(EconomyStage::GroupCompactFill, count, &parameters);
+        launch(EconomyStage::MarketBoundary, 1, &parameters);
+        if let Market::Labor | Market::Input(_) | Market::Consumer(_) | Market::Household = market {
+            launch(EconomyStage::GroupPrepare, count, &parameters);
+        }
+        launch(EconomyStage::MarketBoundary, 1, &parameters);
+        for shift in (0..count.max(1).ilog2() + 1).step_by(4) {
+            parameters.sort_width = shift;
+            launch(EconomyStage::GroupRadixLocal, count, &parameters);
+            parallel::scan_active(
+                &self.device,
+                &self.scratch,
+                7 * count,
+                16 * count.div_ceil(self.device.workgroup as usize),
+                &self.control,
+                &self.searches.dispatches,
+            );
+            launch(EconomyStage::GroupRadixScatter, count, &parameters);
+            parameters.sort_source = 2 * count as u32 - parameters.sort_source;
+        }
+        launch(EconomyStage::GroupRanges, count, &parameters);
+        launch(EconomyStage::MarketBoundary, 1, &parameters);
+        launch(EconomyStage::GroupExecute, count, &parameters);
+        launch(EconomyStage::MarketBoundary, 1, &parameters);
+        if let Market::Labor | Market::Input(_) | Market::Consumer(_) | Market::Household = market {
+            launch(EconomyStage::GroupFinalize, count, &parameters);
+        }
+        launch(EconomyStage::MarketBoundary, 1, &parameters);
+        parameters.status_start = 4 * count as u32;
+        if let (Market::Input(_) | Market::Consumer(_) | Market::Household, true) =
+            (market, self.matching_round + 1 == MATCHING_ROUNDS)
+        {
+            markets::feedback_boundary(&self.device, &self.control, &self.feedback);
+            self.feedback_operation(EconomyStage::RecordFeedback, count, &parameters);
+        }
+        if let Trace::Record = trace {
+            self.fault_check()?;
+            let statuses = self.device.read_range(&self.scratch, 4 * count, count)?;
+            self.readback_bytes += (count * WORD_BYTES) as u64;
+            evidence.decisions.extend(
+                statuses
+                    .into_iter()
+                    .map(|code| EventStatus::try_from(code)?.decision())
+                    .collect::<Result<Vec<_>>>()?
+                    .into_iter()
+                    .flatten(),
+            );
+        }
+        Ok(())
+    }
+    #[cfg(test)]
+    fn original_market(
         &mut self,
         market: Market,
         phase: Phase,
@@ -1008,15 +1280,16 @@ impl Simulation {
         let range = 0..self.metadata.actors.len();
         match (activity.phase_data, self.market_execution) {
             (0, _) => Ok(()),
-            (_, MarketExecution::Grouped) => {
+            (_, MarketExecution::Original) => {
                 self.clear_market(market, phase, range, activity.phase_data, trace, evidence)
             }
-            #[cfg(test)]
             (_, MarketExecution::Reference) => {
                 self.reference_market(market, phase, range, trace, evidence)
             }
+            (_, MarketExecution::Grouped) => unreachable!(),
         }
     }
+    #[cfg(test)]
     fn clear_market(
         &mut self,
         market: Market,
@@ -1187,26 +1460,52 @@ impl Simulation {
             &self.control,
             bytemuck::cast_slice(&[ObservationControlLayout::zeroed()]),
         );
+        #[cfg(test)]
         let parameters =
             self.parameters(Phase::Audit, Market::Labor, 0, self.metadata.actors.len())?;
-        self.economy(
-            EconomyStage::Summarize,
-            self.metadata
+        let groups = self
+            .metadata
+            .actors
+            .len()
+            .div_ceil(economy::audit::TILE_ACTORS);
+        #[cfg(test)]
+        let groups = match self.audit_execution {
+            AuditExecution::Original => self
+                .metadata
                 .actors
                 .len()
                 .div_ceil(SummaryLayout::ACTORS_PER_GROUP as usize),
-            &parameters,
-            &self.summary,
+            AuditExecution::Tiled => groups,
+        };
+        #[cfg(test)]
+        match self.audit_execution {
+            AuditExecution::Original => {
+                self.economy(EconomyStage::Summarize, groups, &parameters, &self.summary)
+            }
+            AuditExecution::Tiled => self.audit.summarize(
+                &self.device,
+                &self.state,
+                &self.actors,
+                &self.config,
+                &self.events,
+                &self.control,
+            ),
+        }
+        #[cfg(not(test))]
+        self.audit.summarize(
+            &self.device,
+            &self.state,
+            &self.actors,
+            &self.config,
+            &self.events,
+            &self.control,
         );
         reduction::summary(
             &self.device,
             &self.events,
             &self.summary,
             &self.control,
-            self.metadata
-                .actors
-                .len()
-                .div_ceil(SummaryLayout::ACTORS_PER_GROUP as usize),
+            groups,
         )?;
         let totals = self
             .device

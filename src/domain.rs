@@ -827,7 +827,7 @@ impl Scenario {
                 .research
                 .as_ref()
                 .map_or(0, research::ResearchConfig::memory_estimate)
-            + actors * 72
+            + actors * 128
             + (actors.div_ceil(128) + 1) * 4
             + self.config.demography.people.len().max(
                 self.config.households as usize

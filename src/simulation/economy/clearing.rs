@@ -14,6 +14,14 @@ pub(super) fn actor_settlement(
     id: u32,
     #[comptime] posting: Posting,
 ) {
+    let mut invocation = id;
+    if comptime!(parameters.discovery == Discovery::Indexed) {
+        invocation = parameters.count;
+        if id < control[CONSTRUCTED_EVENTS_WORD].load() {
+            invocation = scratch[(parameters.sort_source + parameters.count + id) as usize];
+        }
+    }
+    let id = invocation;
     if id < parameters.count {
         let actor = id + parameters.offset;
         let other = proposals[actor as usize * ProposalLayout::WORDS + ProposalLayout::ACTOR];

@@ -6,11 +6,25 @@ use cubecl::prelude::*;
 pub enum Discovery {
     #[cfg(test)]
     Linear,
+    #[cfg(test)]
+    Original,
     Indexed,
+}
+
+impl Discovery {
+    pub fn indexed(self) -> bool {
+        match self {
+            #[cfg(test)]
+            Self::Linear => false,
+            _ => true,
+        }
+    }
 }
 
 #[derive(CubeType, CubeLaunch, Clone, Copy)]
 pub struct EconomyParameters {
+    #[cube(comptime)]
+    pub scan: super::parallel::ScanMode,
     pub day: u32,
     pub settlement_rotation: u32,
     #[cube(comptime)]
@@ -29,6 +43,7 @@ pub struct EconomyParameters {
 impl EconomyParameters {
     pub fn launch(self) -> EconomyParametersLaunch {
         EconomyParametersLaunch {
+            scan: self.scan,
             day: self.day,
             settlement_rotation: self.settlement_rotation,
             phase: self.phase,

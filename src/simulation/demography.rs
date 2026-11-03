@@ -367,7 +367,101 @@ impl DemographyRuntime {
             famine_exposure: u64::from(totals[6]) + (u64::from(totals[7]) << 32),
         })
     }
-    pub fn grow_births(&self, device: &Device, births: &[u32], next_identity: u64) -> Result<Self> {
+    pub fn grow_births(
+        &self,
+        device: &Device,
+        births: &[u32],
+        next_identity: u64,
+        scratch: &CubeTensor,
+    ) -> Result<Self> {
+        let count = self.count + births.iter().filter(|&&birth| birth > 0).count();
+        let growth = count as u64 * ((PersonLayout::WORDS * 2 + 5) * WORD_BYTES) as u64
+            + births.len() as u64 * 8;
+        device.reclaim_memory(growth)?;
+        let required = growth
+            + device
+                .client
+                .memory_report(cubecl::MemoryScope::Device)
+                .usage()
+                .bytes_reserved;
+        match count <= u32::MAX as usize && required <= device.memory_budget.bytes() {
+            true => (),
+            false => Err(anyhow!(
+                "person registry capacity exhausted: {required} bytes exceed device budget"
+            ))?,
+        }
+        let range_counts = self
+            .range_counts
+            .iter()
+            .zip(births)
+            .map(|(&count, &birth)| count + u32::from(birth > 0))
+            .collect::<Vec<_>>();
+        let grown = Self {
+            people: device.empty(count.max(1) * PersonLayout::WORDS),
+            audited: device.empty(count.max(1) * PersonLayout::WORDS),
+            ranges: device.empty(births.len() * 2),
+            policy: self.policy.clone(),
+            births: self.births.clone(),
+            count,
+            range_counts,
+            initial_population: self.initial_population,
+            seed: self.seed,
+        };
+        let argument = |tensor: &CubeTensor| tensor.clone().into_buffer_arg();
+        let cube_count = device.count(births.len());
+        kernels::birth_prefix::launch(
+            &device.client,
+            cube_count.clone(),
+            CubeDim::new_1d(device.workgroup),
+            argument(&self.births),
+            argument(scratch),
+        );
+        super::parallel::scan(
+            device,
+            scratch,
+            births.len(),
+            births.len().div_ceil(device.workgroup as usize),
+        );
+        kernels::birth_ranges::launch(
+            &device.client,
+            cube_count.clone(),
+            CubeDim::new_1d(device.workgroup),
+            argument(&self.ranges),
+            argument(&self.births),
+            argument(scratch),
+            argument(&grown.ranges),
+        );
+        kernels::grow::launch(
+            &device.client,
+            cube_count,
+            CubeDim::new_1d(device.workgroup),
+            argument(&self.people),
+            argument(&grown.people),
+            argument(&self.ranges),
+            argument(&grown.ranges),
+            argument(&self.births),
+            next_identity as u32,
+            (next_identity >> 32) as u32,
+        );
+        device.reclaim_memory(0)?;
+        match device
+            .client
+            .memory_report(cubecl::MemoryScope::Device)
+            .usage()
+            .bytes_reserved
+            <= device.memory_budget.bytes()
+        {
+            true => Ok(grown),
+            false => Err(anyhow!("person registry allocation exceeded device budget")),
+        }
+    }
+    #[cfg(test)]
+    pub fn reference_births(
+        &self,
+        device: &Device,
+        births: &[u32],
+        next_identity: u64,
+    ) -> Result<Self> {
         let count = self.count + births.iter().filter(|&&birth| birth > 0).count();
         let growth = count as u64 * ((PersonLayout::WORDS * 2 + 5) * WORD_BYTES) as u64
             + births.len() as u64 * 8;
@@ -448,7 +542,7 @@ impl DemographyRuntime {
         self.ranges = device.tensor(&ranges);
         self.births = device.tensor(&vec![0; count]);
     }
-    pub fn pending_births(&self, device: &Device) -> Result<Vec<u32>> {
-        device.read(&self.births)
+    pub fn birth_buffer(&self) -> &CubeTensor {
+        &self.births
     }
 }

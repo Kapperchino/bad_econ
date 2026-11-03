@@ -172,7 +172,12 @@ fn grouped_market_faults_match_reference_and_restore_the_audited_state() -> Resu
         let scenario = Scenario::baseline(3, 42, Experiment::Concentrated)?;
         let initial = scenario.initial()?;
         let mut messages = Vec::new();
-        for execution in [MarketExecution::Grouped, MarketExecution::Reference] {
+        for (execution, trace) in [
+            (MarketExecution::Grouped, Trace::Record),
+            (MarketExecution::Grouped, Trace::Discard),
+            (MarketExecution::Original, Trace::Discard),
+            (MarketExecution::Reference, Trace::Record),
+        ] {
             let mut simulation = Simulation::new(scenario.clone(), Device::headless(64)?)?;
             simulation.market_execution = execution;
             for phase in Phase::ALL
@@ -202,15 +207,10 @@ fn grouped_market_faults_match_reference_and_restore_the_audited_state() -> Resu
                 &simulation.state,
                 bytemuck::cast_slice(&encode(&state.values)),
             );
-            messages.push(
-                simulation
-                    .phase(case.phase, Trace::Record)
-                    .unwrap_err()
-                    .to_string(),
-            );
+            messages.push(simulation.phase(case.phase, trace).unwrap_err().to_string());
             assert_eq!(simulation.download()?, initial);
         }
-        assert_eq!(messages[0], messages[1]);
+        assert!(messages.iter().all(|message| message == &messages[0]));
     }
     Ok(())
 }
@@ -369,5 +369,233 @@ fn gpu_firm_growth_matches_full_rebuild_with_births_and_migration() -> Result<()
         assert_eq!(gpu.snapshot, reference.snapshot, "day {day}");
     }
     gpu.checkpoint()?.restore()?;
+    Ok(())
+}
+
+#[test]
+fn device_markets_match_original_gpu_phases() -> Result<()> {
+    for workgroup in [32, 64, 128, 256] {
+        let scenario = Scenario::industrial(193, 42, Experiment::Concentrated)?;
+        let mut actual = Simulation::new(scenario.clone(), Device::headless(workgroup)?)?;
+        let mut expected = Simulation::new(scenario, Device::headless(64)?)?;
+        expected.market_execution = MarketExecution::Original;
+        expected.audit_execution = AuditExecution::Original;
+        for day in 0..4 {
+            for phase in Phase::ALL {
+                let reference = expected.phase(phase, Trace::Record)?;
+                let result = actual.phase(phase, Trace::Record)?;
+                assert_eq!(
+                    result.decisions, reference.decisions,
+                    "{workgroup} {day} {phase:?}"
+                );
+                assert_eq!(
+                    result.frontier_depth, reference.frontier_depth,
+                    "{workgroup} {day} {phase:?}"
+                );
+                assert_eq!(
+                    result.events, reference.events,
+                    "{workgroup} {day} {phase:?}"
+                );
+                assert_eq!(
+                    actual.download()?,
+                    expected.download()?,
+                    "{workgroup} {day} {phase:?}"
+                );
+                assert_eq!(actual.snapshot, expected.snapshot);
+            }
+        }
+    }
+    Ok(())
+}
+
+#[test]
+fn optimized_experiments_continue_original_checkpoints_across_day_thirty() -> Result<()> {
+    for experiment in [
+        Experiment::Baseline,
+        Experiment::Shortage,
+        Experiment::Transport,
+        Experiment::Concentrated,
+    ] {
+        let mut config = Scenario::industrial(300, 42, experiment)?.config().clone();
+        config.demography.annual_births_per_million_fertile_women = 1_000_000;
+        let scenario = Scenario::new(config)?;
+        let mut expected = Simulation::new(scenario.clone(), Device::headless(64)?)?;
+        expected.market_execution = MarketExecution::Original;
+        expected.audit_execution = AuditExecution::Original;
+        expected.registry_execution = RegistryExecution::Reference;
+        let mut actual = Simulation::new(scenario, Device::headless(128)?)?;
+        for day in 0..33 {
+            if day == 29 {
+                actual =
+                    Simulation::from_checkpoint(expected.checkpoint()?, Device::headless(256)?)?;
+            }
+            for phase in Phase::ALL {
+                let reference = expected.phase(phase, Trace::Record)?;
+                let result = actual.phase(phase, Trace::Record)?;
+                assert_eq!(
+                    result.events, reference.events,
+                    "{experiment:?} {day} {phase:?}"
+                );
+                assert_eq!(
+                    result.decisions, reference.decisions,
+                    "{experiment:?} {day} {phase:?}"
+                );
+                assert_eq!(
+                    actual.download()?,
+                    expected.download()?,
+                    "{experiment:?} {day} {phase:?}"
+                );
+                assert_eq!(actual.snapshot, expected.snapshot);
+            }
+        }
+        assert_eq!(actual.checkpoint()?, expected.checkpoint()?);
+    }
+    Ok(())
+}
+
+#[test]
+fn capacity_changes_preserve_spatial_membership_and_rollback_preparation() -> Result<()> {
+    let scenario = Scenario::industrial(97, 42, Experiment::Baseline)?;
+    let mut simulation = Simulation::new(scenario.clone(), Device::headless(64)?)?;
+    let mut initial = simulation.download()?;
+    initial.set(Field::PendingCapacity, 97, 5);
+    simulation.device.write(
+        &simulation.state,
+        bytemuck::cast_slice(&encode(&initial.values)),
+    );
+    let spatial = simulation.device.read(&simulation.spatial)?;
+    let mut requests = vec![0; simulation.actors().len()];
+    requests[97] = (6 << 24) | 5;
+    simulation
+        .device
+        .write(&simulation.enterprise_requests, &requests);
+    let plan = registry::RegistryPlan::new(
+        &scenario,
+        &simulation.metadata,
+        &simulation.migrations,
+        &requests,
+    )?
+    .context("capacity transition")?;
+    let budget = simulation.device.memory_budget;
+    simulation.device.memory_budget = MemoryBudget::Reported { available_bytes: 2 };
+    assert!(
+        simulation
+            .commit_registry(plan, &vec![0; requests.len()])
+            .is_err()
+    );
+    simulation.device.memory_budget = budget;
+    assert_eq!(simulation.download()?, initial);
+    let plan = registry::RegistryPlan::new(
+        &scenario,
+        &simulation.metadata,
+        &simulation.migrations,
+        &requests,
+    )?
+    .context("capacity transition")?;
+    simulation.commit_registry(plan, &vec![0; requests.len()])?;
+    let mut expected = initial;
+    enterprise::transitions(&mut expected, &scenario, &requests)?;
+    assert_eq!(simulation.download()?, expected);
+    assert_eq!(simulation.device.read(&simulation.spatial)?, spatial);
+    Ok(())
+}
+
+#[test]
+fn speculative_candidates_only_commit_faults_inside_the_visited_prefix() -> Result<()> {
+    let mut config = Scenario::baseline(1, 42, Experiment::Concentrated)?
+        .config()
+        .clone();
+    config.firms = 9;
+    config.bargaining = Some(crate::domain::bargaining::BargainingPolicy {
+        legal_minimum: 1,
+        quantum: 1,
+        daily_cash_cost: 1_000_000,
+        funded_other: 0,
+        participating_adults: 1,
+        normal_day_minutes: 1440,
+        work_cost_per_minute: 0,
+        desired_wage: 1000,
+        mandate: 500,
+        withdrawal: 0,
+        alternatives: 0,
+        concentration: 0,
+        replacements: 0,
+    });
+    config.household_production = crate::domain::enterprise::HouseholdProduction::industrial();
+    config.population = Some(Population {
+        households: vec![HouseholdSeed {
+            identity: 1,
+            position: Position { x: 500, y: 500 },
+            cash: 5000,
+            inventories: Good::food([0, 0, 100]),
+            fatigue: 0,
+        }],
+        firms: (2..=10)
+            .map(|identity| FirmSeed {
+                identity,
+                position: Position { x: 500, y: 500 },
+                owner: 1,
+                good: Good::Bread,
+                cash: 5000,
+                inventories: [0; Good::COUNT],
+                capacity: 1,
+                technique: Technique::new(1, 1, 1).expect("one-minute packet"),
+                wage: 1,
+                price: 1,
+            })
+            .collect(),
+    });
+    let scenario = Scenario::new(config)?;
+    for available in [8, 7] {
+        let mut outcomes = Vec::new();
+        for execution in [MarketExecution::Grouped, MarketExecution::Original] {
+            let mut simulation = Simulation::new(scenario.clone(), Device::headless(64)?)?;
+            simulation.market_execution = execution;
+            let mut state = simulation.download()?;
+            state.set(Field::Time, 0, u64::from(u32::MAX));
+            for firm in 1..=9 {
+                state.set(
+                    Field::Slots,
+                    firm,
+                    u64::from(firm <= available || firm == 9),
+                );
+                state.set(Field::LaborMinutes, firm, 1);
+                state.set(Field::InputTicks, firm, 0);
+                state.set(Field::EquipmentCondition, firm, 1000);
+            }
+            state.set(Field::LaborMinutes, 9, u64::from(u32::MAX));
+            state.set(Field::EquipmentCondition, 9, u64::from(u32::MAX));
+            simulation.device.write(
+                &simulation.state,
+                bytemuck::cast_slice(&encode(&state.values)),
+            );
+            let mut evidence = PhaseEvidence::default();
+            let result = simulation.market(
+                Market::Labor,
+                Phase::Commitment,
+                Trace::Record,
+                &mut evidence,
+            );
+            outcomes.push(result.as_ref().err().map(ToString::to_string));
+            match available {
+                8 => {
+                    result?;
+                    assert_eq!(
+                        simulation.device.read(&simulation.proposals)?[ProposalLayout::ACTOR],
+                        1
+                    );
+                }
+                _ => assert!(
+                    outcomes
+                        .last()
+                        .unwrap()
+                        .as_ref()
+                        .context("visited fault")?
+                        .contains("ARITHMETIC_OVERFLOW")
+                ),
+            }
+        }
+        assert_eq!(outcomes[0], outcomes[1]);
+    }
     Ok(())
 }
