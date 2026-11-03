@@ -1,5 +1,5 @@
 #![cfg(feature = "compute")]
-mod support;
+use crate::support;
 
 use anyhow::Result;
 use bad_econ::simulation::{Device, analytics::*};

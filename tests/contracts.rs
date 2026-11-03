@@ -1,5 +1,5 @@
 #[cfg(feature = "compute")]
-mod support;
+use crate::support;
 use anyhow::Result;
 #[cfg(feature = "compute")]
 use bad_econ::runtime::*;

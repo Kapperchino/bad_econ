@@ -1,4 +1,5 @@
 #![cfg(feature = "compute")]
+mod support;
 use anyhow::{Context, Result};
 use bad_econ::{
     domain::*,
@@ -274,7 +275,7 @@ fn gpu_phases_match_across_workgroups_and_experiments() -> Result<()> {
             config.firms = 12;
             config.batch_size = 7;
             let scenario = Scenario::new(config)?;
-            let mut gpu = Simulation::new(scenario, Device::headless(workgroup)?)?;
+            let mut gpu = Simulation::new(scenario, support::device(workgroup)?)?;
             let mut replay = Vec::new();
             for _ in 0..8 {
                 for phase in Phase::ALL {

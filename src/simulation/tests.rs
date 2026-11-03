@@ -1,4 +1,20 @@
 use super::*;
+use std::{
+    collections::{HashMap, hash_map::Entry},
+    sync::{Mutex, OnceLock},
+};
+
+fn device(workgroup: u32) -> Result<Device> {
+    static DEVICES: OnceLock<Mutex<HashMap<u32, Device>>> = OnceLock::new();
+    let mut devices = DEVICES
+        .get_or_init(Mutex::default)
+        .lock()
+        .map_err(|_| anyhow!("test GPU device cache poisoned"))?;
+    match devices.entry(workgroup) {
+        Entry::Occupied(entry) => Ok(entry.get().clone()),
+        Entry::Vacant(entry) => Ok(entry.insert(Device::headless(workgroup)?).clone()),
+    }
+}
 
 #[test]
 fn industrial_recipes_match_coordinate_scheduler() -> Result<()> {
@@ -20,9 +36,8 @@ fn compare_market_execution(scenario: Scenario, days: usize) -> Result<()> {
 }
 
 fn compare_market_state(scenario: Scenario, initial: State, days: usize) -> Result<()> {
-    let mut grouped =
-        Simulation::from_state(scenario.clone(), initial.clone(), Device::headless(128)?)?;
-    let mut reference = Simulation::from_state(scenario, initial, Device::headless(64)?)?;
+    let mut grouped = Simulation::from_state(scenario.clone(), initial.clone(), device(128)?)?;
+    let mut reference = Simulation::from_state(scenario, initial, device(64)?)?;
     reference.market_execution = MarketExecution::Reference;
     for day in 0..days {
         for phase in Phase::ALL {
@@ -173,7 +188,7 @@ fn grouped_market_faults_match_reference_and_restore_the_audited_state() -> Resu
         let initial = scenario.initial()?;
         let mut messages = Vec::new();
         for execution in [MarketExecution::Grouped, MarketExecution::Reference] {
-            let mut simulation = Simulation::new(scenario.clone(), Device::headless(64)?)?;
+            let mut simulation = Simulation::new(scenario.clone(), device(64)?)?;
             simulation.market_execution = execution;
             for phase in Phase::ALL
                 .into_iter()
@@ -255,8 +270,8 @@ fn gpu_registry_migration_births_and_estates_match_audited_rebuilds() -> Result<
             .collect(),
     });
     let scenario = Scenario::new(config)?;
-    let mut gpu = Simulation::new(scenario.clone(), Device::headless(64)?)?;
-    let mut reference = Simulation::new(scenario.clone(), Device::headless(128)?)?;
+    let mut gpu = Simulation::new(scenario.clone(), device(64)?)?;
+    let mut reference = Simulation::new(scenario.clone(), device(128)?)?;
     reference.registry_execution = RegistryExecution::Reference;
     for day in 0..60 {
         if day == 12 {
@@ -317,8 +332,8 @@ fn gpu_firm_growth_matches_full_rebuild_with_births_and_migration() -> Result<()
             initial.set(field, actor, initial.get(field, actor) + amount);
         }
     }
-    let mut gpu = Simulation::from_state(scenario.clone(), initial.clone(), Device::headless(64)?)?;
-    let mut reference = Simulation::from_state(scenario.clone(), initial, Device::headless(128)?)?;
+    let mut gpu = Simulation::from_state(scenario.clone(), initial.clone(), device(64)?)?;
+    let mut reference = Simulation::from_state(scenario.clone(), initial, device(128)?)?;
     for day in 0..4 {
         let source = scenario.config().households as usize + 2;
         let mut requests = vec![0; gpu.actors().len()];

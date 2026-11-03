@@ -117,13 +117,21 @@ The runtime uses bounded integers, directed rational intervals, and versioned no
 ## Verify and benchmark
 
 ```sh
-cargo test --features viewer
+cargo gpu-fast
+cargo gpu-full
+cargo test --locked --features viewer --test integration demography:: --jobs 2 -- --test-threads=1
 cargo clippy --all-targets --features viewer -- -D warnings
 cargo run --release -- benchmark --sizes 1000000 --warmup 2 --days 60 --output /tmp/benchmark.json
 cargo run --release -- benchmark --restore /tmp/economy.checkpoint.json --warmup 1 --days 30 --output /tmp/continuation-benchmark.json
 ```
 
-Compute tests run exclusively on GPU and compare phase states across workgroups, the original transaction scheduler, and independent integer oracles. The test helper always selects the GPU. Benchmarks record daily timings, event counts, memory, readback volume, and state hashes. Startup and checkpoint restoration are reported separately. A restored benchmark measures that checkpoint's economy; its starting day follows the requested warmup. The final state download is outside the timed interval.
+`cargo gpu-fast` runs 11 representative checks for ledger authorization, wide arithmetic, dependency ordering, checkpoint replay, rollback, population growth, phase ordering, industrial conservation and actor storage. Use it during the edit/test loop, then run the affected subsystem by module name, as in the demography example. `cargo gpu-full` runs all unit and integration tests, including long horizons, all workgroup comparisons, research/finance coverage and isolated allocation checks. Neither command runs a CPU simulation backend. The fast command is a subset; full coverage remains available and no tests are ignored or deleted.
+
+Integration cases share one executable and cache a GPU device per workgroup so shader compilation can be reused. Tests that inspect device-wide allocation budgets keep fresh devices, and the dedicated GPU allocation suite remains a separate executable. Both aliases use two build jobs to bound compiler memory use. The fast subset uses four test threads; the full suite uses one for predictable GPU scheduling. These settings do not change ordinary Cargo commands. The [test performance report](reports/gpu-test-performance.md) records measurements and coverage boundaries. Cargo's [integration-test guidance](https://doc.rust-lang.org/cargo/reference/cargo-targets.html#integration-tests) describes the single-executable module layout.
+
+Add new integration modules to `tests/integration.rs`; automatic top-level test-target discovery is disabled. Run an existing module with `--test integration module_name::` instead of the former `--test module_name` command. Memory-budget cases must construct a fresh device instead of using the shared test helper.
+
+Compute tests compare phase states across workgroups, the original transaction scheduler, and independent integer oracles. The test helper always selects the GPU. Benchmarks record daily timings, event counts, memory, readback volume, and state hashes. Startup and checkpoint restoration are reported separately. A restored benchmark measures that checkpoint's economy; its starting day follows the requested warmup. The final state download is outside the timed interval.
 
 The [GPU performance measurements](reports/gpu-performance-progress.json) record the ongoing 10× optimization target. The current million-household, 60-day run improved from 100.41 s to 51.91 s (1.93×) on Apple M5 Pro / Metal, with identical final state hashes, snapshots, and daily event counts. Research totals use parallel reductions, and supported firm entries grow state on the GPU while downloading only affected actors. The 10× target remains in progress.
 
