@@ -7,6 +7,7 @@ use super::{
     households::{KernelFatigue, KernelObservation, ObservationKind, next_fatigue, observed_blend},
     layout::*,
     negotiation::{NegotiationRequest, NegotiationStatus, legal_grid_rate, negotiate},
+    parallel::{self, Reduction},
     parameters::{Discovery, EconomyParameters},
     payroll::PayrollAccrual,
     policy::*,
@@ -1914,7 +1915,6 @@ pub enum EconomyStage {
     RecordFeedback,
     ApplyFeedback,
     IndexCount,
-    IndexPrefix,
     IndexOffsets,
     IndexFill,
     IndexPrices,
@@ -1925,6 +1925,7 @@ pub enum EconomyStage {
     Summarize,
     Inspect,
     GroupInitialize,
+    GroupSort,
     GroupMerge,
     GroupExecute,
     GroupPrepare,
@@ -1954,25 +1955,27 @@ pub fn economy(
             record_feedback(state, config, proposals, bundles, control, parameters, id)
         }
         EconomyStage::ApplyFeedback => apply_feedback(state, config, control, id),
-        EconomyStage::IndexCount => index_count(state, actors, config, spatial, parameters, id),
-        EconomyStage::IndexPrefix => index_prefix(config, spatial, parameters, id),
-        EconomyStage::IndexOffsets => index_offsets(state, actors, config, spatial, parameters, id),
-        EconomyStage::IndexFill => index_fill(state, actors, config, spatial, parameters, id),
-        EconomyStage::IndexPrices => index_prices(state, config, spatial, id),
+        EconomyStage::IndexCount => {
+            index_count(state, actors, config, spatial, bundles, parameters, id)
+        }
+        EconomyStage::IndexOffsets => index_offsets(config, spatial, bundles, parameters, id),
+        EconomyStage::IndexFill => index_fill(config, spatial, bundles, parameters, id),
+        EconomyStage::IndexPrices => index_prices(state, config, spatial),
         EconomyStage::Local => local(state, actors, config, control, parameters, id),
         EconomyStage::Propose => propose(
             state, actors, config, spatial, proposals, control, parameters, id,
         ),
         EconomyStage::MarketActivity => {
             let mut active = 0u32;
-            for actor in id * 256..min((id + 1) * 256, config.actors) {
-                active += u32::cast_from(
-                    proposals[actor as usize * ProposalLayout::WORDS + ProposalLayout::ACTOR]
+            if id < config.actors {
+                active = u32::cast_from(
+                    proposals[id as usize * ProposalLayout::WORDS + ProposalLayout::ACTOR]
                         != NO_ACTOR,
                 );
             }
-            if active != 0 {
-                control[CONSTRUCTED_EVENTS_WORD].fetch_add(active);
+            let total = parallel::reduce(active, comptime!(Reduction::Sum));
+            if UNIT_POS == 0 && total != 0 {
+                control[CONSTRUCTED_EVENTS_WORD].fetch_add(total);
             }
         }
         EconomyStage::Construct => construct(
@@ -1989,6 +1992,7 @@ pub fn economy(
         EconomyStage::GroupInitialize => {
             group_initialize(proposals, bundles, control, parameters, id)
         }
+        EconomyStage::GroupSort => group_sort(bundles, parameters, id),
         EconomyStage::GroupMerge => group_merge(bundles, parameters, id),
         EconomyStage::GroupExecute => group_execute(
             state, actors, config, proposals, bundles, control, parameters, id,
@@ -2070,15 +2074,68 @@ fn group_initialize(
     id: u32,
 ) {
     let count = parameters.count;
+    let mut peer = u32::new(comptime!(i64::from(NO_ACTOR)));
     if id < count {
-        let peer = proposals
+        peer = proposals
             [(parameters.offset + id) as usize * ProposalLayout::WORDS + ProposalLayout::ACTOR];
-        if peer != NO_ACTOR {
-            let slot = control[CONSTRUCTED_EVENTS_WORD].fetch_add(1);
-            scratch[slot as usize] = peer;
-            scratch[(count + slot) as usize] = id;
-        }
         KernelEventStatus::new(comptime!(EventStatus::Inactive)).store(scratch, 4 * count + id);
+    }
+    let prefix = parallel::prefix_sum(u32::cast_from(peer != NO_ACTOR));
+    let mut first = Shared::<u32>::new();
+    if UNIT_POS == 0 {
+        *first = control[CONSTRUCTED_EVENTS_WORD].fetch_add(prefix.total);
+    }
+    sync_cube();
+    if peer != NO_ACTOR {
+        let slot = *first + prefix.inclusive - 1;
+        scratch[slot as usize] = peer;
+        scratch[(count + slot) as usize] = id;
+    }
+}
+
+#[cube]
+fn group_sort(scratch: &mut [u32], parameters: &EconomyParameters, id: u32) {
+    let count = parameters.count;
+    let active = parameters.sort_count;
+    let lane = UNIT_POS as usize;
+    let mut keys = Shared::<[u32]>::new_slice(256usize);
+    let mut items = Shared::<[u32]>::new_slice(256usize);
+    let mut key = u32::new(comptime!(i64::from(NO_ACTOR)));
+    let mut item = 0u32;
+    if id < active {
+        key = scratch[id as usize];
+        item = scratch[(count + id) as usize];
+    }
+    keys[lane] = key;
+    items[lane] = item;
+    sync_cube();
+    let rotation = parameters.settlement_rotation % max(count, 1);
+    let mut width = 2u32;
+    while width <= CUBE_DIM {
+        let mut stride = width / 2;
+        while stride > 0 {
+            let other = (UNIT_POS ^ stride) as usize;
+            let other_key = keys[other];
+            let other_item = items[other];
+            let priority = (item + count - rotation) % max(count, 1);
+            let other_priority = (other_item + count - rotation) % max(count, 1);
+            let precedes = other_key < key || (other_key == key && other_priority < priority);
+            let lower = (UNIT_POS & width == 0) == (UNIT_POS & stride == 0);
+            if precedes == lower {
+                key = other_key;
+                item = other_item;
+            }
+            sync_cube();
+            keys[lane] = key;
+            items[lane] = item;
+            sync_cube();
+            stride /= 2;
+        }
+        width *= 2;
+    }
+    if id < active {
+        scratch[id as usize] = key;
+        scratch[(count + id) as usize] = item;
     }
 }
 
@@ -2194,22 +2251,28 @@ fn index_count(
     actors: &[u32],
     config: &EconomyConfig,
     spatial: &mut [u32],
+    scratch: &mut [u32],
     parameters: &EconomyParameters,
-    block: u32,
+    member: u32,
 ) {
     let cells = config.spatial_side * config.spatial_side;
     let segment = index_segment(config, parameters);
     let members = spatial[(segment + cells) as usize];
-    if block * DISCOVERY_BLOCK < members {
-        let mut count = 0u32;
-        for member in block * DISCOVERY_BLOCK..min((block + 1) * DISCOVERY_BLOCK, members) {
-            let firm = spatial[(segment + cells + 1 + member) as usize];
-            count += u32::cast_from(discoverable(state, actors, config, parameters, firm));
-        }
-        let base = 3 * (cells + 1 + config.actors);
-        spatial[(base + block) as usize] = count;
+    let mut eligible = 0u32;
+    if member < members {
+        let firm = spatial[(segment + cells + 1 + member) as usize];
+        eligible = u32::cast_from(discoverable(state, actors, config, parameters, firm));
+    }
+    let prefix = parallel::prefix_sum(eligible);
+    if member < config.actors {
+        scratch[member as usize] = prefix.inclusive;
+    }
+    let block = CUBE_POS as u32;
+    if UNIT_POS == 0 && block < ceildiv(config.actors, CUBE_DIM) {
+        scratch[(config.actors + block) as usize] = prefix.total;
     }
 }
+
 #[cube]
 fn index_segment(config: &EconomyConfig, parameters: &EconomyParameters) -> u32 {
     let cells = config.spatial_side * config.spatial_side;
@@ -2220,33 +2283,26 @@ fn index_segment(config: &EconomyConfig, parameters: &EconomyParameters) -> u32 
             2u32
         })
 }
+
 #[cube]
-fn index_prefix(
-    config: &EconomyConfig,
-    spatial: &mut [u32],
-    parameters: &EconomyParameters,
-    id: u32,
-) {
-    if id == 0 {
-        let cells = config.spatial_side * config.spatial_side;
-        let segment = index_segment(config, parameters);
-        let blocks = ceildiv(spatial[(segment + cells) as usize], DISCOVERY_BLOCK);
-        let base = 3 * (cells + 1 + config.actors);
-        let mut offset = 0u32;
-        for block in 0..blocks {
-            let count = spatial[(base + block) as usize];
-            spatial[(base + block) as usize] = offset;
-            offset += count;
+fn index_offset(config: &EconomyConfig, scratch: &mut [u32], members: u32) -> u32 {
+    let mut offset = 0u32;
+    if members > 0 {
+        let member = members - 1;
+        offset = scratch[member as usize];
+        let block = member / CUBE_DIM;
+        if block > 0 {
+            offset += scratch[(config.actors + block - 1) as usize];
         }
-        spatial[(base + blocks) as usize] = offset;
     }
+    offset
 }
+
 #[cube]
 fn index_offsets(
-    state: &mut [u32],
-    actors: &[u32],
     config: &EconomyConfig,
     spatial: &mut [u32],
+    scratch: &mut [u32],
     parameters: &EconomyParameters,
     cell: u32,
 ) {
@@ -2254,56 +2310,52 @@ fn index_offsets(
     if cell <= cells {
         let segment = index_segment(config, parameters);
         let member = spatial[(segment + cell) as usize];
-        let block = member / DISCOVERY_BLOCK;
-        let base = 3 * (cells + 1 + config.actors);
-        let mut offset = spatial[(base + block) as usize];
-        for candidate in block * DISCOVERY_BLOCK..member {
-            let firm = spatial[(segment + cells + 1 + candidate) as usize];
-            offset += u32::cast_from(discoverable(state, actors, config, parameters, firm));
-        }
-        spatial[cell as usize] = offset;
+        spatial[cell as usize] = index_offset(config, scratch, member);
     }
 }
+
 #[cube]
 fn index_fill(
-    state: &mut [u32],
-    actors: &[u32],
     config: &EconomyConfig,
     spatial: &mut [u32],
+    scratch: &mut [u32],
     parameters: &EconomyParameters,
-    block: u32,
+    member: u32,
 ) {
     let cells = config.spatial_side * config.spatial_side;
     let segment = index_segment(config, parameters);
     let members = spatial[(segment + cells) as usize];
-    if block * DISCOVERY_BLOCK < members {
-        let base = 3 * (cells + 1 + config.actors);
-        let mut offset = spatial[(base + block) as usize];
-        for member in block * DISCOVERY_BLOCK..min((block + 1) * DISCOVERY_BLOCK, members) {
-            let firm = spatial[(segment + cells + 1 + member) as usize];
-            if discoverable(state, actors, config, parameters, firm) {
-                spatial[(cells + 1 + offset) as usize] = firm;
-                offset += 1;
-            }
+    if member < members {
+        let mut previous = 0u32;
+        if UNIT_POS > 0 {
+            previous = scratch[member as usize - 1];
+        }
+        if scratch[member as usize] > previous {
+            let offset = index_offset(config, scratch, member + 1);
+            spatial[(cells + offset) as usize] = spatial[(segment + cells + 1 + member) as usize];
         }
     }
 }
 
 #[cube]
-fn index_prices(state: &mut [u32], config: &EconomyConfig, spatial: &mut [u32], block: u32) {
+fn index_prices(state: &mut [u32], config: &EconomyConfig, spatial: &mut [u32]) {
     let cells = config.spatial_side * config.spatial_side;
     let count = spatial[cells as usize];
-    if block * DISCOVERY_BLOCK < count {
-        let mut quote = u32::new(comptime!(i64::from(u32::MAX)));
-        for member in block * DISCOVERY_BLOCK..min((block + 1) * DISCOVERY_BLOCK, count) {
-            let actor = spatial[(cells + 1 + member) as usize];
-            quote = min(
-                quote,
-                number(state, config, comptime!(Field::Price as u32), actor),
-            );
-        }
+    let block = CUBE_POS as u32;
+    let mut quote = u32::new(comptime!(i64::from(u32::MAX)));
+    let mut member = block * DISCOVERY_BLOCK + UNIT_POS;
+    while member < min((block + 1) * DISCOVERY_BLOCK, count) {
+        let actor = spatial[(cells + 1 + member) as usize];
+        quote = min(
+            quote,
+            number(state, config, comptime!(Field::Price as u32), actor),
+        );
+        member += CUBE_DIM;
+    }
+    let minimum = parallel::reduce(quote, comptime!(Reduction::Minimum));
+    if UNIT_POS == 0 && block * DISCOVERY_BLOCK < count {
         let base = 3 * (cells + 1 + config.actors);
-        spatial[(base + block) as usize] = quote;
+        spatial[(base + block) as usize] = minimum;
     }
 }
 

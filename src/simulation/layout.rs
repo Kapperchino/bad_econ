@@ -224,7 +224,7 @@ impl SummaryLayout {
     pub const PRICE_SQUARES: u32 = (offset_of!(Self, price_squares) / TICK_BYTES) as u32;
     pub const METRICS: usize = size_of::<Self>() / TICK_BYTES;
     pub const WORDS: usize = size_of::<Self>() / WORD_BYTES;
-    pub const ACTORS_PER_GROUP: u32 = 256;
+    pub const ACTORS_PER_GROUP: u32 = 64;
     pub const WEALTH_BINS: usize = u64::BITS as usize;
     pub const REGION_SIDE: usize = 16;
     pub const REGIONS: usize = Self::REGION_SIDE * Self::REGION_SIDE;

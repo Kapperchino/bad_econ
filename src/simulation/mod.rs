@@ -14,6 +14,7 @@ mod memory;
 pub mod negotiation;
 mod ops;
 mod ownership;
+mod parallel;
 mod parameters;
 mod payroll;
 mod policy;
@@ -949,42 +950,40 @@ impl Simulation {
                     .config()
                     .map_size
                     .div_ceil(self.scenario.config().search_radius);
-                let blocks = self
-                    .metadata
-                    .actors
-                    .len()
-                    .div_ceil(DISCOVERY_BLOCK as usize);
-                self.economy(
-                    EconomyStage::IndexCount,
-                    blocks,
-                    &parameters,
-                    &self.proposals,
+                let actors = self.metadata.actors.len();
+                let index = |stage, count| {
+                    CubeBackend::economy(
+                        &self.device,
+                        stage,
+                        count,
+                        EconomyBuffers {
+                            state: &self.state,
+                            actors: &self.actors,
+                            config: &self.config,
+                            spatial: &self.spatial,
+                            proposals: &self.proposals,
+                            events: &self.scratch,
+                            control: &self.control,
+                        },
+                        &parameters,
+                    );
+                };
+                index(EconomyStage::IndexCount, actors);
+                parallel::scan(
+                    &self.device,
+                    &self.scratch,
+                    actors,
+                    actors.div_ceil(self.device.workgroup as usize),
                 );
-                self.economy(EconomyStage::IndexPrefix, 1, &parameters, &self.proposals);
-                self.economy(
-                    EconomyStage::IndexOffsets,
-                    (side * side + 1) as usize,
-                    &parameters,
-                    &self.proposals,
-                );
-                self.economy(
-                    EconomyStage::IndexFill,
-                    blocks,
-                    &parameters,
-                    &self.proposals,
-                );
+                index(EconomyStage::IndexOffsets, (side * side + 1) as usize);
+                index(EconomyStage::IndexFill, actors);
                 if matches!(
                     market,
                     Market::Household | Market::Input(Good::Bread) | Market::Consumer(Good::Bread)
                 ) {
-                    self.economy(
+                    index(
                         EconomyStage::IndexPrices,
-                        self.metadata
-                            .actors
-                            .len()
-                            .div_ceil(DISCOVERY_BLOCK as usize),
-                        &parameters,
-                        &self.proposals,
+                        actors.div_ceil(DISCOVERY_BLOCK as usize) * self.device.workgroup as usize,
                     );
                 }
             }
@@ -998,7 +997,7 @@ impl Simulation {
         );
         self.economy(
             EconomyStage::MarketActivity,
-            self.metadata.actors.len().div_ceil(256),
+            self.metadata.actors.len(),
             &parameters,
             &self.proposals,
         );
@@ -1036,7 +1035,9 @@ impl Simulation {
         );
         let launch = |stage, parameters: &EconomyParameters| {
             let invocations = match stage {
-                EconomyStage::GroupMerge | EconomyStage::GroupExecute => active as usize,
+                EconomyStage::GroupSort | EconomyStage::GroupMerge | EconomyStage::GroupExecute => {
+                    active as usize
+                }
                 _ => count,
             };
             CubeBackend::economy(
@@ -1059,7 +1060,8 @@ impl Simulation {
         if let Market::Labor | Market::Input(_) | Market::Consumer(_) | Market::Household = market {
             launch(EconomyStage::GroupPrepare, &parameters);
         }
-        let mut width = 1;
+        launch(EconomyStage::GroupSort, &parameters);
+        let mut width = self.device.workgroup as usize;
         while width < active as usize {
             parameters.sort_width = width as u32;
             launch(EconomyStage::GroupMerge, &parameters);
