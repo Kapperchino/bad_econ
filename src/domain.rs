@@ -1275,6 +1275,8 @@ pub struct ActorRows {
     kind: Vec<u32>,
     owner: Vec<u32>,
     capacity: Vec<u32>,
+    #[serde(skip)]
+    firms: usize,
 }
 impl ActorRows {
     #[inline]
@@ -1283,6 +1285,10 @@ impl ActorRows {
     }
     pub fn is_empty(&self) -> bool {
         self.identity.is_empty()
+    }
+    #[cfg(feature = "compute")]
+    pub(crate) fn firms(&self) -> usize {
+        self.firms
     }
     #[inline]
     pub fn at(&self, index: usize) -> Actor {
@@ -1301,12 +1307,33 @@ impl ActorRows {
         (index < self.len()).then(|| self.at(index))
     }
     pub fn set(&mut self, index: usize, actor: Actor) {
+        self.firms -= usize::from(self.kind[index] > 0);
+        self.firms += usize::from(actor.kind > 0);
         self.identity[index] = actor.identity;
         self.x[index] = actor.position.x;
         self.y[index] = actor.position.y;
         self.kind[index] = actor.kind;
         self.owner[index] = actor.owner;
         self.capacity[index] = actor.capacity;
+    }
+    pub(crate) fn extend(&mut self, actors: impl IntoIterator<Item = Actor>) {
+        let actors = actors.into_iter();
+        let additional = actors.size_hint().0;
+        self.identity.reserve(additional);
+        self.x.reserve(additional);
+        self.y.reserve(additional);
+        self.kind.reserve(additional);
+        self.owner.reserve(additional);
+        self.capacity.reserve(additional);
+        for actor in actors {
+            self.firms += usize::from(actor.kind > 0);
+            self.identity.push(actor.identity);
+            self.x.push(actor.position.x);
+            self.y.push(actor.position.y);
+            self.kind.push(actor.kind);
+            self.owner.push(actor.owner);
+            self.capacity.push(actor.capacity);
+        }
     }
     #[inline]
     pub fn iter(&self) -> impl ExactSizeIterator<Item = Actor> + '_ {
@@ -1315,15 +1342,9 @@ impl ActorRows {
 }
 impl FromIterator<Actor> for ActorRows {
     fn from_iter<T: IntoIterator<Item = Actor>>(actors: T) -> Self {
-        actors.into_iter().fold(Self::default(), |mut rows, actor| {
-            rows.identity.push(actor.identity);
-            rows.x.push(actor.position.x);
-            rows.y.push(actor.position.y);
-            rows.kind.push(actor.kind);
-            rows.owner.push(actor.owner);
-            rows.capacity.push(actor.capacity);
-            rows
-        })
+        let mut rows = Self::default();
+        rows.extend(actors);
+        rows
     }
 }
 impl<'de> Deserialize<'de> for ActorRows {
@@ -1352,6 +1373,7 @@ impl<'de> Deserialize<'de> for ActorRows {
         .all(|len| len == rows.identity.len())
         {
             true => Ok(Self {
+                firms: rows.kind.iter().filter(|&&kind| kind > 0).count(),
                 identity: rows.identity,
                 x: rows.x,
                 y: rows.y,

@@ -1,0 +1,802 @@
+{
+  "stage": "Ordered consumer and fixed-wage settlement batches, bounded firm index work, fused fault boundaries, sequential consumer search, and reduced registry cloning, on top of incremental firm indexes and adaptive settlement spacing.",
+  "hardware": "Apple M5 Pro, 64 GB unified memory",
+  "date": "2026-11-03",
+  "baseline_revision": "328ac8b556cd9cea48e8171cd988653786eb2a99",
+  "prior_revision": "206c531ef312b341e4b67a231f49a682c9dfb954",
+  "optimized_source_sha256_relative_to_prior": {
+    "src/simulation/economy/batch.rs": "1e54b252dae03a4ff341a72d3df1e85904532435ee3deed47e869f30bc396239",
+    "src/simulation/economy/batch/labor.rs": "556efbb2a48ecc3ef63fe1bbbbfebb5bdbe99248d4f79c419479efdf416e5c70",
+    "src/simulation/registry/spatial.rs": "ca5423fdf25937c7552202789fc2cffccc1a1f70f1f126ac2ac0c78c2f9f2eda",
+    "src/domain.rs": "23ce7d4087a6afb0d054db3d0933ba7f6d907e2e0c3a8d508f91cf3dec277da2",
+    "src/simulation/economy.rs": "b4e88ec8a356f61589b496833cd01a424bd34ffa79eedaf7a5b1232483d1c97c",
+    "src/simulation/layout.rs": "bc044a4593c45f90bfafbcc37e9b45bc3028551309c62233c5d5b71fdc4da52a",
+    "src/simulation/markets.rs": "e264dea8de7e854a5b82473885c93fd849acb58eaf408a8def4e3ee0440e370e",
+    "src/simulation/mod.rs": "fc817c62346c6304a6f6547815e18cd71cf3e663ce2cb4c882fc0c400a74c4cb",
+    "src/simulation/registry.rs": "56951b548bc33b6ecfcdcbff8b537aea29dc791493f68f86161bfa3ac2b9d067",
+    "src/simulation/registry/entries.rs": "4cf7ef501364c4c0ac221989567407a6ff0a2c19362a456408f66a7f8bdd8ccd",
+    "src/simulation/tests.rs": "c643f85ff8912b166cfe73bc495296a6ed09619a0fbbe18a15d5b74a8a97e786"
+  },
+  "harness_sha256": "d3e33e09e619550b6c978a47da165489d23797d4b9d3acaabd7dc92e15a497ed",
+  "binary_sha256": {
+    "baseline": "6c5d8a4fc78c84d2d090dcc2b15c37e1fd131f2db07089da172aeeb92e0e5df3",
+    "optimized": "7123a04f0c448529145876ed9515e29b2e99f150aee2d256be86cc97a2d769a5"
+  },
+  "backend": "Apple M5 Pro / Metal",
+  "changes": [
+    "Batch one-unit consumer purchases by counterparty with ordered accepted-prefix counts and exact stock and arithmetic limits.",
+    "Batch fixed-wage hires with bounded integer capacity calculations; retain sequential settlement for negotiated wages.",
+    "Cache firm counts without changing serialization, bound firm index construction by membership, and avoid repeated registry counting.",
+    "Latch market faults and prepare indirect dispatch counts in one kernel.",
+    "Use sequential indexed searches for labor and consumer markets; retain cooperative candidate tiles for input and household markets.",
+    "Reuse actor rows for rollback, avoid cloning the complete registry for compact entry state, and build migration indexes directly from rows.",
+    "Rebuild actor metadata when a restored zero-capacity firm grows, preserving its spatial index and recomputing geographic capacity exactly."
+  ],
+  "protocol": {
+    "seed": 42,
+    "economy": "industrial",
+    "experiment": "baseline",
+    "workgroup": 64,
+    "warmup_days": 2,
+    "measured_days": 60,
+    "untimed_preflight_days": 62,
+    "unused_device_allocations_released_after_preflight": true,
+    "preflight_replay_hashes_checked": true,
+    "harness": "examples/gpu_throughput.rs",
+    "separate_runs_per_revision": 3,
+    "revision_order": [
+      "baseline",
+      "optimized-before-checkpoint-fix",
+      "optimized-before-checkpoint-fix",
+      "baseline",
+      "baseline",
+      "optimized-before-checkpoint-fix",
+      "optimized",
+      "optimized",
+      "optimized"
+    ],
+    "revision_order_note": "Comparisons use the three unchanged baseline runs and three final optimized runs after the checkpoint fix. Earlier optimized measurements are superseded.",
+    "profiling": false,
+    "startup_compilation_and_final_download_timed": false,
+    "daily_audits_registry_and_audited_copies_timed": true,
+    "gpu_tests_and_benchmarks_run_sequentially": true
+  },
+  "comparisons": [
+    {
+      "households": 10000,
+      "median_milliseconds_per_day": {
+        "baseline": 47.07093265,
+        "optimized": 24.2769132
+      },
+      "speedup_over_baseline": 1.9389175329753212,
+      "identical_hashes": true,
+      "identical_scenarios": true,
+      "within_memory_budget": true,
+      "runs": {
+        "baseline": [
+          {
+            "seconds": 2.823518625,
+            "milliseconds_per_day": 47.05864375,
+            "final_state_hash": "e19fcb5a3d9d051a630523d75aa9524da12dee98884167713a3b2a1cce5144df",
+            "scenario_hash": "aa44a01ff450bcce73e6bf621ed089a124004b9cf94da7a1e16a469e943bb1e3",
+            "preflight_days": 62,
+            "preflight_seconds": 4.570676167,
+            "preflight_state_hash": "e19fcb5a3d9d051a630523d75aa9524da12dee98884167713a3b2a1cce5144df",
+            "readback_bytes": 5354688,
+            "estimated_bytes": 178174512,
+            "maximum_reserved_bytes": 57310208,
+            "memory_budget_bytes": 27830837248,
+            "mean_phase_milliseconds": {
+              "Opening": 0.441716,
+              "Observation": 0.44921601666666666,
+              "Proposal": 0.7095639333333333,
+              "Commitment": 3.1549382,
+              "WorkPayment": 0.97429865,
+              "ProvisionPurchase": 31.95861385,
+              "PhysicalClose": 1.1198243833333335,
+              "AccountsDecisions": 0.6000527166666667,
+              "Audit": 7.58844935
+            }
+          },
+          {
+            "seconds": 2.9276767919999998,
+            "milliseconds_per_day": 48.79461319999999,
+            "final_state_hash": "e19fcb5a3d9d051a630523d75aa9524da12dee98884167713a3b2a1cce5144df",
+            "scenario_hash": "aa44a01ff450bcce73e6bf621ed089a124004b9cf94da7a1e16a469e943bb1e3",
+            "preflight_days": 62,
+            "preflight_seconds": 4.758909042,
+            "preflight_state_hash": "e19fcb5a3d9d051a630523d75aa9524da12dee98884167713a3b2a1cce5144df",
+            "readback_bytes": 5354688,
+            "estimated_bytes": 178174512,
+            "maximum_reserved_bytes": 57310208,
+            "memory_budget_bytes": 27830837248,
+            "mean_phase_milliseconds": {
+              "Opening": 0.4476811666666667,
+              "Observation": 0.4465362,
+              "Proposal": 0.7346867833333334,
+              "Commitment": 3.28690545,
+              "WorkPayment": 0.9991104833333333,
+              "ProvisionPurchase": 33.16401041666667,
+              "PhysicalClose": 1.1418556,
+              "AccountsDecisions": 0.61343395,
+              "Audit": 7.897234683333333
+            }
+          },
+          {
+            "seconds": 2.8242559590000003,
+            "milliseconds_per_day": 47.07093265,
+            "final_state_hash": "e19fcb5a3d9d051a630523d75aa9524da12dee98884167713a3b2a1cce5144df",
+            "scenario_hash": "aa44a01ff450bcce73e6bf621ed089a124004b9cf94da7a1e16a469e943bb1e3",
+            "preflight_days": 62,
+            "preflight_seconds": 4.5738315,
+            "preflight_state_hash": "e19fcb5a3d9d051a630523d75aa9524da12dee98884167713a3b2a1cce5144df",
+            "readback_bytes": 5354688,
+            "estimated_bytes": 178174512,
+            "maximum_reserved_bytes": 57310208,
+            "memory_budget_bytes": 27830837248,
+            "mean_phase_milliseconds": {
+              "Opening": 0.4375944666666667,
+              "Observation": 0.4497103666666667,
+              "Proposal": 0.7131541666666666,
+              "Commitment": 3.14333885,
+              "WorkPayment": 0.9858763333333334,
+              "ProvisionPurchase": 31.957381966666667,
+              "PhysicalClose": 1.1259221666666666,
+              "AccountsDecisions": 0.6060971,
+              "Audit": 7.58944645
+            }
+          }
+        ],
+        "optimized": [
+          {
+            "seconds": 1.4566147919999999,
+            "milliseconds_per_day": 24.2769132,
+            "final_state_hash": "e19fcb5a3d9d051a630523d75aa9524da12dee98884167713a3b2a1cce5144df",
+            "scenario_hash": "aa44a01ff450bcce73e6bf621ed089a124004b9cf94da7a1e16a469e943bb1e3",
+            "preflight_days": 62,
+            "preflight_seconds": 3.504043416,
+            "preflight_state_hash": "e19fcb5a3d9d051a630523d75aa9524da12dee98884167713a3b2a1cce5144df",
+            "readback_bytes": 381144,
+            "estimated_bytes": 178740112,
+            "maximum_reserved_bytes": 57307392,
+            "memory_budget_bytes": 27830837248,
+            "mean_phase_milliseconds": {
+              "Opening": 0.4388987166666667,
+              "Observation": 0.45087703333333334,
+              "Proposal": 0.7265214833333333,
+              "Commitment": 1.06752485,
+              "WorkPayment": 0.9854923666666666,
+              "ProvisionPurchase": 15.764154133333333,
+              "PhysicalClose": 1.2077853833333334,
+              "AccountsDecisions": 0.6410604,
+              "Audit": 2.9336464166666665
+            }
+          },
+          {
+            "seconds": 1.446876958,
+            "milliseconds_per_day": 24.11461596666667,
+            "final_state_hash": "e19fcb5a3d9d051a630523d75aa9524da12dee98884167713a3b2a1cce5144df",
+            "scenario_hash": "aa44a01ff450bcce73e6bf621ed089a124004b9cf94da7a1e16a469e943bb1e3",
+            "preflight_days": 62,
+            "preflight_seconds": 3.482150542,
+            "preflight_state_hash": "e19fcb5a3d9d051a630523d75aa9524da12dee98884167713a3b2a1cce5144df",
+            "readback_bytes": 381144,
+            "estimated_bytes": 178740112,
+            "maximum_reserved_bytes": 57307392,
+            "memory_budget_bytes": 27830837248,
+            "mean_phase_milliseconds": {
+              "Opening": 0.4369271,
+              "Observation": 0.45036255,
+              "Proposal": 0.72136325,
+              "Commitment": 1.0650459,
+              "WorkPayment": 0.97431255,
+              "ProvisionPurchase": 15.658024283333333,
+              "PhysicalClose": 1.1742333666666667,
+              "AccountsDecisions": 0.6456631833333333,
+              "Audit": 2.9276430833333333
+            }
+          },
+          {
+            "seconds": 1.4687643750000001,
+            "milliseconds_per_day": 24.479406250000004,
+            "final_state_hash": "e19fcb5a3d9d051a630523d75aa9524da12dee98884167713a3b2a1cce5144df",
+            "scenario_hash": "aa44a01ff450bcce73e6bf621ed089a124004b9cf94da7a1e16a469e943bb1e3",
+            "preflight_days": 62,
+            "preflight_seconds": 3.76903925,
+            "preflight_state_hash": "e19fcb5a3d9d051a630523d75aa9524da12dee98884167713a3b2a1cce5144df",
+            "readback_bytes": 381144,
+            "estimated_bytes": 178740112,
+            "maximum_reserved_bytes": 57307392,
+            "memory_budget_bytes": 27830837248,
+            "mean_phase_milliseconds": {
+              "Opening": 0.4423618166666667,
+              "Observation": 0.4425603166666667,
+              "Proposal": 0.7021888833333333,
+              "Commitment": 1.0606605,
+              "WorkPayment": 0.9783138666666666,
+              "ProvisionPurchase": 16.080928533333335,
+              "PhysicalClose": 1.17294935,
+              "AccountsDecisions": 0.6346152666666667,
+              "Audit": 2.9036680666666665
+            }
+          }
+        ]
+      }
+    },
+    {
+      "households": 100000,
+      "median_milliseconds_per_day": {
+        "baseline": 190.22049514999998,
+        "optimized": 69.72913958333334
+      },
+      "speedup_over_baseline": 2.7279914292168677,
+      "identical_hashes": true,
+      "identical_scenarios": true,
+      "within_memory_budget": true,
+      "runs": {
+        "baseline": [
+          {
+            "seconds": 11.413229709,
+            "milliseconds_per_day": 190.22049514999998,
+            "final_state_hash": "12ccf521b9ccd96fa67d9d25a9db9414f7bc759f94dd8415ae691d19c40dc6c9",
+            "scenario_hash": "b3962a16a8d3ba6ac4d4fa953d6f56be8b9f323563ac42de870e84c7d667a72b",
+            "preflight_days": 62,
+            "preflight_seconds": 13.892286042,
+            "preflight_state_hash": "12ccf521b9ccd96fa67d9d25a9db9414f7bc759f94dd8415ae691d19c40dc6c9",
+            "readback_bytes": 71994688,
+            "estimated_bytes": 547770588,
+            "maximum_reserved_bytes": 720847616,
+            "memory_budget_bytes": 27802681344,
+            "mean_phase_milliseconds": {
+              "Opening": 1.4301049,
+              "Observation": 0.6772985833333334,
+              "Proposal": 0.8900326,
+              "Commitment": 19.6721785,
+              "WorkPayment": 1.39719155,
+              "ProvisionPurchase": 134.88316601666665,
+              "PhysicalClose": 2.27218185,
+              "AccountsDecisions": 0.8083847833333333,
+              "Audit": 28.124358883333333
+            }
+          },
+          {
+            "seconds": 11.744924583,
+            "milliseconds_per_day": 195.74874305,
+            "final_state_hash": "12ccf521b9ccd96fa67d9d25a9db9414f7bc759f94dd8415ae691d19c40dc6c9",
+            "scenario_hash": "b3962a16a8d3ba6ac4d4fa953d6f56be8b9f323563ac42de870e84c7d667a72b",
+            "preflight_days": 62,
+            "preflight_seconds": 13.814328125,
+            "preflight_state_hash": "12ccf521b9ccd96fa67d9d25a9db9414f7bc759f94dd8415ae691d19c40dc6c9",
+            "readback_bytes": 71994688,
+            "estimated_bytes": 547770588,
+            "maximum_reserved_bytes": 720847616,
+            "memory_budget_bytes": 27802681344,
+            "mean_phase_milliseconds": {
+              "Opening": 1.4016381166666667,
+              "Observation": 0.68281245,
+              "Proposal": 0.8926201333333333,
+              "Commitment": 20.559275666666665,
+              "WorkPayment": 1.4202201166666666,
+              "ProvisionPurchase": 139.36204648333333,
+              "PhysicalClose": 2.292275083333333,
+              "AccountsDecisions": 0.8317769833333334,
+              "Audit": 28.239015966666667
+            }
+          },
+          {
+            "seconds": 11.399192667,
+            "milliseconds_per_day": 189.98654445,
+            "final_state_hash": "12ccf521b9ccd96fa67d9d25a9db9414f7bc759f94dd8415ae691d19c40dc6c9",
+            "scenario_hash": "b3962a16a8d3ba6ac4d4fa953d6f56be8b9f323563ac42de870e84c7d667a72b",
+            "preflight_days": 62,
+            "preflight_seconds": 13.552533666,
+            "preflight_state_hash": "12ccf521b9ccd96fa67d9d25a9db9414f7bc759f94dd8415ae691d19c40dc6c9",
+            "readback_bytes": 71994688,
+            "estimated_bytes": 547770588,
+            "maximum_reserved_bytes": 720847616,
+            "memory_budget_bytes": 27802681344,
+            "mean_phase_milliseconds": {
+              "Opening": 1.38181315,
+              "Observation": 0.6725854333333333,
+              "Proposal": 0.8974625166666667,
+              "Commitment": 19.580136166666666,
+              "WorkPayment": 1.4042257166666667,
+              "ProvisionPurchase": 135.05974235,
+              "PhysicalClose": 2.265958933333333,
+              "AccountsDecisions": 0.8155472333333333,
+              "Audit": 27.842290233333333
+            }
+          }
+        ],
+        "optimized": [
+          {
+            "seconds": 4.183748375,
+            "milliseconds_per_day": 69.72913958333334,
+            "final_state_hash": "12ccf521b9ccd96fa67d9d25a9db9414f7bc759f94dd8415ae691d19c40dc6c9",
+            "scenario_hash": "b3962a16a8d3ba6ac4d4fa953d6f56be8b9f323563ac42de870e84c7d667a72b",
+            "preflight_days": 62,
+            "preflight_seconds": 6.469526417,
+            "preflight_state_hash": "12ccf521b9ccd96fa67d9d25a9db9414f7bc759f94dd8415ae691d19c40dc6c9",
+            "readback_bytes": 23241420,
+            "estimated_bytes": 553426588,
+            "maximum_reserved_bytes": 737441536,
+            "memory_budget_bytes": 27802697728,
+            "mean_phase_milliseconds": {
+              "Opening": 1.4739618,
+              "Observation": 0.6761264666666666,
+              "Proposal": 0.8366555999999999,
+              "Commitment": 5.75326115,
+              "WorkPayment": 1.4341159666666667,
+              "ProvisionPurchase": 41.672238183333334,
+              "PhysicalClose": 2.27483265,
+              "AccountsDecisions": 0.8423563166666667,
+              "Audit": 14.69002985
+            }
+          },
+          {
+            "seconds": 4.091526042,
+            "milliseconds_per_day": 68.1921007,
+            "final_state_hash": "12ccf521b9ccd96fa67d9d25a9db9414f7bc759f94dd8415ae691d19c40dc6c9",
+            "scenario_hash": "b3962a16a8d3ba6ac4d4fa953d6f56be8b9f323563ac42de870e84c7d667a72b",
+            "preflight_days": 62,
+            "preflight_seconds": 6.380205583,
+            "preflight_state_hash": "12ccf521b9ccd96fa67d9d25a9db9414f7bc759f94dd8415ae691d19c40dc6c9",
+            "readback_bytes": 23241420,
+            "estimated_bytes": 553426588,
+            "maximum_reserved_bytes": 737441536,
+            "memory_budget_bytes": 27802697728,
+            "mean_phase_milliseconds": {
+              "Opening": 1.3842944666666668,
+              "Observation": 0.6253937333333334,
+              "Proposal": 0.7817478833333333,
+              "Commitment": 5.6707172833333335,
+              "WorkPayment": 1.3213528166666666,
+              "ProvisionPurchase": 41.1057653,
+              "PhysicalClose": 2.1693541666666665,
+              "AccountsDecisions": 0.8041264333333333,
+              "Audit": 14.264834033333333
+            }
+          },
+          {
+            "seconds": 4.409447833,
+            "milliseconds_per_day": 73.49079721666666,
+            "final_state_hash": "12ccf521b9ccd96fa67d9d25a9db9414f7bc759f94dd8415ae691d19c40dc6c9",
+            "scenario_hash": "b3962a16a8d3ba6ac4d4fa953d6f56be8b9f323563ac42de870e84c7d667a72b",
+            "preflight_days": 62,
+            "preflight_seconds": 6.687893084,
+            "preflight_state_hash": "12ccf521b9ccd96fa67d9d25a9db9414f7bc759f94dd8415ae691d19c40dc6c9",
+            "readback_bytes": 23241420,
+            "estimated_bytes": 553426588,
+            "maximum_reserved_bytes": 737441536,
+            "memory_budget_bytes": 27802697728,
+            "mean_phase_milliseconds": {
+              "Opening": 1.3542770666666666,
+              "Observation": 0.6342924333333333,
+              "Proposal": 0.8112693666666667,
+              "Commitment": 5.657672266666666,
+              "WorkPayment": 1.3450375,
+              "ProvisionPurchase": 46.11538753333333,
+              "PhysicalClose": 2.2313166166666667,
+              "AccountsDecisions": 0.8361875166666667,
+              "Audit": 14.4378834
+            }
+          }
+        ]
+      }
+    },
+    {
+      "households": 1000000,
+      "median_milliseconds_per_day": {
+        "baseline": 781.3912541666667,
+        "optimized": 473.40467985000004
+      },
+      "speedup_over_baseline": 1.6505777982893057,
+      "identical_hashes": true,
+      "identical_scenarios": true,
+      "within_memory_budget": true,
+      "runs": {
+        "baseline": [
+          {
+            "seconds": 46.708013792,
+            "milliseconds_per_day": 778.4668965333334,
+            "final_state_hash": "4be8836e4beba8d890ee00706a9b1ef0015bd8db29b8017d5229123f074333eb",
+            "scenario_hash": "285c3867fe6fbcaf134dd0cebc3746fe256007c17f8b6f5d55badeba5dffb913",
+            "preflight_days": 62,
+            "preflight_seconds": 52.261884417,
+            "preflight_state_hash": "4be8836e4beba8d890ee00706a9b1ef0015bd8db29b8017d5229123f074333eb",
+            "readback_bytes": 665572552,
+            "estimated_bytes": 3837939792,
+            "maximum_reserved_bytes": 7036915456,
+            "memory_budget_bytes": 27608399872,
+            "mean_phase_milliseconds": {
+              "Opening": 8.62976385,
+              "Observation": 2.0646714833333335,
+              "Proposal": 0.9589861,
+              "Commitment": 79.5733042,
+              "WorkPayment": 4.0857416,
+              "ProvisionPurchase": 474.6080979,
+              "PhysicalClose": 11.1606597,
+              "AccountsDecisions": 1.3266492166666666,
+              "Audit": 195.98288893333333
+            }
+          },
+          {
+            "seconds": 46.883475250000004,
+            "milliseconds_per_day": 781.3912541666667,
+            "final_state_hash": "4be8836e4beba8d890ee00706a9b1ef0015bd8db29b8017d5229123f074333eb",
+            "scenario_hash": "285c3867fe6fbcaf134dd0cebc3746fe256007c17f8b6f5d55badeba5dffb913",
+            "preflight_days": 62,
+            "preflight_seconds": 51.877010125,
+            "preflight_state_hash": "4be8836e4beba8d890ee00706a9b1ef0015bd8db29b8017d5229123f074333eb",
+            "readback_bytes": 665572552,
+            "estimated_bytes": 3837939792,
+            "maximum_reserved_bytes": 7036915456,
+            "memory_budget_bytes": 27608399872,
+            "mean_phase_milliseconds": {
+              "Opening": 8.445477,
+              "Observation": 2.0438646166666667,
+              "Proposal": 0.94584785,
+              "Commitment": 79.56434023333334,
+              "WorkPayment": 4.139759033333333,
+              "ProvisionPurchase": 479.2257346833333,
+              "PhysicalClose": 11.173602816666667,
+              "AccountsDecisions": 1.3373028666666666,
+              "Audit": 194.43909161666667
+            }
+          },
+          {
+            "seconds": 48.185921083,
+            "milliseconds_per_day": 803.0986847166665,
+            "final_state_hash": "4be8836e4beba8d890ee00706a9b1ef0015bd8db29b8017d5229123f074333eb",
+            "scenario_hash": "285c3867fe6fbcaf134dd0cebc3746fe256007c17f8b6f5d55badeba5dffb913",
+            "preflight_days": 62,
+            "preflight_seconds": 52.108685916,
+            "preflight_state_hash": "4be8836e4beba8d890ee00706a9b1ef0015bd8db29b8017d5229123f074333eb",
+            "readback_bytes": 665572552,
+            "estimated_bytes": 3837939792,
+            "maximum_reserved_bytes": 7036915456,
+            "memory_budget_bytes": 27608399872,
+            "mean_phase_milliseconds": {
+              "Opening": 8.388284066666667,
+              "Observation": 2.150412483333333,
+              "Proposal": 1.0007458666666667,
+              "Commitment": 83.27201183333334,
+              "WorkPayment": 4.314317366666667,
+              "ProvisionPurchase": 494.28745485,
+              "PhysicalClose": 11.774989,
+              "AccountsDecisions": 1.4379757666666666,
+              "Audit": 196.39071810000002
+            }
+          }
+        ],
+        "optimized": [
+          {
+            "seconds": 28.404280791,
+            "milliseconds_per_day": 473.40467985000004,
+            "final_state_hash": "4be8836e4beba8d890ee00706a9b1ef0015bd8db29b8017d5229123f074333eb",
+            "scenario_hash": "285c3867fe6fbcaf134dd0cebc3746fe256007c17f8b6f5d55badeba5dffb913",
+            "preflight_days": 62,
+            "preflight_seconds": 33.978864,
+            "preflight_state_hash": "4be8836e4beba8d890ee00706a9b1ef0015bd8db29b8017d5229123f074333eb",
+            "readback_bytes": 183458608,
+            "estimated_bytes": 3894499792,
+            "maximum_reserved_bytes": 7114450176,
+            "memory_budget_bytes": 27608530944,
+            "mean_phase_milliseconds": {
+              "Opening": 8.36795695,
+              "Observation": 2.0140118166666667,
+              "Proposal": 0.9380993,
+              "Commitment": 45.90966395,
+              "WorkPayment": 4.2993035,
+              "ProvisionPurchase": 258.7006618,
+              "PhysicalClose": 11.298253433333333,
+              "AccountsDecisions": 1.46272015,
+              "Audit": 140.3423076
+            }
+          },
+          {
+            "seconds": 28.094533125,
+            "milliseconds_per_day": 468.24221875,
+            "final_state_hash": "4be8836e4beba8d890ee00706a9b1ef0015bd8db29b8017d5229123f074333eb",
+            "scenario_hash": "285c3867fe6fbcaf134dd0cebc3746fe256007c17f8b6f5d55badeba5dffb913",
+            "preflight_days": 62,
+            "preflight_seconds": 33.333945625,
+            "preflight_state_hash": "4be8836e4beba8d890ee00706a9b1ef0015bd8db29b8017d5229123f074333eb",
+            "readback_bytes": 183458608,
+            "estimated_bytes": 3894499792,
+            "maximum_reserved_bytes": 7114450176,
+            "memory_budget_bytes": 27608530944,
+            "mean_phase_milliseconds": {
+              "Opening": 7.963198583333333,
+              "Observation": 2.0250611166666665,
+              "Proposal": 0.9427131833333333,
+              "Commitment": 45.644422283333334,
+              "WorkPayment": 4.236558316666667,
+              "ProvisionPurchase": 257.46238201666665,
+              "PhysicalClose": 11.293306283333333,
+              "AccountsDecisions": 1.4582826,
+              "Audit": 137.14575773333334
+            }
+          },
+          {
+            "seconds": 28.920686875,
+            "milliseconds_per_day": 482.01144791666667,
+            "final_state_hash": "4be8836e4beba8d890ee00706a9b1ef0015bd8db29b8017d5229123f074333eb",
+            "scenario_hash": "285c3867fe6fbcaf134dd0cebc3746fe256007c17f8b6f5d55badeba5dffb913",
+            "preflight_days": 62,
+            "preflight_seconds": 34.470221833,
+            "preflight_state_hash": "4be8836e4beba8d890ee00706a9b1ef0015bd8db29b8017d5229123f074333eb",
+            "readback_bytes": 183458608,
+            "estimated_bytes": 3894499792,
+            "maximum_reserved_bytes": 7114450176,
+            "memory_budget_bytes": 27608530944,
+            "mean_phase_milliseconds": {
+              "Opening": 8.06050835,
+              "Observation": 2.0480652666666668,
+              "Proposal": 0.9632019666666667,
+              "Commitment": 46.9395605,
+              "WorkPayment": 4.440101366666667,
+              "ProvisionPurchase": 265.26645978333335,
+              "PhysicalClose": 11.665776966666666,
+              "AccountsDecisions": 1.5189631833333332,
+              "Audit": 141.02760003333333
+            }
+          }
+        ]
+      }
+    }
+  ],
+  "acceptance": {
+    "at_least_tenfold_at_one_million": false,
+    "no_greater_than_five_percent_small_case_slowdown": true,
+    "identical_final_hashes": true,
+    "within_configured_memory_budgets": true
+  },
+  "exploratory_measurements": {
+    "protocol": "One release run per variant, one million households, seed 42, workgroup 64, two warmup days, ten measured days, profiling disabled. These short CLI runs are exploratory, not acceptance measurements; they omit the full preflight and day-30 transitions.",
+    "variants": {
+      "unit-batch": "Earlier consumer settlement batching; actor counting and indexing still scan the full registry.",
+      "bounded-index": "Add cached actor counts and bound firm-market indexing by actual membership.",
+      "labor-batch": "Add ordered batching for fixed-wage labor settlement.",
+      "fused-boundary": "Fuse fault latching and indirect dispatch preparation.",
+      "sequential-input": "Try sequential input search; slower and discarded.",
+      "sequential-consumer": "Use sequential consumer search with cooperative input and household search; retained.",
+      "zero-dispatch": "Try zero workgroups for empty stages; no improvement, discarded."
+    },
+    "runs": {
+      "unit-batch": {
+        "seconds": 3.975497958,
+        "milliseconds_per_day": 397.54979579999997,
+        "final_state_hash": "c3e78f368c1542c22c5e33f3172bcd5e7ed403eebc34ab83ca9e93c03658c7af",
+        "scenario_hash": "285c3867fe6fbcaf134dd0cebc3746fe256007c17f8b6f5d55badeba5dffb913",
+        "preflight_days": 0,
+        "preflight_seconds": 0,
+        "preflight_state_hash": null,
+        "readback_bytes": 151912,
+        "estimated_bytes": 3894499792,
+        "maximum_reserved_bytes": 3865321472,
+        "memory_budget_bytes": 27830837248,
+        "mean_phase_milliseconds": {
+          "Opening": 4.7343834,
+          "Observation": 2.0035749,
+          "Proposal": 0.9401166,
+          "Commitment": 76.3216416,
+          "WorkPayment": 4.7390208,
+          "ProvisionPurchase": 239.55820830000002,
+          "PhysicalClose": 9.2088914,
+          "AccountsDecisions": 1.4994958,
+          "Audit": 58.463525000000004
+        }
+      },
+      "bounded-index": {
+        "seconds": 3.691032334,
+        "milliseconds_per_day": 369.1032334,
+        "final_state_hash": "c3e78f368c1542c22c5e33f3172bcd5e7ed403eebc34ab83ca9e93c03658c7af",
+        "scenario_hash": "285c3867fe6fbcaf134dd0cebc3746fe256007c17f8b6f5d55badeba5dffb913",
+        "preflight_days": 0,
+        "preflight_seconds": 0,
+        "preflight_state_hash": null,
+        "readback_bytes": 151912,
+        "estimated_bytes": 3894499792,
+        "maximum_reserved_bytes": 3865321472,
+        "memory_budget_bytes": 27830837248,
+        "mean_phase_milliseconds": {
+          "Opening": 4.3017541999999995,
+          "Observation": 2.0143334,
+          "Proposal": 0.9673918,
+          "Commitment": 75.401125,
+          "WorkPayment": 4.7768916,
+          "ProvisionPurchase": 221.323975,
+          "PhysicalClose": 9.039375099999999,
+          "AccountsDecisions": 1.488375,
+          "Audit": 49.7117876
+        }
+      },
+      "labor-batch": {
+        "seconds": 3.384643291,
+        "milliseconds_per_day": 338.46432910000004,
+        "final_state_hash": "c3e78f368c1542c22c5e33f3172bcd5e7ed403eebc34ab83ca9e93c03658c7af",
+        "scenario_hash": "285c3867fe6fbcaf134dd0cebc3746fe256007c17f8b6f5d55badeba5dffb913",
+        "preflight_days": 0,
+        "preflight_seconds": 0,
+        "preflight_state_hash": null,
+        "readback_bytes": 151912,
+        "estimated_bytes": 3894499792,
+        "maximum_reserved_bytes": 3865321216,
+        "memory_budget_bytes": 27830837248,
+        "mean_phase_milliseconds": {
+          "Opening": 4.4161667,
+          "Observation": 2.0098376,
+          "Proposal": 0.9903127,
+          "Commitment": 44.462421,
+          "WorkPayment": 4.8637084,
+          "ProvisionPurchase": 221.5274582,
+          "PhysicalClose": 9.1252083,
+          "AccountsDecisions": 1.4640084,
+          "Audit": 49.5205958
+        }
+      },
+      "fused-boundary": {
+        "seconds": 3.319561917,
+        "milliseconds_per_day": 331.9561917,
+        "final_state_hash": "c3e78f368c1542c22c5e33f3172bcd5e7ed403eebc34ab83ca9e93c03658c7af",
+        "scenario_hash": "285c3867fe6fbcaf134dd0cebc3746fe256007c17f8b6f5d55badeba5dffb913",
+        "preflight_days": 0,
+        "preflight_seconds": 0,
+        "preflight_state_hash": null,
+        "readback_bytes": 151912,
+        "estimated_bytes": 3894499792,
+        "maximum_reserved_bytes": 3865321216,
+        "memory_budget_bytes": 27830837248,
+        "mean_phase_milliseconds": {
+          "Opening": 4.25425,
+          "Observation": 1.9209252,
+          "Proposal": 0.9451122,
+          "Commitment": 43.6411417,
+          "WorkPayment": 4.6492292,
+          "ProvisionPurchase": 216.9728832,
+          "PhysicalClose": 8.9219,
+          "AccountsDecisions": 1.4561124,
+          "Audit": 49.1134415
+        }
+      },
+      "sequential-input": {
+        "seconds": 3.927837875,
+        "milliseconds_per_day": 392.78378749999996,
+        "final_state_hash": "c3e78f368c1542c22c5e33f3172bcd5e7ed403eebc34ab83ca9e93c03658c7af",
+        "scenario_hash": "285c3867fe6fbcaf134dd0cebc3746fe256007c17f8b6f5d55badeba5dffb913",
+        "preflight_days": 0,
+        "preflight_seconds": 0,
+        "preflight_state_hash": null,
+        "readback_bytes": 151912,
+        "estimated_bytes": 3894499792,
+        "maximum_reserved_bytes": 3865321472,
+        "memory_budget_bytes": 27830837248,
+        "mean_phase_milliseconds": {
+          "Opening": 4.6122876,
+          "Observation": 2.1169377,
+          "Proposal": 1.0242248,
+          "Commitment": 44.9856834,
+          "WorkPayment": 37.7502457,
+          "ProvisionPurchase": 238.1411584,
+          "PhysicalClose": 9.5020043,
+          "AccountsDecisions": 1.5556792,
+          "Audit": 53.0136874
+        }
+      },
+      "sequential-consumer": {
+        "seconds": 3.171187084,
+        "milliseconds_per_day": 317.1187084,
+        "final_state_hash": "c3e78f368c1542c22c5e33f3172bcd5e7ed403eebc34ab83ca9e93c03658c7af",
+        "scenario_hash": "285c3867fe6fbcaf134dd0cebc3746fe256007c17f8b6f5d55badeba5dffb913",
+        "preflight_days": 0,
+        "preflight_seconds": 0,
+        "preflight_state_hash": null,
+        "readback_bytes": 151912,
+        "estimated_bytes": 3894499792,
+        "maximum_reserved_bytes": 3865321216,
+        "memory_budget_bytes": 27830837248,
+        "mean_phase_milliseconds": {
+          "Opening": 4.2514126,
+          "Observation": 2.00535,
+          "Proposal": 0.92165,
+          "Commitment": 43.6372125,
+          "WorkPayment": 4.6155626,
+          "ProvisionPurchase": 202.5250124,
+          "PhysicalClose": 8.8522498,
+          "AccountsDecisions": 1.4060542,
+          "Audit": 48.833191799999994
+        }
+      },
+      "zero-dispatch": {
+        "seconds": 3.215297292,
+        "milliseconds_per_day": 321.52972919999996,
+        "final_state_hash": "c3e78f368c1542c22c5e33f3172bcd5e7ed403eebc34ab83ca9e93c03658c7af",
+        "scenario_hash": "285c3867fe6fbcaf134dd0cebc3746fe256007c17f8b6f5d55badeba5dffb913",
+        "preflight_days": 0,
+        "preflight_seconds": 0,
+        "preflight_state_hash": null,
+        "readback_bytes": 151912,
+        "estimated_bytes": 3894499792,
+        "maximum_reserved_bytes": 3865321216,
+        "memory_budget_bytes": 27830837248,
+        "mean_phase_milliseconds": {
+          "Opening": 4.3648334,
+          "Observation": 2.0041833,
+          "Proposal": 0.9355042,
+          "Commitment": 44.2814666,
+          "WorkPayment": 4.769721,
+          "ProvisionPurchase": 205.0864877,
+          "PhysicalClose": 9.0575128,
+          "AccountsDecisions": 1.436396,
+          "Audit": 49.5119958
+        }
+      }
+    },
+    "identical_hashes": true,
+    "binary_sha256": {
+      "unit-batch": "a29e901d07757ef0104086cd967addd302ceb2192184898a4bbeb2f144f98c68",
+      "bounded-index": "cc2c26ba1d864767b5516824c69f73b660f7eb4161cedca5a80f31016e773538",
+      "labor-batch": "b43a55d9d2a6abe8ab8607e322dfbe883f21c0b2e3eefe0d5a267cad4e0ca3c2",
+      "fused-boundary": "3c261c40c7f86b3e15504abf1843ea9709b332e861ab9416d90bf90ab0b97142",
+      "sequential-input": "0408de5d1cde66975cb1fc62f09bb485523eec30ff64c0e27e8a2fb044f26a65",
+      "sequential-consumer": "99e47b4bab2a4ea8e9d4d3f1afac41f8e7ffcdf38901ac2dc797749658f28686",
+      "zero-dispatch": "2baefdce39fbfaff1fbc8983be9b32a61f7eb904b00c2a8063278f7465914133"
+    }
+  },
+  "registry_cloning_ablation": {
+    "protocol": "One release run at one million households with 62 untimed preflight days, two warmup days, and 60 measured days; final market code before registry cloning reductions.",
+    "run": {
+      "seconds": 28.636540125,
+      "milliseconds_per_day": 477.27566874999997,
+      "final_state_hash": "4be8836e4beba8d890ee00706a9b1ef0015bd8db29b8017d5229123f074333eb",
+      "scenario_hash": "285c3867fe6fbcaf134dd0cebc3746fe256007c17f8b6f5d55badeba5dffb913",
+      "preflight_days": 62,
+      "preflight_seconds": 35.197413,
+      "preflight_state_hash": "4be8836e4beba8d890ee00706a9b1ef0015bd8db29b8017d5229123f074333eb",
+      "readback_bytes": 183458608,
+      "estimated_bytes": 3894499792,
+      "maximum_reserved_bytes": 7114450176,
+      "memory_budget_bytes": 27830837248,
+      "mean_phase_milliseconds": {
+        "Opening": 8.096288933333334,
+        "Observation": 2.0387917,
+        "Proposal": 0.95186665,
+        "Commitment": 46.41606598333333,
+        "WorkPayment": 4.288740166666667,
+        "ProvisionPurchase": 261.2980431666667,
+        "PhysicalClose": 11.418781983333334,
+        "AccountsDecisions": 1.4907396666666666,
+        "Audit": 141.19974578333333
+      }
+    },
+    "source_sha256_relative_to_prior": {
+      "src/simulation/economy/batch.rs": "1e54b252dae03a4ff341a72d3df1e85904532435ee3deed47e869f30bc396239",
+      "src/simulation/economy/batch/labor.rs": "556efbb2a48ecc3ef63fe1bbbbfebb5bdbe99248d4f79c419479efdf416e5c70",
+      "src/simulation/registry/spatial.rs": "ca5423fdf25937c7552202789fc2cffccc1a1f70f1f126ac2ac0c78c2f9f2eda",
+      "src/domain.rs": "a5633f04effa96abaed34d4ac0ef1c279f5ff41df13e6f1c0d1b34ad08d36000",
+      "src/simulation/economy.rs": "b4e88ec8a356f61589b496833cd01a424bd34ffa79eedaf7a5b1232483d1c97c",
+      "src/simulation/layout.rs": "bc044a4593c45f90bfafbcc37e9b45bc3028551309c62233c5d5b71fdc4da52a",
+      "src/simulation/markets.rs": "e264dea8de7e854a5b82473885c93fd849acb58eaf408a8def4e3ee0440e370e",
+      "src/simulation/mod.rs": "8e3c528a9eb5a206b4394e7d89e3998815ca9ac8d7ac98fd63af70c66801e352",
+      "src/simulation/registry.rs": "4a5c316c07e9e368689b114ab0c6e575ddb4e170ae5761f761e77065ed807e1c",
+      "src/simulation/registry/entries.rs": "e0b8cdded613c918003cd86e85abcc7a30a01a08e839f7e11e00aac361aebf74"
+    },
+    "binary_sha256": "480258bf088f6fa04de4e7380ea169ccb7814c16e82b6c8fd6d983b53f9cadfa"
+  },
+  "validation": {
+    "full_gpu_suite": "cargo test --features viewer -- --test-threads=1: 196 passed",
+    "settlement_oracles": "Original sequential GPU settlement versus ordered batches: 13 consumer fixtures and 25 fixed-wage fixtures, shared and subgroup scans, workgroups 32/64/128/256; compare state, statuses, and control/fault words.",
+    "restored_capacity_regression": "A valid checkpoint with zero firm capacity and installed capital reproduced stale geographic capacity (0 instead of 5). Growth now matches complete metadata rebuilding and preserves the spatial index at workgroups 32/64/128/256.",
+    "phase_comparisons": "Original GPU phase comparisons include industrial and agrarian economies, four experiments, rotated searches, unaffordable food, overflow, entry, births, migration, rollback, and checkpoint continuation through day 33.",
+    "lint": "cargo clippy --all-targets --features viewer -- -D warnings passed",
+    "format": "cargo fmt --all -- --check; git diff --check passed",
+    "non_compute_build": "cargo check --no-default-features passed"
+  },
+  "remaining_bottlenecks": [
+    "Goods matching remains the largest daily phase.",
+    "Registry growth still reallocates state and audited buffers, copies population records, and performs full pre/post audits.",
+    "Thousands of sorting and scan launches remain in each day."
+  ],
+  "raw_artifacts": "/tmp/bad-econ-speedup"
+}

@@ -501,6 +501,58 @@ fn capacity_changes_preserve_spatial_membership_and_rollback_preparation() -> Re
 }
 
 #[test]
+fn restored_zero_capacity_growth_matches_complete_gpu_metadata() -> Result<()> {
+    let scenario = Scenario::industrial(97, 42, Experiment::Baseline)?;
+    let mut initial = scenario.initial()?;
+    let mut firm = initial.actors.at(97);
+    firm.capacity = 0;
+    initial.actors.set(97, firm);
+    initial.set(Field::InstalledCapital, 97, 1);
+    initial.set(Field::PendingCapacity, 97, 5);
+    let checkpoint = Checkpoint::new(&scenario, &initial)?;
+    let mut requests = vec![0; initial.actors.len()];
+    requests[97] = (6 << 24) | 5;
+    for workgroup in [32, 64, 128, 256] {
+        let mut simulation =
+            Simulation::from_checkpoint(checkpoint.clone(), Device::headless(workgroup)?)?;
+        let mut expected = simulation.download()?;
+        enterprise::transitions(&mut expected, &scenario, &requests)?;
+        let spatial = simulation.device.read(&simulation.spatial)?;
+        let rows = expected
+            .actors
+            .iter()
+            .map(|actor| ActorLayout::new(&actor, &scenario))
+            .collect::<ActorMetadataRows>();
+        simulation
+            .device
+            .write(&simulation.enterprise_requests, &requests);
+        let plan = registry::RegistryPlan::new(
+            &scenario,
+            &simulation.metadata,
+            &simulation.migrations,
+            &requests,
+        )?
+        .context("restored capacity transition")?;
+        simulation.commit_registry(plan, &vec![0; requests.len()])?;
+        assert_eq!(simulation.download()?.digest(), expected.digest());
+        assert_eq!(simulation.device.read(&simulation.spatial)?, spatial);
+        for (index, (actual, expected)) in simulation
+            .device
+            .read(&simulation.actors)?
+            .into_iter()
+            .zip(rows.words())
+            .enumerate()
+        {
+            assert_eq!(
+                actual, expected,
+                "actor metadata word {index}, workgroup {workgroup}"
+            );
+        }
+    }
+    Ok(())
+}
+
+#[test]
 fn speculative_candidates_only_commit_faults_inside_the_visited_prefix() -> Result<()> {
     let mut config = Scenario::baseline(1, 42, Experiment::Concentrated)?
         .config()

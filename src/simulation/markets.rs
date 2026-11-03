@@ -1,13 +1,21 @@
-use super::{flags::*, parallel, parameters::*, words::ceildiv};
+use super::{
+    configuration::{EconomyConfig, Feature},
+    flags::*,
+    parallel,
+    parameters::*,
+    words::ceildiv,
+};
 use cubecl::prelude::*;
 
 pub(super) const LATCH_WORD: usize = CONTROL_WORDS;
-pub(super) const RANGES_WORD: usize = CONTROL_WORDS + 1;
+pub(super) const RANGE_SLOTS_WORD: usize = CONTROL_WORDS + 1;
 pub(super) const SEARCHES_WORD: usize = CONTROL_WORDS + 2;
+const MAX_RANGE_SPACING: u32 = 32;
 pub(super) const SEARCH_DISPATCH: usize = 0;
 pub(super) const SORT_DISPATCH: usize = 3;
 pub(super) const RANGE_DISPATCH: usize = 6;
 pub(super) const HISTOGRAM_DISPATCH: usize = 9;
+pub(super) const QUEUE_DISPATCH: usize = 27;
 
 pub(super) struct SearchBuffers {
     pub requests: burn_wgpu::CubeTensor,
@@ -20,7 +28,7 @@ impl SearchBuffers {
             requests: device.empty(actors * 5),
             dispatches: device
                 .client
-                .memory_dedicated_allocation(108, |_| device.empty(27)),
+                .memory_dedicated_allocation(120, |_| device.empty(30)),
         }
     }
 }
@@ -53,15 +61,17 @@ pub(super) fn prepare_dispatch(
 
 #[cube(launch)]
 fn prepare_counts(control: &[Atomic<u32>], dispatches: &mut [u32], workgroup: u32) {
-    let mut counts = Array::<u32>::new(9usize);
+    control[LATCH_WORD].store(control[crate::simulation::flags::FAULT_WORD].load());
+    let mut counts = Array::<u32>::new(10usize);
     counts[0usize] = control[SEARCHES_WORD].load();
     counts[1usize] = ceildiv(control[CONSTRUCTED_EVENTS_WORD].load(), workgroup);
-    counts[2usize] = ceildiv(control[RANGES_WORD].load(), workgroup);
+    counts[2usize] = ceildiv(control[RANGE_SLOTS_WORD].load(), workgroup);
     counts[3usize] = ceildiv(16 * counts[1usize], workgroup);
     for index in 4..9usize {
         counts[index] = ceildiv(counts[index - 1], workgroup);
     }
-    for index in 0..9usize {
+    counts[9usize] = control[RANGE_SLOTS_WORD].load();
+    for index in 0..10usize {
         let count = counts[index];
         dispatches[index * 3] = min(max(count, 1), 65535);
         dispatches[index * 3 + 1] = ceildiv(max(count, 1), 65535);
@@ -86,6 +96,7 @@ pub(super) fn active(control: &[Atomic<u32>], parameters: &EconomyParameters) ->
 pub(super) fn ranges(
     scratch: &mut [u32],
     control: &[Atomic<u32>],
+    config: &EconomyConfig,
     parameters: &EconomyParameters,
     id: u32,
 ) {
@@ -99,14 +110,38 @@ pub(super) fn ranges(
             first = scratch[(source + id - 1) as usize] != scratch[(source + id) as usize];
         }
     }
-    let prefix = parallel::scan_prefix(u32::cast_from(first), comptime!(parameters.scan));
+    let mut slots = 0u32;
+    let mut length = 0u32;
+    if first {
+        let key = scratch[(source + id) as usize];
+        let mut low = id + 1;
+        let mut high = active;
+        while low < high {
+            let middle = (low + high) / 2;
+            let same = scratch[(source + middle) as usize] == key;
+            low = select(same, middle + 1, low);
+            high = select(same, high, middle);
+        }
+        length = low - id;
+        slots = min(length, MAX_RANGE_SPACING);
+        if comptime!(
+            matches!(parameters.market, MarketFlag::Consumer(_))
+                || parameters.market == MarketFlag::Labor
+                    && config.bargaining.enabled == Feature::Disabled
+        ) {
+            slots = 1;
+        }
+    }
+    let prefix = parallel::scan_prefix(slots, comptime!(parameters.scan));
     let mut base = Shared::<u32>::new();
     if UNIT_POS == 0 {
-        *base = control[RANGES_WORD].fetch_add(prefix.total);
+        *base = control[RANGE_SLOTS_WORD].fetch_add(prefix.total);
     }
     sync_cube();
     if first {
-        scratch[(5 * count + *base + prefix.inclusive - 1) as usize] = id;
+        let slot = *base + prefix.inclusive - slots;
+        scratch[(5 * count + slot) as usize] = id;
+        scratch[(6 * count + slot) as usize] = length;
     }
 }
 
@@ -126,6 +161,7 @@ pub(super) fn compact_count(
                 != u32::MAX,
         );
         KernelEventStatus::new(comptime!(EventStatus::Inactive)).store(scratch, 4 * count + id);
+        scratch[(5 * count + id) as usize] = u32::MAX;
     }
     let prefix = parallel::scan_prefix(present, comptime!(parameters.scan));
     if id < count {

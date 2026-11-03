@@ -2,7 +2,7 @@ use super::flags::ControlLayout;
 
 use super::rows::row_layout;
 use crate::{
-    domain::{Actor, Good, Scenario, State},
+    domain::{Actor, ActorRows, Good, Scenario, State},
     ledger::{LEG_WORDS, MAX_LEGS, TickLayout},
 };
 use anyhow::{Context, Result};
@@ -31,23 +31,26 @@ pub struct SpatialIndex {
 }
 impl SpatialIndex {
     pub fn new(scenario: &Scenario, state: &State) -> Self {
+        Self::from_actors(scenario, &state.actors)
+    }
+    pub(super) fn from_actors(scenario: &Scenario, actors: &ActorRows) -> Self {
         let config = scenario.config();
         let side = config.map_size.div_ceil(config.search_radius);
         let cells = (side * side) as usize;
-        let segment = cells + 1 + state.actors.len();
+        let segment = cells + 1 + actors.len();
         let cell = |index: usize| {
-            let position = state.actors.at(index).position;
+            let position = actors.at(index).position;
             (position.y / config.search_radius * side + position.x / config.search_radius) as usize
         };
         let mut starts = vec![0; cells + 1];
-        for actor in 0..state.actors.len() {
+        for actor in 0..actors.len() {
             starts[cell(actor) + 1] += 1;
         }
         for cell in 1..starts.len() {
             starts[cell] += starts[cell - 1];
         }
-        let mut members = vec![0; state.actors.len()];
-        for actor in 0..state.actors.len() {
+        let mut members = vec![0; actors.len()];
+        for actor in 0..actors.len() {
             let offset = &mut starts[cell(actor)];
             members[*offset] = actor;
             *offset += 1;
@@ -55,15 +58,13 @@ impl SpatialIndex {
         let firms = members
             .iter()
             .copied()
-            .filter(|&index| state.actors.at(index).kind > 0)
+            .filter(|&index| actors.at(index).kind > 0)
             .collect::<Vec<_>>();
-        let mut words = vec![
-            0;
-            3 * segment
-                + state.actors.len().div_ceil(DISCOVERY_BLOCK as usize)
-                + 1
-                + state.actors.len()
-        ];
+        let mut words =
+            vec![
+                0;
+                3 * segment + actors.len().div_ceil(DISCOVERY_BLOCK as usize) + 1 + actors.len()
+            ];
         for (base, members) in [(segment, &members), (2 * segment, &firms)] {
             for (slot, &actor) in members.iter().enumerate() {
                 words[base + cell(actor) + 1] += 1;
@@ -76,18 +77,18 @@ impl SpatialIndex {
         let tile = config.map_size.div_ceil(128);
         let query_side = config.map_size.div_ceil(tile);
         let query_cell = |index: usize| {
-            let position = state.actors.at(index).position;
+            let position = actors.at(index).position;
             (position.y / tile * query_side + position.x / tile) as usize
         };
         let mut offsets = vec![0; (query_side * query_side) as usize + 1];
-        for actor in 0..state.actors.len() {
+        for actor in 0..actors.len() {
             offsets[query_cell(actor) + 1] += 1;
         }
         for cell in 1..offsets.len() {
             offsets[cell] += offsets[cell - 1];
         }
-        let query_base = 3 * segment + state.actors.len().div_ceil(DISCOVERY_BLOCK as usize) + 1;
-        for actor in 0..state.actors.len() {
+        let query_base = 3 * segment + actors.len().div_ceil(DISCOVERY_BLOCK as usize) + 1;
+        for actor in 0..actors.len() {
             let offset = &mut offsets[query_cell(actor)];
             words[query_base + *offset] = actor as u32;
             *offset += 1;

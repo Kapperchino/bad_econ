@@ -6,7 +6,7 @@ use super::{
     },
     households::{KernelFatigue, KernelObservation, ObservationKind, next_fatigue, observed_blend},
     layout::*,
-    markets::{self, LATCH_WORD, RANGES_WORD},
+    markets::{self, LATCH_WORD, RANGE_SLOTS_WORD},
     negotiation::{NegotiationRequest, NegotiationStatus, legal_grid_rate, negotiate},
     parallel::{self, Reduction},
     parameters::{Discovery, EconomyParameters},
@@ -25,6 +25,7 @@ use crate::{
 };
 use cubecl::prelude::*;
 pub(super) mod audit;
+pub(super) mod batch;
 mod clearing;
 pub(super) mod enterprises;
 mod household_production;
@@ -1984,7 +1985,7 @@ pub fn economy(
                     control[LATCH_WORD].store(control[crate::simulation::flags::FAULT_WORD].load());
                     if comptime!(stage == EconomyStage::MarketStart) {
                         control[CONSTRUCTED_EVENTS_WORD].store(0);
-                        control[RANGES_WORD].store(0);
+                        control[RANGE_SLOTS_WORD].store(0);
                         control[markets::SEARCHES_WORD].store(0);
                     }
                 }
@@ -2002,7 +2003,7 @@ pub fn economy(
             EconomyStage::GroupRadixScatter => {
                 markets::radix_scatter(bundles, control, parameters, id)
             }
-            EconomyStage::GroupRanges => markets::ranges(bundles, control, parameters, id),
+            EconomyStage::GroupRanges => markets::ranges(bundles, control, config, parameters, id),
             EconomyStage::ClearFeedback => {
                 if id < control.len() as u32 {
                     control[id as usize].store(0);
@@ -2258,7 +2259,7 @@ fn group_execute(
     let mut invocation = id;
     if comptime!(parameters.discovery == Discovery::Indexed) {
         invocation = active_count;
-        if id < control[RANGES_WORD].load() {
+        if id < control[RANGE_SLOTS_WORD].load() {
             invocation = scratch[(5 * count + id) as usize];
         }
     }

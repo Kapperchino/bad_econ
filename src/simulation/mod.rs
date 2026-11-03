@@ -740,22 +740,51 @@ impl Simulation {
             self.scenario.fields(),
         );
         let mut metadata = batch.metadata;
-        if let Some(actors) = plan.actors {
-            metadata.actors = actors
-                .iter()
-                .chain(metadata.actors.iter().skip(actors.len()))
-                .collect();
+        if let Some(mut actors) = plan.actors {
+            actors.extend(metadata.actors.iter().skip(actors.len()));
+            metadata.actors = actors;
         }
         let config = configuration::Configuration::new(&self.device, &self.scenario, &metadata);
-        let rows = metadata
+        let additions = metadata
             .actors
+            .iter()
+            .skip(self.metadata.actors.len())
+            .collect::<ActorRows>();
+        let rows = additions
             .iter()
             .map(|actor| ActorLayout::new(&actor, &self.scenario))
             .collect::<ActorMetadataRows>();
-        let actors = self.device.tensor(&rows.words());
-        let spatial = self
-            .device
-            .tensor(&SpatialIndex::new(&self.scenario, &metadata).words);
+        let previous_actors = registry::extend_actors(&self.device, &self.actors, &rows);
+        let mut transitions = entries.transitions.clone();
+        transitions.resize(count, 0);
+        let enterprise_requests = self.device.tensor(&transitions);
+        let actors = match plan.transition {
+            registry::RegistryTransition::Unchanged => previous_actors.clone(),
+            registry::RegistryTransition::Capacity(registry::CapacityUpdate::Patch) => {
+                registry::patch_capacity(&self.device, &previous_actors, &enterprise_requests)
+            }
+            registry::RegistryTransition::Capacity(registry::CapacityUpdate::Rebuild)
+            | registry::RegistryTransition::Migration => {
+                let rows = metadata
+                    .actors
+                    .iter()
+                    .map(|actor| ActorLayout::new(&actor, &self.scenario))
+                    .collect::<ActorMetadataRows>();
+                self.device.tensor(&rows.words())
+            }
+        };
+        let spatial = match plan.transition {
+            registry::RegistryTransition::Migration => self
+                .device
+                .tensor(&SpatialIndex::new(&self.scenario, &metadata).words),
+            _ => registry::spatial::extend(
+                &self.device,
+                &self.scenario,
+                &self.spatial,
+                &actors,
+                &additions,
+            ),
+        };
         let mut demography = match newborns {
             0 => self.demography.clone(),
             _ => self.grow_births(births)?,
@@ -766,9 +795,6 @@ impl Simulation {
             .as_ref()
             .map(|research| research.with_actors(&self.device, &metadata.actors))
             .transpose()?;
-        let mut transitions = entries.transitions.clone();
-        transitions.resize(count, 0);
-        let enterprise_requests = self.device.tensor(&transitions);
         let scratch_words = markets::scratch_words(count);
         let event_words = count.div_ceil(economy::audit::TILE_ACTORS) * SummaryLayout::WORDS;
         #[cfg(test)]
@@ -830,14 +856,6 @@ impl Simulation {
             registry_execution: self.registry_execution,
             matching_round: self.matching_round,
         };
-        let previous_actors = self
-            .metadata
-            .actors
-            .iter()
-            .chain(next.metadata.actors.iter().skip(self.metadata.actors.len()))
-            .map(|actor| ActorLayout::new(&actor, &self.scenario))
-            .collect::<ActorMetadataRows>();
-        let previous_actors = self.device.tensor(&previous_actors.words());
         registry::apply(
             &next.device,
             &next.state,
@@ -872,34 +890,36 @@ impl Simulation {
             .as_ref()
             .map(|grown| grown.observation(&self.device))
             .transpose()?;
-        let previous_actors = self.metadata.actors.clone();
         let previous_actor_buffer = self.actors.clone();
         let previous_spatial = self.spatial.clone();
         let next_buffers = match plan.transition {
             registry::RegistryTransition::Unchanged => None,
-            registry::RegistryTransition::Capacity => Some(registry::RegistryBuffers {
-                actors: registry::patch_capacity(
-                    &self.device,
-                    &self.actors,
-                    &self.enterprise_requests,
-                ),
-                spatial: self.spatial.clone(),
-            }),
-            registry::RegistryTransition::Migration => {
-                let actors = plan.actors.as_ref().context("missing migration actors")?;
+            registry::RegistryTransition::Capacity(registry::CapacityUpdate::Patch) => {
+                Some(registry::RegistryBuffers {
+                    actors: registry::patch_capacity(
+                        &self.device,
+                        &self.actors,
+                        &self.enterprise_requests,
+                    ),
+                    spatial: self.spatial.clone(),
+                })
+            }
+            registry::RegistryTransition::Capacity(registry::CapacityUpdate::Rebuild)
+            | registry::RegistryTransition::Migration => {
+                let actors = plan.actors.as_ref().context("missing changed actor rows")?;
                 let rows = actors
                     .iter()
                     .map(|actor| ActorLayout::new(&actor, &self.scenario))
                     .collect::<ActorMetadataRows>();
-                let metadata = State {
-                    actors: actors.clone(),
-                    ..self.metadata.clone()
+                let spatial = match plan.transition {
+                    registry::RegistryTransition::Migration => self
+                        .device
+                        .tensor(&SpatialIndex::from_actors(&self.scenario, actors).words),
+                    _ => self.spatial.clone(),
                 };
                 Some(registry::RegistryBuffers {
                     actors: self.device.tensor(&rows.words()),
-                    spatial: self
-                        .device
-                        .tensor(&SpatialIndex::new(&self.scenario, &metadata).words),
+                    spatial,
                 })
             }
         };
@@ -919,9 +939,9 @@ impl Simulation {
             &self.scratch,
             self.day as u32,
         );
-        if let Some(actors) = plan.actors {
-            self.metadata.actors = actors;
-        }
+        let previous_actors = plan
+            .actors
+            .map(|actors| std::mem::replace(&mut self.metadata.actors, actors));
         if let Some(buffers) = next_buffers {
             self.actors = buffers.actors;
             self.spatial = buffers.spatial;
@@ -949,7 +969,9 @@ impl Simulation {
                 Ok(())
             }
             Err(error) => {
-                self.metadata.actors = previous_actors;
+                if let Some(actors) = previous_actors {
+                    self.metadata.actors = actors;
+                }
                 self.actors = previous_actor_buffer;
                 self.spatial = previous_spatial;
                 Err(error)
@@ -1073,22 +1095,28 @@ impl Simulation {
                 EconomyStage::SearchPrepare => &self.searches.requests,
                 _ => &self.scratch,
             };
-            economy::economy::launch(
-                &self.device.client,
-                dispatch,
-                cubecl::CubeDim::new_1d(self.device.workgroup),
-                self.state.clone().into_buffer_arg(),
-                self.actors.clone().into_buffer_arg(),
-                self.config.launch(),
-                self.spatial.clone().into_buffer_arg(),
-                self.proposals.clone().into_buffer_arg(),
-                events.clone().into_buffer_arg(),
-                self.control.clone().into_buffer_arg(),
-                parameters.launch(),
-                stage,
-            );
-            if let EconomyStage::MarketBoundary = stage {
-                markets::prepare_dispatch(&self.device, &self.control, &self.searches.dispatches);
+            match stage {
+                EconomyStage::MarketBoundary => {
+                    markets::prepare_dispatch(
+                        &self.device,
+                        &self.control,
+                        &self.searches.dispatches,
+                    );
+                }
+                _ => economy::economy::launch(
+                    &self.device.client,
+                    dispatch,
+                    cubecl::CubeDim::new_1d(self.device.workgroup),
+                    self.state.clone().into_buffer_arg(),
+                    self.actors.clone().into_buffer_arg(),
+                    self.config.launch(),
+                    self.spatial.clone().into_buffer_arg(),
+                    self.proposals.clone().into_buffer_arg(),
+                    events.clone().into_buffer_arg(),
+                    self.control.clone().into_buffer_arg(),
+                    parameters.launch(),
+                    stage,
+                ),
             }
         };
         launch(EconomyStage::MarketStart, 1, &parameters);
@@ -1098,19 +1126,25 @@ impl Simulation {
                 .config()
                 .map_size
                 .div_ceil(self.scenario.config().search_radius);
-            launch(EconomyStage::IndexCount, count, &parameters);
+            let members = match market {
+                Market::Household | Market::Input(Good::Bread) | Market::Consumer(Good::Bread) => {
+                    count
+                }
+                _ => self.metadata.actors.firms(),
+            };
+            launch(EconomyStage::IndexCount, members, &parameters);
             parallel::scan(
                 &self.device,
                 &self.scratch,
                 count,
-                count.div_ceil(self.device.workgroup as usize),
+                members.div_ceil(self.device.workgroup as usize),
             );
             launch(
                 EconomyStage::IndexOffsets,
                 (side * side + 1) as usize,
                 &parameters,
             );
-            launch(EconomyStage::IndexFill, count, &parameters);
+            launch(EconomyStage::IndexFill, members, &parameters);
             if matches!(
                 market,
                 Market::Household | Market::Input(Good::Bread) | Market::Consumer(Good::Bread)
@@ -1123,7 +1157,7 @@ impl Simulation {
             }
         }
         match market {
-            Market::Payroll | Market::Distribution => {
+            Market::Labor | Market::Consumer(_) | Market::Payroll | Market::Distribution => {
                 launch(EconomyStage::Propose, count, &parameters)
             }
             _ => {
@@ -1174,7 +1208,32 @@ impl Simulation {
         }
         launch(EconomyStage::GroupRanges, count, &parameters);
         launch(EconomyStage::MarketBoundary, 1, &parameters);
-        launch(EconomyStage::GroupExecute, count, &parameters);
+        match market {
+            Market::Labor if self.scenario.config().bargaining.is_none() => {
+                economy::batch::labor::settle_labor::launch(
+                    &self.device.client,
+                    markets::dispatch(&self.searches.dispatches, markets::QUEUE_DISPATCH),
+                    cubecl::CubeDim::new_1d(self.device.workgroup),
+                    self.state.clone().into_buffer_arg(),
+                    self.config.launch(),
+                    self.scratch.clone().into_buffer_arg(),
+                    self.control.clone().into_buffer_arg(),
+                    parameters.launch(),
+                )
+            }
+            Market::Consumer(_) => economy::batch::settle_units::launch(
+                &self.device.client,
+                markets::dispatch(&self.searches.dispatches, markets::QUEUE_DISPATCH),
+                cubecl::CubeDim::new_1d(self.device.workgroup),
+                self.state.clone().into_buffer_arg(),
+                self.actors.clone().into_buffer_arg(),
+                self.config.launch(),
+                self.scratch.clone().into_buffer_arg(),
+                self.control.clone().into_buffer_arg(),
+                parameters.launch(),
+            ),
+            _ => launch(EconomyStage::GroupExecute, count, &parameters),
+        }
         launch(EconomyStage::MarketBoundary, 1, &parameters);
         if let Market::Labor | Market::Input(_) | Market::Consumer(_) | Market::Household = market {
             launch(EconomyStage::GroupFinalize, count, &parameters);
@@ -1544,19 +1603,9 @@ impl Simulation {
                 .transpose()?
                 .unwrap_or_default(),
             employed: totals.employed.into(),
-            households: self
-                .metadata
-                .actors
-                .iter()
-                .filter(|actor| actor.kind == 0)
-                .count() as u64,
+            households: (self.metadata.actors.len() - self.metadata.actors.firms()) as u64,
             shortages: totals.shortages.into(),
-            firms: self
-                .metadata
-                .actors
-                .iter()
-                .filter(|actor| actor.kind > 0)
-                .count() as u64,
+            firms: self.metadata.actors.firms() as u64,
             firm_entries: self
                 .metadata
                 .actors

@@ -129,6 +129,7 @@ impl EntryBatch {
         let words = device.read(&values)?;
         let readback_bytes = words.len() as u64 * 4;
         let mut compact = State {
+            day: metadata.day,
             actors: selected
                 .iter()
                 .map(|&index| metadata.actors.at(index))
@@ -136,7 +137,11 @@ impl EntryBatch {
             values: decode(&words),
             ownership: Vec::new(),
             next_identity,
-            ..metadata.clone()
+            initial_cash: metadata.initial_cash,
+            initial_goods: metadata.initial_goods,
+            research: metadata.research.clone(),
+            people: metadata.people.clone(),
+            initial_population: metadata.initial_population,
         };
         let mut compact_requests = vec![0; selected.len()];
         for &owner in &entries.entries {
@@ -154,14 +159,12 @@ impl EntryBatch {
         enterprise::enter(&mut compact, scenario, &compact_requests)?;
         let mut grown = metadata.clone();
         let before = metadata.actors.len();
-        grown.actors = metadata
+        grown
             .actors
-            .iter()
-            .chain(compact.actors.iter().skip(selected.len()).map(|mut actor| {
+            .extend(compact.actors.iter().skip(selected.len()).map(|mut actor| {
                 actor.owner = selected[actor.owner as usize] as u32;
                 actor
-            }))
-            .collect();
+            }));
         grown.next_identity = compact.next_identity;
         grown.ownership.extend(compact.ownership.iter().cloned());
         let owners = entries
