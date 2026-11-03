@@ -56,7 +56,6 @@ struct PolicyLayout {
     recovery: u32,
 }
 impl PolicyLayout {
-    const SEED: usize = offset_of!(Self, seed) / WORD_BYTES;
     const MINIMUM_AGE: usize = offset_of!(Self, minimum_age) / WORD_BYTES;
     const RETIREMENT_AGE: usize = offset_of!(Self, retirement_age) / WORD_BYTES;
     const BIRTHS: usize = offset_of!(Self, births) / WORD_BYTES;
@@ -88,6 +87,7 @@ pub struct DemographyRuntime {
     count: usize,
     range_counts: Vec<u32>,
     initial_population: u64,
+    seed: u64,
 }
 impl DemographyRuntime {
     pub fn new(device: &Device, scenario: &Scenario, state: &State) -> Result<Self> {
@@ -169,6 +169,7 @@ impl DemographyRuntime {
             count,
             range_counts: ranges.chunks_exact(2).map(|range| range[1]).collect(),
             initial_population: state.initial_population,
+            seed: scenario.config().seed,
         })
     }
     fn launch(
@@ -186,6 +187,16 @@ impl DemographyRuntime {
         let count = self.births.meta.shape()[0];
         let groups = (count as u32).div_ceil(device.workgroup).max(1);
         let x = groups.min(u16::MAX.into());
+        let samples = match stage {
+            Stage::Mortality => super::random::samples(
+                device,
+                self.seed,
+                day,
+                super::random::Stream::Demography,
+                [self.count, 5],
+            )?,
+            _ => super::tensor::empty(device, [0]),
+        };
         kernels::step::launch(
             &device.client,
             CubeCount::Static(x, groups.div_ceil(x), 1),
@@ -197,6 +208,7 @@ impl DemographyRuntime {
             argument(&self.ranges),
             argument(&self.policy),
             argument(&self.births),
+            unsafe { BufferArg::from_raw_parts(samples.handle, samples.meta.num_elements()) },
             u32::try_from(day)?,
             stage,
         );
@@ -242,19 +254,7 @@ impl DemographyRuntime {
             super::CopyDirection::Save => (&self.people, &self.audited),
             super::CopyDirection::Restore => (&self.audited, &self.people),
         };
-        let argument = |tensor: &CubeTensor| unsafe {
-            BufferArg::from_raw_parts(tensor.handle.clone(), tensor.meta.shape()[0])
-        };
-        let count = source.meta.shape()[0] as u32;
-        let groups = count.div_ceil(device.workgroup).max(1);
-        let x = groups.min(u16::MAX.into());
-        kernels::copy::launch(
-            &device.client,
-            CubeCount::Static(x, groups.div_ceil(x), 1),
-            CubeDim::new_1d(device.workgroup),
-            argument(source),
-            argument(target),
-        );
+        super::tensor::copy(device, source, target);
     }
     pub fn download(
         &self,
@@ -325,11 +325,23 @@ impl DemographyRuntime {
             argument(&shards),
             self.count as u32,
         );
-        kernels::reduce_observation::launch(
+        let input = cubecl::std::tensor::TensorHandle::new_contiguous(
+            [OBSERVATION_SHARDS, 8],
+            shards.handle,
+            <u32 as cubecl::prelude::Scalar>::elem_type_native(),
+        );
+        let sums = super::reduction::reduce(
+            device,
+            &input,
+            0,
+            cubek::reduce::components::instructions::ReduceOperationConfig::Sum,
+            <u64 as cubecl::prelude::Scalar>::elem_type_native(),
+        )?;
+        kernels::observation_totals::launch(
             &device.client,
             CubeCount::Static(1, 1, 1),
             CubeDim::new_1d(device.workgroup),
-            argument(&shards),
+            unsafe { BufferArg::from_raw_parts(sums.handle, 8) },
             argument(&output),
         );
         let totals = device.read(&output)?;
@@ -344,8 +356,8 @@ impl DemographyRuntime {
     }
     pub fn grow_births(&self, device: &Device, births: &[u32], next_identity: u64) -> Result<Self> {
         let count = self.count + births.iter().filter(|&&birth| birth > 0).count();
-        let growth =
-            count as u64 * (PersonLayout::WORDS * WORD_BYTES * 2) as u64 + births.len() as u64 * 8;
+        let growth = count as u64 * ((PersonLayout::WORDS * 2 + 5) * WORD_BYTES) as u64
+            + births.len() as u64 * 8;
         device.reclaim_memory(growth)?;
         let required = growth
             + device
@@ -380,6 +392,7 @@ impl DemographyRuntime {
             count,
             range_counts,
             initial_population: self.initial_population,
+            seed: self.seed,
         };
         let argument = |tensor: &CubeTensor| unsafe {
             BufferArg::from_raw_parts(tensor.handle.clone(), tensor.meta.shape()[0])

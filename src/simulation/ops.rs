@@ -43,7 +43,9 @@ impl Device {
             required_limits: limits,
             required_features: adapter.features()
                 & (wgpu::Features::TIMESTAMP_QUERY
-                    | wgpu::Features::TIMESTAMP_QUERY_INSIDE_ENCODERS),
+                    | wgpu::Features::TIMESTAMP_QUERY_INSIDE_ENCODERS
+                    | wgpu::Features::SHADER_INT64
+                    | wgpu::Features::SUBGROUP),
             ..Default::default()
         };
         let (device, queue) = pollster::block_on(adapter.request_device(&descriptor))?;
@@ -59,6 +61,16 @@ impl Device {
         )
     }
     pub fn import(setup: WgpuSetup, workgroup: u32) -> Result<Self> {
+        match setup
+            .device
+            .features()
+            .contains(wgpu::Features::SHADER_INT64)
+        {
+            true => (),
+            false => Err(anyhow!(
+                "CubeK integer reductions require GPU SHADER_INT64 support"
+            ))?,
+        }
         match WORKGROUP_SIZES.contains(&workgroup) {
             true => {
                 let name = format!("{} / {:?}", setup.adapter.get_info().name, setup.backend);

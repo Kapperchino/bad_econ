@@ -1,4 +1,6 @@
 #![cfg(feature = "compute")]
+#[path = "support/estimates.rs"]
+mod estimates;
 mod support;
 
 use anyhow::{Result, anyhow};
@@ -67,11 +69,11 @@ fn signed(ticks: SignedTicks) -> i128 {
     }
 }
 
-fn signed_exact(values: &[SignedInterval], expected: &[i64]) {
+fn signed_approximate(values: &[SignedInterval], expected: &[i64]) {
     assert_eq!(values.len(), expected.len());
     for (actual, &expected) in values.iter().zip(expected) {
-        assert_eq!(signed(actual.lower), i128::from(expected));
-        assert_eq!(signed(actual.upper), i128::from(expected));
+        estimates::assert_close(signed(actual.lower), i128::from(expected));
+        estimates::assert_close(signed(actual.upper), i128::from(expected));
     }
 }
 
@@ -100,7 +102,7 @@ fn lean_inverse_labor_coefficient_and_reproduction_derivatives() -> Result<()> {
     let labor = matrix(&device, 1, 2, &[2, 3], 1, scale)?;
     let goods_change = direction(&device, 2, 2, &[0, 1, 0, 0], 4, scale)?;
     let direct_change = direction(&device, 1, 2, &[0, -1], 1, scale)?;
-    signed_exact(
+    signed_approximate(
         &Sensitivity::inverse(&device, &inverse, &goods_change)?.read(&device)?,
         &[0, 12_000, 0, 0],
     );
@@ -113,7 +115,7 @@ fn lean_inverse_labor_coefficient_and_reproduction_derivatives() -> Result<()> {
             direct_labor: &direct_change,
         },
     )?;
-    signed_exact(&labor_change.read(&device)?, &[0, -12_000]);
+    signed_approximate(&labor_change.read(&device)?, &[0, -12_000]);
     let coefficient = Sensitivity::coefficient(
         &device,
         &labor,
@@ -123,15 +125,15 @@ fn lean_inverse_labor_coefficient_and_reproduction_derivatives() -> Result<()> {
             output: 1,
         },
     )?;
-    assert_eq!(
+    estimates::assert_close(
         coefficient.read(&device)?,
         [
             Interval { lower: 0, upper: 0 },
             Interval {
                 lower: 48_000,
-                upper: 48_000
-            }
-        ]
+                upper: 48_000,
+            },
+        ],
     );
     let reproduction = matrix(&device, 2, 1, &[3, 2], 24, scale)?;
     let reproduction_change = direction(&device, 2, 1, &[0, 1], 2, scale)?;
@@ -146,10 +148,10 @@ fn lean_inverse_labor_coefficient_and_reproduction_derivatives() -> Result<()> {
             training_change: &training_change,
         },
     )?;
-    signed_exact(&change.read(&device)?, &[29_000]);
+    signed_approximate(&change.read(&device)?, &[29_000]);
     let conversion_inverse = matrix(&device, 1, 1, &[4], 1, scale)?;
-    let beta = DeviceVector::exact(&device, &[96_000])?;
-    signed_exact(
+    let beta = DeviceVector::from_ticks(&device, &[96_000])?;
+    signed_approximate(
         &Sensitivity::conversion(&device, &conversion_inverse, &beta, &change)?.read(&device)?,
         &[464_000],
     );
@@ -160,9 +162,9 @@ fn lean_inverse_labor_coefficient_and_reproduction_derivatives() -> Result<()> {
 fn lean_asymmetric_conversion_uses_transposed_direction() -> Result<()> {
     let device = support::device(64)?;
     let inverse = matrix(&device, 2, 2, &[2, 0, 0, 1], 1, 1000)?;
-    let beta = DeviceVector::exact(&device, &[2000, 1000])?;
+    let beta = DeviceVector::from_ticks(&device, &[2000, 1000])?;
     let change = direction(&device, 2, 2, &[1, 2, -1, 0], 4, 1000)?;
-    signed_exact(
+    signed_approximate(
         &Sensitivity::conversion(&device, &inverse, &beta, &change)?.read(&device)?,
         &[500, 1000],
     );
@@ -172,10 +174,10 @@ fn lean_asymmetric_conversion_uses_transposed_direction() -> Result<()> {
 #[test]
 fn lean_normalized_and_scalar_derivatives_keep_negative_directions() -> Result<()> {
     let device = support::device(64)?;
-    let beta = DeviceVector::exact(&device, &[2000, 3000, 1000])?;
+    let beta = DeviceVector::from_ticks(&device, &[2000, 3000, 1000])?;
     let beta_change = DeviceSignedVector::difference(
-        DeviceVector::exact(&device, &[1000, 0, 1000])?,
-        DeviceVector::exact(&device, &[0, 1000, 0])?,
+        DeviceVector::from_ticks(&device, &[1000, 0, 1000])?,
+        DeviceVector::from_ticks(&device, &[0, 1000, 0])?,
     )?;
     let alpha_change = available(Sensitivity::normalized(
         &device,
@@ -184,11 +186,11 @@ fn lean_normalized_and_scalar_derivatives_keep_negative_directions() -> Result<(
         0,
         1000,
     )?)?;
-    signed_exact(&alpha_change.read(&device)?, &[0, -1250, 250]);
+    signed_approximate(&alpha_change.read(&device)?, &[0, -1250, 250]);
     let labor = matrix(&device, 3, 2, &[2, 3, 1, 4, 5, 0], 1, 1000)?;
     let labor_change = direction(&device, 3, 2, &[2, 0, 0, -2, 1, 0], 2, 1000)?;
     let alpha = available(beta.normalize(&device, 0, 1000)?)?;
-    signed_exact(
+    signed_approximate(
         &Sensitivity::scalar_values(&device, &labor, &alpha, &labor_change, &alpha_change)?
             .read(&device)?,
         &[1250, -6500],
@@ -206,7 +208,7 @@ fn lean_finite_labor_difference_is_not_an_infinitesimal() -> Result<()> {
     let new_direct_labor = matrix(&device, 1, 2, &[1, 2], 1, scale)?;
     let old_labor = matrix(&device, 1, 2, &[2, 3], 1, scale)?;
     let new_inverse = matrix(&device, 2, 2, &[4, 2, 0, 3], 3, scale)?;
-    signed_exact(
+    signed_approximate(
         &Sensitivity::finite_labor_change(
             &device,
             FiniteLaborChange {
@@ -229,45 +231,45 @@ fn lean_residual_bound_uses_absolute_signed_residual() -> Result<()> {
     let device = support::device(64)?;
     let inverse = matrix(&device, 2, 2, &[2, 2, 0, 1], 1, 1000)?;
     let residual = DeviceSignedVector::difference(
-        DeviceVector::exact(&device, &[0, 1000])?,
-        DeviceVector::exact(&device, &[1000, 0])?,
+        DeviceVector::from_ticks(&device, &[0, 1000])?,
+        DeviceVector::from_ticks(&device, &[1000, 0])?,
     )?;
-    assert_eq!(
+    estimates::assert_close(
         Sensitivity::residual_error(&device, &inverse, &residual)?.read(&device)?,
         [
             Interval {
                 lower: 4000,
-                upper: 4000
+                upper: 4000,
             },
             Interval {
                 lower: 1000,
-                upper: 1000
-            }
-        ]
+                upper: 1000,
+            },
+        ],
     );
     Ok(())
 }
 
 #[test]
-fn normalized_derivatives_round_outward_and_use_wide_ticks() -> Result<()> {
+fn normalized_derivatives_round_f32_estimates_outward() -> Result<()> {
     let device = support::device(64)?;
     let unit = 1u64 << 40;
-    let beta = DeviceVector::exact(&device, &[unit * 3, unit * 2])?;
+    let beta = DeviceVector::from_ticks(&device, &[unit * 3, unit * 2])?;
     let change = DeviceSignedVector::difference(
-        DeviceVector::exact(&device, &[unit, 0])?,
-        DeviceVector::exact(&device, &[0, unit])?,
+        DeviceVector::from_ticks(&device, &[unit, 0])?,
+        DeviceVector::from_ticks(&device, &[0, unit])?,
     )?;
     let result =
         available(Sensitivity::normalized(&device, &beta, &change, 0, 1000)?)?.read(&device)?;
-    signed_exact(&result[..1], &[0]);
+    signed_approximate(&result[..1], &[0]);
     signed_contains(result[1], -5000, 9);
     assert!(signed(result[1].upper) - signed(result[1].lower) <= 3);
-    let reference = DeviceVector::exact(&device, &[1])?;
+    let reference = DeviceVector::from_ticks(&device, &[1])?;
     let reference_change = DeviceSignedVector::difference(
-        DeviceVector::exact(&device, &[u64::MAX])?,
-        DeviceVector::exact(&device, &[0])?,
+        DeviceVector::from_ticks(&device, &[1 << 60])?,
+        DeviceVector::from_ticks(&device, &[0])?,
     )?;
-    signed_exact(
+    signed_approximate(
         &available(Sensitivity::normalized(
             &device,
             &reference,
@@ -373,7 +375,7 @@ fn lean_truncation_accepts_signed_direct_labor_matrices() -> Result<()> {
         NeumannTerms::new(3)?,
     )?)?
     .read(&device)?;
-    signed_exact(&report.partial, &[28_000, -42_000]);
+    signed_approximate(&report.partial, &[28_000, -42_000]);
     signed_contains(report.enclosure[0], 32_000, 1);
     signed_contains(report.enclosure[1], -128_000, 3);
     assert_eq!(report.weighted_tail, 20_000);
@@ -417,7 +419,7 @@ fn truncation_rejects_false_certificates_and_reports_bounded_overflow() -> Resul
                 denominator: 1,
             }],
         )?,
-        u32::MAX,
+        1 << 31,
     )?;
     assert!(
         LaborTruncation::new(
@@ -443,10 +445,10 @@ fn sensitivity_admission_checks_shapes_reference_and_scale() -> Result<()> {
         )
         .is_err()
     );
-    let beta = DeviceVector::exact(&device, &[0, 1])?;
+    let beta = DeviceVector::from_ticks(&device, &[0, 1])?;
     let change = DeviceSignedVector::difference(
-        DeviceVector::exact(&device, &[1, 1])?,
-        DeviceVector::exact(&device, &[0, 0])?,
+        DeviceVector::from_ticks(&device, &[1, 1])?,
+        DeviceVector::from_ticks(&device, &[0, 0])?,
     )?;
     assert!(matches!(
         Sensitivity::normalized(&device, &beta, &change, 0, 1000)?,

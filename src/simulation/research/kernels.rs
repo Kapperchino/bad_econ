@@ -2,8 +2,8 @@ use super::super::{
     flags::{FaultFlags, KernelFaults},
     words::*,
 };
-use super::{layout::*, nonlinear::*, random::*};
-use crate::domain::{Field, Good, Phase, research::RESEARCH_SCALE};
+use super::{layout::*, nonlinear::*};
+use crate::domain::{Field, Good, research::RESEARCH_SCALE};
 use crate::simulation::rows::RowIndex;
 use cubecl::prelude::*;
 
@@ -19,9 +19,7 @@ pub enum ResearchStage {
     MachineClose,
     StockClose,
     Summary,
-    ReduceSummary,
     Audit,
-    Copy,
 }
 
 #[repr(u32)]
@@ -89,19 +87,13 @@ fn access(state: &mut [u32], base: &RowIndex) -> u32 {
 }
 
 #[cube]
-fn seed(config: &[u32]) -> Ticks {
-    ticks(config[Header::SEED], config[Header::SEED + 1])
-}
-
-#[cube]
 fn attempt(
     main: &mut [u32],
     state: &mut [u32],
     config: &[u32],
     table: &[u32],
-    constants: &[u32],
+    samples: &[f32],
     control: &[Atomic<u32>],
-    day: u32,
     id: usize,
 ) {
     let base = RowIndex::new(
@@ -181,21 +173,7 @@ fn attempt(
             outcome = comptime!(AttemptOutcome::NoTime as u32);
         }
         if outcome == comptime!(AttemptOutcome::Failed as u32) {
-            let attempts = read(state, saved.field(ProjectState::ATTEMPTS, 2usize));
-            let random = draw(
-                RandomKey {
-                    seed: seed(config),
-                    day: ticks(day, 0),
-                    phase: comptime!(Phase::PhysicalClose as u32),
-                    actor: ticks(
-                        config[item.field(ProjectLayout::IDENTITY, 2usize)],
-                        config[item.field(ProjectLayout::IDENTITY, 2usize) + 1],
-                    ),
-                    purpose: 0x52535243,
-                    index: attempts,
-                },
-                constants,
-            );
+            let random = samples[project as usize];
             for good in 0..Good::COUNT {
                 let coordinate = main_coordinate(config, good as u32 + 1, owner);
                 let used = ticks(
@@ -220,7 +198,7 @@ fn attempt(
                 ticks(1, 0),
                 control,
             );
-            if succeeds(probability, random) {
+            if random < probability as f32 / PROBABILITY_SCALE as f32 {
                 outcome = comptime!(AttemptOutcome::Discovered as u32);
                 increment(
                     state,
@@ -259,19 +237,13 @@ pub fn research(
     state: &mut [u32],
     config: &[u32],
     table: &[u32],
-    constants: &[u32],
+    samples: &[f32],
     output: &mut [u32],
     control: &[Atomic<u32>],
-    day: u32,
     #[comptime] stage: ResearchStage,
 ) {
     let id = ABSOLUTE_POS;
     match stage {
-        ResearchStage::Copy => {
-            if id < state.len() {
-                output[id] = state[id];
-            }
-        }
         ResearchStage::Opening => {
             if id < config[Header::LAB_COUNT] as usize {
                 let lab = RowIndex::new(
@@ -488,22 +460,9 @@ pub fn research(
                     + 1500;
                 let score = i32::cast_from(positive) - i32::cast_from(negative);
                 let probability = sigmoid(score, table);
-                let random = draw(
-                    RandomKey {
-                        seed: seed(config),
-                        day: ticks(day, 0),
-                        phase: comptime!(Phase::Observation as u32),
-                        actor: ticks(
-                            config[item.field(StrikeLayout::IDENTITY, 2usize)],
-                            config[item.field(StrikeLayout::IDENTITY, 2usize) + 1],
-                        ),
-                        purpose: 0x5354524b,
-                        index: zero(),
-                    },
-                    constants,
-                );
+                let random = samples[id];
                 let participation = select(
-                    succeeds(probability, random),
+                    random < probability as f32 / PROBABILITY_SCALE as f32,
                     comptime!(Participation::Striking as u32),
                     comptime!(Participation::Working as u32),
                 );
@@ -561,7 +520,7 @@ pub fn research(
         }
         ResearchStage::Attempt => {
             if id < config[Header::LAB_COUNT] as usize {
-                attempt(main, state, config, table, constants, control, day, id);
+                attempt(main, state, config, table, samples, control, id);
             }
         }
         ResearchStage::MachineClose => {
@@ -716,7 +675,7 @@ pub fn research(
         }
         ResearchStage::Summary => {
             let metrics = comptime!(SummaryLayout::WORDS / 2);
-            let shards = output.len() / SummaryLayout::WORDS - 1;
+            let shards = output.len() / SummaryLayout::WORDS;
             let shard = id / metrics;
             let metric = id % metrics;
             if shard < shards {
@@ -832,20 +791,6 @@ pub fn research(
                             ),
                         );
                     }
-                }
-                write(output, SummaryLayout::WORDS + id * 2, total);
-            }
-        }
-        ResearchStage::ReduceSummary => {
-            if id < SummaryLayout::WORDS / 2 {
-                let shards = output.len() / SummaryLayout::WORDS - 1;
-                let mut total = zero();
-                for shard in 0..shards {
-                    total = add(
-                        control,
-                        total,
-                        read(output, (shard + 1) * SummaryLayout::WORDS + id * 2),
-                    );
                 }
                 write(output, id * 2, total);
             }

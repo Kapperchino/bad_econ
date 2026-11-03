@@ -40,40 +40,11 @@ fn band(age: u32) -> u32 {
 }
 
 #[cube]
-fn mix(value: u32) -> u32 {
-    let a = (value ^ (value >> 16)) * 0x7feb352du32;
-    let b = (a ^ (a >> 15)) * 0x846ca68bu32;
-    b ^ (b >> 16)
-}
-
-#[cube]
-fn random(people: &mut [u32], policy: &[u32], base: usize, day: u32, purpose: u32) -> Ticks {
-    let a = mix(people[base + P::IDENTITY] ^ policy[D::SEED] ^ mix(day) ^ purpose);
-    let b = mix(people[base + P::IDENTITY + 1] ^ policy[D::SEED + 1] ^ mix(a + 0x9e3779b9u32));
-    ticks(mix(a ^ b), mix(b + a))
-}
-
-#[cube]
-fn probability_draw(random: Ticks) -> Ticks {
-    let low = times32(random.extract(0usize), comptime!(PROBABILITY_SCALE as u32));
-    let cross_a = times32(random.extract(1usize), comptime!(PROBABILITY_SCALE as u32));
-    let cross_b = times32(
-        random.extract(0usize),
-        comptime!((PROBABILITY_SCALE >> 32) as u32),
-    );
-    let high = times32(
-        random.extract(1usize),
-        comptime!((PROBABILITY_SCALE >> 32) as u32),
-    );
-    let middle = plus(
-        ticks(low.extract(1usize), 0),
-        ticks(cross_a.extract(0usize), 0),
-    )
-    .value;
-    let middle = plus(middle, ticks(cross_b.extract(0usize), 0)).value;
-    let upper = plus(high, ticks(cross_a.extract(1usize), 0)).value;
-    let upper = plus(upper, ticks(cross_b.extract(1usize), 0)).value;
-    plus(upper, ticks(middle.extract(1usize), 0)).value
+fn probability_draw(high: f32, low: f32) -> Ticks {
+    let high = u64::cast_from(high * 16777216.0) * comptime!(PROBABILITY_SCALE);
+    let low = u64::cast_from(low * 16777216.0) * comptime!(PROBABILITY_SCALE);
+    let value = (high >> 24) + ((((high & 0xffffffu64) << 24) + low) >> 48);
+    ticks(value as u32, (value >> 32) as u32)
 }
 
 #[cube]
@@ -158,6 +129,7 @@ pub fn step(
     ranges: &[u32],
     policy: &[u32],
     births: &mut [u32],
+    samples: &[f32],
     day: u32,
     #[comptime] stage: Stage,
 ) {
@@ -364,7 +336,10 @@ pub fn step(
                         policy[D::FAMINE],
                         policy[D::VULNERABILITY + group as usize],
                     );
-                    let draw = probability_draw(random(people, policy, base, day, 1));
+                    let draw = probability_draw(
+                        samples[index as usize * 5],
+                        samples[index as usize * 5 + 1],
+                    );
                     let cause = death_cause(draw, background, occupational, famine);
                     people[base + P::CAUSE] = cause;
                     living -= u32::cast_from(cause > 0);
@@ -395,13 +370,16 @@ pub fn step(
                         && people[base + P::SEX] == 0
                         && cooldown == 0
                         && cause == 0;
-                    let birth_draw = probability_draw(random(people, policy, base, day, 2));
+                    let birth_draw = probability_draw(
+                        samples[index as usize * 5 + 2],
+                        samples[index as usize * 5 + 3],
+                    );
                     if fertile
                         && lt(birth_draw, rate(policy[D::BIRTHS]))
                         && births[household as usize] == 0
                     {
                         births[household as usize] =
-                            1 + (random(people, policy, base, day, 3).extract(0usize) & 1);
+                            1 + u32::cast_from(samples[index as usize * 5 + 4] >= 0.5);
                         people[base + P::COOLDOWN] = policy[D::SPACING];
                     }
                 }
@@ -414,14 +392,6 @@ pub fn step(
                 living,
             );
         }
-    }
-}
-
-#[cube(launch)]
-pub fn copy(source: &[u32], target: &mut [u32]) {
-    let index = ABSOLUTE_POS;
-    if index < source.len() {
-        target[index] = source[index];
     }
 }
 
@@ -449,21 +419,12 @@ pub fn observe(people: &[u32], policy: &[u32], output: &[Atomic<u32>], count: u3
 }
 
 #[cube(launch)]
-pub fn reduce_observation(shards: &[u32], output: &mut [u32]) {
+pub fn observation_totals(sums: &[u64], output: &mut [u32]) {
     let metric = ABSOLUTE_POS;
     if metric < 7 {
-        let mut total = zero();
-        for shard in 0..OBSERVATION_SHARDS {
-            let base = shard * 8 + metric;
-            let mut high = 0;
-            if metric == 6 {
-                high = shards[base + 1];
-            }
-            total = plus(total, ticks(shards[base], high)).value;
-        }
-        output[metric] = total.extract(0usize);
+        output[metric] = sums[metric] as u32;
         if metric == 6 {
-            output[7usize] = total.extract(1usize);
+            output[7usize] = ((sums[6usize] >> 32) + sums[7usize]) as u32;
         }
     }
 }
@@ -489,7 +450,10 @@ mod tests {
                 input[base + 4],
                 input[base + 5],
             );
-            let draw = probability_draw(ticks(input[base + 6], input[base + 7]));
+            let draw = probability_draw(
+                (input[base + 6] >> 8) as f32 / 16777216.0,
+                (input[base + 7] >> 8) as f32 / 16777216.0,
+            );
             output[index * 4] = risk.extract(0usize);
             output[index * 4 + 1] = risk.extract(1usize);
             output[index * 4 + 2] = draw.extract(0usize);
@@ -562,7 +526,7 @@ mod tests {
     }
 
     #[test]
-    fn occupational_units_rare_risks_safety_and_full_width_draws_on_gpu() -> Result<()> {
+    fn occupational_units_rare_risks_safety_and_cubek_draws_on_gpu() -> Result<()> {
         let device = Device::headless(64)?;
         let cases = [
             [100, 0, 1000, 0, 0, 0, 0, 0],
@@ -602,8 +566,8 @@ mod tests {
         assert!(risks[7] > risks[2]);
         assert!(risks[8] > risks[2]);
         for (case, row) in cases.iter().zip(words.chunks_exact(4)) {
-            let random = u64::from(case[6]) | (u64::from(case[7]) << 32);
-            let expected = (u128::from(random) * u128::from(PROBABILITY_SCALE)) >> 64;
+            let random = (u64::from(case[6] >> 8) << 24) | u64::from(case[7] >> 8);
+            let expected = (u128::from(random) * u128::from(PROBABILITY_SCALE)) >> 48;
             let actual = u64::from(row[2]) | (u64::from(row[3]) << 32);
             assert_eq!(u128::from(actual), expected);
         }

@@ -248,9 +248,9 @@ fn explicit_maps_replace_generated_maps_and_legacy_scenarios_default_to_generati
     let checkpoint = Checkpoint::new(&scenario, &state)?;
     assert_eq!(checkpoint.restore()?.scenario, scenario);
     let mut encoded = serde_json::to_value(checkpoint)?;
-    assert_eq!(encoded["version"], 6);
+    assert_eq!(encoded["version"], 7);
     assert_eq!(encoded["scenario"]["version"], 2);
-    assert_eq!(STATE_HASH_VERSION, "bad-econ/state/DeterministicV1/v7");
+    assert_eq!(STATE_HASH_VERSION, "bad-econ/state/CubekV2/v8");
     encoded["version"] = serde_json::json!(4);
     assert!(serde_json::from_value::<Checkpoint>(encoded).is_err());
     Ok(())

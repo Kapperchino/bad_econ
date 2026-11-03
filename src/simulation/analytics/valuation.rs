@@ -82,7 +82,7 @@ impl ValuationRequest {
                 demand[activity] = u64::from(analysis.scale);
                 let solution = account.goods_requirements(
                     device,
-                    &DeviceVector::exact(device, &demand)?,
+                    &DeviceVector::from_ticks(device, &demand)?,
                     &analysis.goods_certificate,
                     analysis.budget,
                 )?;

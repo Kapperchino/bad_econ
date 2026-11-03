@@ -3,7 +3,6 @@ pub mod capabilities;
 mod kernels;
 mod layout;
 mod nonlinear;
-mod random;
 
 use self::{
     kernels::{ResearchStage, research},
@@ -271,7 +270,6 @@ impl EncodedResearch {
             });
             for project in &lab.projects {
                 projects.push(ProjectLayout {
-                    identity: project.identity.into(),
                     prerequisites: project.prerequisites,
                     outcomes: project.outcomes,
                     inputs: project.inputs,
@@ -344,7 +342,6 @@ impl EncodedResearch {
             .map(|strike| {
                 Ok(StrikeLayout {
                     household: actor_index(strike.household)? as u32,
-                    identity: strike.household.into(),
                     grievance: strike.grievance,
                     solidarity: strike.solidarity,
                     trust: strike.trust,
@@ -394,7 +391,7 @@ impl EncodedResearch {
         .max()
         .unwrap_or(1);
         let mut hash = Sha256::new();
-        hash.update(b"bad-econ/research-configuration/ResearchFixedV3\0");
+        hash.update(b"bad-econ/research-configuration/ResearchCubekV4\0");
         hash.update(serde_json::to_vec(&config)?);
         for &word in configuration.iter().skip(1).chain(&state) {
             hash.update(word.to_le_bytes());
@@ -414,8 +411,9 @@ pub struct ResearchRuntime {
     state: CubeTensor,
     audited: CubeTensor,
     table: CubeTensor,
-    constants: CubeTensor,
+    seed: u64,
     summary: CubeTensor,
+    summary_shards: CubeTensor,
     control: CubeTensor,
     dummy: CubeTensor,
     work_items: usize,
@@ -437,9 +435,11 @@ impl ResearchRuntime {
             state: device.tensor(&encoded.state),
             audited: device.empty(encoded.state.len()),
             table: device.tensor(&nonlinear::HAZARD_TABLE),
-            constants: device.tensor(&random::SHA_CONSTANTS),
-            summary: device
-                .empty(SummaryLayout::WORDS * (encoded.work_items.div_ceil(128).clamp(1, 256) + 1)),
+            seed: u64::from(encoded.configuration[Header::SEED])
+                | (u64::from(encoded.configuration[Header::SEED + 1]) << 32),
+            summary: device.empty(SummaryLayout::WORDS),
+            summary_shards: device
+                .empty(SummaryLayout::WORDS * encoded.work_items.div_ceil(128).clamp(1, 256)),
             control: device.tensor(&[0; CONTROL_WORDS]),
             dummy: device.tensor(&[0; 2]),
             work_items: encoded.work_items,
@@ -508,18 +508,35 @@ impl ResearchRuntime {
                 day,
                 count,
             },
-        );
+        )?;
         self.readback_bytes
             .set(self.readback_bytes.get() + (CONTROL_WORDS * 4) as u64);
         FaultFlags::read(&device.read(&self.control)?)?.into_result()
     }
 
-    fn dispatch(&self, device: &Device, launch: ResearchLaunch<'_>) {
+    fn dispatch(&self, device: &Device, launch: ResearchLaunch<'_>) -> Result<()> {
+        let samples = match launch.stage {
+            ResearchStage::Strike => super::random::samples(
+                device,
+                self.seed,
+                u64::from(launch.day),
+                super::random::Stream::Strikes,
+                [self.work_items],
+            )?,
+            ResearchStage::Attempt => super::random::samples(
+                device,
+                self.seed,
+                u64::from(launch.day),
+                super::random::Stream::Research,
+                [self.work_items],
+            )?,
+            _ => super::tensor::empty(device, [0]),
+        };
         let argument = |tensor: &CubeTensor| unsafe {
-            BufferArg::from_raw_parts(tensor.handle.clone(), tensor.meta.shape()[0])
+            BufferArg::from_raw_parts(tensor.handle.clone(), tensor.meta.num_elements())
         };
         let count = match launch.stage {
-            ResearchStage::Summary => (self.summary.meta.shape()[0] - SummaryLayout::WORDS) / 2,
+            ResearchStage::Summary => self.summary_shards.meta.shape()[0] / 2,
             _ => launch.count,
         };
         let groups = (count as u32).div_ceil(device.workgroup).max(1);
@@ -532,22 +549,35 @@ impl ResearchRuntime {
             argument(launch.state),
             argument(&self.configuration),
             argument(&self.table),
-            argument(&self.constants),
-            argument(launch.output),
+            argument(&samples),
+            argument(match launch.stage {
+                ResearchStage::Summary => &self.summary_shards,
+                _ => launch.output,
+            }),
             argument(&self.control),
-            launch.day,
             launch.stage,
         );
         if let ResearchStage::Summary = launch.stage {
-            self.dispatch(
-                device,
-                ResearchLaunch {
-                    stage: ResearchStage::ReduceSummary,
-                    count: SummaryLayout::WORDS / 2,
-                    ..launch
-                },
+            let shards = self.summary_shards.meta.shape()[0] / SummaryLayout::WORDS;
+            let input = cubecl::std::tensor::TensorHandle::new_contiguous(
+                [shards, SummaryLayout::WORDS / 2],
+                self.summary_shards.handle.clone(),
+                <u64 as cubecl::prelude::Scalar>::elem_type_native(),
+            );
+            let totals = super::reduction::sum_ticks(device, &input, 0, &self.control)?;
+            let output = cubecl::std::tensor::TensorHandle::new_contiguous(
+                [1, SummaryLayout::WORDS / 2],
+                launch.output.handle.clone(),
+                <u64 as cubecl::prelude::Scalar>::elem_type_native(),
+            );
+            cubecl::std::tensor::copy_into(
+                &device.client,
+                totals.binding(),
+                output.binding(),
+                <u64 as cubecl::prelude::Scalar>::elem_type_native(),
             );
         }
+        Ok(())
     }
 
     pub(super) fn with_actors(
@@ -668,7 +698,7 @@ impl ResearchRuntime {
                 day: 0,
                 count: SummaryLayout::WORDS / 2,
             },
-        );
+        )?;
         self.readback_bytes.set(
             self.readback_bytes.get()
                 + ((CONTROL_WORDS + SummaryLayout::WORDS + self.state_words) * 4) as u64,
@@ -697,31 +727,13 @@ impl ResearchRuntime {
     }
 
     pub fn save_audited(&self, device: &Device) -> Result<()> {
-        self.run(
-            device,
-            &self.dummy,
-            &self.audited,
-            ResearchStage::Copy,
-            0,
-            self.state_words,
-        )
+        super::tensor::copy(device, &self.state, &self.audited);
+        Ok(())
     }
 
     pub fn restore_audited(&self, device: &Device) -> Result<()> {
+        super::tensor::copy(device, &self.audited, &self.state);
         device.write(&self.control, &[0; CONTROL_WORDS]);
-        self.dispatch(
-            device,
-            ResearchLaunch {
-                main: &self.dummy,
-                state: &self.audited,
-                output: &self.state,
-                stage: ResearchStage::Copy,
-                day: 0,
-                count: self.state_words,
-            },
-        );
-        self.readback_bytes
-            .set(self.readback_bytes.get() + (CONTROL_WORDS * 4) as u64);
-        FaultFlags::read(&device.read(&self.control)?)?.into_result()
+        Ok(())
     }
 }

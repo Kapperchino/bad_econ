@@ -1,7 +1,5 @@
 use super::*;
 
-const MAX_MATRIX_CELLS: usize = 1_048_576;
-
 pub struct DeviceMatrix {
     pub(super) data: CubeTensor,
     pub(super) rows: usize,
@@ -47,7 +45,7 @@ impl DeviceMatrix {
             && scale > 0
         {
             true => Ok(Self {
-                data: device.empty((cells * INTERVAL_WORDS).max(INTERVAL_WORDS)),
+                data: tensor::empty(device, [2, rows, columns]),
                 rows,
                 columns,
                 scale,
@@ -59,23 +57,31 @@ impl DeviceMatrix {
     }
 
     pub fn new(device: &Device, matrix: &SparseMatrix, scale: u32) -> Result<Self> {
-        let output = Self::empty(device, matrix.rows, matrix.columns, scale)?;
-        let sparse = DeviceOperator::new(device, matrix);
-        let control = device.tensor(&[0; CONTROL_WORDS]);
-        kernels::dense_from_sparse::launch(
-            &device.client,
-            count(device, matrix.rows * matrix.columns),
-            CubeDim::new_1d(device.workgroup),
-            argument(&sparse.offsets),
-            argument(&sparse.entries),
-            argument(&output.data),
-            argument(&control),
-            matrix.rows as u32,
-            matrix.columns as u32,
+        match scale {
+            0 => Err(anyhow!("matrix scale must be positive")),
+            _ => {
+                for entry in &matrix.entries {
+                    let _ = TickEstimate::new(
+                        entry.numerator as f32 / entry.denominator as f32 * scale as f32,
+                    )?;
+                }
+                Ok(Self::upload(device, matrix, scale))
+            }
+        }
+    }
+
+    pub(super) fn upload(device: &Device, matrix: &SparseMatrix, scale: u32) -> Self {
+        let mut values = vec![0.0; matrix.rows * matrix.columns];
+        for entry in &matrix.entries {
+            values[entry.row * matrix.columns + entry.column] =
+                entry.numerator as f32 / entry.denominator as f32 * scale as f32;
+        }
+        Self {
+            data: tensor::floats(device, [2, matrix.rows, matrix.columns], &values.repeat(2)),
+            rows: matrix.rows,
+            columns: matrix.columns,
             scale,
-        );
-        faults(device, &control)?;
-        Ok(output)
+        }
     }
 
     pub fn rows(&self) -> usize {
@@ -116,18 +122,16 @@ impl DeviceMatrix {
             true => {
                 let output = Self::empty(device, self.rows, right.columns, self.scale)?;
                 let control = device.tensor(&[0; CONTROL_WORDS]);
-                kernels::dense_product::launch(
+                let left = tensor::reshape(&self.data, [2, self.rows, self.columns]);
+                let right = tensor::reshape(&right.data, [2, right.rows, right.columns]);
+                tensor::matmul(device, &left, &right, &output.data)?;
+                kernels::rescale::launch(
                     &device.client,
-                    count(device, output.rows * output.columns),
+                    count(device, output.rows * output.columns * 2),
                     CubeDim::new_1d(device.workgroup),
-                    argument(&self.data),
-                    argument(&right.data),
                     argument(&output.data),
                     argument(&control),
-                    self.rows as u32,
-                    self.columns as u32,
-                    right.columns as u32,
-                    self.scale,
+                    self.scale as f32,
                 );
                 faults(device, &control)?;
                 Ok(output)
@@ -160,15 +164,20 @@ impl DeviceMatrix {
 
     pub fn transpose(&self, device: &Device) -> Result<Self> {
         let output = Self::empty(device, self.columns, self.rows, self.scale)?;
-        kernels::dense_transpose::launch(
-            &device.client,
-            count(device, self.rows * self.columns),
-            CubeDim::new_1d(device.workgroup),
-            argument(&self.data),
-            argument(&output.data),
-            self.rows as u32,
-            self.columns as u32,
-        );
+        if self.rows * self.columns > 0 {
+            let input = TensorHandle::new(
+                self.data.handle.clone(),
+                [2, self.columns, self.rows],
+                [self.rows * self.columns, 1, self.columns],
+                f32::elem_type_native(),
+            );
+            cubecl::std::tensor::copy_into(
+                &device.client,
+                input.binding(),
+                output.data.clone().binding(),
+                f32::elem_type_native(),
+            );
+        }
         Ok(output)
     }
 
@@ -244,7 +253,7 @@ impl DeviceOperator {
         {
             true => Ok(()),
             false => Err(anyhow!(
-                "certified inverse dimensions or iteration budget are invalid"
+                "analytical inverse dimensions or iteration budget are invalid"
             )),
         }?;
         let output = DeviceMatrix::empty(device, self.rows, self.columns, scale)?;
@@ -255,7 +264,7 @@ impl DeviceOperator {
                 .context("inverse requires a square matrix")? = u64::from(scale);
             let solution = self.solve(
                 device,
-                &DeviceVector::exact(device, &rhs)?,
+                &DeviceVector::from_ticks(device, &rhs)?,
                 certificate,
                 budget,
             )?;
@@ -371,6 +380,7 @@ impl DeviceSignedVector {
 
     pub fn read(&self, device: &Device) -> Result<Vec<SignedInterval>> {
         let output = device.empty((self.positive.length * 6).max(6));
+        let control = device.tensor(&[0; CONTROL_WORDS]);
         kernels::signed_vector::launch(
             &device.client,
             count(device, self.positive.length),
@@ -378,8 +388,10 @@ impl DeviceSignedVector {
             argument(&self.positive.data),
             argument(&self.negative.data),
             argument(&output),
+            argument(&control),
             self.positive.length as u32,
         );
+        faults(device, &control)?;
         Ok(device
             .read(&output)?
             .chunks_exact(6)

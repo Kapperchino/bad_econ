@@ -437,29 +437,8 @@ impl LaborTruncation {
             true => {
                 let sparse = DeviceOperator::new(device, goods);
                 let weights = device.tensor(&padded(contraction.weights.clone()));
-                let certificate_rows = device.empty((goods.rows * 2).max(2));
                 let control = device.tensor(&[0; CONTROL_WORDS]);
-                kernels::certificate_rows::launch(
-                    &device.client,
-                    count(device, goods.rows),
-                    CubeDim::new_1d(device.workgroup),
-                    argument(&sparse.offsets),
-                    argument(&sparse.entries),
-                    argument(&weights),
-                    argument(&certificate_rows),
-                    argument(&control),
-                    goods.rows as u32,
-                    contraction.numerator,
-                    contraction.denominator,
-                );
-                kernels::certificate_reduce::launch(
-                    &device.client,
-                    CubeCount::Static(1, 1, 1),
-                    CubeDim::new_1d(1),
-                    argument(&certificate_rows),
-                    argument(&control),
-                    goods.rows as u32,
-                );
+                sparse.certificate(device, contraction, &control)?;
                 let status = faults(device, &control)?;
                 match status[0] {
                     kernels::AVAILABLE => {
@@ -481,27 +460,49 @@ impl LaborTruncation {
                                 term = term.product(device, &goods)?;
                             }
                         }
-                        let norms = DeviceVector::empty(device, labor.rows);
+                        let weighted = tensor::empty(device, [2, labor.rows, labor.columns]);
                         let weighted_tail = DeviceVector::empty(device, 1);
-                        derivative_kernels::weighted_rows::launch(
+                        derivative_kernels::weighted_values::launch(
                             &device.client,
-                            count(device, labor.rows),
+                            count(device, labor.rows * labor.columns),
                             CubeDim::new_1d(device.workgroup),
                             argument(&labor.data),
                             argument(&weights),
-                            argument(&norms.data),
-                            argument(&control),
+                            argument(&weighted),
                             labor.rows as u32,
                             labor.columns as u32,
                         );
+                        let weighted = TensorHandle::new_contiguous(
+                            [2, labor.rows, labor.columns],
+                            weighted.handle,
+                            f32::elem_type_native(),
+                        );
+                        let norms = reduction::reduce(
+                            device,
+                            &weighted,
+                            2,
+                            ReduceOperationConfig::Sum,
+                            f32::elem_type_native(),
+                        )?;
+                        let norms = TensorHandle::new_contiguous(
+                            [labor.rows * 2],
+                            norms.handle,
+                            f32::elem_type_native(),
+                        );
+                        let norm = reduction::reduce(
+                            device,
+                            &norms,
+                            0,
+                            ReduceOperationConfig::Max,
+                            f32::elem_type_native(),
+                        )?;
                         derivative_kernels::tail_bound::launch(
                             &device.client,
                             CubeCount::Static(1, 1, 1),
                             CubeDim::new_1d(1),
-                            argument(&norms.data),
+                            unsafe { BufferArg::from_raw_parts(norm.handle, 1) },
                             argument(&weighted_tail.data),
                             argument(&control),
-                            labor.rows as u32,
                             contraction.numerator,
                             contraction.denominator,
                             terms.0,
@@ -559,14 +560,14 @@ impl LaborTruncation {
 
 mod derivative_kernels {
     use super::super::kernels::{Bounds, UNRESOLVED, divide_product, interval, scaled, sum, write};
-    use crate::simulation::words::*;
+    use super::super::kernels::{checked, positive};
     use cubecl::prelude::*;
 
     #[cube(launch)]
     pub fn absolute(
-        positive_input: &[u32],
-        negative_input: &[u32],
-        output: &mut [u32],
+        positive_input: &[f32],
+        negative_input: &[f32],
+        output: &mut [f32],
         length: u32,
     ) {
         let index = ABSOLUTE_POS;
@@ -577,8 +578,8 @@ mod derivative_kernels {
                 output,
                 index,
                 Bounds {
-                    lower: maximum(positive(a.lower, b.upper), positive(b.lower, a.upper)),
-                    upper: maximum(positive(a.upper, b.lower), positive(b.upper, a.lower)),
+                    lower: max(positive(a.lower, b.upper), positive(b.lower, a.upper)),
+                    upper: max(positive(a.upper, b.lower), positive(b.upper, a.lower)),
                 },
             );
         }
@@ -587,8 +588,8 @@ mod derivative_kernels {
     #[cube]
     fn quotient(value: Bounds, divisor: &Bounds, scale: u32, control: &[Atomic<u32>]) -> Bounds {
         Bounds {
-            lower: divide_product(value.lower, ticks(scale, 0), divisor.upper, control).lower,
-            upper: divide_product(value.upper, ticks(scale, 0), divisor.lower, control).upper,
+            lower: divide_product(value.lower, scale as f32, divisor.upper, control).lower,
+            upper: divide_product(value.upper, scale as f32, divisor.lower, control).upper,
         }
     }
 
@@ -607,11 +608,11 @@ mod derivative_kernels {
 
     #[cube(launch)]
     pub fn normalized(
-        beta: &[u32],
-        change_positive: &[u32],
-        change_negative: &[u32],
-        positive_output: &mut [u32],
-        negative_output: &mut [u32],
+        beta: &[f32],
+        change_positive: &[f32],
+        change_negative: &[f32],
+        positive_output: &mut [f32],
+        negative_output: &mut [f32],
         control: &[Atomic<u32>],
         length: u32,
         reference: u32,
@@ -620,7 +621,7 @@ mod derivative_kernels {
         let index = ABSOLUTE_POS;
         if index < length as usize {
             let divisor = interval(beta, reference as usize);
-            if equal(divisor.lower, zero()) {
+            if divisor.lower == 0.0 {
                 control[0].store(UNRESOLVED);
             }
             if index == reference as usize {
@@ -628,20 +629,20 @@ mod derivative_kernels {
                     positive_output,
                     index,
                     Bounds {
-                        lower: zero(),
-                        upper: zero(),
+                        lower: 0.0,
+                        upper: 0.0,
                     },
                 );
                 write(
                     negative_output,
                     index,
                     Bounds {
-                        lower: zero(),
-                        upper: zero(),
+                        lower: 0.0,
+                        upper: 0.0,
                     },
                 );
             }
-            if index != reference as usize && !equal(divisor.lower, zero()) {
+            if index != reference as usize && !(divisor.lower == 0.0) {
                 let alpha = quotient(interval(beta, index), &divisor, scale, control);
                 let dp = quotient(interval(change_positive, index), &divisor, scale, control);
                 let dn = quotient(interval(change_negative, index), &divisor, scale, control);
@@ -672,31 +673,22 @@ mod derivative_kernels {
     }
 
     #[cube(launch)]
-    pub fn weighted_rows(
-        labor: &[u32],
+    pub fn weighted_values(
+        labor: &[f32],
         weights: &[u32],
-        output: &mut [u32],
-        control: &[Atomic<u32>],
+        output: &mut [f32],
         rows: u32,
         columns: u32,
     ) {
-        let row = ABSOLUTE_POS;
-        if row < rows as usize {
-            let mut norm = zero();
-            for column in 0..columns {
-                let weighted = times(
-                    interval(labor, row * columns as usize + column as usize).upper,
-                    weights[column as usize],
-                );
-                weighted.faults.record(control);
-                norm = sum(norm, weighted.value, control);
-            }
+        let index = ABSOLUTE_POS;
+        if index < rows as usize * columns as usize {
+            let weighted = interval(labor, index).upper * weights[index % columns as usize] as f32;
             write(
                 output,
-                row,
+                index,
                 Bounds {
-                    lower: norm,
-                    upper: norm,
+                    lower: weighted,
+                    upper: weighted,
                 },
             );
         }
@@ -704,19 +696,15 @@ mod derivative_kernels {
 
     #[cube(launch)]
     pub fn tail_bound(
-        norms: &[u32],
-        output: &mut [u32],
+        norms: &[f32],
+        output: &mut [f32],
         control: &[Atomic<u32>],
-        rows: u32,
         numerator: u32,
         denominator: u32,
         terms: u32,
     ) {
         if ABSOLUTE_POS == 0 {
-            let mut bound = zero();
-            for row in 0..rows {
-                bound = maximum(bound, interval(norms, row as usize).upper);
-            }
+            let mut bound = checked(max(norms[0], 0.0), control);
             for _term in 0..terms {
                 bound = scaled(bound, numerator, denominator, control).upper;
             }
@@ -725,7 +713,7 @@ mod derivative_kernels {
                 output,
                 0usize,
                 Bounds {
-                    lower: zero(),
+                    lower: 0.0,
                     upper: bound,
                 },
             );
@@ -734,10 +722,10 @@ mod derivative_kernels {
 
     #[cube(launch)]
     pub fn tail_enclosure(
-        partial: &[u32],
-        tail: &[u32],
+        partial: &[f32],
+        tail: &[f32],
         weights: &[u32],
-        output: &mut [u32],
+        output: &mut [f32],
         control: &[Atomic<u32>],
         rows: u32,
         columns: u32,

@@ -1912,90 +1912,6 @@ fn summarize(
     }
 }
 
-#[enumflags2::bitflags]
-#[repr(u32)]
-#[derive(Clone, Copy)]
-enum ReductionKind {
-    Sum,
-    Minimum,
-    Maximum,
-}
-
-#[derive(CubeType, Clone, Copy)]
-struct SummaryReduction {
-    kind: u32,
-}
-#[cube]
-impl SummaryReduction {
-    fn new(metric: u32) -> Self {
-        let mut kind = u32::new(comptime!(i64::from(
-            enumflags2::BitFlags::from_flag(ReductionKind::Sum).bits()
-        )));
-        if metric == SummaryLayout::MINIMUM_WAGE
-            || metric == SummaryLayout::MINIMUM_PRICE
-            || (metric >= SummaryLayout::WAGE_MINIMA
-                && metric < SummaryLayout::WAGE_MINIMA + Good::COUNT as u32)
-            || (metric >= SummaryLayout::PRICE_MINIMA
-                && metric < SummaryLayout::PRICE_MINIMA + Good::COUNT as u32)
-        {
-            kind = comptime!(enumflags2::BitFlags::from_flag(ReductionKind::Minimum).bits());
-        }
-        if metric == SummaryLayout::MAXIMUM_WAGE
-            || metric == SummaryLayout::MAXIMUM_PRICE
-            || (metric >= SummaryLayout::WAGE_MAXIMA
-                && metric < SummaryLayout::WAGE_MAXIMA + Good::COUNT as u32)
-            || (metric >= SummaryLayout::PRICE_MAXIMA
-                && metric < SummaryLayout::PRICE_MAXIMA + Good::COUNT as u32)
-        {
-            kind = comptime!(enumflags2::BitFlags::from_flag(ReductionKind::Maximum).bits());
-        }
-        SummaryReduction { kind }
-    }
-    fn is(&self, #[comptime] kind: ReductionKind) -> bool {
-        self.kind == comptime!(enumflags2::BitFlags::from_flag(kind).bits())
-    }
-    fn combine(&self, control: &[Atomic<u32>], total: Ticks, part: Ticks) -> Ticks {
-        let mut result = zero();
-        if self.is(comptime!(ReductionKind::Minimum)) {
-            result = minimum(total, part);
-        }
-        if self.is(comptime!(ReductionKind::Maximum)) {
-            result = maximum(total, part);
-        }
-        if self.is(comptime!(ReductionKind::Sum)) {
-            result = add_checked(control, total, part);
-        }
-        result
-    }
-}
-
-#[cube]
-fn reduce(
-    config: &[u32],
-    proposals: &mut [u32],
-    bundles: &mut [u32],
-    control: &[Atomic<u32>],
-    id: u32,
-) {
-    if id < SummaryLayout::METRICS as u32 {
-        let mut total = ticks(0u32, 0u32);
-        let reduction = SummaryReduction::new(id);
-        if reduction.is(comptime!(ReductionKind::Minimum)) {
-            total = ticks(u32::MAX, u32::MAX);
-        }
-        for group in 0u32..ceildiv(
-            config[ConfigLayout::ACTORS],
-            SummaryLayout::ACTORS_PER_GROUP,
-        ) {
-            let base = (group * SummaryLayout::METRICS as u32 + id) * TICK_WORDS as u32;
-            let part = ticks(bundles[(base) as usize], bundles[(base + 1u32) as usize]);
-            total = reduction.combine(control, total, part);
-        }
-        proposals[(id * TICK_WORDS as u32) as usize] = total.extract(LOW_WORD);
-        proposals[(id * TICK_WORDS as u32 + 1u32) as usize] = total.extract(HIGH_WORD);
-    }
-}
-
 #[cube]
 fn inspect(
     state: &mut [u32],
@@ -2008,15 +1924,6 @@ fn inspect(
         let item = value(state, config, id, parameters.offset);
         proposals[(id * TICK_WORDS as u32) as usize] = item.extract(LOW_WORD);
         proposals[(id * TICK_WORDS as u32 + 1u32) as usize] = item.extract(HIGH_WORD);
-    }
-}
-
-#[cube]
-fn copy_state(state: &mut [u32], proposals: &mut [u32], id: u32) {
-    if id < (state.len() as u32 / TICK_WORDS as u32) {
-        proposals[(id * TICK_WORDS as u32) as usize] = state[(id * TICK_WORDS as u32) as usize];
-        proposals[(id * TICK_WORDS as u32 + 1u32) as usize] =
-            state[(id * TICK_WORDS as u32 + HIGH_WORD as u32) as usize];
     }
 }
 
@@ -2037,9 +1944,7 @@ pub enum EconomyStage {
     MarketActivity,
     Construct,
     Summarize,
-    Reduce,
     Inspect,
-    CopyState,
     GroupInitialize,
     GroupMerge,
     GroupExecute,
@@ -2132,9 +2037,7 @@ pub fn economy(
             comptime!(Posting::ApplyActor),
         ),
         EconomyStage::Summarize => summarize(state, actors, config, bundles, control, id),
-        EconomyStage::Reduce => reduce(config, proposals, bundles, control, id),
         EconomyStage::Inspect => inspect(state, config, proposals, parameters, id),
-        EconomyStage::CopyState => copy_state(state, proposals, id),
     }
 }
 

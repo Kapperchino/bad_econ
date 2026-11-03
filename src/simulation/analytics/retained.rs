@@ -107,7 +107,7 @@ impl InventoryHorizon {
                 "inventory horizon requires one context, matching dimensions, and at most 4096 stages"
             )),
             true => {
-                let zero = || DeviceVector::exact(device, &vec![0; m]);
+                let zero = || DeviceVector::from_ticks(device, &vec![0; m]);
                 let mut current = opening;
                 let mut actual_hours = zero()?;
                 let mut final_and_project_hours = zero()?;
@@ -291,27 +291,26 @@ impl AugmentedInverse {
 
 mod retained_kernels {
     use super::super::kernels::{Bounds, divide_product, interval, write};
-    use crate::simulation::words::*;
     use cubecl::prelude::*;
 
     #[cube(launch)]
     pub fn reciprocal_reference(
-        input: &[u32],
-        output: &mut [u32],
+        input: &[f32],
+        output: &mut [f32],
         control: &[Atomic<u32>],
         reference: u32,
         scale: u32,
     ) {
         if ABSOLUTE_POS == 0 {
             let divisor = interval(input, reference as usize);
-            if equal(divisor.upper, zero()) {
+            if divisor.upper == 0.0 {
                 control[0].store(1);
             }
-            if equal(divisor.lower, zero()) && !equal(divisor.upper, zero()) {
+            if (divisor.lower == 0.0) && !(divisor.upper == 0.0) {
                 control[0].store(2);
             }
-            if !equal(divisor.lower, zero()) {
-                let units = ticks(scale, 0);
+            if !(divisor.lower == 0.0) {
+                let units = scale as f32;
                 write(
                     output,
                     0usize,

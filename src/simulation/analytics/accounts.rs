@@ -162,7 +162,7 @@ impl DeviceAccounts {
                         .collect::<Vec<_>>();
                     let solution = coupled.solve(
                         device,
-                        &DeviceVector::exact(device, &rhs)?,
+                        &DeviceVector::from_ticks(device, &rhs)?,
                         certificate,
                         budget,
                     )?;
@@ -292,6 +292,7 @@ pub fn comparator(
             "comparator requires complete context, a scalar requirement, and a positive scale"
         )),
         true => {
+            let _ = TickEstimate::new(living as f32)?;
             let output = device.empty(12);
             let control = device.tensor(&[0; CONTROL_WORDS]);
             kernels::comparator::launch(

@@ -1,8 +1,4 @@
-use crate::simulation::{
-    flags::{FaultFlags, KernelFaults},
-    layout::{HIGH_WORD, LOW_WORD, TICK_WORDS},
-    words::*,
-};
+use crate::simulation::flags::{FaultFlags, KernelFaults};
 use cubecl::prelude::*;
 
 pub const ENTRY_WORDS: usize = 3;
@@ -10,122 +6,78 @@ pub const AVAILABLE: u32 = 1;
 pub const INADMISSIBLE: u32 = 2;
 pub const UNRESOLVED: u32 = 3;
 pub const INAPPLICABLE: u32 = 4;
-const INTERVAL_WORDS: usize = 4;
 
 #[derive(CubeType, Clone, Copy)]
 pub(super) struct Bounds {
-    pub(super) lower: Ticks,
-    pub(super) upper: Ticks,
+    pub(super) lower: f32,
+    pub(super) upper: f32,
 }
 
 #[cube]
-fn read(input: &[u32], offset: usize) -> Ticks {
-    ticks(input[offset], input[offset + 1])
-}
-
-#[cube]
-pub(super) fn interval(input: &[u32], index: usize) -> Bounds {
-    let base = index * INTERVAL_WORDS;
+pub(super) fn interval(input: &[f32], index: usize) -> Bounds {
     Bounds {
-        lower: read(input, base),
-        upper: read(input, base + TICK_WORDS),
+        lower: input[index],
+        upper: input[input.len() / 2 + index],
     }
 }
 
 #[cube]
-pub(super) fn write(output: &mut [u32], index: usize, bounds: Bounds) {
-    let base = index * INTERVAL_WORDS;
-    output[base] = bounds.lower.extract(LOW_WORD);
-    output[base + 1] = bounds.lower.extract(HIGH_WORD);
-    output[base + 2] = bounds.upper.extract(LOW_WORD);
-    output[base + 3] = bounds.upper.extract(HIGH_WORD);
+pub(super) fn write(output: &mut [f32], index: usize, bounds: Bounds) {
+    output[index] = bounds.lower;
+    output[output.len() / 2 + index] = bounds.upper;
 }
 
 #[cube]
-pub(super) fn sum(left: Ticks, right: Ticks, control: &[Atomic<u32>]) -> Ticks {
-    let result = plus(left, right);
-    result.faults.record(control);
-    result.value
+pub(super) fn positive(left: f32, right: f32) -> f32 {
+    max(left - right, 0.0)
+}
+
+#[cube]
+pub(super) fn sum(left: f32, right: f32, control: &[Atomic<u32>]) -> f32 {
+    checked(left + right, control)
 }
 
 #[cube]
 pub(super) fn scaled(
-    value: Ticks,
+    value: f32,
     numerator: u32,
     denominator: u32,
     control: &[Atomic<u32>],
 ) -> Bounds {
-    let lower = ratio(value, numerator, denominator);
-    lower.faults.record(control);
-    let remainder = minus(value, times(divide(value, denominator), denominator).value);
-    let product = times32(remainder.extract(LOW_WORD), numerator);
-    let remainder = minus(
-        product,
-        times(divide(product, denominator), denominator).value,
-    );
+    let value = checked(value * numerator as f32 / denominator as f32, control);
     Bounds {
-        lower: lower.value,
-        upper: sum(
-            lower.value,
-            ticks(u32::cast_from(!equal(remainder, zero())), 0),
-            control,
-        ),
+        lower: value,
+        upper: value,
     }
 }
 
 #[cube]
-fn row_product(
-    offsets: &[u32],
-    entries: &[u32],
-    input: &[u32],
-    row: usize,
+pub(super) fn divide_product(
+    left: f32,
+    right: f32,
+    denominator: f32,
     control: &[Atomic<u32>],
 ) -> Bounds {
-    let mut lower = zero();
-    let mut upper = zero();
-    for entry in offsets[row]..offsets[row + 1] {
-        let base = entry as usize * ENTRY_WORDS;
-        let value = interval(input, entries[base] as usize);
-        let numerator = entries[base + 1];
-        let denominator = entries[base + 2];
-        lower = sum(
-            lower,
-            scaled(value.lower, numerator, denominator, control).lower,
-            control,
-        );
-        upper = sum(
-            upper,
-            scaled(value.upper, numerator, denominator, control).upper,
-            control,
-        );
+    let value = checked(left * right / denominator, control);
+    Bounds {
+        lower: value,
+        upper: value,
     }
-    Bounds { lower, upper }
 }
 
 #[cube(launch)]
-pub fn matvec(
-    offsets: &[u32],
-    entries: &[u32],
-    input: &[u32],
-    output: &mut [u32],
-    control: &[Atomic<u32>],
-    rows: u32,
-) {
-    let row = ABSOLUTE_POS;
-    if row < rows as usize {
-        write(
-            output,
-            row,
-            row_product(offsets, entries, input, row, control),
-        );
+pub fn rescale(values: &mut [f32], control: &[Atomic<u32>], scale: f32) {
+    let index = ABSOLUTE_POS;
+    if index < values.len() {
+        values[index] = checked(values[index] / scale, control);
     }
 }
 
 #[cube(launch)]
 pub fn vector_add(
-    left: &[u32],
-    right: &[u32],
-    output: &mut [u32],
+    left: &[f32],
+    right: &[f32],
+    output: &mut [f32],
     control: &[Atomic<u32>],
     length: u32,
 ) {
@@ -144,114 +96,10 @@ pub fn vector_add(
     }
 }
 
-#[cube]
-fn product(left: Ticks, right: Ticks) -> Vector<u32, Const<4>> {
-    let a = times32(left.extract(LOW_WORD), right.extract(LOW_WORD));
-    let b = times32(left.extract(LOW_WORD), right.extract(HIGH_WORD));
-    let c = times32(left.extract(HIGH_WORD), right.extract(LOW_WORD));
-    let d = times32(left.extract(HIGH_WORD), right.extract(HIGH_WORD));
-    let first = a.extract(HIGH_WORD) + b.extract(LOW_WORD);
-    let second = first + c.extract(LOW_WORD);
-    let carry = u32::cast_from(first < a.extract(HIGH_WORD)) + u32::cast_from(second < first);
-    let third = b.extract(HIGH_WORD) + c.extract(HIGH_WORD);
-    let fourth = third + d.extract(LOW_WORD);
-    let fifth = fourth + carry;
-    let top = d.extract(HIGH_WORD)
-        + u32::cast_from(third < b.extract(HIGH_WORD))
-        + u32::cast_from(fourth < third)
-        + u32::cast_from(fifth < fourth);
-    let mut result = Vector::<u32, Const<4>>::new(a.extract(LOW_WORD));
-    result.insert(1usize, second);
-    result.insert(2usize, fifth);
-    result.insert(3usize, top);
-    result
-}
-
-#[cube]
-pub(super) fn divide_product(
-    left: Ticks,
-    right: Ticks,
-    denominator: Ticks,
-    control: &[Atomic<u32>],
-) -> Bounds {
-    let numerator = product(left, right);
-    let mut quotient = zero();
-    let mut remainder = zero();
-    for step in 0..128u32 {
-        let bit = 127 - step;
-        let word = select(
-            bit >= 96,
-            numerator.extract(3usize),
-            select(
-                bit >= 64,
-                numerator.extract(2usize),
-                select(
-                    bit >= 32,
-                    numerator.extract(1usize),
-                    numerator.extract(0usize),
-                ),
-            ),
-        );
-        let digit = (word >> (bit % 32)) & 1;
-        let carry = remainder.extract(HIGH_WORD) >> 31;
-        remainder = ticks(
-            (remainder.extract(LOW_WORD) << 1) | digit,
-            (remainder.extract(HIGH_WORD) << 1) | (remainder.extract(LOW_WORD) >> 31),
-        );
-        let included = carry != 0 || !lt(remainder, denominator);
-        remainder = select(included, minus(remainder, denominator), remainder);
-        if included && bit >= 64 {
-            KernelFaults::new(comptime!(FaultFlags::ARITHMETIC_OVERFLOW)).record(control);
-        }
-        let low = quotient.extract(LOW_WORD) | select(included && bit < 32, 1u32 << (bit % 32), 0);
-        let high =
-            quotient.extract(HIGH_WORD) | select(included && bit / 32 == 1, 1u32 << (bit % 32), 0);
-        quotient = ticks(low, high);
-    }
-    Bounds {
-        lower: quotient,
-        upper: sum(
-            quotient,
-            ticks(u32::cast_from(!equal(remainder, zero())), 0),
-            control,
-        ),
-    }
-}
-
-#[cube(launch)]
-pub fn vector_dot(
-    left: &[u32],
-    right: &[u32],
-    output: &mut [u32],
-    control: &[Atomic<u32>],
-    length: u32,
-    scale: u32,
-) {
-    if ABSOLUTE_POS == 0 {
-        let mut lower = zero();
-        let mut upper = zero();
-        for index in 0..length {
-            let a = interval(left, index as usize);
-            let b = interval(right, index as usize);
-            lower = sum(
-                lower,
-                divide_product(a.lower, b.lower, ticks(scale, 0), control).lower,
-                control,
-            );
-            upper = sum(
-                upper,
-                divide_product(a.upper, b.upper, ticks(scale, 0), control).upper,
-                control,
-            );
-        }
-        write(output, 0, Bounds { lower, upper });
-    }
-}
-
 #[cube(launch)]
 pub fn normalize(
-    input: &[u32],
-    output: &mut [u32],
+    input: &[f32],
+    output: &mut [f32],
     control: &[Atomic<u32>],
     length: u32,
     reference: u32,
@@ -260,145 +108,92 @@ pub fn normalize(
     let index = ABSOLUTE_POS;
     if index < length as usize {
         let divisor = interval(input, reference as usize);
-        if equal(divisor.lower, zero()) {
+        if divisor.lower == 0.0 {
             control[0].store(UNRESOLVED);
         }
-        if !equal(divisor.lower, zero()) {
+        if divisor.lower > 0.0 {
             let value = interval(input, index);
-            let mut lower =
-                divide_product(value.lower, ticks(scale, 0), divisor.upper, control).lower;
-            let mut upper =
-                divide_product(value.upper, ticks(scale, 0), divisor.lower, control).upper;
-            if index == reference as usize {
-                lower = ticks(scale, 0);
-                upper = ticks(scale, 0);
-            }
-            write(output, index, Bounds { lower, upper });
+            write(
+                output,
+                index,
+                Bounds {
+                    lower: select(
+                        index == reference as usize,
+                        scale as f32,
+                        divide_product(value.lower, scale as f32, divisor.upper, control).lower,
+                    ),
+                    upper: select(
+                        index == reference as usize,
+                        scale as f32,
+                        divide_product(value.upper, scale as f32, divisor.lower, control).upper,
+                    ),
+                },
+            );
         }
     }
 }
 
 #[cube(launch)]
 pub fn certificate_rows(
-    offsets: &[u32],
-    entries: &[u32],
-    weights: &[u32],
+    product: &[f32],
+    weights: &[f32],
     output: &mut [u32],
-    control: &[Atomic<u32>],
     rows: u32,
     numerator: u32,
     denominator: u32,
 ) {
     let row = ABSOLUTE_POS;
     if row < rows as usize {
-        let mut lower = zero();
-        let mut upper = zero();
-        for entry in offsets[row]..offsets[row + 1] {
-            let base = entry as usize * ENTRY_WORDS;
-            let part = scaled(
-                ticks(0, weights[entries[base] as usize]),
-                entries[base + 1],
-                entries[base + 2],
-                control,
-            );
-            lower = sum(lower, part.lower, control);
-            upper = sum(upper, part.upper, control);
-        }
-        let target = scaled(ticks(0, weights[row]), numerator, denominator, control).lower;
-        output[row * 2] = u32::cast_from(!lt(target, upper));
-        output[row * 2 + 1] = u32::cast_from(!lt(lower, ticks(0, weights[row])));
+        let value = interval(product, row);
+        let weight = interval(weights, row).lower;
+        output[row * 2] = u32::cast_from(
+            (numerator as f32) < denominator as f32
+                && value.upper <= weight * numerator as f32 / denominator as f32,
+        );
+        output[row * 2 + 1] = u32::cast_from(value.lower >= weight);
     }
 }
 
 #[cube(launch)]
-pub fn certificate_reduce(rows: &[u32], control: &[Atomic<u32>], count: u32) {
+pub fn certificate_status(flags: &[u32], control: &[Atomic<u32>]) {
     if ABSOLUTE_POS == 0 {
-        let mut certified = true;
-        let mut inadmissible = true;
-        for row in 0..count {
-            certified = certified && rows[row as usize * 2] != 0;
-            inadmissible = inadmissible && rows[row as usize * 2 + 1] != 0;
-        }
-        let status = select(
-            certified,
+        control[0].store(select(
+            flags[0] != 0,
             AVAILABLE,
-            select(inadmissible, INADMISSIBLE, UNRESOLVED),
-        );
-        control[0].store(status);
+            select(flags[1] != 0, INADMISSIBLE, UNRESOLVED),
+        ));
     }
 }
 
 #[cube(launch)]
-pub fn iterate(
-    offsets: &[u32],
-    entries: &[u32],
-    rhs: &[u32],
-    previous: &[u32],
-    next: &mut [u32],
-    control: &[Atomic<u32>],
-    rows: u32,
-) {
+pub fn residual(product: &[f32], estimate: &[f32], weights: &[u32], output: &mut [f32], rows: u32) {
     let row = ABSOLUTE_POS;
-    if row < rows as usize && control[0].load() == AVAILABLE {
-        let product = row_product(offsets, entries, previous, row, control);
-        let forcing = interval(rhs, row);
-        let value = sum(forcing.lower, product.lower, control);
-        write(
-            next,
-            row,
-            Bounds {
-                lower: value,
-                upper: value,
-            },
-        );
-    }
-}
-
-#[cube(launch)]
-pub fn residual(
-    offsets: &[u32],
-    entries: &[u32],
-    rhs: &[u32],
-    estimate: &[u32],
-    weights: &[u32],
-    output: &mut [u32],
-    control: &[Atomic<u32>],
-    rows: u32,
-) {
-    let row = ABSOLUTE_POS;
-    if row < rows as usize && control[0].load() == AVAILABLE {
-        let product = row_product(offsets, entries, estimate, row, control);
-        let forcing = interval(rhs, row);
-        let lower = sum(forcing.lower, product.lower, control);
-        let upper = sum(forcing.upper, product.upper, control);
-        let approximate = interval(estimate, row).lower;
-        let difference = maximum(positive(approximate, lower), positive(upper, approximate));
-        let weighted = scaled(difference, 1, weights[row], control).upper;
-        output[row * TICK_WORDS] = weighted.extract(LOW_WORD);
-        output[row * TICK_WORDS + 1] = weighted.extract(HIGH_WORD);
+    if row < rows as usize {
+        let product = interval(product, row);
+        let approximate = interval(estimate, row);
+        output[row] = max(
+            f32::abs(product.lower - approximate.lower),
+            f32::abs(product.upper - approximate.upper),
+        ) / weights[row] as f32;
     }
 }
 
 #[cube(launch)]
 pub fn error_bound(
-    residuals: &[u32],
-    error: &mut [u32],
+    norm: &[f32],
+    error: &mut [f32],
     control: &[Atomic<u32>],
-    count: u32,
     numerator: u32,
     denominator: u32,
-    tolerance_low: u32,
-    tolerance_high: u32,
+    tolerance: f32,
 ) {
-    if ABSOLUTE_POS == 0 && control[0].load() == AVAILABLE {
-        let mut norm = zero();
-        for row in 0..count {
-            norm = maximum(norm, read(residuals, row as usize * TICK_WORDS));
-        }
-        let bound = scaled(norm, denominator, denominator - numerator, control).upper;
-        error[0] = bound.extract(LOW_WORD);
-        error[1] = bound.extract(HIGH_WORD);
-        if lt(ticks(tolerance_low, tolerance_high), bound) {
+    if ABSOLUTE_POS == 0 {
+        let bound = checked(
+            max(norm[0], 0.0) * denominator as f32 / (denominator - numerator) as f32,
+            control,
+        );
+        error[0] = bound;
+        if control[0].load() == AVAILABLE && bound > tolerance {
             control[0].store(UNRESOLVED);
         }
     }
@@ -406,41 +201,50 @@ pub fn error_bound(
 
 #[cube(launch)]
 pub fn solution_bounds(
-    estimate: &[u32],
+    estimate: &[f32],
     weights: &[u32],
-    error: &[u32],
-    output: &mut [u32],
+    error: &[f32],
+    output: &mut [f32],
     control: &[Atomic<u32>],
     rows: u32,
 ) {
     let row = ABSOLUTE_POS;
     if row < rows as usize && control[0].load() == AVAILABLE {
-        let bound = times(read(error, 0), weights[row]);
-        bound.faults.record(control);
-        let value = interval(estimate, row).lower;
+        let bound = checked(error[0] * weights[row] as f32, control);
+        let value = interval(estimate, row);
         write(
             output,
             row,
             Bounds {
-                lower: positive(value, bound.value),
-                upper: sum(value, bound.value, control),
+                lower: max(value.lower - bound, 0.0),
+                upper: sum(value.upper, bound, control),
             },
         );
     }
 }
 
 #[cube]
-fn signed_difference(output: &mut [u32], offset: usize, left: Ticks, right: Ticks) {
-    let negative = lt(left, right);
-    let magnitude = select(negative, minus(right, left), minus(left, right));
-    output[offset] = u32::cast_from(negative);
-    output[offset + 1] = magnitude.extract(LOW_WORD);
-    output[offset + 2] = magnitude.extract(HIGH_WORD);
+fn signed_difference(
+    output: &mut [u32],
+    control: &[Atomic<u32>],
+    offset: usize,
+    left: f32,
+    right: f32,
+    #[comptime] rounding: Rounding,
+) {
+    let difference = match rounding {
+        Rounding::Lower => f32::floor(left - right),
+        Rounding::Upper => f32::ceil(left - right),
+    };
+    let magnitude = u64::cast_from(checked(f32::abs(difference), control));
+    output[offset] = u32::cast_from(difference < 0.0);
+    output[offset + 1] = magnitude as u32;
+    output[offset + 2] = (magnitude >> 32) as u32;
 }
 
 #[cube(launch)]
 pub fn comparator(
-    requirement: &[u32],
+    requirement: &[f32],
     output: &mut [u32],
     control: &[Atomic<u32>],
     living_low: u32,
@@ -448,106 +252,40 @@ pub fn comparator(
     scale: u32,
 ) {
     if ABSOLUTE_POS == 0 {
-        let living = ticks(living_low, living_high);
+        let living = (u64::cast_from(living_low) | (u64::cast_from(living_high) << 32)) as f32;
         let value = interval(requirement, 0);
-        signed_difference(output, 0, living, value.upper);
-        signed_difference(output, 3, living, value.lower);
-        if equal(value.lower, zero()) {
-            control[0].store(select(equal(value.upper, zero()), INAPPLICABLE, UNRESOLVED));
+        signed_difference(output, control, 0, living, value.upper, Rounding::Lower);
+        signed_difference(output, control, 3, living, value.lower, Rounding::Upper);
+        if value.lower == 0.0 {
+            control[0].store(select(value.upper == 0.0, INAPPLICABLE, UNRESOLVED));
         }
-        if !equal(value.lower, zero()) {
-            let lower = divide_product(living, ticks(scale, 0), value.upper, control).lower;
-            let upper = divide_product(living, ticks(scale, 0), value.lower, control).upper;
-            signed_difference(output, 6, lower, ticks(scale, 0));
-            signed_difference(output, 9, upper, ticks(scale, 0));
-        }
-    }
-}
-
-#[cube(launch)]
-pub fn dense_from_sparse(
-    offsets: &[u32],
-    entries: &[u32],
-    output: &mut [u32],
-    control: &[Atomic<u32>],
-    rows: u32,
-    columns: u32,
-    scale: u32,
-) {
-    let index = ABSOLUTE_POS;
-    if index < rows as usize * columns as usize {
-        let row = index / columns as usize;
-        let column = index % columns as usize;
-        let mut lower = zero();
-        let mut upper = zero();
-        for entry in offsets[row]..offsets[row + 1] {
-            let base = entry as usize * ENTRY_WORDS;
-            if entries[base] as usize == column {
-                let coefficient = scaled(
-                    ticks(scale, 0),
-                    entries[base + 1],
-                    entries[base + 2],
-                    control,
-                );
-                lower = coefficient.lower;
-                upper = coefficient.upper;
-            }
-        }
-        write(output, index, Bounds { lower, upper });
-    }
-}
-
-#[cube(launch)]
-pub fn dense_product(
-    left: &[u32],
-    right: &[u32],
-    output: &mut [u32],
-    control: &[Atomic<u32>],
-    rows: u32,
-    inner: u32,
-    columns: u32,
-    scale: u32,
-) {
-    let index = ABSOLUTE_POS;
-    if index < rows as usize * columns as usize {
-        let row = index / columns as usize;
-        let column = index % columns as usize;
-        let mut lower = zero();
-        let mut upper = zero();
-        for k in 0..inner {
-            let a = interval(left, row * inner as usize + k as usize);
-            let b = interval(right, k as usize * columns as usize + column);
-            lower = sum(
-                lower,
-                divide_product(a.lower, b.lower, ticks(scale, 0), control).lower,
+        if value.lower > 0.0 {
+            signed_difference(
+                output,
                 control,
+                6,
+                living * scale as f32 / value.upper,
+                scale as f32,
+                Rounding::Lower,
             );
-            upper = sum(
-                upper,
-                divide_product(a.upper, b.upper, ticks(scale, 0), control).upper,
+            signed_difference(
+                output,
                 control,
+                9,
+                living * scale as f32 / value.lower,
+                scale as f32,
+                Rounding::Upper,
             );
         }
-        write(output, index, Bounds { lower, upper });
-    }
-}
-
-#[cube(launch)]
-pub fn dense_transpose(input: &[u32], output: &mut [u32], rows: u32, columns: u32) {
-    let index = ABSOLUTE_POS;
-    if index < rows as usize * columns as usize {
-        let row = index / columns as usize;
-        let column = index % columns as usize;
-        write(output, column * rows as usize + row, interval(input, index));
     }
 }
 
 #[cube(launch)]
 pub fn dense_units(
-    input: &[u32],
+    input: &[f32],
     row_factors: &[u32],
     column_factors: &[u32],
-    output: &mut [u32],
+    output: &mut [f32],
     control: &[Atomic<u32>],
     rows: u32,
     columns: u32,
@@ -556,46 +294,23 @@ pub fn dense_units(
     if index < rows as usize * columns as usize {
         let row = index / columns as usize;
         let column = index % columns as usize;
+        let factor = row_factors[row * 2] as f32 / row_factors[row * 2 + 1] as f32
+            * column_factors[column * 2] as f32
+            / column_factors[column * 2 + 1] as f32;
         let value = interval(input, index);
-        let lower = scaled(
-            value.lower,
-            row_factors[row * 2],
-            row_factors[row * 2 + 1],
-            control,
-        )
-        .lower;
-        let upper = scaled(
-            value.upper,
-            row_factors[row * 2],
-            row_factors[row * 2 + 1],
-            control,
-        )
-        .upper;
         write(
             output,
             index,
             Bounds {
-                lower: scaled(
-                    lower,
-                    column_factors[column * 2],
-                    column_factors[column * 2 + 1],
-                    control,
-                )
-                .lower,
-                upper: scaled(
-                    upper,
-                    column_factors[column * 2],
-                    column_factors[column * 2 + 1],
-                    control,
-                )
-                .upper,
+                lower: checked(value.lower * factor, control),
+                upper: checked(value.upper * factor, control),
             },
         );
     }
 }
 
 #[cube(launch)]
-pub fn dense_column(input: &[u32], output: &mut [u32], rows: u32, columns: u32, column: u32) {
+pub fn dense_column(input: &[f32], output: &mut [f32], rows: u32, columns: u32, column: u32) {
     let row = ABSOLUTE_POS;
     if row < rows as usize {
         write(
@@ -607,12 +322,50 @@ pub fn dense_column(input: &[u32], output: &mut [u32], rows: u32, columns: u32, 
 }
 
 #[cube(launch)]
-pub fn signed_vector(positive: &[u32], negative: &[u32], output: &mut [u32], length: u32) {
+pub fn signed_vector(
+    positive: &[f32],
+    negative: &[f32],
+    output: &mut [u32],
+    control: &[Atomic<u32>],
+    length: u32,
+) {
     let index = ABSOLUTE_POS;
     if index < length as usize {
         let a = interval(positive, index);
         let b = interval(negative, index);
-        signed_difference(output, index * 6, a.lower, b.upper);
-        signed_difference(output, index * 6 + 3, a.upper, b.lower);
+        signed_difference(
+            output,
+            control,
+            index * 6,
+            a.lower,
+            b.upper,
+            Rounding::Lower,
+        );
+        signed_difference(
+            output,
+            control,
+            index * 6 + 3,
+            a.upper,
+            b.lower,
+            Rounding::Upper,
+        );
     }
+}
+
+#[derive(Clone, Copy, Debug, Hash, PartialEq, Eq)]
+enum Rounding {
+    Lower,
+    Upper,
+}
+
+#[cube]
+#[allow(
+    clippy::manual_range_contains,
+    reason = "CubeCL kernels require scalar comparisons"
+)]
+pub(super) fn checked(value: f32, control: &[Atomic<u32>]) -> f32 {
+    if !(value >= 0.0 && value < 18446744073709551616.0) {
+        KernelFaults::new(comptime!(FaultFlags::ARITHMETIC_OVERFLOW)).record(control);
+    }
+    value
 }
