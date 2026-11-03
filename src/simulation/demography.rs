@@ -78,6 +78,7 @@ enum Stage {
     Mortality,
 }
 
+#[derive(Clone)]
 pub struct DemographyRuntime {
     people: CubeTensor,
     audited: CubeTensor,
@@ -408,6 +409,21 @@ impl DemographyRuntime {
             true => Ok(grown),
             false => Err(anyhow!("person registry allocation exceeded device budget")),
         }
+    }
+    pub fn extend_firms(&mut self, device: &Device, count: usize) {
+        self.range_counts.resize(count, 0);
+        let mut offset = 0u32;
+        let ranges = self
+            .range_counts
+            .iter()
+            .flat_map(|&count| {
+                let range = [offset, count];
+                offset += count;
+                range
+            })
+            .collect::<Vec<_>>();
+        self.ranges = device.tensor(&ranges);
+        self.births = device.tensor(&vec![0; count]);
     }
     pub fn pending_births(&self, device: &Device) -> Result<Vec<u32>> {
         device.read(&self.births)

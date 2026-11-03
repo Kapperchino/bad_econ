@@ -1,3 +1,4 @@
+pub(super) mod entries;
 use super::{
     Device,
     layout::{ActorLayout as A, ConfigLayout as C},

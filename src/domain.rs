@@ -772,9 +772,15 @@ impl Scenario {
         self.resources.production_site(good, position)
     }
     pub fn geographic_capacity(&self, actor: &Actor) -> u32 {
-        match (actor.kind, self.retailers.contains_key(&actor.identity)) {
-            (0, _) | (_, true) => actor.capacity,
-            _ => match self.production_site(
+        match actor.kind {
+            0 => actor.capacity,
+            _ => self.firm_geographic_capacity(actor),
+        }
+    }
+    fn firm_geographic_capacity(&self, actor: &Actor) -> u32 {
+        match self.retailers.contains_key(&actor.identity) {
+            true => actor.capacity,
+            false => match self.production_site(
                 Good::from_index(actor.kind).expect("validated firm good"),
                 actor.position,
             ) {
@@ -1270,12 +1276,14 @@ pub struct ActorRows {
     capacity: Vec<u32>,
 }
 impl ActorRows {
+    #[inline]
     pub fn len(&self) -> usize {
         self.identity.len()
     }
     pub fn is_empty(&self) -> bool {
         self.identity.is_empty()
     }
+    #[inline]
     pub fn at(&self, index: usize) -> Actor {
         Actor {
             identity: self.identity[index],
@@ -1299,6 +1307,7 @@ impl ActorRows {
         self.owner[index] = actor.owner;
         self.capacity[index] = actor.capacity;
     }
+    #[inline]
     pub fn iter(&self) -> impl ExactSizeIterator<Item = Actor> + '_ {
         (0..self.len()).map(|index| self.at(index))
     }

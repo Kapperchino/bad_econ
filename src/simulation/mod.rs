@@ -557,10 +557,24 @@ impl Simulation {
             RegistryExecution::Gpu => plan,
             RegistryExecution::Reference => None,
         };
-        match (count, plan) {
-            (0, _) => (),
-            (_, Some(plan)) => self.commit_registry(plan, &births)?,
-            (_, None) => {
+        let entries = registry::entries::EntryGrowth::new(
+            &self.scenario,
+            &self.metadata,
+            &self.migrations,
+            &requests,
+        )?;
+        #[cfg(test)]
+        let entries = match self.registry_execution {
+            RegistryExecution::Gpu => entries,
+            RegistryExecution::Reference => None,
+        };
+        match (count, plan, entries) {
+            (0, _, _) => (),
+            (_, Some(plan), _) => self.commit_registry(plan, &births)?,
+            (_, None, Some(growth)) => {
+                self.commit_entries(&requests, &growth.requests, growth.plan, &births)?
+            }
+            (_, None, None) => {
                 let mut state = self.download()?;
                 let estimated =
                     (state.actors.len() + count) as u64 * self.scenario.fields() as u64 * 24
@@ -604,6 +618,162 @@ impl Simulation {
                 self.timings = timings;
                 self.readback_bytes += readback;
             }
+        }
+        Ok(())
+    }
+    fn commit_entries(
+        &mut self,
+        requests: &[u32],
+        entries: &registry::entries::EntryRequests,
+        plan: registry::RegistryPlan,
+        births: &[u32],
+    ) -> Result<()> {
+        let newborns = births.iter().filter(|&&birth| birth > 0).count();
+        let next_identity = self
+            .metadata
+            .next_identity
+            .checked_add(newborns as u64)
+            .context("identity capacity exhausted")?;
+        let batch = registry::entries::EntryBatch::new(
+            &self.device,
+            &self.scenario,
+            &self.metadata,
+            &self.state,
+            requests,
+            entries,
+            next_identity,
+        )?;
+        let count = batch.metadata.actors.len();
+        let additional = count as u64 * self.scenario.fields() as u64 * 16 + count as u64 * 128;
+        self.device.reclaim_memory(additional)?;
+        match self
+            .memory_usage()
+            .bytes_reserved
+            .saturating_add(additional)
+            <= self.device.memory_budget.bytes()
+        {
+            true => (),
+            false => Err(anyhow!("registry growth exceeds the device memory budget"))?,
+        }
+        let state = batch.grow(
+            &self.device,
+            &self.state,
+            self.metadata.actors.len(),
+            self.scenario.fields(),
+        );
+        let mut metadata = batch.metadata;
+        if let Some(actors) = plan.actors {
+            metadata.actors = actors
+                .iter()
+                .chain(metadata.actors.iter().skip(actors.len()))
+                .collect();
+        }
+        let configuration = ConfigLayout::new(&self.scenario, &metadata);
+        let config = self.device.tensor(bytemuck::cast_slice(&[configuration]));
+        let rows = metadata
+            .actors
+            .iter()
+            .map(|actor| ActorLayout::new(&actor, &self.scenario))
+            .collect::<ActorMetadataRows>();
+        let actors = self.device.tensor(&rows.words());
+        let spatial = self
+            .device
+            .tensor(&SpatialIndex::new(&self.scenario, &metadata).words);
+        let mut demography = match newborns {
+            0 => self.demography.clone(),
+            _ => self
+                .demography
+                .grow_births(&self.device, births, self.metadata.next_identity)?,
+        };
+        demography.extend_firms(&self.device, count);
+        let research = self
+            .research
+            .as_ref()
+            .map(|research| research.with_actors(&self.device, &metadata.actors))
+            .transpose()?;
+        let mut transitions = entries.transitions.clone();
+        transitions.resize(count, 0);
+        let enterprise_requests = self.device.tensor(&transitions);
+        let scratch_words = count * 5;
+        let event_words =
+            count.div_ceil(SummaryLayout::ACTORS_PER_GROUP as usize) * SummaryLayout::WORDS;
+        #[cfg(test)]
+        let batch_size = (self.scenario.config().batch_size as usize).min(count);
+        #[cfg(test)]
+        let scratch_words = scratch_words.max(batch_size * ScratchLayout::WORDS_PER_EVENT);
+        #[cfg(test)]
+        let event_words = event_words.max(batch_size * EVENT_WORDS);
+        let ownership = self
+            .ownership
+            .as_ref()
+            .map(|_| ownership::OwnershipRuntime::new(&self.device, &metadata))
+            .transpose()?;
+        let management = management::EnterpriseManagement::new(&self.device, &metadata);
+        let mut next = Self {
+            scenario: self.scenario.clone(),
+            device: self.device.clone(),
+            status: self.status.clone(),
+            snapshot: self.snapshot.clone(),
+            timings: self.timings.clone(),
+            readback_bytes: self.readback_bytes + batch.readback_bytes,
+            metadata,
+            day: self.day,
+            audited_day: self.audited_day,
+            next_phase: self.next_phase,
+            state,
+            audited: self
+                .device
+                .empty(count * self.scenario.fields() * TICK_WORDS),
+            actors,
+            config,
+            spatial,
+            proposals: self.device.empty(count * ProposalLayout::WORDS),
+            events: self.device.empty(event_words),
+            scratch: self.device.empty(scratch_words),
+            #[cfg(test)]
+            links: self.device.empty(batch_size * LinkLayout::WORDS_PER_EVENT),
+            market_execution: self.market_execution,
+            control: self.control.clone(),
+            summary: self.summary.clone(),
+            feedback: self
+                .device
+                .tensor(&vec![0; CONTROL_WORDS + count * TICK_WORDS]),
+            finance: None,
+            research,
+            research_readback: self.research_readback,
+            demography,
+            enterprise_requests,
+            ownership,
+            management,
+            migrations: plan.migrations,
+            #[cfg(test)]
+            registry_execution: self.registry_execution,
+            matching_round: self.matching_round,
+        };
+        let previous_actors = self
+            .metadata
+            .actors
+            .iter()
+            .chain(next.metadata.actors.iter().skip(self.metadata.actors.len()))
+            .map(|actor| ActorLayout::new(&actor, &self.scenario))
+            .collect::<ActorMetadataRows>();
+        let previous_actors = self.device.tensor(&previous_actors.words());
+        registry::apply(
+            &next.device,
+            &next.state,
+            &previous_actors,
+            &next.config,
+            &next.enterprise_requests,
+            &next.scratch,
+            next.day as u32,
+        );
+        next.snapshot = next.observe()?;
+        next.device.reclaim_memory(0)?;
+        match next.memory_usage().bytes_reserved <= next.device.memory_budget.bytes() {
+            true => *self = next,
+            false => Err(anyhow!(
+                "registry allocation exceeds the device memory budget"
+            ))?,
         }
         Ok(())
     }

@@ -22,6 +22,7 @@ const DIRECT_READBACK_WORDS: usize = 1024;
 #[cfg(test)]
 pub const TEST_WORKGROUP: u32 = 64;
 
+#[derive(Clone)]
 pub struct Device {
     pub client: Client,
     pub cube: cubecl::Device,

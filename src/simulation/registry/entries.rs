@@ -1,0 +1,310 @@
+use super::*;
+use crate::domain::Good;
+use crate::simulation::{decode, encode, enterprise, layout::TICK_WORDS};
+use std::collections::BTreeSet;
+
+pub(in crate::simulation) struct EntryRequests {
+    pub transitions: Vec<u32>,
+    entries: Vec<usize>,
+}
+
+impl EntryRequests {
+    pub fn new(scenario: &Scenario, requests: &[u32]) -> Option<Self> {
+        let entries = requests
+            .iter()
+            .enumerate()
+            .filter(|(_, action)| Self::is_entry(**action))
+            .map(|(actor, _)| actor)
+            .collect::<Vec<_>>();
+        let sources = requests.iter().all(|&action| match action >> 24 {
+            8 | 9 => (1..=requests.len() as u32).contains(&(action & 0x00ffffff)),
+            _ => true,
+        });
+        match (
+            scenario.config().finance.as_ref(),
+            entries.is_empty(),
+            sources,
+        ) {
+            (None, false, true) => Some(Self {
+                transitions: requests
+                    .iter()
+                    .map(|&action| match Self::is_entry(action) {
+                        true => 0,
+                        false => action,
+                    })
+                    .collect(),
+                entries,
+            }),
+            _ => None,
+        }
+    }
+
+    fn is_entry(action: u32) -> bool {
+        (1..=Good::COUNT as u32).contains(&action) || matches!(action >> 24, 8 | 9)
+    }
+}
+
+pub(in crate::simulation) struct EntryGrowth {
+    pub requests: EntryRequests,
+    pub plan: RegistryPlan,
+}
+
+impl EntryGrowth {
+    pub fn new(
+        scenario: &Scenario,
+        metadata: &State,
+        migrations: &MigrationRegistry,
+        requests: &[u32],
+    ) -> Result<Option<Self>> {
+        EntryRequests::new(scenario, requests)
+            .map(|requests| {
+                RegistryPlan::new(scenario, metadata, migrations, &requests.transitions)
+                    .map(|plan| plan.map(|plan| Self { requests, plan }))
+            })
+            .transpose()
+            .map(Option::flatten)
+    }
+}
+
+pub(in crate::simulation) struct EntryBatch {
+    pub metadata: State,
+    pub readback_bytes: u64,
+    indices: CubeTensor,
+    values: CubeTensor,
+}
+
+impl EntryBatch {
+    pub fn new(
+        device: &Device,
+        scenario: &Scenario,
+        metadata: &State,
+        state: &CubeTensor,
+        requests: &[u32],
+        entries: &EntryRequests,
+        next_identity: u64,
+    ) -> Result<Self> {
+        let selected = entries
+            .entries
+            .iter()
+            .flat_map(|&owner| {
+                let source = match requests[owner] >> 24 {
+                    8 | 9 => Some((requests[owner] & 0x00ffffff) as usize - 1),
+                    _ => None,
+                };
+                std::iter::once(owner).chain(source)
+            })
+            .collect::<BTreeSet<_>>()
+            .into_iter()
+            .collect::<Vec<_>>();
+        let required = selected.len() as u64 * scenario.fields() as u64 * 16;
+        device.reclaim_memory(required)?;
+        match device
+            .client
+            .memory_report(cubecl::MemoryScope::Device)
+            .usage()
+            .bytes_reserved
+            .saturating_add(required)
+            <= device.memory_budget.bytes()
+        {
+            true => (),
+            false => Err(anyhow::anyhow!(
+                "entry staging exceeds the device memory budget"
+            ))?,
+        }
+        let indices = device.tensor(
+            &selected
+                .iter()
+                .map(|&index| index as u32)
+                .collect::<Vec<_>>(),
+        );
+        let values = device.empty(selected.len() * scenario.fields() * TICK_WORDS);
+        transfer(
+            device,
+            state,
+            &values,
+            &indices,
+            metadata.actors.len(),
+            Transfer::Gather,
+        );
+        let words = device.read(&values)?;
+        let readback_bytes = words.len() as u64 * 4;
+        let mut compact = State {
+            actors: selected
+                .iter()
+                .map(|&index| metadata.actors.at(index))
+                .collect(),
+            values: decode(&words),
+            ownership: Vec::new(),
+            next_identity,
+            ..metadata.clone()
+        };
+        let mut compact_requests = vec![0; selected.len()];
+        for &owner in &entries.entries {
+            let index = selected.binary_search(&owner).expect("selected owner");
+            compact_requests[index] = match requests[owner] >> 24 {
+                kind @ (8 | 9) => {
+                    let source = (requests[owner] & 0x00ffffff) as usize - 1;
+                    (kind << 24)
+                        + selected.binary_search(&source).expect("selected source") as u32
+                        + 1
+                }
+                _ => requests[owner],
+            };
+        }
+        enterprise::enter(&mut compact, scenario, &compact_requests)?;
+        let mut grown = metadata.clone();
+        let before = metadata.actors.len();
+        grown.actors = metadata
+            .actors
+            .iter()
+            .chain(compact.actors.iter().skip(selected.len()).map(|mut actor| {
+                actor.owner = selected[actor.owner as usize] as u32;
+                actor
+            }))
+            .collect();
+        grown.next_identity = compact.next_identity;
+        grown.ownership.extend(compact.ownership.iter().cloned());
+        let owners = entries
+            .entries
+            .iter()
+            .map(|owner| selected.binary_search(owner).expect("selected owner"));
+        let patches = owners
+            .chain(selected.len()..compact.actors.len())
+            .collect::<Vec<_>>();
+        for (offset, &owner) in entries.entries.iter().enumerate() {
+            compact.set(
+                Field::InvestmentFirm,
+                selected.binary_search(&owner).expect("selected owner"),
+                (before + offset + 1) as u64,
+            );
+        }
+        let indices = patches
+            .iter()
+            .map(|&index| match index < selected.len() {
+                true => selected[index] as u32,
+                false => (before + index - selected.len()) as u32,
+            })
+            .collect::<Vec<_>>();
+        let compact_values = &compact.values;
+        let compact_count = compact.actors.len();
+        let values = (0..scenario.fields())
+            .flat_map(|field| {
+                patches
+                    .iter()
+                    .map(move |&actor| compact_values[field * compact_count + actor])
+            })
+            .collect::<Vec<_>>();
+        Ok(Self {
+            metadata: grown,
+            readback_bytes,
+            indices: device.tensor(&indices),
+            values: device.tensor(bytemuck::cast_slice(&encode(&values))),
+        })
+    }
+
+    pub fn grow(
+        &self,
+        device: &Device,
+        previous: &CubeTensor,
+        before: usize,
+        fields: usize,
+    ) -> CubeTensor {
+        let grown = device.empty(self.metadata.actors.len() * fields * TICK_WORDS);
+        transfer(
+            device,
+            previous,
+            &grown,
+            &self.indices,
+            before,
+            Transfer::Grow,
+        );
+        transfer(
+            device,
+            &self.values,
+            &grown,
+            &self.indices,
+            self.metadata.actors.len(),
+            Transfer::Scatter,
+        );
+        grown
+    }
+}
+
+#[derive(Clone, Copy, Debug, Hash, PartialEq, Eq)]
+enum Transfer {
+    Gather,
+    Grow,
+    Scatter,
+}
+
+#[cube(launch)]
+fn transfer_rows(
+    source: &[u32],
+    target: &mut [u32],
+    indices: &[u32],
+    actors: u32,
+    #[comptime] stage: Transfer,
+) {
+    let id = ABSOLUTE_POS;
+    match stage {
+        Transfer::Gather => {
+            if id < target.len() {
+                let field = id / (indices.len() * TICK_WORDS);
+                let actor = indices[id / TICK_WORDS % indices.len()] as usize;
+                target[id] =
+                    source[(field * actors as usize + actor) * TICK_WORDS + id % TICK_WORDS];
+            }
+        }
+        Transfer::Grow => {
+            if id < target.len() {
+                let fields = source.len() / (actors as usize * TICK_WORDS);
+                let count = target.len() / (fields * TICK_WORDS);
+                let actor = id / TICK_WORDS % count;
+                let field = id / (count * TICK_WORDS);
+                let mut value = 0;
+                if actor < actors as usize {
+                    value =
+                        source[(field * actors as usize + actor) * TICK_WORDS + id % TICK_WORDS];
+                }
+                target[id] = value;
+            }
+        }
+        Transfer::Scatter => {
+            if id < source.len() {
+                let field = id / (indices.len() * TICK_WORDS);
+                let actor = indices[id / TICK_WORDS % indices.len()] as usize;
+                target[(field * actors as usize + actor) * TICK_WORDS + id % TICK_WORDS] =
+                    source[id];
+            }
+        }
+    }
+}
+
+fn transfer(
+    device: &Device,
+    source: &CubeTensor,
+    target: &CubeTensor,
+    indices: &CubeTensor,
+    actors: usize,
+    stage: Transfer,
+) {
+    let argument = |tensor: &CubeTensor| unsafe {
+        BufferArg::from_raw_parts(tensor.handle.clone(), tensor.meta.shape()[0])
+    };
+    let count = match stage {
+        Transfer::Scatter => source.meta.shape()[0],
+        _ => target.meta.shape()[0],
+    };
+    let groups = (count as u32).div_ceil(device.workgroup).max(1);
+    let x = groups.min(u16::MAX.into());
+    transfer_rows::launch(
+        &device.client,
+        CubeCount::Static(x, groups.div_ceil(x), 1),
+        CubeDim::new_1d(device.workgroup),
+        argument(source),
+        argument(target),
+        argument(indices),
+        actors as u32,
+        stage,
+    );
+}

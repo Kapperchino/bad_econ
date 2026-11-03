@@ -19,6 +19,7 @@ pub enum ResearchStage {
     MachineClose,
     StockClose,
     Summary,
+    ReduceSummary,
     Audit,
     Copy,
 }
@@ -714,10 +715,16 @@ pub fn research(
             }
         }
         ResearchStage::Summary => {
-            if id < SummaryLayout::WORDS / 2 {
+            let metrics = comptime!(SummaryLayout::WORDS / 2);
+            let shards = output.len() / SummaryLayout::WORDS - 1;
+            let shard = id / metrics;
+            let metric = id % metrics;
+            if shard < shards {
                 let mut total = zero();
-                for lab in 0..config[Header::LAB_COUNT] as usize {
-                    if id < SummaryLayout::CONSUMED / 2 + Good::COUNT {
+                let count = config[Header::LAB_COUNT] as usize;
+                let chunk = ceildiv(count as u32, shards as u32) as usize;
+                for lab in shard * chunk..min((shard + 1) * chunk, count) {
+                    if metric < SummaryLayout::CONSUMED / 2 + Good::COUNT {
                         total = add(
                             control,
                             total,
@@ -729,25 +736,27 @@ pub fn research(
                                     lab,
                                 )
                                 .field(LabState::CONSUMED, Good::COUNT * 2)
-                                    + id * 2,
+                                    + metric * 2,
                             ),
                         );
                     }
                 }
-                for project in 0..config[Header::PROJECT_COUNT] as usize {
+                let count = config[Header::PROJECT_COUNT] as usize;
+                let chunk = ceildiv(count as u32, shards as u32) as usize;
+                for project in shard * chunk..min((shard + 1) * chunk, count) {
                     let saved = RowIndex::new(
                         config[Header::PROJECT_STATE] as usize,
                         config[Header::PROJECT_COUNT] as usize,
                         project,
                     );
-                    if id == SummaryLayout::ATTEMPTS / 2 {
+                    if metric == SummaryLayout::ATTEMPTS / 2 {
                         total = add(
                             control,
                             total,
                             read(state, saved.field(ProjectState::ATTEMPTS, 2usize)),
                         );
                     }
-                    if id == SummaryLayout::DISCOVERIES / 2 {
+                    if metric == SummaryLayout::DISCOVERIES / 2 {
                         total = add(
                             control,
                             total,
@@ -755,7 +764,9 @@ pub fn research(
                         );
                     }
                 }
-                for machine in 0..config[Header::MACHINE_COUNT] as usize {
+                let count = config[Header::MACHINE_COUNT] as usize;
+                let chunk = ceildiv(count as u32, shards as u32) as usize;
+                for machine in shard * chunk..min((shard + 1) * chunk, count) {
                     let saved = RowIndex::new(
                         config[Header::MACHINE_STATE] as usize,
                         config[Header::MACHINE_COUNT] as usize,
@@ -766,9 +777,9 @@ pub fn research(
                         config[Header::MACHINE_COUNT] as usize,
                         machine,
                     );
-                    if id < SummaryLayout::CONSUMED / 2 + Good::COUNT
+                    if metric < SummaryLayout::CONSUMED / 2 + Good::COUNT
                         && config[item.field(MachineLayout::MAINTENANCE_GOOD, 1usize)]
-                            == id as u32 + 1
+                            == metric as u32 + 1
                     {
                         total = add(
                             control,
@@ -776,7 +787,7 @@ pub fn research(
                             read(state, saved.field(MachineState::CONSUMED, 2usize)),
                         );
                     }
-                    if id == SummaryLayout::REMAINING_SERVICE / 2 {
+                    if metric == SummaryLayout::REMAINING_SERVICE / 2 {
                         total = add(
                             control,
                             total,
@@ -784,8 +795,10 @@ pub fn research(
                         );
                     }
                 }
-                for stock in 0..config[Header::STOCK_COUNT] as usize {
-                    if id == SummaryLayout::NATURAL_STOCK / 2 {
+                let count = config[Header::STOCK_COUNT] as usize;
+                let chunk = ceildiv(count as u32, shards as u32) as usize;
+                for stock in shard * chunk..min((shard + 1) * chunk, count) {
+                    if metric == SummaryLayout::NATURAL_STOCK / 2 {
                         total = add(
                             control,
                             total,
@@ -801,8 +814,10 @@ pub fn research(
                         );
                     }
                 }
-                for strike in 0..config[Header::STRIKE_COUNT] as usize {
-                    if id == SummaryLayout::STRIKING / 2 {
+                let count = config[Header::STRIKE_COUNT] as usize;
+                let chunk = ceildiv(count as u32, shards as u32) as usize;
+                for strike in shard * chunk..min((shard + 1) * chunk, count) {
+                    if metric == SummaryLayout::STRIKING / 2 {
                         total = add(
                             control,
                             total,
@@ -817,6 +832,20 @@ pub fn research(
                             ),
                         );
                     }
+                }
+                write(output, SummaryLayout::WORDS + id * 2, total);
+            }
+        }
+        ResearchStage::ReduceSummary => {
+            if id < SummaryLayout::WORDS / 2 {
+                let shards = output.len() / SummaryLayout::WORDS - 1;
+                let mut total = zero();
+                for shard in 0..shards {
+                    total = add(
+                        control,
+                        total,
+                        read(output, (shard + 1) * SummaryLayout::WORDS + id * 2),
+                    );
                 }
                 write(output, id * 2, total);
             }

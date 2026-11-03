@@ -1628,12 +1628,9 @@ fn summarize(
             totals[(SummaryLayout::WAGE_MINIMA + good) as usize] = ticks(u32::MAX, u32::MAX);
             totals[(SummaryLayout::PRICE_MINIMA + good) as usize] = ticks(u32::MAX, u32::MAX);
         }
-        for actor in id * SummaryLayout::ACTORS_PER_GROUP
-            ..min(
-                (id + 1u32) * SummaryLayout::ACTORS_PER_GROUP,
-                config[ConfigLayout::ACTORS],
-            )
-        {
+        let count = config[ConfigLayout::ACTORS];
+        for offset in 0..ceildiv(count - id, groups) {
+            let actor = id + offset * groups;
             totals[SummaryLayout::CASH as usize] = add_checked(
                 control,
                 totals[SummaryLayout::CASH as usize],

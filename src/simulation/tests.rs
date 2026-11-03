@@ -286,3 +286,88 @@ fn gpu_registry_migration_births_and_estates_match_audited_rebuilds() -> Result<
     gpu.checkpoint()?.restore()?;
     Ok(())
 }
+
+#[test]
+fn gpu_firm_growth_matches_full_rebuild_with_births_and_migration() -> Result<()> {
+    let mut config = Scenario::industrial(300, 42, Experiment::Baseline)?
+        .config()
+        .clone();
+    config.demography.annual_births_per_million_fertile_women = 1_000_000;
+    config.buffer_days = 30;
+    config.household_cash = 1_000_000;
+    let scenario = Scenario::new(config)?;
+    let mut initial = scenario.initial()?;
+    for actor in 0..3 {
+        for (good, amount) in [(Good::Tools, 20), (Good::Wood, 50)] {
+            let field = Field::inventory(good);
+            let donor = (3..initial.actors.len())
+                .max_by_key(|&index| initial.get(field, index))
+                .expect("material supplier");
+            initial.set(
+                field,
+                donor,
+                initial
+                    .get(field, donor)
+                    .checked_sub(amount)
+                    .context(format!(
+                        "insufficient {good:?}: {}",
+                        initial.get(field, donor)
+                    ))?,
+            );
+            initial.set(field, actor, initial.get(field, actor) + amount);
+        }
+    }
+    let mut gpu = Simulation::from_state(scenario.clone(), initial.clone(), Device::headless(64)?)?;
+    let mut reference = Simulation::from_state(scenario.clone(), initial, Device::headless(128)?)?;
+    for day in 0..4 {
+        let source = scenario.config().households as usize + 2;
+        let mut requests = vec![0; gpu.actors().len()];
+        requests[0] = Good::Bread as u32;
+        requests[1] = (8 << 24) + source as u32 + 1;
+        requests[2] = (9 << 24) + source as u32 + 1;
+        requests[3] = (2 << 24) + 5;
+        let entries =
+            registry::entries::EntryRequests::new(&scenario, &requests).expect("entry requests");
+        if day == 0 {
+            let before = gpu.download()?;
+            let budget = gpu.device.memory_budget;
+            gpu.device.memory_budget = MemoryBudget::Reported { available_bytes: 2 };
+            let plan = registry::RegistryPlan::new(
+                &scenario,
+                &gpu.metadata,
+                &gpu.migrations,
+                &entries.transitions,
+            )?
+            .expect("supported transitions");
+            assert!(
+                gpu.commit_entries(&requests, &entries, plan, &vec![0; requests.len()])
+                    .is_err()
+            );
+            gpu.device.memory_budget = budget;
+            assert_eq!(gpu.download()?, before);
+        }
+        let plan = registry::RegistryPlan::new(
+            &scenario,
+            &gpu.metadata,
+            &gpu.migrations,
+            &entries.transitions,
+        )?
+        .expect("supported transitions");
+        let births = vec![0; requests.len()];
+        gpu.commit_entries(&requests, &entries, plan, &births)
+            .context("GPU growth")?;
+        let mut expected = reference.download()?;
+        enterprise::enter(&mut expected, &scenario, &requests)?;
+        enterprise::transitions(&mut expected, &scenario, &requests)?;
+        reference.replace(scenario.clone(), expected)?;
+        assert_eq!(gpu.download()?, reference.download()?, "growth {day}");
+        assert_eq!(gpu.snapshot, reference.snapshot, "growth {day}");
+        gpu.copy_audited(CopyDirection::Save)?;
+        gpu.advance()?;
+        reference.advance()?;
+        assert_eq!(gpu.download()?, reference.download()?, "day {day}");
+        assert_eq!(gpu.snapshot, reference.snapshot, "day {day}");
+    }
+    gpu.checkpoint()?.restore()?;
+    Ok(())
+}

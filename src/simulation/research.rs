@@ -408,6 +408,7 @@ impl EncodedResearch {
     }
 }
 
+#[derive(Clone)]
 pub struct ResearchRuntime {
     configuration: CubeTensor,
     state: CubeTensor,
@@ -437,7 +438,8 @@ impl ResearchRuntime {
             audited: device.empty(encoded.state.len()),
             table: device.tensor(&nonlinear::HAZARD_TABLE),
             constants: device.tensor(&random::SHA_CONSTANTS),
-            summary: device.empty(SummaryLayout::WORDS),
+            summary: device
+                .empty(SummaryLayout::WORDS * (encoded.work_items.div_ceil(128).clamp(1, 256) + 1)),
             control: device.tensor(&[0; CONTROL_WORDS]),
             dummy: device.tensor(&[0; 2]),
             work_items: encoded.work_items,
@@ -516,7 +518,11 @@ impl ResearchRuntime {
         let argument = |tensor: &CubeTensor| unsafe {
             BufferArg::from_raw_parts(tensor.handle.clone(), tensor.meta.shape()[0])
         };
-        let groups = (launch.count as u32).div_ceil(device.workgroup).max(1);
+        let count = match launch.stage {
+            ResearchStage::Summary => (self.summary.meta.shape()[0] - SummaryLayout::WORDS) / 2,
+            _ => launch.count,
+        };
+        let groups = (count as u32).div_ceil(device.workgroup).max(1);
         let x = groups.min(u16::MAX as u32);
         research::launch(
             &device.client,
@@ -532,6 +538,51 @@ impl ResearchRuntime {
             launch.day,
             launch.stage,
         );
+        if let ResearchStage::Summary = launch.stage {
+            self.dispatch(
+                device,
+                ResearchLaunch {
+                    stage: ResearchStage::ReduceSummary,
+                    count: SummaryLayout::WORDS / 2,
+                    ..launch
+                },
+            );
+        }
+    }
+
+    pub(super) fn with_actors(
+        &self,
+        device: &Device,
+        actors: &crate::domain::ActorRows,
+    ) -> Result<Self> {
+        let mut words = device.read(&self.configuration)?;
+        let machines = words[Header::MACHINE_COUNT] as usize;
+        let stocks = words[Header::STOCK_COUNT] as usize;
+        let unchanged_machines = (0..machines).all(|index| {
+            let base = words[Header::MACHINES] as usize;
+            let actor = words[base + MachineLayout::FIRM * machines + index] as usize;
+            actors.at(actor).capacity
+                == words[base + MachineLayout::MAXIMUM_PACKETS * machines + index]
+        });
+        let unchanged_stocks = (0..stocks).all(|index| {
+            let base = words[Header::STOCKS] as usize;
+            let actor = words[base + StockLayout::FIRM * stocks + index] as usize;
+            actors.at(actor).capacity == words[base + StockLayout::MAXIMUM_PACKETS * stocks + index]
+        });
+        match (unchanged_machines, unchanged_stocks) {
+            (true, true) => (),
+            _ => Err(anyhow!(
+                "research checkpoint profile, table, configuration or shape mismatch"
+            ))?,
+        }
+        words[Header::ACTORS] = u32::try_from(actors.len())?;
+        let next = Self {
+            configuration: device.tensor(&words),
+            ..self.clone()
+        };
+        next.readback_bytes
+            .set(next.readback_bytes.get() + words.len() as u64 * 4);
+        Ok(next)
     }
 
     pub fn before_phase(
@@ -579,7 +630,7 @@ impl ResearchRuntime {
             0,
             SummaryLayout::WORDS / 2,
         )?;
-        let words = device.read(&self.summary)?;
+        let words = device.read_range(&self.summary, 0, SummaryLayout::WORDS)?;
         self.readback_bytes
             .set(self.readback_bytes.get() + (SummaryLayout::WORDS * 4) as u64);
         let summary: &SummaryLayout = bytemuck::from_bytes(bytemuck::cast_slice(&words));
@@ -623,7 +674,7 @@ impl ResearchRuntime {
                 + ((CONTROL_WORDS + SummaryLayout::WORDS + self.state_words) * 4) as u64,
         );
         FaultFlags::read(&device.read(&self.control)?)?.into_result()?;
-        let words = device.read(&self.summary)?;
+        let words = device.read_range(&self.summary, 0, SummaryLayout::WORDS)?;
         let summary: &SummaryLayout = bytemuck::from_bytes(bytemuck::cast_slice(&words));
         Ok(ResearchSnapshot {
             profile: RESEARCH_PROFILE.into(),
