@@ -14,7 +14,9 @@ fn births_grow_the_person_registry_and_checkpoint_without_creating_money() -> Re
     let scenario = Scenario::new(config)?;
     let initial = scenario.initial()?;
     let mut original = Simulation::new(scenario.clone(), support::device(64)?)?;
-    original.advance()?;
+    for _ in 0..7 {
+        original.advance()?;
+    }
     assert!(original.snapshot.population.births > 0);
     assert!(original.snapshot.population.dependents > 0);
     assert_eq!(original.snapshot.cash, initial.initial_cash);
@@ -27,7 +29,7 @@ fn births_grow_the_person_registry_and_checkpoint_without_creating_money() -> Re
         state
             .people
             .iter()
-            .filter(|person| person.age_days == 0)
+            .filter(|person| person.age_days < 7)
             .all(|person| person.work_minutes == 0 && person.employer.is_none())
     );
     let checkpoint = original.checkpoint()?;
@@ -95,10 +97,10 @@ fn version_one_scenarios_migrate_and_old_checkpoints_fail_before_decoding_state(
     let mut simulation = Simulation::new(Scenario::new(config)?, device)?;
     simulation.advance()?;
     let mut checkpoint = serde_json::to_value(simulation.checkpoint()?)?;
-    checkpoint["version"] = 5.into();
+    checkpoint["version"] = 6.into();
     checkpoint["state"] = serde_json::Value::Null;
     let error = serde_json::from_value::<Checkpoint>(checkpoint).unwrap_err();
-    assert!(error.to_string().contains("format 6"));
+    assert!(error.to_string().contains("format 7"));
     Ok(())
 }
 

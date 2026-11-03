@@ -51,12 +51,12 @@ pub struct AnalysisReport {
     pub context: ContextVersion,
     pub profile: &'static str,
     pub scale: u32,
-    pub goods_values: Diagnostic<CertifiedValues>,
-    pub gross_requirements: Diagnostic<CertifiedValues>,
+    pub goods_values: Diagnostic<ApproximateValues>,
+    pub gross_requirements: Diagnostic<ApproximateValues>,
     pub occupational_hours: Diagnostic<Vec<Interval>>,
     pub research_values: Diagnostic<Vec<Interval>>,
     pub plan_value: Diagnostic<Vec<Interval>>,
-    pub coupled_values: Diagnostic<CertifiedValues>,
+    pub coupled_values: Diagnostic<ApproximateValues>,
     pub normalized_coupled: Diagnostic<Vec<Interval>>,
     pub residual_scale: Diagnostic<Vec<Interval>>,
     pub comparator: Diagnostic<ComparatorReport>,
@@ -91,8 +91,8 @@ impl AnalysisRequest {
             )),
             true => {
                 let account = model.upload(device)?;
-                let weights = DeviceVector::exact(device, &self.weights)?;
-                let final_demand = DeviceVector::exact(device, &self.final_demand)?;
+                let weights = DeviceVector::from_ticks(device, &self.weights)?;
+                let final_demand = DeviceVector::from_ticks(device, &self.final_demand)?;
                 let values = account.external_values(
                     device,
                     &weights,
@@ -102,8 +102,10 @@ impl AnalysisRequest {
                 let demand = match &self.research {
                     Some(research) => final_demand.add(
                         device,
-                        &DeviceOperator::new(device, &research.inputs)
-                            .apply(device, &DeviceVector::exact(device, &research.attempts)?)?,
+                        &DeviceOperator::new(device, &research.inputs).apply(
+                            device,
+                            &DeviceVector::from_ticks(device, &research.attempts)?,
+                        )?,
                     )?,
                     None => DeviceVector {
                         data: final_demand.data.clone(),
@@ -125,7 +127,7 @@ impl AnalysisRequest {
                                 device,
                                 &DeviceOperator::new(device, &research.hours).apply(
                                     device,
-                                    &DeviceVector::exact(device, &research.attempts)?,
+                                    &DeviceVector::from_ticks(device, &research.attempts)?,
                                 )?,
                             )?,
                             None => production,
@@ -151,7 +153,7 @@ impl AnalysisRequest {
                                     device,
                                     &costs.dot(
                                         device,
-                                        &DeviceVector::exact(device, &research.attempts)?,
+                                        &DeviceVector::from_ticks(device, &research.attempts)?,
                                         self.scale,
                                     )?,
                                 )?)

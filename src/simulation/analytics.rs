@@ -12,20 +12,22 @@ pub use request::*;
 pub use sensitivity::*;
 pub use valuation::*;
 
-use super::{
-    Device,
-    flags::FaultFlags,
-    layout::{TICK_WORDS, WORD_BYTES},
-};
+use super::{Device, flags::FaultFlags, layout::WORD_BYTES, reduction, tensor};
 use anyhow::{Context, Result, anyhow};
 use burn_wgpu::CubeTensor;
-use cubecl::{CubeCount, CubeDim, prelude::BufferArg};
+use cubecl::{
+    CubeCount, CubeDim,
+    prelude::{BufferArg, Scalar},
+    std::tensor::TensorHandle,
+};
+use cubek::reduce::components::instructions::ReduceOperationConfig;
 use serde::{Deserialize, Serialize};
 
-pub const ANALYTICAL_PROFILE: &str = "DirectedRationalTicksV1";
+pub const ANALYTICAL_PROFILE: &str = "CubekF32V2";
 const INTERVAL_WORDS: usize = 4;
 const CONTROL_WORDS: usize = 4;
 const MAX_DIMENSION: usize = 65_535;
+const MAX_MATRIX_CELLS: usize = 1_048_576;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -71,6 +73,7 @@ impl SparseMatrix {
     pub fn new(rows: usize, columns: usize, mut entries: Vec<Coefficient>) -> Result<Self> {
         let admitted = rows <= MAX_DIMENSION
             && columns <= MAX_DIMENSION
+            && rows.saturating_mul(columns) <= MAX_MATRIX_CELLS
             && entries.len() <= u32::MAX as usize / kernels::ENTRY_WORDS
             && entries
                 .iter()
@@ -201,8 +204,21 @@ pub struct Interval {
     pub upper: u64,
 }
 
+struct TickEstimate(f32);
+
+impl TickEstimate {
+    fn new(value: f32) -> Result<Self> {
+        match value.is_finite() && (0.0..u64::MAX as f32).contains(&value) {
+            true => Ok(Self(value)),
+            false => Err(anyhow!(
+                "analytical estimate is outside the finite tick range"
+            )),
+        }
+    }
+}
+
 #[derive(Clone, Debug, Serialize)]
-pub struct CertifiedValues {
+pub struct ApproximateValues {
     pub values: Vec<Interval>,
     pub weighted_error: u64,
     pub iterations: u32,
@@ -268,22 +284,15 @@ pub struct DeviceVector {
 }
 
 impl DeviceVector {
-    pub fn exact(device: &Device, values: &[u64]) -> Result<Self> {
+    pub fn from_ticks(device: &Device, values: &[u64]) -> Result<Self> {
         match values.len() <= MAX_DIMENSION {
             true => {
-                let words = values
+                let values_f32 = values
                     .iter()
-                    .flat_map(|&value| {
-                        [
-                            value as u32,
-                            (value >> 32) as u32,
-                            value as u32,
-                            (value >> 32) as u32,
-                        ]
-                    })
-                    .collect::<Vec<_>>();
+                    .map(|&value| TickEstimate::new(value as f32).map(|value| value.0))
+                    .collect::<Result<Vec<_>>>()?;
                 Ok(Self {
-                    data: device.tensor(&padded(words)),
+                    data: tensor::floats(device, [2, values.len()], &values_f32.repeat(2)),
                     length: values.len(),
                 })
             }
@@ -293,7 +302,7 @@ impl DeviceVector {
 
     fn empty(device: &Device, length: usize) -> Self {
         Self {
-            data: device.empty((length * INTERVAL_WORDS).max(INTERVAL_WORDS)),
+            data: tensor::empty(device, [2, length]),
             length,
         }
     }
@@ -306,15 +315,28 @@ impl DeviceVector {
     }
 
     pub fn read(&self, device: &Device) -> Result<Vec<Interval>> {
-        Ok(device
-            .read(&self.data)?
-            .chunks_exact(INTERVAL_WORDS)
-            .take(self.length)
-            .map(|words| Interval {
-                lower: decode(&words[..TICK_WORDS]),
-                upper: decode(&words[TICK_WORDS..]),
+        let bytes = device.client.read_one(self.data.handle.clone())?;
+        let values = bytemuck::cast_slice::<u8, f32>(&bytes);
+        (0..self.length)
+            .map(|index| {
+                let lower = values[index];
+                let upper = values[self.length + index];
+                match lower.is_finite()
+                    && upper.is_finite()
+                    && lower >= 0.0
+                    && lower <= upper
+                    && upper < u64::MAX as f32
+                {
+                    true => Ok(Interval {
+                        lower: lower.floor() as u64,
+                        upper: upper.ceil() as u64,
+                    }),
+                    false => Err(anyhow!(
+                        "analytical result is outside the finite tick range"
+                    )),
+                }
             })
-            .collect())
+            .collect()
     }
 
     pub fn add(&self, device: &Device, other: &Self) -> Result<Self> {
@@ -347,16 +369,17 @@ impl DeviceVector {
             true => {
                 let output = Self::empty(device, 1);
                 let control = device.tensor(&[0; CONTROL_WORDS]);
-                kernels::vector_dot::launch(
+                let left = tensor::reshape(&self.data, [2, 1, self.length]);
+                let right = tensor::reshape(&other.data, [2, self.length, 1]);
+                let product = tensor::reshape(&output.data, [2, 1, 1]);
+                tensor::matmul(device, &left, &right, &product)?;
+                kernels::rescale::launch(
                     &device.client,
-                    CubeCount::Static(1, 1, 1),
+                    count(device, 2),
                     CubeDim::new_1d(device.workgroup),
-                    argument(&self.data),
-                    argument(&other.data),
                     argument(&output.data),
                     argument(&control),
-                    self.length as u32,
-                    scale,
+                    scale as f32,
                 );
                 faults(device, &control)?;
                 Ok(output)
@@ -399,54 +422,71 @@ impl DeviceVector {
 }
 
 pub struct DeviceOperator {
-    offsets: CubeTensor,
-    entries: CubeTensor,
+    matrix: DeviceMatrix,
     rows: usize,
     columns: usize,
 }
 
 impl DeviceOperator {
     pub fn new(device: &Device, matrix: &SparseMatrix) -> Self {
-        let mut offsets = vec![0; matrix.rows + 1];
-        matrix
-            .entries
-            .iter()
-            .for_each(|entry| offsets[entry.row + 1] += 1);
-        (1..offsets.len()).for_each(|index| offsets[index] += offsets[index - 1]);
-        let entries = matrix
-            .entries
-            .iter()
-            .flat_map(|entry| [entry.column as u32, entry.numerator, entry.denominator])
-            .collect::<Vec<_>>();
         Self {
-            offsets: device.tensor(&padded(offsets)),
-            entries: device.tensor(&padded(entries)),
+            matrix: DeviceMatrix::upload(device, matrix, 1),
             rows: matrix.rows,
             columns: matrix.columns,
         }
     }
 
     pub fn apply(&self, device: &Device, input: &DeviceVector) -> Result<DeviceVector> {
-        match self.columns == input.length {
-            false => Err(anyhow!("matrix and vector dimensions disagree")),
-            true => {
-                let output = DeviceVector::empty(device, self.rows);
-                let control = device.tensor(&[0; CONTROL_WORDS]);
-                kernels::matvec::launch(
-                    &device.client,
-                    count(device, self.rows),
-                    CubeDim::new_1d(device.workgroup),
-                    argument(&self.offsets),
-                    argument(&self.entries),
-                    argument(&input.data),
-                    argument(&output.data),
-                    argument(&control),
-                    self.rows as u32,
-                );
-                faults(device, &control)?;
-                Ok(output)
-            }
-        }
+        self.matrix.apply(device, input)
+    }
+
+    fn certificate(
+        &self,
+        device: &Device,
+        certificate: &Contraction,
+        control: &CubeTensor,
+    ) -> Result<()> {
+        let weights = DeviceVector::from_ticks(
+            device,
+            &certificate
+                .weights
+                .iter()
+                .map(|&value| u64::from(value))
+                .collect::<Vec<_>>(),
+        )?;
+        let product = self.apply(device, &weights)?;
+        let rows = device.empty((self.rows * 2).max(2));
+        kernels::certificate_rows::launch(
+            &device.client,
+            count(device, self.rows),
+            CubeDim::new_1d(device.workgroup),
+            argument(&product.data),
+            argument(&weights.data),
+            argument(&rows),
+            self.rows as u32,
+            certificate.numerator,
+            certificate.denominator,
+        );
+        let input = TensorHandle::new_contiguous(
+            [self.rows, 2],
+            rows.handle.clone(),
+            u32::elem_type_native(),
+        );
+        let flags = reduction::reduce(
+            device,
+            &input,
+            0,
+            ReduceOperationConfig::All,
+            u32::elem_type_native(),
+        )?;
+        kernels::certificate_status::launch(
+            &device.client,
+            CubeCount::Static(1, 1, 1),
+            CubeDim::new_1d(1),
+            unsafe { BufferArg::from_raw_parts(flags.handle, 2) },
+            argument(control),
+        );
+        Ok(())
     }
 
     pub fn step(
@@ -465,7 +505,7 @@ impl DeviceOperator {
         certificate: &Contraction,
         budget: SolveBudget,
     ) -> Result<DeviceSolution> {
-        let initial = DeviceVector::exact(device, &vec![0; self.rows])?;
+        let initial = DeviceVector::from_ticks(device, &vec![0; self.rows])?;
         self.solve_from(device, rhs, &initial, certificate, budget)
     }
 
@@ -484,84 +524,58 @@ impl DeviceOperator {
             && budget.iterations <= 100_000;
         match admitted {
             false => Err(anyhow!(
-                "certified solve dimensions or iteration budget are invalid"
+                "analytical solve dimensions or iteration budget are invalid"
             )),
             true => {
                 let weights = device.tensor(&padded(certificate.weights.clone()));
                 let control = device.tensor(&[0; CONTROL_WORDS]);
-                let rows = device.empty((self.rows * 2).max(2));
-                kernels::certificate_rows::launch(
-                    &device.client,
-                    count(device, self.rows),
-                    CubeDim::new_1d(device.workgroup),
-                    argument(&self.offsets),
-                    argument(&self.entries),
-                    argument(&weights),
-                    argument(&rows),
-                    argument(&control),
-                    self.rows as u32,
-                    certificate.numerator,
-                    certificate.denominator,
-                );
-                kernels::certificate_reduce::launch(
-                    &device.client,
-                    CubeCount::Static(1, 1, 1),
-                    CubeDim::new_1d(device.workgroup),
-                    argument(&rows),
-                    argument(&control),
-                    self.rows as u32,
-                );
+                self.certificate(device, certificate, &control)?;
                 let mut previous = DeviceVector {
                     data: initial.data.clone(),
                     length: initial.length,
                 };
-                let mut next = DeviceVector::empty(device, self.rows);
                 let iterations = match self.rows {
                     0 => 0,
                     _ => budget.iterations,
                 };
                 for _ in 0..iterations {
-                    kernels::iterate::launch(
-                        &device.client,
-                        count(device, self.rows),
-                        CubeDim::new_1d(device.workgroup),
-                        argument(&self.offsets),
-                        argument(&self.entries),
-                        argument(&rhs.data),
-                        argument(&previous.data),
-                        argument(&next.data),
-                        argument(&control),
-                        self.rows as u32,
-                    );
-                    std::mem::swap(&mut previous, &mut next);
+                    previous = self.step(device, rhs, &previous)?;
                 }
-                let residuals = device.empty((self.rows * TICK_WORDS).max(TICK_WORDS));
+                let product = self.step(device, rhs, &previous)?;
+                let residuals = tensor::empty(device, [self.rows]);
                 kernels::residual::launch(
                     &device.client,
                     count(device, self.rows),
                     CubeDim::new_1d(device.workgroup),
-                    argument(&self.offsets),
-                    argument(&self.entries),
-                    argument(&rhs.data),
+                    argument(&product.data),
                     argument(&previous.data),
                     argument(&weights),
                     argument(&residuals),
-                    argument(&control),
                     self.rows as u32,
                 );
-                let error = device.empty(TICK_WORDS);
+                let residuals = TensorHandle::new_contiguous(
+                    [self.rows],
+                    residuals.handle,
+                    f32::elem_type_native(),
+                );
+                let norm = reduction::reduce(
+                    device,
+                    &residuals,
+                    0,
+                    ReduceOperationConfig::Max,
+                    f32::elem_type_native(),
+                )?;
+                let error = tensor::empty(device, [1]);
                 kernels::error_bound::launch(
                     &device.client,
                     CubeCount::Static(1, 1, 1),
-                    CubeDim::new_1d(device.workgroup),
-                    argument(&residuals),
+                    CubeDim::new_1d(1),
+                    unsafe { BufferArg::from_raw_parts(norm.handle, 1) },
                     argument(&error),
                     argument(&control),
-                    self.rows as u32,
                     certificate.numerator,
                     certificate.denominator,
-                    budget.weighted_tolerance as u32,
-                    (budget.weighted_tolerance >> 32) as u32,
+                    budget.weighted_tolerance as f32,
                 );
                 let output = DeviceVector::empty(device, self.rows);
                 kernels::solution_bounds::launch(
@@ -604,11 +618,11 @@ impl DeviceSolution {
         })
     }
 
-    pub fn read(&self, device: &Device) -> Result<Diagnostic<CertifiedValues>> {
+    pub fn read(&self, device: &Device) -> Result<Diagnostic<ApproximateValues>> {
         Ok(match self.values(device)? {
-            Diagnostic::Available(values) => Diagnostic::Available(CertifiedValues {
+            Diagnostic::Available(values) => Diagnostic::Available(ApproximateValues {
                 values: values.read(device)?,
-                weighted_error: decode(&device.read(&self.error)?),
+                weighted_error: f32::from_bits(device.read(&self.error)?[0]).ceil() as u64,
                 iterations: self.iterations,
                 profile: ANALYTICAL_PROFILE,
             }),
@@ -638,7 +652,7 @@ fn padded(mut words: Vec<u32>) -> Vec<u32> {
 }
 
 fn argument(tensor: &CubeTensor) -> BufferArg {
-    unsafe { BufferArg::from_raw_parts(tensor.handle.clone(), tensor.meta.shape()[0]) }
+    unsafe { BufferArg::from_raw_parts(tensor.handle.clone(), tensor.meta.num_elements()) }
 }
 
 fn count(device: &Device, items: usize) -> CubeCount {

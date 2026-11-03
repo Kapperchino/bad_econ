@@ -1,8 +1,8 @@
 # GPU test iteration
 
-This change reduces repeated GPU initialization and test executable linking, and adds a small developer feedback command. All 182 existing tests remain available; no scenario, assertion, workgroup, simulation horizon or test case was removed or ignored.
+This change reduces repeated GPU initialization and test executable linking, and adds a small developer feedback command. The original revision preserved all 182 tests from its baseline; no scenario, assertion, workgroup, simulation horizon or test case was removed or ignored. Later upstream tests remain registered in the combined targets; merge validation is recorded separately below.
 
-The baseline is `7ded21494010e218e54cd8503473d1fca176590f`. Measurements below were collected on November 2, 2026, on Windows with an RTX 3090, Vulkan, driver 616.56 and Rust 1.97.1. The development profile uses application optimization level 1 and dependency level 2, with the existing ICU build overrides unchanged.
+The historical baseline is `7ded21494010e218e54cd8503473d1fca176590f`, compared with PR revision `bd142fb1c2cae7e541bb04740f49a20ad82d89e3`. Measurements below were collected on November 2, 2026, on Windows with an RTX 3090, Vulkan, driver 616.56 and Rust 1.97.1. They predate upstream's CubeK refactor and do not measure the merged implementation. The development profile uses application optimization level 1 and dependency level 2, with the existing ICU build overrides unchanged.
 
 ## Cause and change
 
@@ -10,21 +10,21 @@ The integration helper previously called `Device::headless` for every fixture. E
 
 Test helpers now retain one device per workgroup and clone the handle for each simulation. Simulation state and buffers are still constructed separately. The library's grouped/reference comparisons and the GPU workgroup matrix use the same approach. Cases that inspect device-wide allocation totals keep fresh devices, including the demographic growth-budget rollback test.
 
-Nineteen integration files are modules of `tests/integration.rs`, sharing one executable and its device cache. The dedicated `gpu` target stays separate. This reduces integration executables from 20 to 2. The 19 library tests plus 156 integration cases and 7 dedicated GPU cases still total 182. A comparison of runtime `--list` inventories, normalizing the new module prefixes, found no missing or added test names.
+Nineteen integration files are modules of `tests/integration.rs`, sharing one executable and its device cache. The dedicated `gpu` target stays separate. This reduces integration executables from 20 to 2. The original comparison contained 19 library tests, 156 integration cases and 7 dedicated GPU cases, totaling 182. A comparison of those runtime `--list` inventories, normalizing the new module prefixes, found no missing or added test names.
 
 ## Developer commands and coverage
 
 | Command | Purpose | Coverage boundary |
 | --- | --- | --- |
 | `cargo gpu-fast` | 11 checks, four test threads, two build jobs. | Ledger authorization and wide arithmetic, dependency ordering, phase ordering, transport/checkpoint continuation, rollback, births and actor storage, industrial conservation. |
-| `cargo gpu-full` | All 182 unit/integration tests, one test thread, two build jobs. | Includes the long annual crop scenario, broad workgroup/experiment matrices, reference schedulers, all research/finance cases and allocation boundaries. |
+| `cargo gpu-full` | All unit/integration tests, one test thread, two build jobs. | Includes the long annual crop scenario, broad workgroup/experiment matrices, reference schedulers, all research/finance cases and allocation boundaries. |
 | `cargo test --locked --features viewer --test integration demography:: --jobs 2 -- --test-threads=1` | Run the subsystem affected by a change. | Replace the module filter as appropriate. |
 
 The fast subset is an iteration aid; it does not replace the full suite before merging changes. In particular, it does not cover the complete research/finance APIs, all workgroups, or long-run population and crop behavior. Tests use GPU simulation and independent integer oracles; none invokes the CPU simulation backend.
 
 Add new integration modules to `tests/integration.rs`: `autotests = false` makes target registration explicit. The former `--test demography` form becomes `--test integration demography::`. GPU allocation-budget tests must continue to use fresh devices.
 
-## Validation and observed timing
+## Original revision: validation and observed timing
 
 **These are diagnostic timings, not a controlled speedup benchmark.** Another workload shared the GPU, its utilization varied substantially, and the candidate full run overlapped host-only build checks. The baseline also had three failures. Test target ordering and driver cache warmth were not held constant. Do not derive a reliable speedup ratio from the full-run totals.
 
@@ -53,6 +53,25 @@ Additional checks passed:
 - The four-thread smoke runs exercise shared devices concurrently with the isolated growth-budget rollback case. This addresses the cache-isolation issue found in the requested GPT-6.1 Sol source review.
 
 Final GPT-6.1 Sol review found no blocking issues after the isolation fix and reviewed the runtime inventory and validation logs. That review was read-only; the reviewer did not independently rerun the GPU checks. Other hardware/backend combinations remain unverified.
+
+## Validation after merging upstream main
+
+Upstream `ba6421a45665a1b90e42b4be4e6b5c471f2322a8` adds CubeK analytics, reductions and random streams, updated checkpoint semantics, and additional tests. The merge preserves those production changes and assertions. The analytics, retained-account and sensitivity modules import one shared `estimates` helper registered in `tests/integration.rs`, alongside the cached GPU support module. Allocation-budget cases retain fresh devices.
+
+The final runtime inventory matches all **186** upstream test names after normalizing integration-module prefixes: **21 library**, **158 integration** and **7 GPU-specific** checks. Every upstream integration module remains registered, and all 11 fast-alias names resolve.
+
+Validation on RTX 3090 / Vulkan:
+
+- All 186 checks passed, with no failures or ignored cases. The final integration and GPU executables were rerun after consolidating the estimates helper; the unchanged, cached library executable's 21 passing results were retained.
+- `cargo gpu-fast` passed all 11 cases on the final merged build.
+- `cargo fmt --all -- --check` passed.
+- `cargo clippy --locked --all-targets --features viewer --jobs 2 -- -D warnings` passed.
+- `cargo check --locked --no-default-features --lib --tests --jobs 2` passed (compile only). Windows emitted the existing incremental-cache hard-link fallback warnings.
+- GPT-6.1 Sol reviewed the conflict resolution and final shared-helper placement with no blocking source findings. The review was read-only; the reviewer did not independently execute tests.
+
+GPU contention remains uncontrolled. This validation establishes correctness coverage; no measured speedup is claimed. The earlier timing table applies only to the original pre-CubeK revisions.
+
+Local evidence is in `target/pr6-merge-main/`: `runtime-inventory-final.json`, `validated-summary.json`, the target logs in `full/` and `full-final/`, `fast-final.log`, `clippy-final.log` and `no-default.log`. `validated-summary.json` contains exactly the passing 186-case inventory from the unchanged library target and final integration/GPU targets.
 
 ## Reproduce the timing inventory
 

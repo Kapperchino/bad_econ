@@ -26,7 +26,8 @@ pub use population::{
 pub use resources::{ProductionSite, ResourceMap, ResourceRegion};
 
 pub const SCENARIO_VERSION: u32 = 2;
-pub const STATE_HASH_VERSION: &str = "bad-econ/state/DeterministicV1/v7";
+const CHECKPOINT_VERSION: u32 = 7;
+pub const STATE_HASH_VERSION: &str = "bad-econ/state/CubekV2/v8";
 pub const USED_FIELDS: usize = Field::PendingCapacity as usize + 1;
 pub const TRANSIT_FIELDS: usize = USED_FIELDS + Good::COUNT;
 pub const CONSUMPTION_FIELDS: usize = TRANSIT_FIELDS + Good::COUNT;
@@ -832,7 +833,7 @@ impl Scenario {
                 self.config.households as usize
                     * self.config.demography.initial_household_members as usize,
             ) as u64
-                * 144
+                * 164
             + actors * 24
             + batch * (16 * 8 * 4 + 16 * 4 * 3 + 28)
             + 128 * 1024 * 1024
@@ -1557,7 +1558,7 @@ impl Checkpoint {
         let _ = ObservationSnapshot::from_state(scenario, state)?;
         let checksum = Self::checksum(scenario.config(), state)?;
         Ok(Self {
-            version: 6,
+            version: CHECKPOINT_VERSION,
             profile: PROFILE.into(),
             table_hash: table_hash(),
             scenario: scenario.config.clone(),
@@ -1571,7 +1572,7 @@ impl Checkpoint {
     pub fn restore(&self) -> Result<Restored> {
         let scenario = Scenario::new(self.scenario.clone())?;
         let valid = [
-            self.version == 6,
+            self.version == CHECKPOINT_VERSION,
             self.profile == PROFILE,
             self.table_hash == table_hash(),
             self.state.values.len()
@@ -2455,9 +2456,9 @@ impl TryFrom<CheckpointDocument> for Checkpoint {
             .get("version")
             .and_then(serde_json::Value::as_u64)
         {
-            Some(6) => (),
+            Some(version) if version == u64::from(CHECKPOINT_VERSION) => (),
             _ => Err(anyhow!(
-                "unsupported checkpoint format: format 6 is required; regenerate older checkpoints"
+                "unsupported checkpoint format: format {CHECKPOINT_VERSION} is required; regenerate older checkpoints"
             ))?,
         }
         #[derive(Deserialize)]

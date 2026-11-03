@@ -1,5 +1,5 @@
 #![cfg(feature = "compute")]
-use crate::support;
+use crate::{estimates, support};
 
 use anyhow::{Result, anyhow};
 use bad_econ::simulation::{Device, analytics::*};
@@ -40,23 +40,23 @@ fn grain_training() -> Result<SparseMatrix> {
     dense(1, 1, &[1], &[4])
 }
 
-fn available(values: Diagnostic<CertifiedValues>) -> Result<CertifiedValues> {
+fn available(values: Diagnostic<ApproximateValues>) -> Result<ApproximateValues> {
     match values {
         Diagnostic::Available(values) => Ok(values),
         diagnostic => Err(anyhow!("unexpected diagnostic: {diagnostic:?}")),
     }
 }
 
-fn exact(vector: &DeviceVector, device: &Device, expected: &[u64]) -> Result<()> {
-    assert_eq!(
+fn approximate(vector: &DeviceVector, device: &Device, expected: &[u64]) -> Result<()> {
+    estimates::assert_close(
         vector.read(device)?,
         expected
             .iter()
             .map(|&value| Interval {
                 lower: value,
-                upper: value
+                upper: value,
             })
-            .collect::<Vec<_>>()
+            .collect::<Vec<_>>(),
     );
     Ok(())
 }
@@ -72,7 +72,7 @@ fn lean_sparse_accounts_research_and_plan_totals() -> Result<()> {
     let transpose = DeviceOperator::new(&device, &grain_goods()?.transpose());
     let labor = DeviceOperator::new(&device, &grain_labor()?);
     let forcing = DeviceOperator::new(&device, &grain_labor()?.transpose())
-        .apply(&device, &DeviceVector::exact(&device, &[1000])?)?;
+        .apply(&device, &DeviceVector::from_ticks(&device, &[1000])?)?;
     let values = transpose.solve(
         &device,
         &forcing,
@@ -85,23 +85,23 @@ fn lean_sparse_accounts_research_and_plan_totals() -> Result<()> {
     let report = available(values.read(&device)?)?;
     contains(report.values[0], 2000, 1);
     contains(report.values[1], 3000, 1);
-    let goods_values = DeviceVector::exact(&device, &[2000, 3000])?;
+    let goods_values = DeviceVector::from_ticks(&device, &[2000, 3000])?;
     let j = dense(2, 1, &[1, 1], &[2, 1])?;
     let f = dense(1, 1, &[2], &[1])?;
-    let attempts = DeviceVector::exact(&device, &[1000])?;
-    let final_demand = DeviceVector::exact(&device, &[0, 2000])?;
+    let attempts = DeviceVector::from_ticks(&device, &[1000])?;
+    let final_demand = DeviceVector::from_ticks(&device, &[0, 2000])?;
     let research = DeviceOperator::new(&device, &j.transpose())
         .apply(&device, &goods_values)?
         .add(
             &device,
             &DeviceOperator::new(&device, &f.transpose())
-                .apply(&device, &DeviceVector::exact(&device, &[1000])?)?,
+                .apply(&device, &DeviceVector::from_ticks(&device, &[1000])?)?,
         )?;
-    exact(&research, &device, &[6000])?;
+    approximate(&research, &device, &[6000])?;
     let total = goods_values
         .dot(&device, &final_demand, 1000)?
         .add(&device, &research.dot(&device, &attempts, 1000)?)?;
-    exact(&total, &device, &[12_000])?;
+    approximate(&total, &device, &[12_000])?;
     let gross_demand = final_demand.add(
         &device,
         &DeviceOperator::new(&device, &j).apply(&device, &attempts)?,
@@ -119,12 +119,12 @@ fn lean_sparse_accounts_research_and_plan_totals() -> Result<()> {
     contains(requirements.values[0], 7000, 1);
     contains(requirements.values[1], 3000, 1);
     let hours = labor
-        .apply(&device, &DeviceVector::exact(&device, &[7000, 3000])?)?
+        .apply(&device, &DeviceVector::from_ticks(&device, &[7000, 3000])?)?
         .add(
             &device,
             &DeviceOperator::new(&device, &f).apply(&device, &attempts)?,
         )?;
-    exact(&hours, &device, &[12_000])?;
+    approximate(&hours, &device, &[12_000])?;
     Ok(())
 }
 
@@ -137,10 +137,10 @@ fn lean_coupled_step_uses_old_blocks_and_normalizes_both_blocks() -> Result<()> 
     let coupled = SparseMatrix::coupled(&grain_goods()?, &labor, &reproduction, &training)?;
     let step = DeviceOperator::new(&device, &coupled).step(
         &device,
-        &DeviceVector::exact(&device, &[0, 0, 1000, 1000])?,
-        &DeviceVector::exact(&device, &[2000, 3000, 5000, 7000])?,
+        &DeviceVector::from_ticks(&device, &[0, 0, 1000, 1000])?,
+        &DeviceVector::from_ticks(&device, &[2000, 3000, 5000, 7000])?,
     )?;
-    exact(&step, &device, &[6000, 19000, 3250, 1250])?;
+    approximate(&step, &device, &[6000, 19000, 3250, 1250])?;
     let coupled = SparseMatrix::coupled(
         &SparseMatrix::new(2, 2, vec![])?,
         &labor,
@@ -149,7 +149,7 @@ fn lean_coupled_step_uses_old_blocks_and_normalizes_both_blocks() -> Result<()> 
     )?;
     let solution = DeviceOperator::new(&device, &coupled).solve(
         &device,
-        &DeviceVector::exact(&device, &[0, 0, 1000, 1000])?,
+        &DeviceVector::from_ticks(&device, &[0, 0, 1000, 1000])?,
         &Contraction::new(9, 10, vec![240, 648, 200, 140])?,
         SolveBudget {
             iterations: 100,
@@ -160,12 +160,12 @@ fn lean_coupled_step_uses_old_blocks_and_normalizes_both_blocks() -> Result<()> 
     for (interval, numerator) in report.values.iter().zip([40_000, 108_000, 40_000, 28_000]) {
         contains(*interval, numerator, 23);
     }
-    let reference = DeviceVector::exact(&device, &[40_000, 108_000, 40_000, 28_000])?;
+    let reference = DeviceVector::from_ticks(&device, &[40_000, 108_000, 40_000, 28_000])?;
     let normalized = match reference.normalize(&device, 2, 1000)? {
         Diagnostic::Available(value) => value,
         _ => Err(anyhow!("normalization unavailable"))?,
     };
-    exact(&normalized, &device, &[1000, 2700, 1000, 700])?;
+    approximate(&normalized, &device, &[1000, 2700, 1000, 700])?;
     Ok(())
 }
 
@@ -173,8 +173,8 @@ fn lean_coupled_step_uses_old_blocks_and_normalizes_both_blocks() -> Result<()> 
 fn lean_residual_certificate_is_for_the_actual_operator() -> Result<()> {
     let device = support::device(64)?;
     let matrix = grain_goods()?;
-    let rhs = DeviceVector::exact(&device, &[1000, 1000])?;
-    let approximate = DeviceVector::exact(&device, &[1900, 2900])?;
+    let rhs = DeviceVector::from_ticks(&device, &[1000, 1000])?;
+    let approximate = DeviceVector::from_ticks(&device, &[1900, 2900])?;
     let bound = DeviceOperator::new(&device, &matrix.transpose()).solve_from(
         &device,
         &rhs,
@@ -237,24 +237,24 @@ fn goods_remain_available_when_optional_closure_is_inadmissible() -> Result<()> 
     let one = dense(1, 1, &[1], &[1])?;
     let goods = DeviceOperator::new(&device, &zero).solve(
         &device,
-        &DeviceVector::exact(&device, &[1000])?,
+        &DeviceVector::from_ticks(&device, &[1000])?,
         &Contraction::new(0, 1, vec![1])?,
         SolveBudget {
             iterations: 1,
             weighted_tolerance: 0,
         },
     )?;
-    assert_eq!(
+    estimates::assert_close(
         available(goods.read(&device)?)?.values,
         [Interval {
             lower: 1000,
-            upper: 1000
-        }]
+            upper: 1000,
+        }],
     );
     let coupled = SparseMatrix::coupled(&zero, &one, &one, &zero)?;
     let closure = DeviceOperator::new(&device, &coupled).solve(
         &device,
-        &DeviceVector::exact(&device, &[0, 1000])?,
+        &DeviceVector::from_ticks(&device, &[0, 1000])?,
         &Contraction::new(1, 2, vec![1, 1])?,
         SolveBudget {
             iterations: 10,
@@ -262,9 +262,9 @@ fn goods_remain_available_when_optional_closure_is_inadmissible() -> Result<()> 
         },
     )?;
     assert!(matches!(closure.read(&device)?, Diagnostic::Inadmissible));
-    let zeros = DeviceVector::exact(&device, &[0, 1000])?;
+    let zeros = DeviceVector::from_ticks(&device, &[0, 1000])?;
     match zeros.normalize(&device, 1, 1000)? {
-        Diagnostic::Available(value) => exact(&value, &device, &[0, 1000])?,
+        Diagnostic::Available(value) => approximate(&value, &device, &[0, 1000])?,
         _ => Err(anyhow!("zero goods values must be allowed"))?,
     }
     assert!(matches!(
@@ -275,15 +275,25 @@ fn goods_remain_available_when_optional_closure_is_inadmissible() -> Result<()> 
 }
 
 #[test]
-fn analytical_products_preserve_wide_ticks_and_reject_overflow() -> Result<()> {
+fn analytical_products_quantize_ticks_and_reject_out_of_range_estimates() -> Result<()> {
     let device = support::device(64)?;
-    let left = DeviceVector::exact(&device, &[u64::MAX])?;
-    let one = DeviceVector::exact(&device, &[1])?;
-    exact(&left.dot(&device, &one, 1)?, &device, &[u64::MAX])?;
-    let two = DeviceVector::exact(&device, &[2])?;
+    assert!(DeviceVector::from_ticks(&device, &[u64::MAX]).is_err());
+    let left = DeviceVector::from_ticks(&device, &[1 << 63])?;
+    let one = DeviceVector::from_ticks(&device, &[1])?;
+    approximate(&left.dot(&device, &one, 1)?, &device, &[1 << 63])?;
+    let two = DeviceVector::from_ticks(&device, &[2])?;
     assert!(left.dot(&device, &two, 1).is_err());
-    let wide = DeviceVector::exact(&device, &[1u64 << 40])?;
-    exact(&wide.dot(&device, &wide, 1 << 20)?, &device, &[1u64 << 60])?;
+    assert!(left.add(&device, &left).is_err());
+    let quantized = DeviceVector::from_ticks(&device, &[(1 << 24) + 1])?;
+    assert_eq!(
+        quantized.read(&device)?,
+        [Interval {
+            lower: 1 << 24,
+            upper: 1 << 24
+        }]
+    );
+    let wide = DeviceVector::from_ticks(&device, &[1u64 << 40])?;
+    approximate(&wide.dot(&device, &wide, 1 << 20)?, &device, &[1u64 << 60])?;
     let thirds = DeviceOperator::new(&device, &dense(1, 1, &[1], &[3])?).apply(&device, &one)?;
     assert_eq!(thirds.read(&device)?, [Interval { lower: 0, upper: 1 }]);
     Ok(())
@@ -331,7 +341,7 @@ fn empty_accounts_have_vacuous_certificates_and_exact_zero_hours() -> Result<()>
     let operator = DeviceOperator::new(&device, &goods);
     let solution = operator.solve(
         &device,
-        &DeviceVector::exact(&device, &[])?,
+        &DeviceVector::from_ticks(&device, &[])?,
         &certificate,
         budget,
     )?;
@@ -342,7 +352,7 @@ fn empty_accounts_have_vacuous_certificates_and_exact_zero_hours() -> Result<()>
     let account = AccountModel::new(goods.clone(), labor.clone())?.upload(&device)?;
     match solution.values(&device)? {
         Diagnostic::Available(values) => {
-            exact(
+            approximate(
                 &account.occupational_hours(&device, values)?,
                 &device,
                 &[0, 0],
@@ -396,10 +406,10 @@ fn grain_coupled_fixed_point_fixture() -> Result<()> {
     )?;
     let step = DeviceOperator::new(&device, &matrix).step(
         &device,
-        &DeviceVector::exact(&device, &[0, 0, 1000])?,
-        &DeviceVector::exact(&device, &[8000, 12000, 4000])?,
+        &DeviceVector::from_ticks(&device, &[0, 0, 1000])?,
+        &DeviceVector::from_ticks(&device, &[8000, 12000, 4000])?,
     )?;
-    exact(&step, &device, &[8000, 12000, 4000])?;
+    approximate(&step, &device, &[8000, 12000, 4000])?;
     Ok(())
 }
 
@@ -410,16 +420,16 @@ fn account_api_keeps_optional_closure_and_research_separate() -> Result<()> {
         .with_reproduction(grain_reproduction()?, grain_training()?)?
         .with_research(dense(2, 1, &[1, 1], &[2, 1])?, dense(1, 1, &[2], &[1])?)?;
     let account = model.upload(&device)?;
-    let goods = DeviceVector::exact(&device, &[2000, 3000])?;
-    let weights = DeviceVector::exact(&device, &[1000])?;
+    let goods = DeviceVector::from_ticks(&device, &[2000, 3000])?;
+    let weights = DeviceVector::from_ticks(&device, &[1000])?;
     let research = match account.research_values(&device, &goods, &weights)? {
         Diagnostic::Available(values) => values,
         _ => Err(anyhow!("research account unavailable"))?,
     };
-    exact(&research, &device, &[6000])?;
-    let y = DeviceVector::exact(&device, &[0, 2000])?;
-    let z = DeviceVector::exact(&device, &[1000])?;
-    exact(
+    approximate(&research, &device, &[6000])?;
+    let y = DeviceVector::from_ticks(&device, &[0, 2000])?;
+    let z = DeviceVector::from_ticks(&device, &[1000])?;
+    approximate(
         &DeviceAccounts::plan_value(&device, &goods, &research, &y, &z, 1000)?,
         &device,
         &[12_000],
@@ -453,7 +463,7 @@ fn labeled_comparators_do_not_fabricate_zero_requirement_rates() -> Result<()> {
         period: "day 1".into(),
         convention: "external weights".into(),
     };
-    let requirement = DeviceVector::exact(&device, &[8000])?;
+    let requirement = DeviceVector::from_ticks(&device, &[8000])?;
     let report = comparator(&device, context.clone(), 12_000, &requirement, 1000)?;
     assert_eq!(report.context, context);
     assert_eq!(
@@ -463,18 +473,18 @@ fn labeled_comparators_do_not_fabricate_zero_requirement_rates() -> Result<()> {
             magnitude: 4000
         }
     );
-    assert_eq!(
+    estimates::assert_close(
         report.rate,
         Diagnostic::Available(SignedInterval {
             lower: SignedTicks {
                 sign: Sign::NonNegative,
-                magnitude: 500
+                magnitude: 500,
             },
             upper: SignedTicks {
                 sign: Sign::NonNegative,
-                magnitude: 500
+                magnitude: 500,
             },
-        })
+        }),
     );
     let deficit = comparator(&device, context.clone(), 4000, &requirement, 1000)?;
     assert_eq!(
@@ -484,25 +494,25 @@ fn labeled_comparators_do_not_fabricate_zero_requirement_rates() -> Result<()> {
             magnitude: 4000
         }
     );
-    assert_eq!(
+    estimates::assert_close(
         deficit.rate,
         Diagnostic::Available(SignedInterval {
             lower: SignedTicks {
                 sign: Sign::Negative,
-                magnitude: 500
+                magnitude: 500,
             },
             upper: SignedTicks {
                 sign: Sign::Negative,
-                magnitude: 500
+                magnitude: 500,
             },
-        })
+        }),
     );
     assert!(matches!(
         comparator(
             &device,
             context.clone(),
             1000,
-            &DeviceVector::exact(&device, &[0])?,
+            &DeviceVector::from_ticks(&device, &[0])?,
             1000
         )?
         .rate,
@@ -540,39 +550,39 @@ fn retained_boundary_units_and_inventory_accounts_execute_on_device() -> Result<
             training: &training,
         },
     )?;
-    assert_eq!(
+    estimates::assert_close(
         reduced.goods.read(&device)?,
         [Interval {
             lower: 17000,
-            upper: 17000
-        }]
+            upper: 17000,
+        }],
     );
-    assert_eq!(
+    estimates::assert_close(
         reduced.labor.read(&device)?,
         [Interval {
             lower: 68000,
-            upper: 68000
-        }]
+            upper: 68000,
+        }],
     );
-    assert_eq!(
+    estimates::assert_close(
         reduced.reproduction.read(&device)?,
         [Interval {
             lower: 8500,
-            upper: 8500
-        }]
+            upper: 8500,
+        }],
     );
-    assert_eq!(
+    estimates::assert_close(
         reduced.training.read(&device)?,
         [Interval {
             lower: 25000,
-            upper: 25000
-        }]
+            upper: 25000,
+        }],
     );
-    exact(
+    approximate(
         &BoundaryReduction::effective_demand(
             &device,
-            &DeviceVector::exact(&device, &[36_000])?,
-            &DeviceVector::exact(&device, &[108_000])?,
+            &DeviceVector::from_ticks(&device, &[36_000])?,
+            &DeviceVector::from_ticks(&device, &[108_000])?,
             &outside_inverse,
             &retained_from_outside,
         )?,
@@ -585,35 +595,35 @@ fn retained_boundary_units_and_inventory_accounts_execute_on_device() -> Result<
         &[UnitFactor::new(1, 1)?],
         &[UnitFactor::new(2, 1)?, UnitFactor::new(1, 2)?],
     )?;
-    assert_eq!(
+    estimates::assert_close(
         transformed.read(&device)?,
         [
             Interval {
                 lower: 4000,
-                upper: 4000
+                upper: 4000,
             },
             Interval {
                 lower: 1500,
-                upper: 1500
-            }
-        ]
+                upper: 1500,
+            },
+        ],
     );
-    exact(
-        &transformed.apply(&device, &DeviceVector::exact(&device, &[1000, 4000])?)?,
+    approximate(
+        &transformed.apply(&device, &DeviceVector::from_ticks(&device, &[1000, 4000])?)?,
         &device,
         &[10000],
     )?;
-    exact(
-        &g.apply(&device, &DeviceVector::exact(&device, &[2000, 2000])?)?,
+    approximate(
+        &g.apply(&device, &DeviceVector::from_ticks(&device, &[2000, 2000])?)?,
         &device,
         &[10000],
     )?;
-    let opening = DeviceVector::exact(&device, &[3000, 0])?;
-    let closing = DeviceVector::exact(&device, &[2000, 0])?;
-    let production = DeviceVector::exact(&device, &[4000, 1000])?;
-    let final_demand = DeviceVector::exact(&device, &[1000, 1000])?;
-    let research_inputs = DeviceVector::exact(&device, &[1000, 0])?;
-    let research_hours = DeviceVector::exact(&device, &[2000])?;
+    let opening = DeviceVector::from_ticks(&device, &[3000, 0])?;
+    let closing = DeviceVector::from_ticks(&device, &[2000, 0])?;
+    let production = DeviceVector::from_ticks(&device, &[4000, 1000])?;
+    let final_demand = DeviceVector::from_ticks(&device, &[1000, 1000])?;
+    let research_inputs = DeviceVector::from_ticks(&device, &[1000, 0])?;
+    let research_hours = DeviceVector::from_ticks(&device, &[2000])?;
     let inventory = InventoryAccount::new(
         &device,
         &DeviceOperator::new(&device, &grain_goods()?),
@@ -635,19 +645,19 @@ fn retained_boundary_units_and_inventory_accounts_execute_on_device() -> Result<
             .iter()
             .all(|value| value.lower.magnitude == 0 && value.upper.magnitude == 0)
     );
-    exact(&inventory.actual_hours, &device, &[7000])?;
-    assert_eq!(
+    approximate(&inventory.actual_hours, &device, &[7000])?;
+    estimates::assert_close(
         inventory.reconciled_hours.read(&device)?[0].lower,
         SignedTicks {
             sign: Sign::NonNegative,
-            magnitude: 7000
-        }
+            magnitude: 7000,
+        },
     );
     Ok(())
 }
 
 #[test]
-fn certified_inverse_and_lifetime_conventions_are_preserved() -> Result<()> {
+fn approximate_inverse_and_lifetime_conventions_are_preserved() -> Result<()> {
     let device = support::device(64)?;
     let inverse = match DeviceOperator::new(&device, &grain_goods()?).inverse(
         &device,
@@ -671,18 +681,18 @@ fn certified_inverse_and_lifetime_conventions_are_preserved() -> Result<()> {
     let subsistence = DeviceMatrix::new(&device, &dense(1, 2, &[1, 2], &[1, 1])?, 1000)?;
     let education = DeviceMatrix::new(&device, &dense(1, 2, &[4, 8], &[1, 1])?, 1000)?;
     let per_hour = DeviceMatrix::per_hour_goods(&device, &subsistence, &education, &[2, 4])?;
-    assert_eq!(
+    estimates::assert_close(
         per_hour.read(&device)?,
         [
             Interval {
                 lower: 3000,
-                upper: 3000
+                upper: 3000,
             },
             Interval {
                 lower: 4000,
-                upper: 4000
-            }
-        ]
+                upper: 4000,
+            },
+        ],
     );
     assert!(education.per_hour_training(&device, &[0, 4]).is_err());
     Ok(())
@@ -752,10 +762,10 @@ fn serialized_analysis_request_runs_complete_device_account() -> Result<()> {
 }
 
 #[test]
-fn comparator_distinguishes_unresolved_denominator_from_zero_requirement() -> Result<()> {
+fn comparator_uses_positive_fractional_denominators() -> Result<()> {
     let device = support::device(64)?;
     let requirement = DeviceOperator::new(&device, &dense(1, 1, &[1], &[3])?)
-        .apply(&device, &DeviceVector::exact(&device, &[1])?)?;
+        .apply(&device, &DeviceVector::from_ticks(&device, &[1])?)?;
     let context = ComparatorContext {
         population: "workers".into(),
         classification: "one".into(),
@@ -763,12 +773,28 @@ fn comparator_distinguishes_unresolved_denominator_from_zero_requirement() -> Re
         convention: "external weights".into(),
     };
     let report = comparator(&device, context, 10, &requirement, 1000)?;
-    assert!(matches!(report.rate, Diagnostic::UnresolvedAccuracy));
+    let rate = match report.rate {
+        Diagnostic::Available(rate) => rate,
+        other => panic!("unexpected fractional comparator: {other:?}"),
+    };
+    estimates::assert_close(
+        rate,
+        SignedInterval {
+            lower: SignedTicks {
+                sign: Sign::NonNegative,
+                magnitude: 29_000,
+            },
+            upper: SignedTicks {
+                sign: Sign::NonNegative,
+                magnitude: 29_000,
+            },
+        },
+    );
     Ok(())
 }
 
 #[test]
-fn wide_interval_products_match_independent_u128_fixtures() -> Result<()> {
+fn wide_products_match_independent_f64_fixtures_with_f32_tolerance() -> Result<()> {
     let device = support::device(64)?;
     for index in 0..48u64 {
         let draw = bad_econ::arithmetic::DrawKey {
@@ -783,7 +809,7 @@ fn wide_interval_products_match_independent_u128_fixtures() -> Result<()> {
         let left = match index % 3 {
             0 => u64::from(draw as u32),
             1 => draw & ((1u64 << 40) - 1),
-            _ => u64::MAX,
+            _ => 1 << 60,
         };
         let right = match index % 3 {
             0 => draw.rotate_left(17),
@@ -795,12 +821,81 @@ fn wide_interval_products_match_independent_u128_fixtures() -> Result<()> {
             1 => (draw as u32).max(1 << 20),
             _ => 1,
         };
-        let actual = DeviceVector::exact(&device, &[left])?
-            .dot(&device, &DeviceVector::exact(&device, &[right])?, divisor)?
+        let actual = DeviceVector::from_ticks(&device, &[left])?
+            .dot(
+                &device,
+                &DeviceVector::from_ticks(&device, &[right])?,
+                divisor,
+            )?
             .read(&device)?[0];
-        let wide = u128::from(left) * u128::from(right);
-        assert_eq!(actual.lower, (wide / u128::from(divisor)) as u64);
-        assert_eq!(actual.upper, wide.div_ceil(u128::from(divisor)) as u64);
+        let expected = left as f64 * right as f64 / f64::from(divisor);
+        estimates::assert_close(actual.lower as f64, expected);
+        estimates::assert_close(actual.upper as f64, expected);
     }
+    Ok(())
+}
+
+#[test]
+fn cubek_rectangular_products_and_transposes_match_f64_reference() -> Result<()> {
+    let device = support::device(64)?;
+    let rows = 5;
+    let inner = 7;
+    let columns = 3;
+    let scale = 1000;
+    let left = (0..rows * inner)
+        .map(|index| (index % 11) as u32)
+        .collect::<Vec<_>>();
+    let right = (0..inner * columns)
+        .map(|index| (index % 5) as u32)
+        .collect::<Vec<_>>();
+    let a = DeviceMatrix::new(
+        &device,
+        &dense(rows, inner, &left, &vec![17; left.len()])?,
+        scale,
+    )?;
+    let b = DeviceMatrix::new(
+        &device,
+        &dense(inner, columns, &right, &vec![13; right.len()])?,
+        scale,
+    )?;
+    let product = a.product(&device, &b)?;
+    let actual = product.read(&device)?;
+    let transposed = product.transpose(&device)?.read(&device)?;
+    for row in 0..rows {
+        for column in 0..columns {
+            let expected = (0..inner)
+                .map(|k| {
+                    f64::from(left[row * inner + k]) / 17.0 * f64::from(right[k * columns + column])
+                        / 13.0
+                })
+                .sum::<f64>()
+                * f64::from(scale);
+            let value = actual[row * columns + column];
+            estimates::assert_close(value.lower as f64, expected);
+            estimates::assert_close(value.upper as f64, expected);
+            assert_eq!(transposed[column * rows + row], value);
+        }
+    }
+    let empty = DeviceVector::from_ticks(&device, &[])?;
+    assert_eq!(
+        empty.dot(&device, &empty, 1)?.read(&device)?,
+        [Interval { lower: 0, upper: 0 }]
+    );
+    Ok(())
+}
+
+#[test]
+fn contraction_rounded_to_one_does_not_admit_an_identity_operator() -> Result<()> {
+    let device = support::device(64)?;
+    let solution = DeviceOperator::new(&device, &dense(1, 1, &[1], &[1])?).solve(
+        &device,
+        &DeviceVector::from_ticks(&device, &[0])?,
+        &Contraction::new(u32::MAX - 1, u32::MAX, vec![1])?,
+        SolveBudget {
+            iterations: 0,
+            weighted_tolerance: 0,
+        },
+    )?;
+    assert!(matches!(solution.read(&device)?, Diagnostic::Inadmissible));
     Ok(())
 }

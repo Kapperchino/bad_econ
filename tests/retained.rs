@@ -1,5 +1,5 @@
 #![cfg(feature = "compute")]
-use crate::support;
+use crate::{estimates, support};
 
 use anyhow::Result;
 use bad_econ::simulation::{Device, analytics::*};
@@ -32,21 +32,21 @@ fn matrix(
     DeviceMatrix::new(device, &sparse(rows, columns, values, denominator)?, scale)
 }
 
-fn exact(vector: &DeviceVector, device: &Device, values: &[u64]) -> Result<()> {
-    assert_eq!(
+fn approximate(vector: &DeviceVector, device: &Device, values: &[u64]) -> Result<()> {
+    estimates::assert_close(
         vector.read(device)?,
         values
             .iter()
             .map(|&value| Interval {
                 lower: value,
-                upper: value
+                upper: value,
             })
-            .collect::<Vec<_>>()
+            .collect::<Vec<_>>(),
     );
     Ok(())
 }
 
-fn signed_exact(vector: &DeviceSignedVector, device: &Device, values: &[i64]) -> Result<()> {
+fn signed_approximate(vector: &DeviceSignedVector, device: &Device, values: &[i64]) -> Result<()> {
     let decode = |value: SignedTicks| match value.sign {
         Sign::NonNegative => i128::from(value.magnitude),
         Sign::Negative => -i128::from(value.magnitude),
@@ -54,8 +54,8 @@ fn signed_exact(vector: &DeviceSignedVector, device: &Device, values: &[i64]) ->
     let actual = vector.read(device)?;
     assert_eq!(actual.len(), values.len());
     for (actual, &value) in actual.iter().zip(values) {
-        assert_eq!(decode(actual.lower), i128::from(value));
-        assert_eq!(decode(actual.upper), i128::from(value));
+        estimates::assert_close(decode(actual.lower), i128::from(value));
+        estimates::assert_close(decode(actual.upper), i128::from(value));
     }
     Ok(())
 }
@@ -67,19 +67,19 @@ fn lean_inventory_horizon_telescopes_research_and_signed_stock_changes() -> Resu
     let goods = DeviceOperator::new(&device, &sparse(2, 2, &[1, 2, 0, 0], 2)?);
     let direct = DeviceOperator::new(&device, &sparse(1, 2, &[1, 1], 1)?);
     let labor = matrix(&device, 1, 2, &[2, 3], 1, 1000)?;
-    let initial = DeviceVector::exact(&device, &[3000, 0])?;
-    let middle = DeviceVector::exact(&device, &[2000, 0])?;
-    let terminal = DeviceVector::exact(&device, &[1000, 0])?;
-    let production_a = DeviceVector::exact(&device, &[4000, 1000])?;
-    let production_b = DeviceVector::exact(&device, &[6000, 2000])?;
-    let zero_goods = DeviceVector::exact(&device, &[0, 0])?;
-    let demand_a = DeviceVector::exact(&device, &[1000, 1000])?;
-    let demand_b = DeviceVector::exact(&device, &[1000, 0])?;
-    let inputs_a = DeviceVector::exact(&device, &[1000, 0])?;
-    let inputs_b = DeviceVector::exact(&device, &[0, 1000])?;
-    let hours_a = DeviceVector::exact(&device, &[2000])?;
-    let hours_b = DeviceVector::exact(&device, &[1000])?;
-    let zero_hours = DeviceVector::exact(&device, &[0])?;
+    let initial = DeviceVector::from_ticks(&device, &[3000, 0])?;
+    let middle = DeviceVector::from_ticks(&device, &[2000, 0])?;
+    let terminal = DeviceVector::from_ticks(&device, &[1000, 0])?;
+    let production_a = DeviceVector::from_ticks(&device, &[4000, 1000])?;
+    let production_b = DeviceVector::from_ticks(&device, &[6000, 2000])?;
+    let zero_goods = DeviceVector::from_ticks(&device, &[0, 0])?;
+    let demand_a = DeviceVector::from_ticks(&device, &[1000, 1000])?;
+    let demand_b = DeviceVector::from_ticks(&device, &[1000, 0])?;
+    let inputs_a = DeviceVector::from_ticks(&device, &[1000, 0])?;
+    let inputs_b = DeviceVector::from_ticks(&device, &[0, 1000])?;
+    let hours_a = DeviceVector::from_ticks(&device, &[2000])?;
+    let hours_b = DeviceVector::from_ticks(&device, &[1000])?;
+    let zero_hours = DeviceVector::from_ticks(&device, &[0])?;
     let horizon = InventoryHorizon::new(
         &device,
         InventoryRegime {
@@ -117,14 +117,14 @@ fn lean_inventory_horizon_telescopes_research_and_signed_stock_changes() -> Resu
         ],
     )?;
     assert_eq!(horizon.stages, 3);
-    exact(&horizon.actual_hours, &device, &[16_000])?;
-    exact(&horizon.final_and_project_hours, &device, &[20_000])?;
-    signed_exact(&horizon.accumulated_stock_adjustment, &device, &[-4000])?;
-    signed_exact(&horizon.terminal_stock_adjustment, &device, &[-4000])?;
-    signed_exact(&horizon.reconciled_hours, &device, &[16_000])?;
-    signed_exact(&horizon.reconciliation_residual, &device, &[0])?;
+    approximate(&horizon.actual_hours, &device, &[16_000])?;
+    approximate(&horizon.final_and_project_hours, &device, &[20_000])?;
+    signed_approximate(&horizon.accumulated_stock_adjustment, &device, &[-4000])?;
+    signed_approximate(&horizon.terminal_stock_adjustment, &device, &[-4000])?;
+    signed_approximate(&horizon.reconciled_hours, &device, &[16_000])?;
+    signed_approximate(&horizon.reconciliation_residual, &device, &[0])?;
     for residual in &horizon.physical_residuals {
-        signed_exact(residual, &device, &[0, 0])?;
+        signed_approximate(residual, &device, &[0, 0])?;
     }
     Ok(())
 }
@@ -146,11 +146,11 @@ fn horizon_empty_context_changes_and_broken_balances_are_distinct() -> Result<()
         direct_labor: &direct,
         labor_requirements: &labor,
     };
-    let opening = DeviceVector::exact(&device, &[1000])?;
-    let zero = DeviceVector::exact(&device, &[0])?;
+    let opening = DeviceVector::from_ticks(&device, &[1000])?;
+    let zero = DeviceVector::from_ticks(&device, &[0])?;
     let empty = InventoryHorizon::new(&device, regime(), &opening, &[])?;
-    exact(&empty.actual_hours, &device, &[0])?;
-    signed_exact(&empty.reconciled_hours, &device, &[0])?;
+    approximate(&empty.actual_hours, &device, &[0])?;
+    signed_approximate(&empty.reconciled_hours, &device, &[0])?;
     let stage = |context| InventoryStage {
         context,
         closing: &opening,
@@ -161,12 +161,18 @@ fn horizon_empty_context_changes_and_broken_balances_are_distinct() -> Result<()
     };
     assert!(InventoryHorizon::new(&device, regime(), &opening, &[stage(changed)]).is_err());
     let broken = InventoryHorizon::new(&device, regime(), &opening, &[stage(context)])?;
-    signed_exact(&broken.physical_residuals[0], &device, &[-1000])?;
-    exact(&broken.actual_hours, &device, &[0])?;
-    signed_exact(&broken.reconciled_hours, &device, &[1000])?;
-    signed_exact(&broken.reconciliation_residual, &device, &[-1000])?;
+    signed_approximate(&broken.physical_residuals[0], &device, &[-1000])?;
+    approximate(&broken.actual_hours, &device, &[0])?;
+    signed_approximate(&broken.reconciled_hours, &device, &[1000])?;
+    signed_approximate(&broken.reconciliation_residual, &device, &[-1000])?;
     assert!(
-        InventoryHorizon::new(&device, regime(), &DeviceVector::exact(&device, &[])?, &[]).is_err()
+        InventoryHorizon::new(
+            &device,
+            regime(),
+            &DeviceVector::from_ticks(&device, &[])?,
+            &[]
+        )
+        .is_err()
     );
     Ok(())
 }
@@ -175,8 +181,8 @@ fn horizon_empty_context_changes_and_broken_balances_are_distinct() -> Result<()
 fn lean_boundary_demand_retains_outside_direct_labor() -> Result<()> {
     let device = support::device(64)?;
     let scale = 684_000;
-    let retained = DeviceVector::exact(&device, &[684_000])?;
-    let outside = DeviceVector::exact(&device, &[2_052_000])?;
+    let retained = DeviceVector::from_ticks(&device, &[684_000])?;
+    let outside = DeviceVector::from_ticks(&device, &[2_052_000])?;
     let retained_labor = matrix(&device, 1, 1, &[68], 19, scale)?;
     let outside_direct_labor = matrix(&device, 1, 1, &[2], 1, scale)?;
     let outside_inverse = matrix(&device, 1, 1, &[4], 3, scale)?;
@@ -192,21 +198,21 @@ fn lean_boundary_demand_retains_outside_direct_labor() -> Result<()> {
             retained_from_outside: &retained_from_outside,
         },
     )?;
-    exact(&account.outside_direct_hours, &device, &[5_472_000])?;
-    exact(&account.effective_retained_demand, &device, &[2_052_000])?;
-    exact(&account.total_hours, &device, &[12_816_000])?;
+    approximate(&account.outside_direct_hours, &device, &[5_472_000])?;
+    approximate(&account.effective_retained_demand, &device, &[2_052_000])?;
+    approximate(&account.total_hours, &device, &[12_816_000])?;
     let full_outside_labor = outside_direct_labor
         .add(
             &device,
             &retained_labor.product(&device, &retained_from_outside)?,
         )?
         .product(&device, &outside_inverse)?;
-    assert_eq!(
+    estimates::assert_close(
         account.total_hours.read(&device)?,
         retained_labor
             .apply(&device, &retained)?
             .add(&device, &full_outside_labor.apply(&device, &outside)?)?
-            .read(&device)?
+            .read(&device)?,
     );
     let retained_goods = matrix(&device, 1, 1, &[1], 4, scale)?;
     let outside_from_retained = matrix(&device, 1, 1, &[1], 3, scale)?;
@@ -228,14 +234,14 @@ fn lean_boundary_demand_retains_outside_direct_labor() -> Result<()> {
             training: &training,
         },
     )?;
-    assert_eq!(
+    estimates::assert_close(
         retained_labor.read(&device)?,
         reduction
             .labor
             .add(&device, &retained_labor.product(&device, &reduction.goods)?)?
-            .read(&device)?
+            .read(&device)?,
     );
-    assert_eq!(
+    estimates::assert_close(
         retained_labor
             .product(&device, &reduction.reproduction)?
             .add(&device, &reduction.training)?
@@ -244,10 +250,10 @@ fn lean_boundary_demand_retains_outside_direct_labor() -> Result<()> {
             .product(&device, &retained_reproduction)?
             .add(
                 &device,
-                &full_outside_labor.product(&device, &outside_reproduction)?
+                &full_outside_labor.product(&device, &outside_reproduction)?,
             )?
             .add(&device, &training)?
-            .read(&device)?
+            .read(&device)?,
     );
     Ok(())
 }
@@ -274,34 +280,34 @@ fn lean_augmented_inverse_and_terminal_activities_use_both_blocks() -> Result<()
         (&augmented.labor_from_goods, 4000),
         (&augmented.labor_from_labor, 2000),
     ] {
-        assert_eq!(
+        estimates::assert_close(
             block.read(&device)?,
             vec![Interval {
                 lower: expected,
-                upper: expected
-            }]
+                upper: expected,
+            }],
         );
     }
-    let rhs = DeviceVector::exact(&device, &[1000])?;
+    let rhs = DeviceVector::from_ticks(&device, &[1000])?;
     let result = augmented.apply(&device, &rhs, &rhs)?;
-    exact(&result.goods, &device, &[3500])?;
-    exact(&result.labor, &device, &[6000])?;
+    approximate(&result.goods, &device, &[3500])?;
+    approximate(&result.labor, &device, &[6000])?;
     let a = matrix(&device, 1, 1, &[1], 2, scale)?;
     let t = matrix(&device, 1, 1, &[1], 4, scale)?;
-    assert_eq!(
+    estimates::assert_close(
         result.goods.read(&device)?,
         a.apply(&device, &result.goods)?
             .add(&device, &reproduction.apply(&device, &result.labor)?)?
             .add(&device, &rhs)?
-            .read(&device)?
+            .read(&device)?,
     );
-    assert_eq!(
+    estimates::assert_close(
         result.labor.read(&device)?,
         direct
             .apply(&device, &result.goods)?
             .add(&device, &t.apply(&device, &result.labor)?)?
             .add(&device, &rhs)?
-            .read(&device)?
+            .read(&device)?,
     );
     let terminal = matrix(&device, 1, 2, &[3, 4], 1, scale)?.add(
         &device,
@@ -309,18 +315,18 @@ fn lean_augmented_inverse_and_terminal_activities_use_both_blocks() -> Result<()
             .product(&device, &inverse)?
             .product(&device, &matrix(&device, 1, 2, &[1, 2], 1, scale)?)?,
     )?;
-    assert_eq!(
+    estimates::assert_close(
         terminal.read(&device)?,
         vec![
             Interval {
                 lower: 5000,
-                upper: 5000
+                upper: 5000,
             },
             Interval {
                 lower: 8000,
-                upper: 8000
-            }
-        ]
+                upper: 8000,
+            },
+        ],
     );
     Ok(())
 }
@@ -345,51 +351,51 @@ fn lean_physical_and_occupational_unit_covariance_preserves_accounts() -> Result
     let np = n.scale_units(&device, &physical_inverse, &physical)?;
     let fp = f.scale_units(&device, &physical_inverse, &occupational)?;
     let tp = t.scale_units(&device, &occupational_inverse, &occupational)?;
-    assert_eq!(gp.read(&device)?, hp.product(&device, &np)?.read(&device)?);
-    assert_eq!(
+    estimates::assert_close(gp.read(&device)?, hp.product(&device, &np)?.read(&device)?);
+    estimates::assert_close(
         gp.read(&device)?,
-        hp.add(&device, &gp.product(&device, &ap)?)?.read(&device)?
+        hp.add(&device, &gp.product(&device, &ap)?)?.read(&device)?,
     );
-    let demand = DeviceVector::exact(&device, &[4 * u64::from(scale), 6 * u64::from(scale)])?;
+    let demand = DeviceVector::from_ticks(&device, &[4 * u64::from(scale), 6 * u64::from(scale)])?;
     let new_demand = demand.scale_units(&device, &physical_inverse)?;
-    assert_eq!(
+    estimates::assert_close(
         g.apply(&device, &demand)?.read(&device)?,
         gp.apply(&device, &new_demand)?
             .scale_units(&device, &occupational)?
-            .read(&device)?
+            .read(&device)?,
     );
-    let weights = DeviceVector::exact(&device, &[u64::from(scale), 2 * u64::from(scale)])?;
+    let weights = DeviceVector::from_ticks(&device, &[u64::from(scale), 2 * u64::from(scale)])?;
     let new_weights = weights.scale_units(&device, &occupational)?;
     let new_values = gp.transpose(&device)?.apply(&device, &new_weights)?;
-    exact(
+    approximate(
         &new_values,
         &device,
         &[28 * u64::from(scale), 5 * u64::from(scale)],
     )?;
     let old_m = g.product(&device, &f)?.add(&device, &t)?;
     let new_m = gp.product(&device, &fp)?.add(&device, &tp)?;
-    assert_eq!(
+    estimates::assert_close(
         new_m.read(&device)?,
         old_m
             .scale_units(&device, &occupational_inverse, &occupational)?
-            .read(&device)?
+            .read(&device)?,
     );
     let residual = DeviceSignedVector::difference(
-        DeviceVector::exact(&device, &[u64::from(scale), 2 * u64::from(scale)])?,
+        DeviceVector::from_ticks(&device, &[u64::from(scale), 2 * u64::from(scale)])?,
         old_m.transpose(&device)?.apply(&device, &weights)?,
     )?;
     let new_residual = DeviceSignedVector::difference(
         weights.scale_units(&device, &occupational)?,
         new_m.transpose(&device)?.apply(&device, &new_weights)?,
     )?;
-    assert_eq!(
+    estimates::assert_close(
         new_residual.read(&device)?,
         residual
             .scale_units(&device, &occupational)?
-            .read(&device)?
+            .read(&device)?,
     );
     match new_weights.normalize(&device, 0, scale)? {
-        Diagnostic::Available(rebased) => exact(
+        Diagnostic::Available(rebased) => approximate(
             &rebased,
             &device,
             &[u64::from(scale), 4 * u64::from(scale) / 3],
@@ -421,27 +427,27 @@ fn lean_lifetime_unit_covariance_transforms_subsistence_and_training() -> Result
     let tp = training
         .scale_units(&device, &inverse_units, &identity)?
         .per_hour_training(&device, &[2, 4])?;
-    assert_eq!(
+    estimates::assert_close(
         fp.read(&device)?,
-        f.scale_units(&device, &identity, &units)?.read(&device)?
+        f.scale_units(&device, &identity, &units)?.read(&device)?,
     );
-    assert_eq!(
+    estimates::assert_close(
         tp.read(&device)?,
         t.scale_units(&device, &inverse_units, &units)?
-            .read(&device)?
+            .read(&device)?,
     );
     let m = g.product(&device, &f)?.add(&device, &t)?;
     let mp = g
         .scale_units(&device, &inverse_units, &identity)?
         .product(&device, &fp)?
         .add(&device, &tp)?;
-    assert_eq!(
+    estimates::assert_close(
         mp.read(&device)?,
         m.scale_units(&device, &inverse_units, &units)?
-            .read(&device)?
+            .read(&device)?,
     );
     assert!(
-        DeviceVector::exact(&device, &[1])?
+        DeviceVector::from_ticks(&device, &[1])?
             .scale_units(&device, &units)
             .is_err()
     );
@@ -451,33 +457,33 @@ fn lean_lifetime_unit_covariance_transforms_subsistence_and_training() -> Result
 #[test]
 fn lean_conversion_reports_the_positive_residual_scale_with_normalized_weights() -> Result<()> {
     let device = support::device(64)?;
-    let beta = DeviceVector::exact(&device, &[2000, 1000])?;
+    let beta = DeviceVector::from_ticks(&device, &[2000, 1000])?;
     let kappa = match beta.reciprocal_reference(&device, 0, 1000)? {
         Diagnostic::Available(value) => value,
         _ => panic!("positive reference must admit a reciprocal"),
     };
-    exact(&kappa, &device, &[500])?;
+    approximate(&kappa, &device, &[500])?;
     let alpha = match beta.normalize(&device, 0, 1000)? {
         Diagnostic::Available(value) => value,
         _ => panic!("positive reference must normalize"),
     };
-    exact(&alpha, &device, &[1000, 500])?;
+    approximate(&alpha, &device, &[1000, 500])?;
     let m = DeviceOperator::new(&device, &sparse(2, 2, &[1, 0, 0, 0], 2)?);
     let residual = DeviceSignedVector::difference(
-        DeviceVector::exact(&device, &[1000, 500])?,
+        DeviceVector::from_ticks(&device, &[1000, 500])?,
         m.apply(&device, &alpha)?,
     )?;
-    signed_exact(&residual, &device, &[500, 500])?;
-    let zero = DeviceVector::exact(&device, &[0])?;
+    signed_approximate(&residual, &device, &[500, 500])?;
+    let zero = DeviceVector::from_ticks(&device, &[0])?;
     assert!(matches!(
         zero.reciprocal_reference(&device, 0, 1000)?,
         Diagnostic::Inapplicable
     ));
     let interval = DeviceOperator::new(&device, &sparse(1, 1, &[1], 3)?)
-        .apply(&device, &DeviceVector::exact(&device, &[1])?)?;
+        .apply(&device, &DeviceVector::from_ticks(&device, &[1])?)?;
     assert!(matches!(
         interval.reciprocal_reference(&device, 0, 1000)?,
-        Diagnostic::UnresolvedAccuracy
+        Diagnostic::Available(_)
     ));
     assert!(beta.reciprocal_reference(&device, 2, 1000).is_err());
     assert!(beta.reciprocal_reference(&device, 0, 0).is_err());

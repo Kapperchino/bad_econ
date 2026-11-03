@@ -741,6 +741,7 @@ dependencies = [
  "bytemuck",
  "clap",
  "cubecl",
+ "cubek",
  "enumflags2",
  "objc2-metal 0.3.2",
  "pollster",
@@ -3706,6 +3707,7 @@ dependencies = [
  "cubek-random",
  "cubek-reduce",
  "cubek-std",
+ "cubek-tile",
 ]
 
 [[package]]

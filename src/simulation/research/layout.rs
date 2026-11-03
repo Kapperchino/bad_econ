@@ -55,7 +55,6 @@ row_layout!(LabLayoutRows, LabLayout {
 });
 
 row_layout!(ProjectLayoutRows, ProjectLayout {
-    identity: TickLayout => IDENTITY,
     prerequisites: u32 => PREREQUISITES,
     outcomes: u32 => OUTCOMES,
     inputs: [u32; Good::COUNT] => INPUTS,
@@ -90,7 +89,6 @@ row_layout!(StockLayoutRows, StockLayout {
 
 row_layout!(StrikeLayoutRows, StrikeLayout {
     household: u32 => HOUSEHOLD,
-    identity: TickLayout => IDENTITY,
     grievance: u32 => GRIEVANCE,
     solidarity: u32 => SOLIDARITY,
     trust: u32 => TRUST,

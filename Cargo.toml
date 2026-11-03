@@ -15,7 +15,7 @@ path = "tests/gpu.rs"
 
 [features]
 default = ["compute"]
-compute = ["dep:burn", "dep:burn-wgpu", "dep:cubecl", "dep:pollster", "dep:ash", "dep:objc2-metal", "dep:sysinfo", "dep:windows"]
+compute = ["dep:burn", "dep:burn-wgpu", "dep:cubecl", "dep:cubek", "dep:pollster", "dep:ash", "dep:objc2-metal", "dep:sysinfo", "dep:windows"]
 viewer = ["compute", "dep:bevy"]
 
 [dependencies]
@@ -30,6 +30,7 @@ burn = { version = "=0.22.1", default-features = false, features = ["std", "wgpu
 burn-wgpu = { version = "=0.22.1", default-features = false, features = ["std"], optional = true }
 bytemuck = { version = "1", features = ["derive", "min_const_generics"] }
 cubecl = { version = "=0.11.1", default-features = false, features = ["std", "wgpu", "cpu"], optional = true }
+cubek = { version = "=0.3.1", default-features = false, features = ["std", "stdlib", "reduce", "matmul", "random"], optional = true }
 pollster = { version = "1.0.1", optional = true }
 bevy = { version = "=0.20.1", default-features = false, features = ["std", "async_executor", "multi_threaded", "bevy_asset", "bevy_audio", "wav", "bevy_log", "bevy_winit", "bevy_render", "bevy_core_pipeline", "bevy_sprite", "bevy_sprite_render", "bevy_gizmos", "bevy_gizmos_render", "bevy_text", "bevy_ui", "bevy_ui_render", "default_font", "debug", "x11", "wayland"], optional = true }
 

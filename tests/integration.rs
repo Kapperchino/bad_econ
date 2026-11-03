@@ -4,6 +4,9 @@ mod contracts;
 mod demography;
 mod distributors;
 mod enterprise;
+#[cfg(feature = "compute")]
+#[path = "support/estimates.rs"]
+mod estimates;
 mod execution;
 mod finance;
 mod households;

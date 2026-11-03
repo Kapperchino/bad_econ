@@ -16,10 +16,13 @@ mod ownership;
 mod parameters;
 mod payroll;
 mod policy;
+mod random;
+mod reduction;
 mod registry;
 pub mod research;
 mod rows;
 mod scheduler;
+mod tensor;
 mod words;
 use crate::{
     arithmetic::add,
@@ -32,8 +35,7 @@ use burn_wgpu::{CubeBackend, CubeTensor};
 use bytemuck::Zeroable;
 use economy::EconomyStage;
 use flags::{
-    CONTROL_WORDS, ControlLayout, DependencyShape, EventStatus, FaultFlags, MarketFlag,
-    SchedulerControl,
+    CONTROL_WORDS, ControlLayout, DependencyShape, EventStatus, FaultFlags, SchedulerControl,
 };
 use layout::*;
 pub use memory::MemoryBudget;
@@ -1195,12 +1197,16 @@ impl Simulation {
             &parameters,
             &self.summary,
         );
-        self.economy(
-            EconomyStage::Reduce,
-            SummaryLayout::METRICS,
-            &parameters,
+        reduction::summary(
+            &self.device,
+            &self.events,
             &self.summary,
-        );
+            &self.control,
+            self.metadata
+                .actors
+                .len()
+                .div_ceil(SummaryLayout::ACTORS_PER_GROUP as usize),
+        )?;
         let totals = self
             .device
             .read_range(&self.summary, 0, SummaryLayout::WORDS)?;
@@ -1321,38 +1327,11 @@ impl Simulation {
         })
     }
     fn copy_audited(&mut self, direction: CopyDirection) -> Result<()> {
-        let parameters = EconomyParameters {
-            day: 0,
-            settlement_rotation: 0,
-            phase: Phase::Opening,
-            market: MarketFlag::Labor,
-            discovery: Discovery::Indexed,
-            offset: 0,
-            count: 0,
-            status_start: 0,
-            sort_source: 0,
-            sort_width: 0,
-            sort_count: 0,
-        };
         let (source, target) = match direction {
             CopyDirection::Save => (&self.state, &self.audited),
             CopyDirection::Restore => (&self.audited, &self.state),
         };
-        CubeBackend::economy(
-            &self.device,
-            EconomyStage::CopyState,
-            self.state.meta.shape()[0] / TICK_WORDS,
-            EconomyBuffers {
-                state: source,
-                actors: &self.actors,
-                config: &self.config,
-                spatial: &self.spatial,
-                proposals: target,
-                events: &self.events,
-                control: &self.control,
-            },
-            &parameters,
-        );
+        tensor::copy(&self.device, source, target);
         if let Some(research) = &self.research {
             match direction {
                 CopyDirection::Save => research.save_audited(&self.device)?,
