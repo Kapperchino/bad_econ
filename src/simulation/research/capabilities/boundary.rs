@@ -93,20 +93,8 @@ impl DeviceCapabilityGraph {
             true => {
                 let adjacency = device.empty((self.nodes * self.row_words).max(1));
                 let labels = device.empty(self.nodes.max(1));
-                copy::launch(
-                    &device.client,
-                    count(device, self.nodes * self.row_words),
-                    CubeDim::new_1d(device.workgroup),
-                    argument(&self.adjacency),
-                    argument(&adjacency),
-                );
-                copy::launch(
-                    &device.client,
-                    count(device, self.nodes),
-                    CubeDim::new_1d(device.workgroup),
-                    argument(&self.labels),
-                    argument(&labels),
-                );
+                crate::simulation::tensor::copy(device, &self.adjacency, &adjacency);
+                crate::simulation::tensor::copy(device, &self.labels, &labels);
                 for pivot in retained..self.nodes {
                     eliminate::launch(
                         &device.client,
@@ -145,13 +133,7 @@ impl DeviceCapabilityGraph {
 
     pub fn closure(&self, device: &Device) -> Result<CapabilityClosure> {
         let labels = device.empty(self.nodes.max(1));
-        copy::launch(
-            &device.client,
-            count(device, self.nodes),
-            CubeDim::new_1d(device.workgroup),
-            argument(&self.labels),
-            argument(&labels),
-        );
+        crate::simulation::tensor::copy(device, &self.labels, &labels);
         let changed = device.tensor(&[0]);
         let mut round = 0;
         let mut progress = ClosureProgress::Propagating;
@@ -190,21 +172,11 @@ impl DeviceCapabilityGraph {
 }
 
 fn argument(tensor: &CubeTensor) -> BufferArg {
-    unsafe { BufferArg::from_raw_parts(tensor.handle.clone(), tensor.meta.shape()[0]) }
+    tensor.clone().into_buffer_arg()
 }
 
 fn count(device: &Device, items: usize) -> CubeCount {
-    let groups = (items as u32).div_ceil(device.workgroup).max(1);
-    let x = groups.min(u16::MAX as u32);
-    CubeCount::Static(x, groups.div_ceil(x), 1)
-}
-
-#[cube(launch)]
-fn copy(input: &[u32], output: &mut [u32]) {
-    let id = ABSOLUTE_POS;
-    if id < input.len() {
-        output[id] = input[id];
-    }
+    device.count(items)
 }
 
 #[cube(launch)]

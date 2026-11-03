@@ -96,6 +96,8 @@ To enable an upgrade in a custom scenario, add its enum name to the owning resea
 - [Analytics](src/simulation/analytics.rs): approximate f32 accounts from explicitly supplied analytical inputs, using CubeK batched matrix multiplication and reductions.
 - [Viewer](src/viewer.rs): Bevy controls, inspection, and visualization.
 
+Kernel interfaces use CubeCL `CubeType` and `CubeLaunch` records. Stages, markets, discovery strategies, economy modes, and optional policy modes use comptime enums; days, populations, rates, balances, and per-actor decisions remain runtime data. Tax brackets use a typed `Sequence` with an unrolled structural loop. Research and demography pass named launch parameters and table buffers. Burn tensor arguments and CubeCL dispatch sizing handle buffer metadata and device limits; CubeK supplies matrix multiplication, reductions, and random sampling.
+
 ## Lean correspondence
 
 Compared against `../marx-lean-proof` at `1ad0e02`. The executable contracts correspond to the following proof modules; the Rust tests check finite arithmetic and execution, rather than extending the Lean proofs to the runtime.

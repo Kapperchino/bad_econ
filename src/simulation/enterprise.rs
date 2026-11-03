@@ -1,11 +1,8 @@
-use super::{
-    Device,
-    layout::{ActorLayout, ConfigLayout},
-    words::*,
-};
+use super::{Device, layout::ActorLayout, words::*};
 use crate::domain::{Field, Good, enterprise::EnterpriseState};
+use crate::simulation::configuration::{Configuration, EconomyConfig, Feature};
 use burn_wgpu::CubeTensor;
-use cubecl::{CubeCount, CubeDim, prelude::*};
+use cubecl::{CubeDim, prelude::*};
 
 #[allow(
     clippy::manual_is_multiple_of,
@@ -15,15 +12,15 @@ use cubecl::{CubeCount, CubeDim, prelude::*};
 fn requests(
     state: &mut [u32],
     actors: &[u32],
-    config: &[u32],
+    config: &EconomyConfig,
     spatial: &[u32],
     output: &mut [u32],
     day: u32,
 ) {
     let actor = ABSOLUTE_POS as u32;
-    if actor < config[ConfigLayout::ACTORS] {
-        let count = config[ConfigLayout::ACTORS];
-        if config[ConfigLayout::HOME] > 0
+    if actor < config.actors {
+        let count = config.actors;
+        if comptime!(config.home_mode == Feature::Enabled)
             && actors[ActorLayout::KIND * (actors.len() / ActorLayout::WORDS) + actor as usize] == 0
         {
             crate::simulation::economy::enterprises::mobility(state, actors, config, actor, day);
@@ -41,7 +38,7 @@ fn requests(
         let mut viable = false;
         if funded && target == comptime!(Good::Bread as u32) {
             let quote = load(state, comptime!(Field::Price as u32) * count + actor).extract(0usize);
-            let wage = config[ConfigLayout::STARTING_WAGE];
+            let wage = config.starting_wage;
             let mut replacement = u32::new(comptime!(i64::from(u32::MAX)));
             let ax = actors[ActorLayout::X * (actors.len() / ActorLayout::WORDS) + actor as usize];
             let ay = actors[ActorLayout::Y * (actors.len() / ActorLayout::WORDS) + actor as usize];
@@ -56,16 +53,12 @@ fn requests(
                     [ActorLayout::X * (actors.len() / ActorLayout::WORDS) + candidate as usize];
                 let by = actors
                     [ActorLayout::Y * (actors.len() / ActorLayout::WORDS) + candidate as usize];
-                let nearby = max(ax, bx) - min(ax, bx) + max(ay, by) - min(ay, by)
-                    <= config[ConfigLayout::SEARCH_RADIUS];
+                let nearby =
+                    max(ax, bx) - min(ax, bx) + max(ay, by) - min(ay, by) <= config.search_radius;
                 let cost = plus(times32(240, wage), times32(20, input_price)).value;
                 let funded_operations = !lt(
                     divide(cash, 2),
-                    times(
-                        cost,
-                        config[ConfigLayout::COVERAGE] + config[ConfigLayout::RING],
-                    )
-                    .value,
+                    times(cost, config.coverage + config.ring).value,
                 );
                 let opportunity = supplier == comptime!(Good::Flour as u32)
                     && !equal(flour, zero())
@@ -238,8 +231,8 @@ fn requests(
                     [ActorLayout::X * (actors.len() / ActorLayout::WORDS) + candidate as usize];
                 let by = actors
                     [ActorLayout::Y * (actors.len() / ActorLayout::WORDS) + candidate as usize];
-                let nearby = max(ax, bx) - min(ax, bx) + max(ay, by) - min(ay, by)
-                    <= config[ConfigLayout::SEARCH_RADIUS];
+                let nearby =
+                    max(ax, bx) - min(ax, bx) + max(ay, by) - min(ay, by) <= config.search_radius;
                 if action == 0
                     && candidate_kind > 0
                     && status < comptime!(EnterpriseState::Liquidating as u32)
@@ -260,25 +253,20 @@ pub(super) fn propose(
     device: &Device,
     state: &CubeTensor,
     actors: &CubeTensor,
-    config: &CubeTensor,
+    config: &Configuration,
     spatial: &CubeTensor,
     output: &CubeTensor,
     day: u32,
 ) {
-    let argument = |tensor: &CubeTensor| unsafe {
-        BufferArg::from_raw_parts(tensor.handle.clone(), tensor.meta.shape()[0])
-    };
-    let groups = (output.meta.shape()[0] as u32)
-        .div_ceil(device.workgroup)
-        .max(1);
-    let x = groups.min(u16::MAX.into());
+    let argument = |tensor: &CubeTensor| tensor.clone().into_buffer_arg();
+    let cube_count = device.count(output.meta.num_elements());
     requests::launch(
         &device.client,
-        CubeCount::Static(x, groups.div_ceil(x), 1),
+        cube_count,
         CubeDim::new_1d(device.workgroup),
         argument(state),
         argument(actors),
-        argument(config),
+        config.launch(),
         argument(spatial),
         argument(output),
         day,

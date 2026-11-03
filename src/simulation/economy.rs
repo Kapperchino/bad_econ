@@ -6,15 +6,14 @@ use super::{
     },
     households::{KernelFatigue, KernelObservation, ObservationKind, next_fatigue, observed_blend},
     layout::*,
-    negotiation::{
-        NegotiationRequest, NegotiationStatus, PolicyLayout, legal_grid_rate, negotiate,
-    },
+    negotiation::{NegotiationRequest, NegotiationStatus, legal_grid_rate, negotiate},
     parameters::{Discovery, EconomyParameters},
     payroll::PayrollAccrual,
     policy::*,
     scheduler::apply,
     words::*,
 };
+use crate::simulation::configuration::{EconomyConfig, Feature};
 use crate::{
     domain::{
         BASE_FIELDS, CONSUMPTION_FIELDS, Field, Good, PRODUCTION_FIELDS, Phase, TRANSIT_FIELDS,
@@ -30,27 +29,27 @@ use super::scheduler::Posting;
 use clearing::{PeerBalances, PeerOffer, actor_settlement};
 
 #[cube]
-fn at(config: &[u32], field: u32, actor: u32) -> u32 {
-    field * config[ConfigLayout::ACTORS] + actor
+fn at(config: &EconomyConfig, field: u32, actor: u32) -> u32 {
+    field * config.actors + actor
 }
 
 #[cube]
-fn value(state: &mut [u32], config: &[u32], field: u32, actor: u32) -> Ticks {
+fn value(state: &mut [u32], config: &EconomyConfig, field: u32, actor: u32) -> Ticks {
     load(state, at(config, field, actor))
 }
 
 #[cube]
-fn number(state: &mut [u32], config: &[u32], field: u32, actor: u32) -> u32 {
+fn number(state: &mut [u32], config: &EconomyConfig, field: u32, actor: u32) -> u32 {
     value(state, config, field, actor).extract(LOW_WORD)
 }
 
 #[cube]
-fn set(state: &mut [u32], config: &[u32], field: u32, actor: u32, number: Ticks) {
+fn set(state: &mut [u32], config: &EconomyConfig, field: u32, actor: u32, number: Ticks) {
     store(state, at(config, field, actor), number);
 }
 
 #[cube]
-fn set32(state: &mut [u32], config: &[u32], field: u32, actor: u32, number: u32) {
+fn set32(state: &mut [u32], config: &EconomyConfig, field: u32, actor: u32, number: u32) {
     set(state, config, field, actor, ticks(number, 0u32));
 }
 
@@ -71,7 +70,7 @@ fn multiply(control: &[Atomic<u32>], a: Ticks, b: u32) -> Ticks {
 #[cube]
 fn increase(
     state: &mut [u32],
-    config: &[u32],
+    config: &EconomyConfig,
     control: &[Atomic<u32>],
     field: u32,
     actor: u32,
@@ -106,20 +105,20 @@ fn distance(actors: &[u32], a: u32, b: u32) -> u32 {
 fn local(
     state: &mut [u32],
     actors: &[u32],
-    config: &[u32],
+    config: &EconomyConfig,
     control: &[Atomic<u32>],
     parameters: &EconomyParameters,
     id: u32,
 ) {
-    if id < config[ConfigLayout::ACTORS] {
+    if id < config.actors {
         let k = kind(actors, id);
         let phase = comptime!(parameters.phase);
         match phase {
             Phase::Opening => {
                 for good in 1u32..Good::COUNT as u32 + 1 {
                     let slot = BASE_FIELDS as u32
-                        + (good - 1) * config[ConfigLayout::RING]
-                        + parameters.day % config[ConfigLayout::RING];
+                        + (good - 1) * config.ring
+                        + parameters.day % config.ring;
                     let delivery = value(state, config, slot, id);
                     increase(state, config, control, good, id, delivery);
                     let transit_field = TRANSIT_FIELDS as u32 + good - 1;
@@ -163,12 +162,12 @@ fn local(
             Phase::Observation => {}
             Phase::Proposal => {
                 if !k.is(comptime!(ActorKind::Household)) {
-                    if config[ConfigLayout::HOME] > 0 {
+                    if comptime!(config.home_mode == Feature::Enabled) {
                         enterprises::available_method(state, actors, config, control, id);
                     }
                     let desired = proposed_starts(
                         KernelStarts {
-                            coverage: config[ConfigLayout::COVERAGE],
+                            coverage: config.coverage,
                             demand: value(state, config, comptime!(Field::Demand as u32), id),
                             finished: value(state, config, k.output(), id),
                             pipeline: value(state, config, comptime!(Field::Pipeline as u32), id),
@@ -215,9 +214,8 @@ fn local(
                     }
                     let mut planning_wage =
                         number(state, config, comptime!(Field::Wage as u32), id);
-                    if config[ConfigLayout::BARGAINING + PolicyLayout::ENABLED] != 0 {
-                        planning_wage =
-                            legal_grid_rate(config, comptime!(ConfigLayout::BARGAINING));
+                    if comptime!(config.bargaining.enabled == Feature::Enabled) {
+                        planning_wage = legal_grid_rate(config);
                     }
                     planned = minimum(
                         planned,
@@ -255,7 +253,7 @@ fn local(
                         );
                         planned = minimum(minimum(shifts, funded), capacity);
                     }
-                    if config[ConfigLayout::HOME] > 0 {
+                    if comptime!(config.home_mode == Feature::Enabled) {
                         let status =
                             number(state, config, comptime!(Field::EnterpriseStatus as u32), id);
                         planned = select(
@@ -284,7 +282,7 @@ fn local(
                     set32(state, config, comptime!(Field::Pipeline as u32), id, 0);
                 }
                 if k.is(comptime!(ActorKind::Household))
-                    && config[ConfigLayout::HOME] > 0
+                    && comptime!(config.home_mode == Feature::Enabled)
                     && number(state, config, comptime!(Field::LivingMembers as u32), id) > 0
                 {
                     enterprises::expand(state, actors, config, control, id);
@@ -322,9 +320,9 @@ fn local(
                         id,
                         consumed,
                     );
-                    if config[ConfigLayout::INDUSTRIAL] != 0 {
+                    if comptime!(config.economy == crate::domain::Economy::Industrial) {
                         for offset in 0..Good::COUNT {
-                            let interval = config[ConfigLayout::CONSUMPTION_INTERVALS + offset];
+                            let interval = config.consumption_intervals[offset];
                             if interval > 1
                                 && (parameters.day + id) % max(interval, 1) == 0
                                 && number(state, config, comptime!(Field::LivingMembers as u32), id)
@@ -356,25 +354,25 @@ fn local(
                     );
                     let mut fatigue = min(
                         number(state, config, comptime!(Field::Fatigue as u32), id)
-                            + config[ConfigLayout::WORK_FATIGUE],
+                            + config.work_fatigue,
                         POLICY_SCALE,
                     );
                     if number(state, config, comptime!(Field::Employed as u32), id) == 0u32 {
                         fatigue = max(
                             number(state, config, comptime!(Field::Fatigue as u32), id),
-                            config[ConfigLayout::REST_RECOVERY],
-                        ) - config[ConfigLayout::REST_RECOVERY];
+                            config.rest_recovery,
+                        ) - config.rest_recovery;
                     }
-                    if config[ConfigLayout::HOUSEHOLD_POLICY_ENABLED] != 0 {
+                    if comptime!(config.household_policy == Feature::Enabled) {
                         let previous_fatigue =
                             number(state, config, comptime!(Field::Fatigue as u32), id);
                         let exertion = number(state, config, comptime!(Field::Hours as u32), id)
                             + number(state, config, comptime!(Field::ResearchMinutes as u32), id);
                         fatigue = next_fatigue(KernelFatigue {
                             fatigue: previous_fatigue,
-                            response: config[ConfigLayout::FATIGUE_RESPONSE],
+                            response: config.fatigue_response,
                             exertion_minutes: exertion,
-                            rest_minutes: config[ConfigLayout::REST_MINUTES],
+                            rest_minutes: config.rest_minutes,
                         });
                     }
                     set32(state, config, comptime!(Field::Fatigue as u32), id, fatigue);
@@ -394,12 +392,14 @@ fn local(
                 }
             },
             Phase::AccountsDecisions => {
-                if k.is(comptime!(ActorKind::Household)) && config[ConfigLayout::HOME] > 0 {
+                if k.is(comptime!(ActorKind::Household))
+                    && comptime!(config.home_mode == Feature::Enabled)
+                {
                     enterprises::household_quote(state, config, id);
                     enterprises::investment(state, config, id);
                 }
                 if !k.is(comptime!(ActorKind::Household)) {
-                    if config[ConfigLayout::HOME] > 0 {
+                    if comptime!(config.home_mode == Feature::Enabled) {
                         let packets = number(state, config, comptime!(Field::Plan as u32), id)
                             - number(state, config, comptime!(Field::Slots as u32), id);
                         enterprises::maintain(state, config, control, id, packets);
@@ -417,7 +417,7 @@ fn local(
                             kind: comptime!(ObservationKind::Observed as u32),
                             value: signal,
                         },
-                        config[ConfigLayout::FORECAST_WEIGHT],
+                        config.forecast_weight,
                         control,
                     );
                     let excess = positive(value(state, config, k.output(), id), demand);
@@ -429,8 +429,7 @@ fn local(
                         minus(excess, unfilled),
                     );
                     let denominator = maximum(demand, ticks(1, 0));
-                    let scaled = fraction_index(magnitude, denominator)
-                        * config[ConfigLayout::PRICE_RESPONSE]
+                    let scaled = fraction_index(magnitude, denominator) * config.price_response
                         / POLICY_SCALE;
                     let table_index = select(
                         positive_sign,
@@ -443,7 +442,7 @@ fn local(
                             multiply(
                                 control,
                                 value(state, config, comptime!(Field::Price as u32), id),
-                                config[(ConfigLayout::PRICE_TABLE as u32 + table_index) as usize],
+                                config.price_table[table_index as usize],
                             ),
                             ticks(select(positive_sign, PRICE_SCALE - 1, 0), 0u32),
                         ),
@@ -455,11 +454,8 @@ fn local(
                         comptime!(Field::Price as u32),
                         id,
                         min(
-                            max(
-                                candidate.extract(LOW_WORD),
-                                config[ConfigLayout::MINIMUM_PRICE],
-                            ),
-                            config[ConfigLayout::MAXIMUM_PRICE],
+                            max(candidate.extract(LOW_WORD), config.minimum_price),
+                            config.maximum_price,
                         ),
                     );
                     set(state, config, comptime!(Field::Demand as u32), id, demand);
@@ -495,15 +491,12 @@ fn local(
                             config,
                             comptime!(Field::Price as u32),
                             id,
-                            min(
-                                max(quote, config[ConfigLayout::MINIMUM_PRICE]),
-                                config[ConfigLayout::MAXIMUM_PRICE],
-                            ),
+                            min(max(quote, config.minimum_price), config.maximum_price),
                         );
                     }
                     let wage = number(state, config, comptime!(Field::Wage as u32), id);
                     let unstaffed = number(state, config, comptime!(Field::Slots as u32), id) > 0;
-                    let increment = config[ConfigLayout::WAGE_INCREMENT];
+                    let increment = config.wage_increment;
                     let offered = select(
                         unstaffed,
                         wage + increment,
@@ -537,22 +530,21 @@ fn local(
 fn propose(
     state: &mut [u32],
     actors: &[u32],
-    config: &[u32],
+    config: &EconomyConfig,
     spatial: &mut [u32],
     proposals: &mut [u32],
     control: &[Atomic<u32>],
     parameters: &EconomyParameters,
     invocation: u32,
 ) {
-    if invocation < config[ConfigLayout::ACTORS] {
+    if invocation < config.actors {
         let market = comptime!(parameters.market);
         let mut id = invocation;
         if comptime!(market == MarketFlag::Household && parameters.discovery == Discovery::Indexed)
         {
-            let cells = config[ConfigLayout::SPATIAL_SIDE] * config[ConfigLayout::SPATIAL_SIDE];
-            let base = 3 * (cells + 1 + config[ConfigLayout::ACTORS])
-                + ceildiv(config[ConfigLayout::ACTORS], DISCOVERY_BLOCK)
-                + 1;
+            let cells = config.spatial_side * config.spatial_side;
+            let base =
+                3 * (cells + 1 + config.actors) + ceildiv(config.actors, DISCOVERY_BLOCK) + 1;
             id = spatial[(base + invocation) as usize];
         }
         let k = kind(actors, id);
@@ -586,7 +578,7 @@ fn propose(
                     actors
                         [ActorLayout::CAPACITY * (actors.len() / ActorLayout::WORDS) + id as usize]
                         * number(state, config, comptime!(Field::InputTicks as u32), id)
-                        * config[ConfigLayout::COVERAGE],
+                        * config.coverage,
                     0u32,
                 );
                 if number(state, config, comptime!(Field::EnterpriseModel as u32), id) == 1 {
@@ -599,14 +591,14 @@ fn propose(
                         control,
                         forecast,
                         number(state, config, comptime!(Field::StockCoverage as u32), id)
-                            + config[ConfigLayout::RING],
+                            + config.ring,
                     );
                 }
                 if !k.is(comptime!(ActorKind::Household))
                     && number(state, config, comptime!(Field::EnterpriseModel as u32), id) == 0
-                    && config[ConfigLayout::HOME] > 0
+                    && comptime!(config.home_mode == Feature::Enabled)
                 {
-                    let horizon = config[ConfigLayout::COVERAGE] + config[ConfigLayout::RING];
+                    let horizon = config.coverage + config.ring;
                     let packets = divide(
                         add_checked(
                             control,
@@ -632,14 +624,14 @@ fn propose(
                     );
                 }
                 if k.is(comptime!(ActorKind::Household))
-                    && config[ConfigLayout::HOME] > 0
+                    && comptime!(config.home_mode == Feature::Enabled)
                     && good == comptime!(Good::Grain as u32)
                     && number(state, config, comptime!(Field::LivingMembers as u32), id) > 0
                 {
                     search = true;
                     wanted = ticks(
                         number(state, config, comptime!(Field::FoodNeed as u32), id)
-                            * (config[ConfigLayout::COVERAGE] + config[ConfigLayout::RING]),
+                            * (config.coverage + config.ring),
                         0,
                     );
                 }
@@ -648,7 +640,7 @@ fn propose(
                 if k.is(comptime!(ActorKind::Household))
                     && investment
                     && number(state, config, comptime!(Field::LivingMembers as u32), id) > 0
-                    && config[ConfigLayout::HOME] > 0
+                    && comptime!(config.home_mode == Feature::Enabled)
                     && (good == comptime!(Good::Tools as u32)
                         || good == comptime!(Good::Wood as u32))
                 {
@@ -656,7 +648,7 @@ fn propose(
                     wanted = ticks(select(good == comptime!(Good::Tools as u32), 2u32, 5u32), 0);
                 }
                 if !k.is(comptime!(ActorKind::Household))
-                    && config[ConfigLayout::HOME] > 0
+                    && comptime!(config.home_mode == Feature::Enabled)
                     && good == comptime!(Good::Wood as u32)
                     && number(state, config, comptime!(Field::Slots as u32), id) == 0
                     && number(state, config, comptime!(Field::Plan as u32), id) > 0
@@ -670,7 +662,7 @@ fn propose(
                 }
                 if !k.is(comptime!(ActorKind::Household))
                     && good == comptime!(Good::Tools as u32)
-                    && config[ConfigLayout::HOME] > 0
+                    && comptime!(config.home_mode == Feature::Enabled)
                 {
                     wanted = select(search, maximum(wanted, ticks(2, 0)), ticks(2, 0));
                     search = true;
@@ -678,15 +670,15 @@ fn propose(
             }
             MarketFlag::Consumer(_) => {
                 good = comptime!(market.good().expect("consumer market") as u32);
-                let interval = config[ConfigLayout::CONSUMPTION_INTERVALS + good as usize - 1];
+                let interval = config.consumption_intervals[good as usize - 1];
                 let until_due =
                     (interval - (parameters.day + id) % max(interval, 1)) % max(interval, 1);
                 search = k.is(comptime!(ActorKind::Household))
                     && number(state, config, comptime!(Field::LivingMembers as u32), id) > 0
-                    && until_due <= config[ConfigLayout::COVERAGE] + config[ConfigLayout::RING];
+                    && until_due <= config.coverage + config.ring;
                 let reserve = ticks(
                     number(state, config, comptime!(Field::FoodNeed as u32), id)
-                        * (config[ConfigLayout::COVERAGE] + config[ConfigLayout::RING]),
+                        * (config.coverage + config.ring),
                     0,
                 );
                 let food = add_checked(
@@ -717,7 +709,7 @@ fn propose(
                 search = k.is(comptime!(ActorKind::Household));
                 wanted = ticks(
                     number(state, config, comptime!(Field::FoodNeed as u32), id)
-                        * (config[ConfigLayout::COVERAGE] + config[ConfigLayout::RING] - 1u32),
+                        * (config.coverage + config.ring - 1u32),
                     0u32,
                 );
             }
@@ -734,14 +726,11 @@ fn propose(
                         positive(
                             value(state, config, comptime!(Field::Cash as u32), id),
                             maximum(
-                                ticks(
-                                    config[ConfigLayout::RESERVE_LOW],
-                                    config[ConfigLayout::RESERVE_HIGH],
-                                ),
+                                ticks(config.reserve_low, config.reserve_high),
                                 value(state, config, comptime!(Field::OperatingReserve as u32), id),
                             ),
                         ),
-                        config[ConfigLayout::DISTRIBUTION_RATE],
+                        config.distribution_rate,
                         POLICY_SCALE,
                     );
                     if !equal(quantity, ticks(0u32, 0u32)) {
@@ -770,10 +759,10 @@ fn propose(
         if search {
             let px = actors[ActorLayout::X * (actors.len() / ActorLayout::WORDS) + id as usize];
             let py = actors[ActorLayout::Y * (actors.len() / ActorLayout::WORDS) + id as usize];
-            let radius = config[ConfigLayout::SEARCH_RADIUS];
+            let radius = config.search_radius;
             let cx = px / radius;
             let cy = py / radius;
-            let side = config[ConfigLayout::SPATIAL_SIDE];
+            let side = config.spatial_side;
             let mut best = ticks(u32::MAX, u32::MAX);
             if comptime!(market == MarketFlag::Labor) {
                 best = ticks(0u32, 0u32);
@@ -801,7 +790,7 @@ fn propose(
                                 && parameters.discovery == Discovery::Indexed
                         ) {
                             let block = rotated / DISCOVERY_BLOCK;
-                            let base = 3 * (side * side + 1 + config[ConfigLayout::ACTORS]);
+                            let base = 3 * (side * side + 1 + config.actors);
                             let quote = spatial[(base + block) as usize];
                             let cash = purchasing_power;
                             if lt(cash, ticks(quote, 0)) {
@@ -813,8 +802,7 @@ fn propose(
                             let mut offset = 0;
                             while offset < skipped && !seen_supply {
                                 let seller = spatial[(side * side + 1 + rotated + offset) as usize];
-                                seen_supply = distance(actors, id, seller)
-                                    <= config[ConfigLayout::SEARCH_RADIUS]
+                                seen_supply = distance(actors, id, seller) <= config.search_radius
                                     && household_production::offers(
                                         state, actors, config, seller, good,
                                     );
@@ -824,7 +812,7 @@ fn propose(
                         if skipped == 0 {
                             let firm = spatial[(side * side + 1u32 + rotated) as usize];
                             let dist = distance(actors, id, firm);
-                            if dist <= config[ConfigLayout::SEARCH_RADIUS] {
+                            if dist <= config.search_radius {
                                 let mut wage =
                                     number(state, config, comptime!(Field::Wage as u32), firm);
                                 let quote =
@@ -841,20 +829,17 @@ fn propose(
                                     }
                                 }
                                 if inspect {
-                                    let mut eligible = dist <= config[ConfigLayout::SEARCH_RADIUS];
+                                    let mut eligible = dist <= config.search_radius;
 
                                     let mut score = ticks(
                                         quote
-                                            + max(
-                                                ceildiv(dist, config[ConfigLayout::SHIPMENT_SPEED]),
-                                                1u32,
-                                            ) * config[ConfigLayout::DELIVERY_PENALTY],
+                                            + max(ceildiv(dist, config.shipment_speed), 1u32)
+                                                * config.delivery_penalty,
                                         0u32,
                                     );
                                     let mut amount = ticks(1u32, 0u32);
                                     if comptime!(market == MarketFlag::Labor) {
-                                        if config[ConfigLayout::BARGAINING + PolicyLayout::ENABLED]
-                                            != 0
+                                        if comptime!(config.bargaining.enabled == Feature::Enabled)
                                         {
                                             let negotiation = negotiate(
                                                 NegotiationRequest {
@@ -897,7 +882,6 @@ fn propose(
                                                 },
                                                 config,
                                                 control,
-                                                comptime!(ConfigLayout::BARGAINING),
                                             );
                                             eligible = eligible
                                                 && negotiation.status
@@ -905,14 +889,13 @@ fn propose(
                                             wage = negotiation.wage.extract(LOW_WORD);
                                             amount = negotiation.wage;
                                         }
-                                        let duration =
-                                            number(
-                                                state,
-                                                config,
-                                                comptime!(Field::LaborMinutes as u32),
-                                                firm,
-                                            ) + ceildiv(dist, config[ConfigLayout::COMMUTE_SPEED])
-                                                * COMMUTE_LEGS;
+                                        let duration = number(
+                                            state,
+                                            config,
+                                            comptime!(Field::LaborMinutes as u32),
+                                            firm,
+                                        ) + ceildiv(dist, config.commute_speed)
+                                            * COMMUTE_LEGS;
                                         eligible = eligible
                                             && number(
                                                 state,
@@ -938,7 +921,7 @@ fn propose(
                                             ),
                                             duration,
                                         );
-                                        if config[ConfigLayout::HOME] > 0 {
+                                        if comptime!(config.home_mode == Feature::Enabled) {
                                             let conditions = 500
                                                 + number(
                                                     state,
@@ -967,8 +950,8 @@ fn propose(
                                             );
                                             let missing = max(need, bread) - bread;
                                             let minutes = missing
-                                                * (config[ConfigLayout::HOME]
-                                                    + config[ConfigLayout::HOME + 1]);
+                                                * (config.home.milling_minutes
+                                                    + config.home.baking_minutes);
                                             let time = number(
                                                 state,
                                                 config,
@@ -1133,7 +1116,7 @@ impl EventBuilder {
             position: event as usize * EVENT_WORDS,
         }
     }
-    fn leg(&mut self, config: &[u32], bundles: &mut [u32], leg: KernelLeg) {
+    fn leg(&mut self, config: &EconomyConfig, bundles: &mut [u32], leg: KernelLeg) {
         let base = self.position;
         bundles[base + LegLayout::COORDINATE] = at(config, leg.field, leg.actor);
         bundles[base + LegLayout::DEBIT_LOW] = leg.debit.extract(LOW_WORD);
@@ -1148,7 +1131,7 @@ impl EventBuilder {
 
     fn transfer(
         &mut self,
-        config: &[u32],
+        config: &EconomyConfig,
         bundles: &mut [u32],
         field: u32,
         actor: u32,
@@ -1180,7 +1163,7 @@ enum EventStorage {
 fn construct(
     state: &mut [u32],
     actors: &[u32],
-    config: &[u32],
+    config: &EconomyConfig,
     proposals: &mut [u32],
     bundles: &mut [u32],
     control: &[Atomic<u32>],
@@ -1216,7 +1199,7 @@ fn construct(
                 MarketFlag::Labor => {
                     let mut offered_wage =
                         number(state, config, comptime!(Field::Wage as u32), other);
-                    if config[ConfigLayout::BARGAINING + PolicyLayout::ENABLED] != 0 {
+                    if comptime!(config.bargaining.enabled == Feature::Enabled) {
                         offered_wage = quantity.extract(LOW_WORD);
                     }
                     let wage = times32(
@@ -1254,7 +1237,7 @@ fn construct(
                         actor,
                         ticks(
                             number(state, config, comptime!(Field::LaborMinutes as u32), other)
-                                + ceildiv(trip, config[ConfigLayout::COMMUTE_SPEED]) * COMMUTE_LEGS,
+                                + ceildiv(trip, config.commute_speed) * COMMUTE_LEGS,
                             0u32,
                         ),
                         zero,
@@ -1374,7 +1357,7 @@ fn construct(
                             guard: prior,
                         },
                     );
-                    if config[ConfigLayout::PAYROLL_ENABLED] != 0 {
+                    if comptime!(config.payroll == Feature::Enabled) {
                         let accrued = add_checked(control, prior, quantity);
                         let before = PayrollAccrual::new(prior, config, control);
                         let after = PayrollAccrual::new(accrued, config, control);
@@ -1475,10 +1458,9 @@ fn construct(
                         number(state, config, comptime!(Field::Price as u32), other),
                     );
                     let slot = BASE_FIELDS as u32
-                        + (good - 1) * config[ConfigLayout::RING]
-                        + (parameters.day
-                            + max(ceildiv(trip, config[ConfigLayout::SHIPMENT_SPEED]), 1u32))
-                            % config[ConfigLayout::RING];
+                        + (good - 1) * config.ring
+                        + (parameters.day + max(ceildiv(trip, config.shipment_speed), 1u32))
+                            % config.ring;
                     event.transfer(
                         config,
                         bundles,
@@ -1608,15 +1590,12 @@ fn construct(
 fn summarize(
     state: &mut [u32],
     actors: &[u32],
-    config: &[u32],
+    config: &EconomyConfig,
     bundles: &mut [u32],
     control: &[Atomic<u32>],
     id: u32,
 ) {
-    let groups = ceildiv(
-        config[ConfigLayout::ACTORS],
-        SummaryLayout::ACTORS_PER_GROUP,
-    );
+    let groups = ceildiv(config.actors, SummaryLayout::ACTORS_PER_GROUP);
     if id < groups {
         let mut totals = Array::<Ticks>::new(SummaryLayout::METRICS);
         for metric in 0..SummaryLayout::METRICS {
@@ -1628,7 +1607,7 @@ fn summarize(
             totals[(SummaryLayout::WAGE_MINIMA + good) as usize] = ticks(u32::MAX, u32::MAX);
             totals[(SummaryLayout::PRICE_MINIMA + good) as usize] = ticks(u32::MAX, u32::MAX);
         }
-        let count = config[ConfigLayout::ACTORS];
+        let count = config.actors;
         for offset in 0..ceildiv(count - id, groups) {
             let actor = id + offset * groups;
             totals[SummaryLayout::CASH as usize] = add_checked(
@@ -1670,7 +1649,7 @@ fn summarize(
                 totals[SummaryLayout::CASH as usize],
                 add_checked(control, payroll_reserve, add_checked(control, tax, charge)),
             );
-            if config[ConfigLayout::PAYROLL_ENABLED] != 0 {
+            if comptime!(config.payroll == Feature::Enabled) {
                 let accrued = PayrollAccrual::new(
                     value(state, config, comptime!(Field::GrossIncome as u32), actor),
                     config,
@@ -1732,11 +1711,11 @@ fn summarize(
                     let x = actors
                         [ActorLayout::X * (actors.len() / ActorLayout::WORDS) + actor as usize]
                         * SummaryLayout::REGION_SIDE as u32
-                        / config[ConfigLayout::MAP_SIZE];
+                        / config.map_size;
                     let y = actors
                         [ActorLayout::Y * (actors.len() / ActorLayout::WORDS) + actor as usize]
                         * SummaryLayout::REGION_SIDE as u32
-                        / config[ConfigLayout::MAP_SIZE];
+                        / config.map_size;
                     control[(SummaryLayout::REGIONS_START as u32
                         + y * SummaryLayout::REGION_SIDE as u32
                         + x) as usize]
@@ -1880,14 +1859,14 @@ fn summarize(
                     value(state, config, CONSUMPTION_FIELDS as u32 + good, actor),
                 );
                 let mut in_ring = zero();
-                for slot in 0u32..config[ConfigLayout::RING] {
+                for slot in 0u32..config.ring {
                     in_ring = add_checked(
                         control,
                         in_ring,
                         value(
                             state,
                             config,
-                            BASE_FIELDS as u32 + good * config[ConfigLayout::RING] + slot,
+                            BASE_FIELDS as u32 + good * config.ring + slot,
                             actor,
                         ),
                     );
@@ -1915,12 +1894,12 @@ fn summarize(
 #[cube]
 fn inspect(
     state: &mut [u32],
-    config: &[u32],
+    config: &EconomyConfig,
     proposals: &mut [u32],
     parameters: &EconomyParameters,
     id: u32,
 ) {
-    if id < config[ConfigLayout::FIELDS] {
+    if id < config.fields {
         let item = value(state, config, id, parameters.offset);
         proposals[(id * TICK_WORDS as u32) as usize] = item.extract(LOW_WORD);
         proposals[(id * TICK_WORDS as u32 + 1u32) as usize] = item.extract(HIGH_WORD);
@@ -1956,7 +1935,7 @@ pub enum EconomyStage {
 pub fn economy(
     state: &mut [u32],
     actors: &[u32],
-    config: &[u32],
+    config: &EconomyConfig,
     spatial: &mut [u32],
     proposals: &mut [u32],
     bundles: &mut [u32],
@@ -1986,7 +1965,7 @@ pub fn economy(
         ),
         EconomyStage::MarketActivity => {
             let mut active = 0u32;
-            for actor in id * 256..min((id + 1) * 256, config[ConfigLayout::ACTORS]) {
+            for actor in id * 256..min((id + 1) * 256, config.actors) {
                 active += u32::cast_from(
                     proposals[actor as usize * ProposalLayout::WORDS + ProposalLayout::ACTOR]
                         != NO_ACTOR,
@@ -2045,7 +2024,7 @@ pub fn economy(
 fn discoverable(
     state: &mut [u32],
     actors: &[u32],
-    config: &[u32],
+    config: &EconomyConfig,
     parameters: &EconomyParameters,
     firm: u32,
 ) -> bool {
@@ -2142,7 +2121,7 @@ fn group_merge(scratch: &mut [u32], parameters: &EconomyParameters, id: u32) {
 fn group_execute(
     state: &mut [u32],
     actors: &[u32],
-    config: &[u32],
+    config: &EconomyConfig,
     proposals: &mut [u32],
     scratch: &mut [u32],
     control: &[Atomic<u32>],
@@ -2213,12 +2192,12 @@ fn group_execute(
 fn index_count(
     state: &mut [u32],
     actors: &[u32],
-    config: &[u32],
+    config: &EconomyConfig,
     spatial: &mut [u32],
     parameters: &EconomyParameters,
     block: u32,
 ) {
-    let cells = config[ConfigLayout::SPATIAL_SIDE] * config[ConfigLayout::SPATIAL_SIDE];
+    let cells = config.spatial_side * config.spatial_side;
     let segment = index_segment(config, parameters);
     let members = spatial[(segment + cells) as usize];
     if block * DISCOVERY_BLOCK < members {
@@ -2227,14 +2206,14 @@ fn index_count(
             let firm = spatial[(segment + cells + 1 + member) as usize];
             count += u32::cast_from(discoverable(state, actors, config, parameters, firm));
         }
-        let base = 3 * (cells + 1 + config[ConfigLayout::ACTORS]);
+        let base = 3 * (cells + 1 + config.actors);
         spatial[(base + block) as usize] = count;
     }
 }
 #[cube]
-fn index_segment(config: &[u32], parameters: &EconomyParameters) -> u32 {
-    let cells = config[ConfigLayout::SPATIAL_SIDE] * config[ConfigLayout::SPATIAL_SIDE];
-    (cells + 1 + config[ConfigLayout::ACTORS])
+fn index_segment(config: &EconomyConfig, parameters: &EconomyParameters) -> u32 {
+    let cells = config.spatial_side * config.spatial_side;
+    (cells + 1 + config.actors)
         * comptime!(if parameters.market.good() == Some(Good::Bread) {
             1u32
         } else {
@@ -2242,12 +2221,17 @@ fn index_segment(config: &[u32], parameters: &EconomyParameters) -> u32 {
         })
 }
 #[cube]
-fn index_prefix(config: &[u32], spatial: &mut [u32], parameters: &EconomyParameters, id: u32) {
+fn index_prefix(
+    config: &EconomyConfig,
+    spatial: &mut [u32],
+    parameters: &EconomyParameters,
+    id: u32,
+) {
     if id == 0 {
-        let cells = config[ConfigLayout::SPATIAL_SIDE] * config[ConfigLayout::SPATIAL_SIDE];
+        let cells = config.spatial_side * config.spatial_side;
         let segment = index_segment(config, parameters);
         let blocks = ceildiv(spatial[(segment + cells) as usize], DISCOVERY_BLOCK);
-        let base = 3 * (cells + 1 + config[ConfigLayout::ACTORS]);
+        let base = 3 * (cells + 1 + config.actors);
         let mut offset = 0u32;
         for block in 0..blocks {
             let count = spatial[(base + block) as usize];
@@ -2261,17 +2245,17 @@ fn index_prefix(config: &[u32], spatial: &mut [u32], parameters: &EconomyParamet
 fn index_offsets(
     state: &mut [u32],
     actors: &[u32],
-    config: &[u32],
+    config: &EconomyConfig,
     spatial: &mut [u32],
     parameters: &EconomyParameters,
     cell: u32,
 ) {
-    let cells = config[ConfigLayout::SPATIAL_SIDE] * config[ConfigLayout::SPATIAL_SIDE];
+    let cells = config.spatial_side * config.spatial_side;
     if cell <= cells {
         let segment = index_segment(config, parameters);
         let member = spatial[(segment + cell) as usize];
         let block = member / DISCOVERY_BLOCK;
-        let base = 3 * (cells + 1 + config[ConfigLayout::ACTORS]);
+        let base = 3 * (cells + 1 + config.actors);
         let mut offset = spatial[(base + block) as usize];
         for candidate in block * DISCOVERY_BLOCK..member {
             let firm = spatial[(segment + cells + 1 + candidate) as usize];
@@ -2284,16 +2268,16 @@ fn index_offsets(
 fn index_fill(
     state: &mut [u32],
     actors: &[u32],
-    config: &[u32],
+    config: &EconomyConfig,
     spatial: &mut [u32],
     parameters: &EconomyParameters,
     block: u32,
 ) {
-    let cells = config[ConfigLayout::SPATIAL_SIDE] * config[ConfigLayout::SPATIAL_SIDE];
+    let cells = config.spatial_side * config.spatial_side;
     let segment = index_segment(config, parameters);
     let members = spatial[(segment + cells) as usize];
     if block * DISCOVERY_BLOCK < members {
-        let base = 3 * (cells + 1 + config[ConfigLayout::ACTORS]);
+        let base = 3 * (cells + 1 + config.actors);
         let mut offset = spatial[(base + block) as usize];
         for member in block * DISCOVERY_BLOCK..min((block + 1) * DISCOVERY_BLOCK, members) {
             let firm = spatial[(segment + cells + 1 + member) as usize];
@@ -2306,8 +2290,8 @@ fn index_fill(
 }
 
 #[cube]
-fn index_prices(state: &mut [u32], config: &[u32], spatial: &mut [u32], block: u32) {
-    let cells = config[ConfigLayout::SPATIAL_SIDE] * config[ConfigLayout::SPATIAL_SIDE];
+fn index_prices(state: &mut [u32], config: &EconomyConfig, spatial: &mut [u32], block: u32) {
+    let cells = config.spatial_side * config.spatial_side;
     let count = spatial[cells as usize];
     if block * DISCOVERY_BLOCK < count {
         let mut quote = u32::new(comptime!(i64::from(u32::MAX)));
@@ -2318,7 +2302,7 @@ fn index_prices(state: &mut [u32], config: &[u32], spatial: &mut [u32], block: u
                 number(state, config, comptime!(Field::Price as u32), actor),
             );
         }
-        let base = 3 * (cells + 1 + config[ConfigLayout::ACTORS]);
+        let base = 3 * (cells + 1 + config.actors);
         spatial[(base + block) as usize] = quote;
     }
 }
@@ -2336,7 +2320,7 @@ fn scaled(control: &[Atomic<u32>], value: Ticks, numerator: u32, denominator: u3
 #[cube]
 fn record_feedback(
     state: &mut [u32],
-    config: &[u32],
+    config: &EconomyConfig,
     proposals: &mut [u32],
     outcomes: &mut [u32],
     feedback: &[Atomic<u32>],
@@ -2369,8 +2353,8 @@ fn record_feedback(
     }
 }
 #[cube]
-fn apply_feedback(state: &mut [u32], config: &[u32], feedback: &[Atomic<u32>], id: u32) {
-    if id < config[ConfigLayout::ACTORS] {
+fn apply_feedback(state: &mut [u32], config: &EconomyConfig, feedback: &[Atomic<u32>], id: u32) {
+    if id < config.actors {
         let base = CONTROL_WORDS as u32 + id * TICK_WORDS as u32;
         set(
             state,

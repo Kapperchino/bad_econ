@@ -119,13 +119,11 @@ pub(super) fn sum_ticks(
     if elements > 0 {
         finish_sum::launch(
             &device.client,
-            CubeCount::Static((elements as u32).div_ceil(device.workgroup), 1, 1),
+            device.count(elements),
             CubeDim::new_1d(device.workgroup),
-            unsafe { BufferArg::from_raw_parts(sums.handle, elements * 2) },
-            unsafe { BufferArg::from_raw_parts(output.handle.clone(), elements) },
-            unsafe {
-                BufferArg::from_raw_parts(control.handle.clone(), control.meta.num_elements())
-            },
+            sums.into_arg().into_buffer_arg(),
+            output.clone().into_arg().into_buffer_arg(),
+            control.clone().into_buffer_arg(),
         );
     }
     Ok(output)
@@ -139,6 +137,13 @@ pub(super) fn summary(
     groups: usize,
 ) -> Result<()> {
     use super::layout::SummaryLayout as S;
+    let input = TensorHandle::new_contiguous(
+        [groups, S::METRICS],
+        input.handle.clone(),
+        u64::elem_type_native(),
+    );
+    let output =
+        TensorHandle::new_contiguous([S::METRICS], output.handle.clone(), u64::elem_type_native());
     let mut start = 0;
     while start < S::METRICS {
         let operation = summary_operation(start as u32);
@@ -154,16 +159,10 @@ pub(super) fn summary(
         );
         columns::launch(
             &device.client,
-            CubeCount::Static(
-                ((groups * width) as u32).div_ceil(device.workgroup).max(1),
-                1,
-                1,
-            ),
+            device.count(groups * width),
             CubeDim::new_1d(device.workgroup),
-            unsafe {
-                BufferArg::from_raw_parts(input.handle.clone(), input.meta.num_elements() / 2)
-            },
-            unsafe { BufferArg::from_raw_parts(values.handle.clone(), groups * width) },
+            input.clone().into_arg().into_buffer_arg(),
+            values.clone().into_arg().into_buffer_arg(),
             S::METRICS as u32,
             width as u32,
             start as u32,
@@ -174,12 +173,10 @@ pub(super) fn summary(
         };
         store_columns::launch(
             &device.client,
-            CubeCount::Static((width as u32).div_ceil(device.workgroup), 1, 1),
+            device.count(width),
             CubeDim::new_1d(device.workgroup),
-            unsafe { BufferArg::from_raw_parts(total.handle, width) },
-            unsafe {
-                BufferArg::from_raw_parts(output.handle.clone(), output.meta.num_elements() / 2)
-            },
+            total.into_arg().into_buffer_arg(),
+            output.clone().into_arg().into_buffer_arg(),
             start as u32,
         );
         start += width;
@@ -188,7 +185,13 @@ pub(super) fn summary(
 }
 
 #[cube(launch)]
-fn columns(input: &[u64], output: &mut [u64], input_columns: u32, columns: u32, start: u32) {
+fn columns(
+    input: &[u64],
+    output: &mut [u64],
+    #[comptime] input_columns: u32,
+    #[comptime] columns: u32,
+    start: u32,
+) {
     let index = ABSOLUTE_POS;
     if index < output.len() {
         output[index] = input[index / columns as usize * input_columns as usize

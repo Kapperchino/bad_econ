@@ -1,13 +1,10 @@
+use crate::simulation::configuration::{Configuration, EconomyConfig};
 pub(super) mod entries;
-use super::{
-    Device,
-    layout::{ActorLayout as A, ConfigLayout as C},
-    words::*,
-};
+use super::{Device, layout::ActorLayout as A, words::*};
 use crate::domain::{ActorRows, Field, Position, Scenario, State};
 use anyhow::{Context, Result};
 use burn_wgpu::CubeTensor;
-use cubecl::{CubeCount, CubeDim, prelude::*};
+use cubecl::{CubeDim, prelude::*};
 use std::collections::BTreeMap;
 
 #[derive(Clone, Default)]
@@ -126,14 +123,14 @@ enum Stage {
 fn transition(
     state: &mut [u32],
     actors: &[u32],
-    config: &[u32],
+    config: &EconomyConfig,
     requests: &[u32],
     incoming: &[Atomic<u32>],
     day: u32,
     #[comptime] stage: Stage,
 ) {
     let actor = ABSOLUTE_POS as u32;
-    let count = config[C::ACTORS];
+    let count = config.actors;
     if actor < count {
         let action = requests[actor as usize];
         let kind = action >> 24;
@@ -173,7 +170,7 @@ fn transition(
                     actors[A::Y * stride + destination as usize],
                 );
                 let distance = max(x, dx) - min(x, dx) + max(y, dy) - min(y, dy);
-                let speed = config[C::SHIPMENT_SPEED];
+                let speed = config.shipment_speed;
                 let duration = max((distance + speed - 1) / speed, 1);
                 store(
                     state,
@@ -235,26 +232,21 @@ pub(super) fn apply(
     device: &Device,
     state: &CubeTensor,
     actors: &CubeTensor,
-    config: &CubeTensor,
+    config: &Configuration,
     requests: &CubeTensor,
     scratch: &CubeTensor,
     day: u32,
 ) {
-    let argument = |tensor: &CubeTensor| unsafe {
-        BufferArg::from_raw_parts(tensor.handle.clone(), tensor.meta.shape()[0])
-    };
-    let groups = (requests.meta.shape()[0] as u32)
-        .div_ceil(device.workgroup)
-        .max(1);
-    let x = groups.min(u16::MAX.into());
+    let argument = |tensor: &CubeTensor| tensor.clone().into_buffer_arg();
+    let cube_count = device.count(requests.meta.num_elements());
     for stage in [Stage::Clear, Stage::Count, Stage::Apply] {
         transition::launch(
             &device.client,
-            CubeCount::Static(x, groups.div_ceil(x), 1),
+            cube_count.clone(),
             CubeDim::new_1d(device.workgroup),
             argument(state),
             argument(actors),
-            argument(config),
+            config.launch(),
             argument(requests),
             argument(scratch),
             day,

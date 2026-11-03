@@ -288,18 +288,15 @@ fn transfer(
     actors: usize,
     stage: Transfer,
 ) {
-    let argument = |tensor: &CubeTensor| unsafe {
-        BufferArg::from_raw_parts(tensor.handle.clone(), tensor.meta.shape()[0])
-    };
+    let argument = |tensor: &CubeTensor| tensor.clone().into_buffer_arg();
     let count = match stage {
         Transfer::Scatter => source.meta.shape()[0],
         _ => target.meta.shape()[0],
     };
-    let groups = (count as u32).div_ceil(device.workgroup).max(1);
-    let x = groups.min(u16::MAX.into());
+    let cube_count = device.count(count);
     transfer_rows::launch(
         &device.client,
-        CubeCount::Static(x, groups.div_ceil(x), 1),
+        cube_count,
         CubeDim::new_1d(device.workgroup),
         argument(source),
         argument(target),

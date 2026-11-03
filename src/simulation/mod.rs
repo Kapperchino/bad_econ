@@ -1,5 +1,6 @@
 pub mod analytics;
 pub mod bargaining;
+mod configuration;
 mod demography;
 mod economy;
 mod enterprise;
@@ -85,7 +86,7 @@ pub struct Simulation {
     state: CubeTensor,
     audited: CubeTensor,
     actors: CubeTensor,
-    config: CubeTensor,
+    config: configuration::Configuration,
     spatial: CubeTensor,
     proposals: CubeTensor,
     events: CubeTensor,
@@ -153,8 +154,7 @@ impl Simulation {
         let snapshot = ObservationSnapshot::default();
         let demography = demography::DemographyRuntime::new(&device, &scenario, &initial)?;
 
-        let configuration = ConfigLayout::new(&scenario, &initial);
-        let config = device.tensor(bytemuck::cast_slice(std::slice::from_ref(&configuration)));
+        let config = configuration::Configuration::new(&device, &scenario, &initial);
         let actor_layouts = initial
             .actors
             .iter()
@@ -670,8 +670,7 @@ impl Simulation {
                 .chain(metadata.actors.iter().skip(actors.len()))
                 .collect();
         }
-        let configuration = ConfigLayout::new(&self.scenario, &metadata);
-        let config = self.device.tensor(bytemuck::cast_slice(&[configuration]));
+        let config = configuration::Configuration::new(&self.device, &self.scenario, &metadata);
         let rows = metadata
             .actors
             .iter()

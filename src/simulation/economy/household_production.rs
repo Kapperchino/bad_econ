@@ -1,10 +1,11 @@
 use super::*;
+use crate::simulation::configuration::EconomyConfig;
 
 #[cube]
 pub(super) fn reserve(
     state: &mut [u32],
     actors: &[u32],
-    config: &[u32],
+    config: &EconomyConfig,
     actor: u32,
     good: u32,
 ) -> Ticks {
@@ -14,7 +15,7 @@ pub(super) fn reserve(
     {
         held = ticks(
             number(state, config, comptime!(Field::FoodNeed as u32), actor)
-                * (config[ConfigLayout::COVERAGE] + config[ConfigLayout::RING]),
+                * (config.coverage + config.ring),
             0,
         );
     }
@@ -37,7 +38,7 @@ pub(super) fn reserve(
 pub(super) fn offers(
     state: &mut [u32],
     actors: &[u32],
-    config: &[u32],
+    config: &EconomyConfig,
     actor: u32,
     good: u32,
 ) -> bool {
@@ -54,7 +55,7 @@ pub(super) fn offers(
 #[cube]
 fn output(
     state: &mut [u32],
-    config: &[u32],
+    config: &EconomyConfig,
     control: &[Atomic<u32>],
     actor: u32,
     good: u32,
@@ -74,7 +75,7 @@ fn output(
 #[cube]
 pub(super) fn produce(
     state: &mut [u32],
-    config: &[u32],
+    config: &EconomyConfig,
     control: &[Atomic<u32>],
     actor: u32,
     day: u32,
@@ -84,8 +85,8 @@ pub(super) fn produce(
     let mut time = available;
     let plots = number(state, config, comptime!(Field::LandPlots as u32), actor);
     let season = day % 365;
-    let harvest = season >= config[ConfigLayout::HOME + 3]
-        && season < config[ConfigLayout::HOME + 3] + config[ConfigLayout::HOME + 4];
+    let harvest = season >= config.home.harvest_start
+        && season < config.home.harvest_start + config.home.harvest_days;
     let tools = !equal(
         value(state, config, comptime!(Field::Tools as u32), actor),
         zero(),
@@ -106,8 +107,8 @@ pub(super) fn produce(
         {
             let crop = value(state, config, comptime!(Field::CropWork as u32), actor);
             let yield_ticks = minimum(
-                divide(crop, max(config[ConfigLayout::HOME + 2], 1)),
-                ticks(plots * config[ConfigLayout::HOME + 5], 0),
+                divide(crop, max(config.home.cultivation_minutes, 1)),
+                ticks(plots * config.home.annual_yield_per_plot, 0),
             );
             output(
                 state,
@@ -124,7 +125,7 @@ pub(super) fn produce(
                 actor,
                 minus(
                     crop,
-                    multiply(control, yield_ticks, config[ConfigLayout::HOME + 2]),
+                    multiply(control, yield_ticks, config.home.cultivation_minutes),
                 ),
             );
             put_harvest(state, config, actor, day / 365 + 1);
@@ -132,7 +133,7 @@ pub(super) fn produce(
     }
     let target = ticks(
         number(state, config, comptime!(Field::FoodNeed as u32), actor)
-            * (config[ConfigLayout::COVERAGE] + config[ConfigLayout::RING] + 2),
+            * (config.coverage + config.ring + 2),
         0,
     );
     let bread_needed = positive(
@@ -148,9 +149,9 @@ pub(super) fn produce(
             flour_needed,
             value(state, config, comptime!(Field::Grain as u32), actor),
         ),
-        ticks(time / max(config[ConfigLayout::HOME], 1), 0),
+        ticks(time / max(config.home.milling_minutes, 1), 0),
     );
-    let milled_minutes = milled.extract(LOW_WORD) * config[ConfigLayout::HOME];
+    let milled_minutes = milled.extract(LOW_WORD) * config.home.milling_minutes;
     time -= milled_minutes;
     let grain = value(state, config, comptime!(Field::Grain as u32), actor);
     set(
@@ -174,9 +175,9 @@ pub(super) fn produce(
             bread_needed,
             value(state, config, comptime!(Field::Flour as u32), actor),
         ),
-        ticks(time / max(config[ConfigLayout::HOME + 1], 1), 0),
+        ticks(time / max(config.home.baking_minutes, 1), 0),
     );
-    time -= baked.extract(LOW_WORD) * config[ConfigLayout::HOME + 1];
+    time -= baked.extract(LOW_WORD) * config.home.baking_minutes;
     let flour = value(state, config, comptime!(Field::Flour as u32), actor);
     set(
         state,
@@ -227,7 +228,7 @@ pub(super) fn produce(
 }
 
 #[cube]
-fn put_harvest(state: &mut [u32], config: &[u32], actor: u32, year: u32) {
+fn put_harvest(state: &mut [u32], config: &EconomyConfig, actor: u32, year: u32) {
     set32(
         state,
         config,

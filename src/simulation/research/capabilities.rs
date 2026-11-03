@@ -90,13 +90,10 @@ impl CapabilityGraph {
                 let mut current = device.empty(self.nodes.max(1));
                 let mut next = device.empty(self.nodes.max(1));
                 let changed = device.tensor(&[0]);
-                let argument = |tensor: &CubeTensor| unsafe {
-                    BufferArg::from_raw_parts(tensor.handle.clone(), tensor.meta.shape()[0])
-                };
-                let groups = (self.nodes as u32).div_ceil(device.workgroup).max(1);
+                let argument = |tensor: &CubeTensor| tensor.clone().into_buffer_arg();
                 initialize::launch(
                     &device.client,
-                    CubeCount::Static(groups, 1, 1),
+                    device.count(self.nodes),
                     CubeDim::new_1d(device.workgroup),
                     argument(&seed),
                     argument(&mask),
@@ -112,7 +109,7 @@ impl CapabilityGraph {
                     device.write(&changed, &[0]);
                     propagate::launch(
                         &device.client,
-                        CubeCount::Static(groups, 1, 1),
+                        device.count(self.nodes),
                         CubeDim::new_1d(device.workgroup),
                         argument(&seed),
                         argument(&mask),

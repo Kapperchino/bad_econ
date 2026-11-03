@@ -1,7 +1,7 @@
 use super::{Good, Technique};
 use serde::{Deserialize, Serialize};
 
-#[derive(Clone, Copy, Debug, Default, Serialize, Deserialize, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, Default, Hash, Serialize, Deserialize, PartialEq, Eq)]
 pub enum Economy {
     #[default]
     Agrarian,

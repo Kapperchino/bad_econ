@@ -1,7 +1,8 @@
-use super::{Device, layout::ConfigLayout, words::*};
+use super::{Device, words::*};
 use crate::domain::{Field, State, enterprise::EnterpriseState};
+use crate::simulation::configuration::{Configuration, EconomyConfig, Feature};
 use burn_wgpu::CubeTensor;
-use cubecl::{CubeCount, CubeDim, prelude::*};
+use cubecl::{CubeDim, prelude::*};
 use std::collections::BTreeMap;
 
 pub(super) struct EnterpriseManagement {
@@ -31,19 +32,15 @@ impl EnterpriseManagement {
         }
     }
 
-    pub fn assign(&self, device: &Device, state: &CubeTensor, config: &CubeTensor, day: u32) {
+    pub fn assign(&self, device: &Device, state: &CubeTensor, config: &Configuration, day: u32) {
         if self.groups > 0 {
-            let argument = |tensor: &CubeTensor| unsafe {
-                BufferArg::from_raw_parts(tensor.handle.clone(), tensor.meta.shape()[0])
-            };
-            let groups = self.groups.div_ceil(device.workgroup);
-            let width = groups.min(u16::MAX.into());
+            let argument = |tensor: &CubeTensor| tensor.clone().into_buffer_arg();
             assign::launch(
                 &device.client,
-                CubeCount::Static(width, groups.div_ceil(width), 1),
+                device.count(self.groups as usize),
                 CubeDim::new_1d(device.workgroup),
                 argument(state),
-                argument(config),
+                config.launch(),
                 argument(&self.firms),
                 self.groups,
                 day,
@@ -53,10 +50,10 @@ impl EnterpriseManagement {
 }
 
 #[cube(launch)]
-fn assign(state: &mut [u32], config: &[u32], firms: &[u32], groups: u32, day: u32) {
+fn assign(state: &mut [u32], config: &EconomyConfig, firms: &[u32], groups: u32, day: u32) {
     let group = ABSOLUTE_POS as u32;
-    if group < groups && config[ConfigLayout::HOME] > 0 {
-        let count = config[ConfigLayout::ACTORS];
+    if group < groups && comptime!(config.home_mode == Feature::Enabled) {
+        let count = config.actors;
         let owner = firms[(group * 3) as usize];
         let start = firms[(group * 3 + 1) as usize];
         let end = firms[(group * 3 + 2) as usize];

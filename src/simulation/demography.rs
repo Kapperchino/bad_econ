@@ -4,7 +4,7 @@ use crate::domain::{Phase, Scenario, State, demography::*};
 use anyhow::{Context, Result, anyhow};
 use burn_wgpu::CubeTensor;
 use bytemuck::{Pod, Zeroable};
-use cubecl::{CubeCount, CubeDim, prelude::BufferArg};
+use cubecl::prelude::*;
 use std::{collections::HashMap, mem::offset_of};
 
 const OBSERVATION_SHARDS: usize = 1024;
@@ -38,36 +38,57 @@ impl PersonLayout {
     const COOLDOWN: usize = offset_of!(Self, cooldown) / WORD_BYTES;
 }
 
-#[repr(C)]
-#[derive(Clone, Copy, Pod, Zeroable)]
-struct PolicyLayout {
-    seed: [u32; 2],
+#[derive(CubeType, CubeLaunch, Clone, Copy)]
+struct DemographyParameters {
     minimum_age: u32,
     retirement_age: u32,
     births: u32,
     spacing: u32,
-    food: [u32; 5],
     work_food: u32,
-    background: [u32; 5],
-    occupational: [u32; 16],
     reference_minutes: u32,
     famine: u32,
-    vulnerability: [u32; 5],
     recovery: u32,
 }
-impl PolicyLayout {
-    const MINIMUM_AGE: usize = offset_of!(Self, minimum_age) / WORD_BYTES;
-    const RETIREMENT_AGE: usize = offset_of!(Self, retirement_age) / WORD_BYTES;
-    const BIRTHS: usize = offset_of!(Self, births) / WORD_BYTES;
-    const SPACING: usize = offset_of!(Self, spacing) / WORD_BYTES;
-    const FOOD: usize = offset_of!(Self, food) / WORD_BYTES;
-    const WORK_FOOD: usize = offset_of!(Self, work_food) / WORD_BYTES;
-    const BACKGROUND: usize = offset_of!(Self, background) / WORD_BYTES;
-    const OCCUPATIONAL: usize = offset_of!(Self, occupational) / WORD_BYTES;
-    const REFERENCE_MINUTES: usize = offset_of!(Self, reference_minutes) / WORD_BYTES;
-    const FAMINE: usize = offset_of!(Self, famine) / WORD_BYTES;
-    const VULNERABILITY: usize = offset_of!(Self, vulnerability) / WORD_BYTES;
-    const RECOVERY: usize = offset_of!(Self, recovery) / WORD_BYTES;
+impl DemographyParameters {
+    fn launch(self) -> DemographyParametersLaunch {
+        DemographyParametersLaunch {
+            minimum_age: self.minimum_age,
+            retirement_age: self.retirement_age,
+            births: self.births,
+            spacing: self.spacing,
+            work_food: self.work_food,
+            reference_minutes: self.reference_minutes,
+            famine: self.famine,
+            recovery: self.recovery,
+        }
+    }
+}
+#[derive(CubeType, CubeLaunch)]
+struct DemographyPolicy {
+    parameters: DemographyParameters,
+    food: Box<[u32]>,
+    background: Box<[u32]>,
+    occupational: Box<[u32]>,
+    vulnerability: Box<[u32]>,
+}
+#[derive(Clone)]
+struct Policy {
+    parameters: DemographyParameters,
+    food: CubeTensor,
+    background: CubeTensor,
+    occupational: CubeTensor,
+    vulnerability: CubeTensor,
+}
+impl Policy {
+    fn launch(&self) -> DemographyPolicyLaunch {
+        DemographyPolicyLaunch {
+            parameters: self.parameters.launch(),
+            food: self.food.clone().into_buffer_arg(),
+            background: self.background.clone().into_buffer_arg(),
+            occupational: self.occupational.clone().into_buffer_arg(),
+            vulnerability: self.vulnerability.clone().into_buffer_arg(),
+        }
+    }
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
@@ -82,7 +103,7 @@ pub struct DemographyRuntime {
     people: CubeTensor,
     audited: CubeTensor,
     ranges: CubeTensor,
-    policy: CubeTensor,
+    policy: Policy,
     births: CubeTensor,
     count: usize,
     range_counts: Vec<u32>,
@@ -142,29 +163,27 @@ impl DemographyRuntime {
         let audited = device.tensor(bytemuck::cast_slice(&encoded));
         let config = &scenario.config().demography;
         let mortality = &config.mortality;
-        let layout = PolicyLayout {
-            seed: [
-                scenario.config().seed as u32,
-                (scenario.config().seed >> 32) as u32,
-            ],
-            minimum_age: config.minimum_work_age_years * DAYS_PER_YEAR,
-            retirement_age: config.retirement_age_years * DAYS_PER_YEAR,
-            births: config.annual_births_per_million_fertile_women,
-            spacing: config.birth_spacing_days,
-            food: config.food_requirement_per_mille,
-            work_food: config.work_food_per_mille,
-            background: mortality.background_annual_ppm,
-            occupational: mortality.occupational_annual_ppm,
-            reference_minutes: mortality.reference_work_minutes_per_year,
-            famine: mortality.famine_daily_ppm_at_thirty_days,
-            vulnerability: mortality.famine_vulnerability_per_mille,
-            recovery: mortality.exposure_recovery_per_day,
+        let policy = Policy {
+            parameters: DemographyParameters {
+                minimum_age: config.minimum_work_age_years * DAYS_PER_YEAR,
+                retirement_age: config.retirement_age_years * DAYS_PER_YEAR,
+                births: config.annual_births_per_million_fertile_women,
+                spacing: config.birth_spacing_days,
+                work_food: config.work_food_per_mille,
+                reference_minutes: mortality.reference_work_minutes_per_year,
+                famine: mortality.famine_daily_ppm_at_thirty_days,
+                recovery: mortality.exposure_recovery_per_day,
+            },
+            food: device.tensor(&config.food_requirement_per_mille),
+            background: device.tensor(&mortality.background_annual_ppm),
+            occupational: device.tensor(&mortality.occupational_annual_ppm),
+            vulnerability: device.tensor(&mortality.famine_vulnerability_per_mille),
         };
         Ok(Self {
             people,
             audited,
             ranges: device.tensor(&ranges),
-            policy: device.tensor(bytemuck::cast_slice(&[layout])),
+            policy,
             births: device.tensor(&vec![0; state.actors.len()]),
             count,
             range_counts: ranges.chunks_exact(2).map(|range| range[1]).collect(),
@@ -177,16 +196,13 @@ impl DemographyRuntime {
         device: &Device,
         state: &CubeTensor,
         actors: &CubeTensor,
-        config: &CubeTensor,
+        config: &super::configuration::Configuration,
         day: u64,
         stage: Stage,
     ) -> Result<()> {
-        let argument = |tensor: &CubeTensor| unsafe {
-            BufferArg::from_raw_parts(tensor.handle.clone(), tensor.meta.shape()[0])
-        };
+        let argument = |tensor: &CubeTensor| tensor.clone().into_buffer_arg();
         let count = self.births.meta.shape()[0];
-        let groups = (count as u32).div_ceil(device.workgroup).max(1);
-        let x = groups.min(u16::MAX.into());
+        let cube_count = device.count(count);
         let samples = match stage {
             Stage::Mortality => super::random::samples(
                 device,
@@ -199,16 +215,16 @@ impl DemographyRuntime {
         };
         kernels::step::launch(
             &device.client,
-            CubeCount::Static(x, groups.div_ceil(x), 1),
+            cube_count,
             CubeDim::new_1d(device.workgroup),
             argument(state),
             argument(actors),
-            argument(config),
+            config.launch(),
             argument(&self.people),
             argument(&self.ranges),
-            argument(&self.policy),
+            self.policy.launch(),
             argument(&self.births),
-            unsafe { BufferArg::from_raw_parts(samples.handle, samples.meta.num_elements()) },
+            samples.clone().into_buffer_arg(),
             u32::try_from(day)?,
             stage,
         );
@@ -219,7 +235,7 @@ impl DemographyRuntime {
         device: &Device,
         state: &CubeTensor,
         actors: &CubeTensor,
-        config: &CubeTensor,
+        config: &super::configuration::Configuration,
         phase: Phase,
         day: u64,
     ) -> Result<()> {
@@ -238,7 +254,7 @@ impl DemographyRuntime {
         device: &Device,
         state: &CubeTensor,
         actors: &CubeTensor,
-        config: &CubeTensor,
+        config: &super::configuration::Configuration,
         phase: Phase,
         day: u64,
     ) -> Result<()> {
@@ -311,17 +327,14 @@ impl DemographyRuntime {
     pub fn observation(&self, device: &Device) -> Result<PopulationObservation> {
         let shards = device.tensor(&[0; OBSERVATION_SHARDS * 8]);
         let output = device.empty(8);
-        let argument = |tensor: &CubeTensor| unsafe {
-            BufferArg::from_raw_parts(tensor.handle.clone(), tensor.meta.shape()[0])
-        };
-        let groups = (self.count as u32).div_ceil(device.workgroup).max(1);
-        let x = groups.min(u16::MAX.into());
+        let argument = |tensor: &CubeTensor| tensor.clone().into_buffer_arg();
+        let cube_count = device.count(self.count);
         kernels::observe::launch(
             &device.client,
-            CubeCount::Static(x, groups.div_ceil(x), 1),
+            cube_count,
             CubeDim::new_1d(device.workgroup),
             argument(&self.people),
-            argument(&self.policy),
+            self.policy.launch(),
             argument(&shards),
             self.count as u32,
         );
@@ -341,7 +354,7 @@ impl DemographyRuntime {
             &device.client,
             CubeCount::Static(1, 1, 1),
             CubeDim::new_1d(device.workgroup),
-            unsafe { BufferArg::from_raw_parts(sums.handle, 8) },
+            sums.into_arg().into_buffer_arg(),
             argument(&output),
         );
         let totals = device.read(&output)?;
@@ -394,14 +407,11 @@ impl DemographyRuntime {
             initial_population: self.initial_population,
             seed: self.seed,
         };
-        let argument = |tensor: &CubeTensor| unsafe {
-            BufferArg::from_raw_parts(tensor.handle.clone(), tensor.meta.shape()[0])
-        };
-        let groups = (births.len() as u32).div_ceil(device.workgroup).max(1);
-        let x = groups.min(u16::MAX.into());
+        let argument = |tensor: &CubeTensor| tensor.clone().into_buffer_arg();
+        let cube_count = device.count(births.len());
         kernels::grow::launch(
             &device.client,
-            CubeCount::Static(x, groups.div_ceil(x), 1),
+            cube_count,
             CubeDim::new_1d(device.workgroup),
             argument(&self.people),
             argument(&grown.people),

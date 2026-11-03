@@ -17,7 +17,7 @@ use crate::domain::{Phase, Scenario, State, research::*};
 use anyhow::{Context, Result, anyhow};
 use burn_wgpu::CubeTensor;
 use bytemuck::Zeroable;
-use cubecl::{CubeCount, CubeDim, prelude::BufferArg};
+use cubecl::CubeDim;
 pub use kernels::{AttemptOutcome, Participation};
 use sha2::{Digest, Sha256};
 use std::cell::Cell;
@@ -190,6 +190,7 @@ impl ResearchSnapshot {
 }
 
 struct EncodedResearch {
+    header: Header,
     configuration: Vec<u32>,
     state: Vec<u32>,
     work_items: usize,
@@ -397,6 +398,7 @@ impl EncodedResearch {
             hash.update(word.to_le_bytes());
         }
         Ok(Self {
+            header,
             configuration,
             state,
             work_items,
@@ -407,6 +409,7 @@ impl EncodedResearch {
 
 #[derive(Clone)]
 pub struct ResearchRuntime {
+    header: Header,
     configuration: CubeTensor,
     state: CubeTensor,
     audited: CubeTensor,
@@ -431,12 +434,12 @@ impl ResearchRuntime {
     ) -> Result<Self> {
         let encoded = EncodedResearch::new(config, scenario, initial)?;
         let runtime = Self {
-            configuration: device.tensor(&encoded.configuration),
+            header: encoded.header,
+            configuration: device.tensor(&encoded.configuration[Header::WORDS..]),
             state: device.tensor(&encoded.state),
             audited: device.empty(encoded.state.len()),
             table: device.tensor(&nonlinear::HAZARD_TABLE),
-            seed: u64::from(encoded.configuration[Header::SEED])
-                | (u64::from(encoded.configuration[Header::SEED + 1]) << 32),
+            seed: u64::from(encoded.header.seed),
             summary: device.empty(SummaryLayout::WORDS),
             summary_shards: device
                 .empty(SummaryLayout::WORDS * encoded.work_items.div_ceil(128).clamp(1, 256)),
@@ -532,22 +535,22 @@ impl ResearchRuntime {
             )?,
             _ => super::tensor::empty(device, [0]),
         };
-        let argument = |tensor: &CubeTensor| unsafe {
-            BufferArg::from_raw_parts(tensor.handle.clone(), tensor.meta.num_elements())
-        };
+        let argument = |tensor: &CubeTensor| tensor.clone().into_buffer_arg();
         let count = match launch.stage {
             ResearchStage::Summary => self.summary_shards.meta.shape()[0] / 2,
             _ => launch.count,
         };
-        let groups = (count as u32).div_ceil(device.workgroup).max(1);
-        let x = groups.min(u16::MAX as u32);
+        let cube_count = device.count(count);
         research::launch(
             &device.client,
-            CubeCount::Static(x, groups.div_ceil(x), 1),
+            cube_count,
             CubeDim::new_1d(device.workgroup),
             argument(launch.main),
             argument(launch.state),
-            argument(&self.configuration),
+            KernelResearchConfigLaunch {
+                parameters: self.header.launch(),
+                records: self.configuration.clone().into_buffer_arg(),
+            },
             argument(&self.table),
             argument(&samples),
             argument(match launch.stage {
@@ -585,17 +588,17 @@ impl ResearchRuntime {
         device: &Device,
         actors: &crate::domain::ActorRows,
     ) -> Result<Self> {
-        let mut words = device.read(&self.configuration)?;
-        let machines = words[Header::MACHINE_COUNT] as usize;
-        let stocks = words[Header::STOCK_COUNT] as usize;
+        let words = device.read(&self.configuration)?;
+        let machines = self.header.machine_count as usize;
+        let stocks = self.header.stock_count as usize;
         let unchanged_machines = (0..machines).all(|index| {
-            let base = words[Header::MACHINES] as usize;
+            let base = self.header.machines as usize - Header::WORDS;
             let actor = words[base + MachineLayout::FIRM * machines + index] as usize;
             actors.at(actor).capacity
                 == words[base + MachineLayout::MAXIMUM_PACKETS * machines + index]
         });
         let unchanged_stocks = (0..stocks).all(|index| {
-            let base = words[Header::STOCKS] as usize;
+            let base = self.header.stocks as usize - Header::WORDS;
             let actor = words[base + StockLayout::FIRM * stocks + index] as usize;
             actors.at(actor).capacity == words[base + StockLayout::MAXIMUM_PACKETS * stocks + index]
         });
@@ -605,9 +608,11 @@ impl ResearchRuntime {
                 "research checkpoint profile, table, configuration or shape mismatch"
             ))?,
         }
-        words[Header::ACTORS] = u32::try_from(actors.len())?;
         let next = Self {
-            configuration: device.tensor(&words),
+            header: Header {
+                actors: u32::try_from(actors.len())?,
+                ..self.header
+            },
             ..self.clone()
         };
         next.readback_bytes

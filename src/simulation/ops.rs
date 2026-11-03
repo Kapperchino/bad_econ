@@ -11,10 +11,9 @@ use burn::{
     tensor::{DType, Shape},
 };
 use burn_wgpu::{CubeBackend, CubeTensor, WgpuSetup, wgpu};
-use cubecl::{CubeCount, CubeDim, client::Client, prelude::BufferArg};
+use cubecl::{CubeCount, CubeDim, client::Client};
 
 const WORKGROUP_SIZES: [u32; 4] = [32, 64, 128, 256];
-const MAX_DISPATCH_GROUPS_PER_AXIS: u32 = u16::MAX as u32;
 const DEDICATED_BUFFER_BYTES: usize = 1024 * 1024;
 const MAX_READBACK_WORDS: usize = 4 * 1024 * 1024;
 const DIRECT_READBACK_WORDS: usize = 1024;
@@ -182,10 +181,12 @@ impl Device {
         }
         Ok(())
     }
-    fn count(&self, count: usize) -> CubeCount {
-        let groups = (count as u32).div_ceil(self.workgroup).max(1);
-        let x = groups.min(MAX_DISPATCH_GROUPS_PER_AXIS);
-        CubeCount::Static(x, groups.div_ceil(x), 1)
+    pub(super) fn count(&self, count: usize) -> CubeCount {
+        cubecl::calculate_cube_count_elemwise(
+            &self.client,
+            count.max(1),
+            CubeDim::new_1d(self.workgroup),
+        )
     }
     pub fn cpu(workgroup: u32) -> Result<Self> {
         let cube = cubecl::Device::cpu().map_err(|error| anyhow::anyhow!("{error}"))?;
@@ -206,7 +207,7 @@ impl Device {
 pub struct EconomyBuffers<'a> {
     pub state: &'a CubeTensor,
     pub actors: &'a CubeTensor,
-    pub config: &'a CubeTensor,
+    pub config: &'a super::configuration::Configuration,
     pub spatial: &'a CubeTensor,
     pub proposals: &'a CubeTensor,
     pub events: &'a CubeTensor,
@@ -246,16 +247,14 @@ impl EconomyOps for CubeBackend {
         buffers: EconomyBuffers<'_>,
         parameters: &EconomyParameters,
     ) {
-        let argument = |tensor: &CubeTensor| unsafe {
-            BufferArg::from_raw_parts(tensor.handle.clone(), tensor.meta.shape()[0])
-        };
+        let argument = |tensor: &CubeTensor| tensor.clone().into_buffer_arg();
         economy::economy::launch(
             &device.client,
             device.count(count),
             CubeDim::new_1d(device.workgroup),
             argument(buffers.state),
             argument(buffers.actors),
-            argument(buffers.config),
+            buffers.config.launch(),
             argument(buffers.spatial),
             argument(buffers.proposals),
             argument(buffers.events),
@@ -271,9 +270,7 @@ impl EconomyOps for CubeBackend {
         buffers: SchedulerBuffers<'_>,
         parameters: SchedulerParameters,
     ) {
-        let argument = |tensor: &CubeTensor| unsafe {
-            BufferArg::from_raw_parts(tensor.handle.clone(), tensor.meta.shape()[0])
-        };
+        let argument = |tensor: &CubeTensor| tensor.clone().into_buffer_arg();
         scheduler::schedule::launch(
             &device.client,
             device.count(count),

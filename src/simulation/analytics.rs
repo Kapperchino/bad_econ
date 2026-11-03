@@ -483,7 +483,7 @@ impl DeviceOperator {
             &device.client,
             CubeCount::Static(1, 1, 1),
             CubeDim::new_1d(1),
-            unsafe { BufferArg::from_raw_parts(flags.handle, 2) },
+            flags.into_arg().into_buffer_arg(),
             argument(control),
         );
         Ok(())
@@ -570,7 +570,7 @@ impl DeviceOperator {
                     &device.client,
                     CubeCount::Static(1, 1, 1),
                     CubeDim::new_1d(1),
-                    unsafe { BufferArg::from_raw_parts(norm.handle, 1) },
+                    norm.into_arg().into_buffer_arg(),
                     argument(&error),
                     argument(&control),
                     certificate.numerator,
@@ -652,11 +652,11 @@ fn padded(mut words: Vec<u32>) -> Vec<u32> {
 }
 
 fn argument(tensor: &CubeTensor) -> BufferArg {
-    unsafe { BufferArg::from_raw_parts(tensor.handle.clone(), tensor.meta.num_elements()) }
+    tensor.clone().into_buffer_arg()
 }
 
 fn count(device: &Device, items: usize) -> CubeCount {
-    CubeCount::Static((items as u32).div_ceil(device.workgroup).max(1), 1, 1)
+    device.count(items)
 }
 
 fn faults(device: &Device, control: &CubeTensor) -> Result<Vec<u32>> {

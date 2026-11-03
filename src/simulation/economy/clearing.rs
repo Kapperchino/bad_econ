@@ -1,11 +1,12 @@
 use super::*;
+use crate::simulation::configuration::{EconomyConfig, Feature};
 use crate::simulation::scheduler::settle;
 
 #[cube]
 pub(super) fn actor_settlement(
     state: &mut [u32],
     actors: &[u32],
-    config: &[u32],
+    config: &EconomyConfig,
     proposals: &mut [u32],
     scratch: &mut [u32],
     control: &[Atomic<u32>],
@@ -34,16 +35,8 @@ pub(super) fn actor_settlement(
                 id,
                 comptime!(EventStorage::Local),
             );
-            settle(
-                state,
-                &event[..],
-                control,
-                0,
-                actor,
-                config[ConfigLayout::ACTORS],
-                posting,
-            )
-            .store(scratch, 4 * parameters.count + id);
+            settle(state, &event[..], control, 0, actor, config.actors, posting)
+                .store(scratch, 4 * parameters.count + id);
         }
     }
 }
@@ -76,7 +69,7 @@ impl PeerBalances {
     pub fn new(
         state: &mut [u32],
         actors: &[u32],
-        config: &[u32],
+        config: &EconomyConfig,
         parameters: &EconomyParameters,
         peer: u32,
     ) -> Self {
@@ -131,7 +124,7 @@ impl PeerBalances {
     pub fn offer(
         &mut self,
         state: &mut [u32],
-        config: &[u32],
+        config: &EconomyConfig,
         proposals: &mut [u32],
         control: &[Atomic<u32>],
         parameters: &EconomyParameters,
@@ -159,7 +152,7 @@ impl PeerBalances {
         match comptime!(parameters.market) {
             MarketFlag::Labor => {
                 let mut rate = self.quote;
-                if config[ConfigLayout::BARGAINING + PolicyLayout::ENABLED] != 0 {
+                if comptime!(config.bargaining.enabled == Feature::Enabled) {
                     rate = quantity.extract(LOW_WORD);
                 }
                 let wage = times32(
@@ -241,7 +234,7 @@ impl PeerBalances {
         &self,
         state: &mut [u32],
         _actors: &[u32],
-        config: &[u32],
+        config: &EconomyConfig,
         parameters: &EconomyParameters,
         peer: u32,
     ) {
