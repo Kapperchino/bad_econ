@@ -1,4 +1,5 @@
 #![cfg(feature = "compute")]
+mod support;
 use anyhow::{Context, Result};
 use bad_econ::{
     domain::*,
@@ -264,7 +265,7 @@ struct PhaseReplay {
 fn gpu_phases_match_across_workgroups_and_experiments() -> Result<()> {
     let mut canonical = BTreeMap::new();
     for workgroup in [32, 64, 128, 256] {
-        let device = Device::headless(workgroup)?;
+        let device = support::device(workgroup)?;
         for experiment in [
             Experiment::Baseline,
             Experiment::Shortage,

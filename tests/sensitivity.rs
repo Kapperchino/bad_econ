@@ -1,7 +1,5 @@
 #![cfg(feature = "compute")]
-#[path = "support/estimates.rs"]
-mod estimates;
-mod support;
+use crate::{estimates, support};
 
 use anyhow::{Result, anyhow};
 use bad_econ::simulation::{Device, analytics::*};

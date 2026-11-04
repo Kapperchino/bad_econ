@@ -75,7 +75,7 @@ fn household_policy_admits_only_bounded_coefficients_and_reserved_rest() -> Resu
 }
 
 #[cfg(feature = "compute")]
-mod support;
+use crate::support;
 
 #[cfg(feature = "compute")]
 fn scenario(minutes: u32) -> Result<Scenario> {

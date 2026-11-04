@@ -3,6 +3,15 @@ name = "bad_econ"
 version = "0.1.0"
 edition = "2024"
 rust-version = "1.97.1"
+autotests = false
+
+[[test]]
+name = "integration"
+path = "tests/integration.rs"
+
+[[test]]
+name = "gpu"
+path = "tests/gpu.rs"
 
 [features]
 default = ["compute"]

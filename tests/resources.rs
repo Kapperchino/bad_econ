@@ -257,7 +257,7 @@ fn explicit_maps_replace_generated_maps_and_legacy_scenarios_default_to_generati
 }
 
 #[cfg(feature = "compute")]
-mod support;
+use crate::support;
 
 #[cfg(feature = "compute")]
 mod compute {

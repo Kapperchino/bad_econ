@@ -1,5 +1,5 @@
 #![cfg(feature = "compute")]
-mod support;
+use crate::support;
 use anyhow::Result;
 use bad_econ::{domain::*, runtime::SimulationCommand, simulation::Simulation};
 
@@ -209,13 +209,13 @@ fn household_formation_and_inheritance_preserve_assets_and_pending_deliveries() 
 
 #[test]
 fn exhausted_person_growth_budget_restores_the_complete_audited_day() -> Result<()> {
-    use bad_econ::simulation::{MemoryBudget, Trace};
+    use bad_econ::simulation::{Device, MemoryBudget, Trace};
     let mut config = Scenario::baseline(3000, 19, Experiment::Concentrated)?
         .config()
         .clone();
     config.demography.annual_births_per_million_fertile_women = 1_000_000;
     config.demography.mortality.background_annual_ppm = [0; 5];
-    let mut simulation = Simulation::new(Scenario::new(config)?, support::device(64)?)?;
+    let mut simulation = Simulation::new(Scenario::new(config)?, Device::headless(64)?)?;
     let initial = simulation.download()?;
     for phase in Phase::ALL
         .into_iter()
