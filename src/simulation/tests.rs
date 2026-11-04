@@ -740,6 +740,117 @@ fn vectorized_opening_matches_serial_deliveries_resets_and_faults_on_gpu() -> Re
 }
 
 #[test]
+fn partitioned_audits_match_original_tiles_extrema_and_overflow_on_gpu() -> Result<()> {
+    #[derive(Clone, Copy)]
+    enum Population {
+        Households,
+        SparseFirms,
+        MultipleFirmTiles,
+    }
+    #[derive(Clone, Copy)]
+    enum Amounts {
+        Wide,
+        Overflow,
+    }
+    for workgroup in [32, 64, 128, 256] {
+        for population in [
+            Population::Households,
+            Population::SparseFirms,
+            Population::MultipleFirmTiles,
+        ] {
+            let mut config = Scenario::baseline(4097, 42, Experiment::Baseline)?
+                .config()
+                .clone();
+            config.firms = match population {
+                Population::Households => 3,
+                Population::SparseFirms => 7,
+                Population::MultipleFirmTiles => 4097,
+            };
+            let scenario = Scenario::new(config)?;
+            let mut simulation = Simulation::new(scenario.clone(), device(workgroup)?)?;
+            let mut initial = scenario.initial()?;
+            for index in 0..initial.actors.len() {
+                let mut actor = initial.actors.at(index);
+                if let Population::Households = population {
+                    actor.kind = 0;
+                    initial.actors.set(index, actor.clone());
+                }
+                let wage = match actor.kind {
+                    0 => u64::MAX,
+                    _ => (1u64 << 40) + index as u64,
+                };
+                initial.set(Field::Wage, index, wage);
+                initial.set(Field::Price, index, (1u64 << 41) + index as u64);
+                initial.set(Field::EnterpriseStatus, index, 4 * (index % 2) as u64);
+                initial.set(Field::EnterpriseModel, index, (index % 2) as u64);
+            }
+            simulation.actors = simulation.device.tensor(
+                &initial
+                    .actors
+                    .iter()
+                    .map(|actor| ActorLayout::new(&actor, &scenario))
+                    .collect::<ActorMetadataRows>()
+                    .words(),
+            );
+            simulation.spatial = simulation
+                .device
+                .tensor(&SpatialIndex::new(&scenario, &initial).words);
+            simulation.audit =
+                economy::audit::AuditBuffers::new(&simulation.device, &initial.actors);
+            simulation.metadata.actors = initial.actors.clone();
+            for amounts in [Amounts::Wide, Amounts::Overflow] {
+                if let Amounts::Overflow = amounts {
+                    for index in 0..initial.actors.len() {
+                        initial.set(Field::Wage, index, u64::from(u32::MAX));
+                    }
+                }
+                simulation.device.write(
+                    &simulation.state,
+                    bytemuck::cast_slice(&encode(&initial.values)),
+                );
+                let poison = match amounts {
+                    Amounts::Wide => u32::MAX,
+                    Amounts::Overflow => 0,
+                };
+                simulation.device.write(
+                    &simulation.events,
+                    &vec![poison; simulation.events.meta.num_elements()],
+                );
+                simulation.audit_execution = AuditExecution::Tiled;
+                let actual = simulation.observe();
+                let totals =
+                    simulation
+                        .device
+                        .read_range(&simulation.summary, 0, SummaryLayout::WORDS)?;
+                let control = simulation.device.read(&simulation.control)?;
+                simulation.audit_execution = AuditExecution::Original;
+                let expected = simulation.observe();
+                assert_eq!(actual.is_ok(), expected.is_ok());
+                assert_eq!(
+                    totals,
+                    simulation
+                        .device
+                        .read_range(&simulation.summary, 0, SummaryLayout::WORDS)?
+                );
+                assert_eq!(control, simulation.device.read(&simulation.control)?);
+                let faults = match (amounts, population) {
+                    (
+                        Amounts::Overflow,
+                        Population::SparseFirms | Population::MultipleFirmTiles,
+                    ) => FaultFlags::ARITHMETIC_OVERFLOW,
+                    _ => FaultFlags::empty(),
+                };
+                assert_eq!(FaultFlags::read(&control)?, faults);
+                if let (Ok(actual), Ok(expected)) = (actual, expected) {
+                    assert_eq!(actual, expected);
+                }
+            }
+        }
+    }
+    Ok(())
+}
+
+#[test]
 fn parallel_transit_audits_match_serial_mismatch_and_overflow_faults_on_gpu() -> Result<()> {
     let scenario = Scenario::baseline(97, 42, Experiment::Transport)?;
     for workgroup in [32, 64, 128, 256] {

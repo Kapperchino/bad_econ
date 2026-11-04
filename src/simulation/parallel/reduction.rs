@@ -139,7 +139,7 @@ pub(in crate::simulation) fn summary(
     input: &CubeTensor,
     output: &CubeTensor,
     control: &CubeTensor,
-    groups: usize,
+    groups: &CubeTensor,
 ) -> Result<()> {
     use crate::simulation::layout::SummaryLayout as S;
     SummaryReduction::launch(
@@ -150,7 +150,7 @@ pub(in crate::simulation) fn summary(
             values: input.clone().into_buffer_arg(),
             output: output.clone().into_buffer_arg(),
             control: control.clone().into_buffer_arg(),
-            groups: groups as u32,
+            groups: groups.clone().into_buffer_arg(),
         },
     );
     Ok(())
@@ -161,7 +161,7 @@ struct SummaryInput {
     values: Box<[Ticks]>,
     output: Box<[Ticks]>,
     control: Box<[Atomic<u32>]>,
-    groups: u32,
+    groups: Box<[u32]>,
 }
 
 struct SummaryReduction;
@@ -181,13 +181,13 @@ impl GpuPass<SummaryInput> for SummarizeTiles {
             &input.values,
             &mut input.output,
             &input.control,
-            input.groups,
+            &input.groups,
         );
     }
 }
 
 #[cube]
-fn summary_tiles(input: &[Ticks], output: &mut [Ticks], control: &[Atomic<u32>], groups: u32) {
+fn summary_tiles(input: &[Ticks], output: &mut [Ticks], control: &[Atomic<u32>], groups: &[u32]) {
     use crate::simulation::layout::SummaryLayout as S;
     let metric = CUBE_POS as u32;
     if metric < S::METRICS as u32 {
@@ -205,7 +205,7 @@ fn summary_tiles(input: &[Ticks], output: &mut [Ticks], control: &[Atomic<u32>],
                 && metric < S::PRICE_MAXIMA + crate::domain::Good::COUNT as u32);
         let mut total = select(minimum, u64::MAX, 0u64);
         let mut group = UNIT_POS;
-        while group < groups {
+        while group < groups[metric as usize] {
             let words = input[(group * S::METRICS as u32 + metric) as usize];
             let value = u64::cast_from(words.extract(0usize))
                 | (u64::cast_from(words.extract(1usize)) << 32);
@@ -428,7 +428,8 @@ mod tests {
         let input = device.tensor(bytemuck::cast_slice(&values));
         let output = device.empty(S::WORDS);
         let control = device.tensor(&[0; CONTROL_WORDS]);
-        summary(&device, &input, &output, &control, groups)?;
+        let group_counts = device.tensor(&vec![groups as u32; S::METRICS]);
+        summary(&device, &input, &output, &control, &group_counts)?;
         let actual = device.read(&output)?;
         original_summary(&device, &input, &output, &control, groups)?;
         assert_eq!(actual, device.read(&output)?);

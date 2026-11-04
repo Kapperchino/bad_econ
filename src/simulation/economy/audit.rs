@@ -1,5 +1,7 @@
 use super::*;
+use crate::domain::ActorRows;
 use crate::simulation::{Device, configuration::Configuration};
+use anyhow::Result;
 use burn_wgpu::CubeTensor;
 use bytemuck::{Pod, Zeroable};
 
@@ -12,6 +14,63 @@ struct Metric {
     kind: u32,
     operation: u32,
     source: u32,
+}
+
+impl Metric {
+    fn population(&self) -> MetricPopulation {
+        match self.kind {
+            0 | NO_ACTOR => MetricPopulation::Actors,
+            _ => MetricPopulation::Firms,
+        }
+    }
+}
+
+#[derive(Clone, Copy, Debug, Hash, PartialEq, Eq)]
+enum MetricPopulation {
+    Actors,
+    Firms,
+}
+
+struct MetricSet {
+    ids: CubeTensor,
+    groups: usize,
+    population: MetricPopulation,
+}
+
+impl MetricSet {
+    fn new(
+        device: &Device,
+        metrics: &[Metric],
+        actors: &ActorRows,
+        population: MetricPopulation,
+    ) -> Self {
+        let ids = metrics
+            .iter()
+            .enumerate()
+            .filter_map(|(index, metric)| {
+                (metric.population() == population).then_some(index as u32)
+            })
+            .collect::<Vec<_>>();
+        let count = match population {
+            MetricPopulation::Actors => actors.len(),
+            MetricPopulation::Firms => actors.firms(),
+        };
+        Self {
+            ids: device.tensor(&ids),
+            groups: count.div_ceil(TILE_ACTORS).max(1),
+            population,
+        }
+    }
+}
+
+pub(in crate::simulation) struct AuditInput<'a> {
+    pub state: &'a CubeTensor,
+    pub actors: &'a CubeTensor,
+    pub config: &'a Configuration,
+    pub spatial: &'a CubeTensor,
+    pub partials: &'a CubeTensor,
+    pub summary: &'a CubeTensor,
+    pub control: &'a CubeTensor,
 }
 
 #[derive(Clone, Copy)]
@@ -29,10 +88,12 @@ enum Source {
 
 pub(in crate::simulation) struct AuditBuffers {
     metrics: CubeTensor,
+    sets: [MetricSet; 2],
+    groups: CubeTensor,
 }
 
 impl AuditBuffers {
-    pub fn new(device: &Device) -> Self {
+    pub fn new(device: &Device, actors: &ActorRows) -> Self {
         use SummaryLayout as S;
         let metrics = (0..S::METRICS as u32)
             .map(|metric| {
@@ -142,48 +203,64 @@ impl AuditBuffers {
                 definition
             })
             .collect::<Vec<_>>();
+        let sets = [MetricPopulation::Actors, MetricPopulation::Firms]
+            .map(|population| MetricSet::new(device, &metrics, actors, population));
+        let groups = metrics
+            .iter()
+            .map(|metric| {
+                sets.iter()
+                    .find(|set| set.population == metric.population())
+                    .expect("metric population")
+                    .groups as u32
+            })
+            .collect::<Vec<_>>();
         Self {
             metrics: device.tensor(bytemuck::cast_slice(&metrics)),
+            sets,
+            groups: device.tensor(&groups),
         }
     }
 
-    pub fn summarize(
-        &self,
-        device: &Device,
-        state: &CubeTensor,
-        actors: &CubeTensor,
-        config: &Configuration,
-        output: &CubeTensor,
-        control: &CubeTensor,
-    ) {
-        let count = actors.meta.num_elements() / ActorLayout::WORDS;
+    pub fn summarize(&self, device: &Device, input: AuditInput<'_>) -> Result<()> {
+        let count = input.actors.meta.num_elements() / ActorLayout::WORDS;
         let argument = |tensor: &CubeTensor| tensor.clone().into_buffer_arg();
         ActorValidation::launch(
             device,
             device.count(count * (Good::COUNT + 1)),
             CubeDim::new_1d(device.workgroup),
             ValidationInputLaunch {
-                state: argument(state),
-                actors: argument(actors),
-                config: config.launch(),
-                control: argument(control),
+                state: argument(input.state),
+                actors: argument(input.actors),
+                config: input.config.launch(),
+                control: argument(input.control),
             },
         );
-        let groups = count.div_ceil(TILE_ACTORS);
-        MetricSummary::launch(
+        for set in &self.sets {
+            MetricSummary::launch(
+                device,
+                device.count(set.groups * set.ids.meta.num_elements() * device.workgroup as usize),
+                CubeDim::new_1d(device.workgroup),
+                SummaryInputLaunch {
+                    state: argument(input.state),
+                    actors: argument(input.actors),
+                    config: input.config.launch(),
+                    spatial: argument(input.spatial),
+                    metrics: argument(&self.metrics),
+                    ids: argument(&set.ids),
+                    output: argument(input.partials),
+                    control: argument(input.control),
+                    groups: set.groups as u32,
+                    population: set.population,
+                },
+            );
+        }
+        parallel::reduction::summary(
             device,
-            device.count(groups * SummaryLayout::METRICS * device.workgroup as usize),
-            CubeDim::new_1d(device.workgroup),
-            SummaryInputLaunch {
-                state: argument(state),
-                actors: argument(actors),
-                config: config.launch(),
-                metrics: argument(&self.metrics),
-                output: argument(output),
-                control: argument(control),
-                groups: groups as u32,
-            },
-        );
+            input.partials,
+            input.summary,
+            input.control,
+            &self.groups,
+        )
     }
 }
 
@@ -216,10 +293,14 @@ struct SummaryInput {
     state: Box<[Ticks]>,
     actors: Box<[u32]>,
     config: EconomyConfig,
+    spatial: Box<[u32]>,
     metrics: Box<[Vector<u32, Const<4>>]>,
+    ids: Box<[u32]>,
     output: Box<[Ticks]>,
     control: Box<[Atomic<u32>]>,
     groups: u32,
+    #[cube(comptime)]
+    population: MetricPopulation,
 }
 
 struct MetricSummary;
@@ -235,41 +316,42 @@ impl GpuPass<SummaryInput> for SummarizeMetrics {
     type Output = ();
 
     fn execute(mut input: SummaryInput) {
-        summarize_metrics(
-            &input.state,
-            &input.actors,
-            &input.config,
-            &input.metrics,
-            &mut input.output,
-            &input.control,
-            input.groups,
-        );
+        summarize_metrics(&mut input);
     }
 }
 
 #[cube]
-fn summarize_metrics(
-    state: &[Ticks],
-    actors: &[u32],
-    config: &EconomyConfig,
-    metrics: &[Vector<u32, Const<4>>],
-    output: &mut [Ticks],
-    control: &[Atomic<u32>],
-    groups: u32,
-) {
+fn summarize_metrics(input: &mut SummaryInput) {
+    let state = &input.state;
+    let actors = &input.actors;
+    let config = &input.config;
+    let control = &input.control;
     let block = CUBE_POS as u32;
-    let metric = block / groups;
-    let group = block % groups;
-    if metric < SummaryLayout::METRICS as u32 {
-        let definition = metrics[metric as usize];
+    let index = block / input.groups;
+    let group = block % input.groups;
+    if (index as usize) < input.ids.len() {
+        let metric = input.ids[index as usize];
+        let definition = input.metrics[metric as usize];
         let field = definition.extract(0usize);
         let selected_kind = definition.extract(1usize);
         let operation = definition.extract(2usize);
         let source = definition.extract(3usize);
         let identity = select(operation == 1, u64::MAX, 0u64);
         let mut total = identity;
-        let mut actor = group * TILE_ACTORS as u32 + UNIT_POS;
-        while actor < min((group + 1) * TILE_ACTORS as u32, config.actors) {
+        let cells = config.spatial_side * config.spatial_side;
+        let firm_segment = 2 * (cells + 1 + config.actors);
+        let count = match comptime!(input.population) {
+            MetricPopulation::Actors => config.actors,
+            MetricPopulation::Firms => input.spatial[(firm_segment + cells) as usize],
+        };
+        let mut member = group * TILE_ACTORS as u32 + UNIT_POS;
+        while member < min((group + 1) * TILE_ACTORS as u32, count) {
+            let actor = match comptime!(input.population) {
+                MetricPopulation::Actors => member,
+                MetricPopulation::Firms => {
+                    input.spatial[(firm_segment + cells + 1 + member) as usize]
+                }
+            };
             let actor_kind = kind(actors, actor).bits();
             let selected = selected_kind == NO_ACTOR
                 || selected_kind == actor_kind
@@ -352,7 +434,7 @@ fn summarize_metrics(
                     _ => checked_sum(total, amount, control),
                 };
             }
-            actor += CUBE_DIM;
+            member += CUBE_DIM;
         }
         let mut shared = Shared::<[u64]>::new_slice(256usize);
         shared[UNIT_POS as usize] = total;
@@ -373,7 +455,7 @@ fn summarize_metrics(
         }
         if UNIT_POS == 0 {
             let base = group * SummaryLayout::METRICS as u32 + metric;
-            output[base as usize] = ticks(
+            input.output[base as usize] = ticks(
                 u32::cast_from(shared[0usize]),
                 u32::cast_from(shared[0usize] >> 32),
             );

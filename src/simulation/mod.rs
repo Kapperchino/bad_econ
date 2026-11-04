@@ -255,7 +255,7 @@ impl Simulation {
         };
         let enterprise_requests = device.tensor(&vec![0; initial.actors.len()]);
         let day = initial.day;
-        let audit = economy::audit::AuditBuffers::new(&device);
+        let audit = economy::audit::AuditBuffers::new(&device, &initial.actors);
         let searches = markets::SearchBuffers::new(&device, initial.actors.len());
         let mut simulation = Self {
             scenario,
@@ -813,6 +813,7 @@ impl Simulation {
             .map(|_| ownership::OwnershipRuntime::new(&self.device, &metadata))
             .transpose()?;
         let management = management::EnterpriseManagement::new(&self.device, &metadata);
+        let audit = economy::audit::AuditBuffers::new(&self.device, &metadata.actors);
         let mut next = Self {
             scenario: self.scenario.clone(),
             device: self.device.clone(),
@@ -840,7 +841,7 @@ impl Simulation {
             market_execution: self.market_execution,
             control: self.control.clone(),
             summary: self.summary.clone(),
-            audit: economy::audit::AuditBuffers::new(&self.device),
+            audit,
             #[cfg(test)]
             audit_execution: self.audit_execution,
             feedback: self
@@ -1535,53 +1536,37 @@ impl Simulation {
             &self.control,
             bytemuck::cast_slice(&[ObservationControlLayout::zeroed()]),
         );
-        #[cfg(test)]
-        let parameters =
-            self.parameters(Phase::Audit, Market::Labor, 0, self.metadata.actors.len())?;
-        let groups = self
-            .metadata
-            .actors
-            .len()
-            .div_ceil(economy::audit::TILE_ACTORS);
-        #[cfg(test)]
-        let groups = match self.audit_execution {
-            AuditExecution::Original => self
-                .metadata
-                .actors
-                .len()
-                .div_ceil(SummaryLayout::ACTORS_PER_GROUP as usize),
-            AuditExecution::Tiled => groups,
+        let input = economy::audit::AuditInput {
+            state: &self.state,
+            actors: &self.actors,
+            config: &self.config,
+            spatial: &self.spatial,
+            partials: &self.events,
+            summary: &self.summary,
+            control: &self.control,
         };
         #[cfg(test)]
         match self.audit_execution {
             AuditExecution::Original => {
-                self.economy(EconomyStage::Summarize, groups, &parameters, &self.summary)
+                let count = self.metadata.actors.len();
+                let parameters = self.parameters(Phase::Audit, Market::Labor, 0, count)?;
+                let groups = count.div_ceil(SummaryLayout::ACTORS_PER_GROUP as usize);
+                self.economy(EconomyStage::Summarize, groups, &parameters, &self.summary);
+                let groups = self
+                    .device
+                    .tensor(&vec![groups as u32; SummaryLayout::METRICS]);
+                reduction::summary(
+                    &self.device,
+                    &self.events,
+                    &self.summary,
+                    &self.control,
+                    &groups,
+                )
             }
-            AuditExecution::Tiled => self.audit.summarize(
-                &self.device,
-                &self.state,
-                &self.actors,
-                &self.config,
-                &self.events,
-                &self.control,
-            ),
-        }
+            AuditExecution::Tiled => self.audit.summarize(&self.device, input),
+        }?;
         #[cfg(not(test))]
-        self.audit.summarize(
-            &self.device,
-            &self.state,
-            &self.actors,
-            &self.config,
-            &self.events,
-            &self.control,
-        );
-        reduction::summary(
-            &self.device,
-            &self.events,
-            &self.summary,
-            &self.control,
-            groups,
-        )?;
+        self.audit.summarize(&self.device, input)?;
         let totals = self
             .device
             .read_range(&self.summary, 0, SummaryLayout::WORDS)?;
