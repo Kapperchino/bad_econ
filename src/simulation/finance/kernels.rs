@@ -305,7 +305,7 @@ fn opening(
     decision
 }
 
-#[cube(launch)]
+#[cube]
 pub(super) fn banks(
     state: &mut [u32],
     banks: &[u32],
@@ -485,7 +485,7 @@ pub(super) fn banks(
     }
 }
 
-#[cube(launch)]
+#[cube]
 pub(super) fn support_needs(state: &mut [u32], recipients: &[u32], output: &mut [u32], count: u32) {
     let id = ABSOLUTE_POS as u32;
     if id < count {
@@ -538,7 +538,7 @@ pub(super) fn bounded_product_ratio(a: Ticks, b: Ticks, denominator: Ticks) -> T
     quotient
 }
 
-#[cube(launch)]
+#[cube]
 pub(super) fn support_plan(
     state: &mut [u32],
     recipients: &[u32],
@@ -583,7 +583,7 @@ pub(super) fn support_plan(
     }
 }
 
-#[cube(launch)]
+#[cube]
 pub(super) fn support_post(
     state: &mut [u32],
     recipients: &[u32],

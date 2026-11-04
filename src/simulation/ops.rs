@@ -4,6 +4,7 @@ use super::{
     memory::MemoryBudget,
     parameters::{EconomyParameters, SchedulerParameters},
     scheduler::{self, SchedulerStage},
+    system::System,
 };
 use anyhow::{Context, Result, anyhow};
 use burn::{
@@ -256,19 +257,21 @@ impl EconomyOps for CubeBackend {
                 buffers.control,
                 parameters.day,
             ),
-            _ => economy::economy::launch(
-                &device.client,
+            _ => economy::EconomySystem::launch(
+                device,
                 device.count(count),
                 CubeDim::new_1d(device.workgroup),
-                argument(buffers.state),
-                argument(buffers.actors),
-                buffers.config.launch(),
-                argument(buffers.spatial),
-                argument(buffers.proposals),
-                argument(buffers.events),
-                argument(buffers.control),
-                parameters.launch(),
-                stage,
+                economy::EconomyInputLaunch {
+                    state: argument(buffers.state),
+                    actors: argument(buffers.actors),
+                    config: buffers.config.launch(),
+                    spatial: argument(buffers.spatial),
+                    proposals: argument(buffers.proposals),
+                    bundles: argument(buffers.events),
+                    control: argument(buffers.control),
+                    parameters: parameters.launch(),
+                    stage,
+                },
             ),
         }
     }
@@ -280,17 +283,19 @@ impl EconomyOps for CubeBackend {
         parameters: SchedulerParameters,
     ) {
         let argument = |tensor: &CubeTensor| tensor.clone().into_buffer_arg();
-        scheduler::schedule::launch(
-            &device.client,
+        scheduler::EventScheduling::launch(
+            device,
             device.count(count),
             CubeDim::new_1d(device.workgroup),
-            argument(buffers.state),
-            argument(buffers.events),
-            argument(buffers.scratch),
-            argument(buffers.control),
-            argument(buffers.links),
-            parameters.launch(),
-            stage,
+            scheduler::ScheduleInputLaunch {
+                balances: argument(buffers.state),
+                events: argument(buffers.events),
+                scratch: argument(buffers.scratch),
+                control: argument(buffers.control),
+                links: argument(buffers.links),
+                params: parameters.launch(),
+                stage,
+            },
         );
     }
 }

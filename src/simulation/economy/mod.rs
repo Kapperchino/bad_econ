@@ -1,3 +1,6 @@
+pub(super) mod markets;
+pub(super) mod scheduler;
+
 use super::{
     flags::{
         ActorKind, COMPLETED_WORD, CONSTRUCTED_EVENTS_WORD, CONTROL_WORDS, EventStatus, FaultFlags,
@@ -6,13 +9,15 @@ use super::{
     },
     households::{KernelFatigue, KernelObservation, ObservationKind, next_fatigue, observed_blend},
     layout::*,
-    markets::{self, LATCH_WORD, RANGE_SLOTS_WORD},
+    markets::{LATCH_WORD, RANGE_SLOTS_WORD},
     negotiation::{NegotiationRequest, NegotiationStatus, legal_grid_rate, negotiate},
     parallel::{self, Reduction},
     parameters::{Discovery, EconomyParameters},
+    pass::GpuPass,
     payroll::PayrollAccrual,
     policy::*,
     scheduler::apply,
+    system::{System, gpu_passes},
     words::*,
 };
 use crate::simulation::configuration::{EconomyConfig, Feature};
@@ -31,8 +36,10 @@ pub(super) mod enterprises;
 mod household_production;
 pub(super) mod opening;
 pub(super) mod search;
+mod systems;
 use super::scheduler::Posting;
 use clearing::{PeerBalances, PeerOffer, actor_settlement};
+pub(super) use systems::{EconomyInputLaunch, EconomySystem};
 
 #[cube]
 fn at(config: &EconomyConfig, field: u32, actor: u32) -> u32 {
@@ -1943,7 +1950,7 @@ pub enum EconomyStage {
     SearchPrepare,
 }
 
-#[cube(launch)]
+#[cube]
 pub fn economy(
     state: &mut [u32],
     actors: &[u32],

@@ -1,6 +1,8 @@
-use super::{
+use crate::simulation::{
     Device,
     flags::{FaultFlags, KernelFaults},
+    pass::GpuPass,
+    system::{System, gpu_passes},
     words::{Ticks, ticks},
 };
 use anyhow::{Context, Result};
@@ -13,7 +15,7 @@ use cubek::reduce::{
     routines::{BlueprintStrategy, cube::CubeStrategy, unit::UnitStrategy},
 };
 
-pub(super) fn reduce(
+pub(in crate::simulation) fn reduce(
     device: &Device,
     input: &TensorHandle,
     axis: usize,
@@ -82,7 +84,7 @@ pub(super) fn reduce(
     Ok(output)
 }
 
-pub(super) fn sum_ticks(
+pub(in crate::simulation) fn sum_ticks(
     device: &Device,
     input: &TensorHandle,
     axis: usize,
@@ -118,39 +120,73 @@ pub(super) fn sum_ticks(
         u64::elem_type_native(),
     );
     if elements > 0 {
-        finish_sum::launch(
-            &device.client,
+        WideSum::launch(
+            device,
             device.count(elements),
             CubeDim::new_1d(device.workgroup),
-            sums.into_arg().into_buffer_arg(),
-            output.clone().into_arg().into_buffer_arg(),
-            control.clone().into_buffer_arg(),
+            SumInputLaunch {
+                sums: sums.into_arg().into_buffer_arg(),
+                output: output.clone().into_arg().into_buffer_arg(),
+                control: control.clone().into_buffer_arg(),
+            },
         );
     }
     Ok(output)
 }
 
-pub(super) fn summary(
+pub(in crate::simulation) fn summary(
     device: &Device,
     input: &CubeTensor,
     output: &CubeTensor,
     control: &CubeTensor,
     groups: usize,
 ) -> Result<()> {
-    use super::layout::SummaryLayout as S;
-    summary_tiles::launch(
-        &device.client,
+    use crate::simulation::layout::SummaryLayout as S;
+    SummaryReduction::launch(
+        device,
         device.count(S::METRICS * device.workgroup as usize),
         CubeDim::new_1d(device.workgroup),
-        input.clone().into_buffer_arg(),
-        output.clone().into_buffer_arg(),
-        control.clone().into_buffer_arg(),
-        groups as u32,
+        SummaryInputLaunch {
+            values: input.clone().into_buffer_arg(),
+            output: output.clone().into_buffer_arg(),
+            control: control.clone().into_buffer_arg(),
+            groups: groups as u32,
+        },
     );
     Ok(())
 }
 
-#[cube(launch)]
+#[derive(CubeType, CubeLaunch)]
+struct SummaryInput {
+    values: Box<[Ticks]>,
+    output: Box<[Ticks]>,
+    control: Box<[Atomic<u32>]>,
+    groups: u32,
+}
+
+struct SummaryReduction;
+struct SummarizeTiles;
+
+impl System for SummaryReduction {
+    type Input = SummaryInput;
+    type Passes = gpu_passes![SummarizeTiles];
+}
+
+#[cube]
+impl GpuPass<SummaryInput> for SummarizeTiles {
+    type Output = ();
+
+    fn execute(mut input: SummaryInput) {
+        summary_tiles(
+            &input.values,
+            &mut input.output,
+            &input.control,
+            input.groups,
+        );
+    }
+}
+
+#[cube]
 fn summary_tiles(input: &[Ticks], output: &mut [Ticks], control: &[Atomic<u32>], groups: u32) {
     use crate::simulation::layout::SummaryLayout as S;
     let metric = CUBE_POS as u32;
@@ -212,14 +248,14 @@ fn summary_tiles(input: &[Ticks], output: &mut [Ticks], control: &[Atomic<u32>],
 }
 
 #[cfg(test)]
-pub(super) fn original_summary(
+pub(in crate::simulation) fn original_summary(
     device: &Device,
     input: &CubeTensor,
     output: &CubeTensor,
     control: &CubeTensor,
     groups: usize,
 ) -> Result<()> {
-    use super::layout::SummaryLayout as S;
+    use crate::simulation::layout::SummaryLayout as S;
     let input = TensorHandle::new_contiguous(
         [groups, S::METRICS],
         input.handle.clone(),
@@ -295,8 +331,8 @@ fn store_columns(input: &[u64], output: &mut [u64], start: u32) {
 
 #[cfg(test)]
 fn summary_operation(metric: u32) -> ReduceOperationConfig {
-    use super::layout::SummaryLayout as S;
     use crate::domain::Good;
+    use crate::simulation::layout::SummaryLayout as S;
     match metric {
         S::MINIMUM_WAGE | S::MINIMUM_PRICE => ReduceOperationConfig::Min,
         S::MAXIMUM_WAGE | S::MAXIMUM_PRICE => ReduceOperationConfig::Max,
@@ -316,7 +352,31 @@ fn summary_operation(metric: u32) -> ReduceOperationConfig {
     }
 }
 
-#[cube(launch)]
+#[derive(CubeType, CubeLaunch)]
+struct SumInput {
+    sums: Box<[u64]>,
+    output: Box<[u64]>,
+    control: Box<[Atomic<u32>]>,
+}
+
+struct WideSum;
+struct FinishSum;
+
+impl System for WideSum {
+    type Input = SumInput;
+    type Passes = gpu_passes![FinishSum];
+}
+
+#[cube]
+impl GpuPass<SumInput> for FinishSum {
+    type Output = ();
+
+    fn execute(mut input: SumInput) {
+        finish_sum(&input.sums, &mut input.output, &input.control);
+    }
+}
+
+#[cube]
 fn finish_sum(sums: &[u64], output: &mut [u64], control: &[Atomic<u32>]) {
     let index = ABSOLUTE_POS;
     if index < output.len() {
@@ -358,8 +418,8 @@ mod tests {
 
     #[test]
     fn summary_reductions_preserve_wide_totals_extrema_and_overflow_on_gpu() -> Result<()> {
-        use super::super::flags::CONTROL_WORDS;
-        use super::super::layout::SummaryLayout as S;
+        use crate::simulation::flags::CONTROL_WORDS;
+        use crate::simulation::layout::SummaryLayout as S;
         let device = Device::headless(64)?;
         let groups = 257;
         let values = (0..groups * S::METRICS)

@@ -2,12 +2,20 @@ use crate::simulation::configuration::{Configuration, EconomyConfig};
 pub(super) mod entries;
 pub(super) mod records;
 pub(super) mod spatial;
-use super::{Device, layout::ActorLayout as A, words::*};
+mod systems;
+use super::{
+    Device,
+    layout::ActorLayout as A,
+    pass::GpuPass,
+    system::{System, gpu_passes},
+    words::*,
+};
 use crate::domain::{ActorRows, Field, Position, Scenario, State};
 use anyhow::{Context, Result};
 use burn_wgpu::CubeTensor;
 use cubecl::{CubeDim, prelude::*};
 use std::collections::BTreeMap;
+use systems::*;
 
 #[derive(Clone, Default)]
 pub(super) struct MigrationRegistry {
@@ -149,7 +157,7 @@ enum Stage {
     clippy::manual_div_ceil,
     reason = "CubeCL lowers explicit integer division"
 )]
-#[cube(launch)]
+#[cube]
 fn transition(
     state: &mut [u32],
     actors: &[u32],
@@ -270,17 +278,19 @@ pub(super) fn apply(
     let argument = |tensor: &CubeTensor| tensor.clone().into_buffer_arg();
     let cube_count = device.count(requests.meta.num_elements());
     for stage in [Stage::Clear, Stage::Count, Stage::Apply] {
-        transition::launch(
-            &device.client,
+        RegistryTransitions::launch(
+            device,
             cube_count.clone(),
             CubeDim::new_1d(device.workgroup),
-            argument(state),
-            argument(actors),
-            config.launch(),
-            argument(requests),
-            argument(scratch),
-            day,
-            stage,
+            TransitionInputLaunch {
+                state: argument(state),
+                actors: argument(actors),
+                config: config.launch(),
+                requests: argument(requests),
+                incoming: argument(scratch),
+                day,
+                stage,
+            },
         );
     }
 }
@@ -291,18 +301,20 @@ pub(super) fn patch_capacity(
     requests: &CubeTensor,
 ) -> CubeTensor {
     let output = device.empty(actors.meta.num_elements());
-    capacity_rows::launch(
-        &device.client,
+    CapacityPatching::launch(
+        device,
         device.count(actors.meta.num_elements()),
         CubeDim::new_1d(device.workgroup),
-        actors.clone().into_buffer_arg(),
-        requests.clone().into_buffer_arg(),
-        output.clone().into_buffer_arg(),
+        CapacityInputLaunch {
+            actors: actors.clone().into_buffer_arg(),
+            requests: requests.clone().into_buffer_arg(),
+            output: output.clone().into_buffer_arg(),
+        },
     );
     output
 }
 
-#[cube(launch)]
+#[cube]
 fn capacity_rows(actors: &[u32], requests: &[u32], output: &mut [u32]) {
     let index = ABSOLUTE_POS;
     if index < actors.len() {
@@ -325,18 +337,20 @@ pub(super) fn extend_actors(
 ) -> CubeTensor {
     let additions = device.tensor(&additions.words());
     let output = device.empty(actors.meta.num_elements() + additions.meta.num_elements());
-    extend_rows::launch(
-        &device.client,
+    ActorGrowth::launch(
+        device,
         device.count(output.meta.num_elements()),
         CubeDim::new_1d(device.workgroup),
-        actors.clone().into_buffer_arg(),
-        additions.into_buffer_arg(),
-        output.clone().into_buffer_arg(),
+        ActorGrowthInputLaunch {
+            actors: actors.clone().into_buffer_arg(),
+            additions: additions.into_buffer_arg(),
+            output: output.clone().into_buffer_arg(),
+        },
     );
     output
 }
 
-#[cube(launch)]
+#[cube]
 fn extend_rows(actors: &[u32], additions: &[u32], output: &mut [u32]) {
     let index = ABSOLUTE_POS;
     if index < output.len() {

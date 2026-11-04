@@ -1,5 +1,10 @@
 use super::{CapabilityClosure, CapabilityGraph, ClosureProgress, padded};
-use crate::simulation::{Device, analytics::SparseMatrix};
+use crate::simulation::{
+    Device,
+    analytics::SparseMatrix,
+    pass::GpuPass,
+    system::{System, gpu_passes},
+};
 use anyhow::{Result, anyhow};
 use burn_wgpu::CubeTensor;
 use cubecl::prelude::*;
@@ -66,14 +71,16 @@ impl DeviceCapabilityGraph {
                     .collect::<Vec<_>>();
                 let input = device.tensor(&padded(&records));
                 let adjacency = device.tensor(&vec![0; (nodes * row_words).max(1)]);
-                positive_support::launch(
-                    &device.client,
+                PositiveSupport::launch(
+                    device,
                     count(device, matrix.entries().len()),
                     CubeDim::new_1d(device.workgroup),
-                    argument(&input),
-                    argument(&adjacency),
-                    matrix.entries().len() as u32,
-                    row_words as u32,
+                    PositiveSupportInputLaunch {
+                        input: argument(&input),
+                        output: argument(&adjacency),
+                        entries: matrix.entries().len() as u32,
+                        row_words: row_words as u32,
+                    },
                 );
                 Ok(Self {
                     adjacency,
@@ -96,15 +103,17 @@ impl DeviceCapabilityGraph {
                 crate::simulation::tensor::copy(device, &self.adjacency, &adjacency);
                 crate::simulation::tensor::copy(device, &self.labels, &labels);
                 for pivot in retained..self.nodes {
-                    eliminate::launch(
-                        &device.client,
+                    BoundaryElimination::launch(
+                        device,
                         count(device, self.nodes),
                         CubeDim::new_1d(device.workgroup),
-                        argument(&adjacency),
-                        argument(&labels),
-                        self.nodes as u32,
-                        self.row_words as u32,
-                        pivot as u32,
+                        BoundaryEliminationInputLaunch {
+                            adjacency: argument(&adjacency),
+                            labels: argument(&labels),
+                            nodes: self.nodes as u32,
+                            row_words: self.row_words as u32,
+                            pivot: pivot as u32,
+                        },
                     );
                 }
                 let row_words = retained.div_ceil(32);
@@ -114,17 +123,19 @@ impl DeviceCapabilityGraph {
                     nodes: retained,
                     row_words,
                 };
-                project::launch(
-                    &device.client,
+                BoundaryProjection::launch(
+                    device,
                     count(device, retained),
                     CubeDim::new_1d(device.workgroup),
-                    argument(&adjacency),
-                    argument(&labels),
-                    argument(&result.adjacency),
-                    argument(&result.labels),
-                    self.row_words as u32,
-                    retained as u32,
-                    row_words as u32,
+                    BoundaryProjectionInputLaunch {
+                        input: argument(&adjacency),
+                        labels: argument(&labels),
+                        output: argument(&result.adjacency),
+                        reduced_labels: argument(&result.labels),
+                        old_stride: self.row_words as u32,
+                        nodes: retained as u32,
+                        row_words: row_words as u32,
+                    },
                 );
                 Ok(result)
             }
@@ -139,15 +150,17 @@ impl DeviceCapabilityGraph {
         let mut progress = ClosureProgress::Propagating;
         while round < self.nodes.saturating_sub(1) && progress == ClosureProgress::Propagating {
             device.write(&changed, &[0]);
-            propagate::launch(
-                &device.client,
+            BoundaryPropagation::launch(
+                device,
                 count(device, self.nodes),
                 CubeDim::new_1d(device.workgroup),
-                argument(&self.adjacency),
-                argument(&labels),
-                argument(&changed),
-                self.nodes as u32,
-                self.row_words as u32,
+                BoundaryPropagationInputLaunch {
+                    adjacency: argument(&self.adjacency),
+                    labels: argument(&labels),
+                    changed: argument(&changed),
+                    nodes: self.nodes as u32,
+                    row_words: self.row_words as u32,
+                },
             );
             progress = match device.read(&changed)?[0] {
                 0 => ClosureProgress::Converged,
@@ -179,7 +192,7 @@ fn count(device: &Device, items: usize) -> CubeCount {
     device.count(items)
 }
 
-#[cube(launch)]
+#[cube]
 fn positive_support(input: &[u32], output: &[Atomic<u32>], entries: u32, row_words: u32) {
     let id = ABSOLUTE_POS;
     if id < entries as usize && input[id * 3 + 2] > 0 {
@@ -189,7 +202,7 @@ fn positive_support(input: &[u32], output: &[Atomic<u32>], entries: u32, row_wor
     }
 }
 
-#[cube(launch)]
+#[cube]
 fn eliminate(adjacency: &mut [u32], labels: &mut [u32], nodes: u32, row_words: u32, pivot: u32) {
     let id = ABSOLUTE_POS;
     if id < nodes as usize && id != pivot as usize {
@@ -209,7 +222,7 @@ fn eliminate(adjacency: &mut [u32], labels: &mut [u32], nodes: u32, row_words: u
     }
 }
 
-#[cube(launch)]
+#[cube]
 fn project(
     input: &[u32],
     labels: &[u32],
@@ -232,7 +245,7 @@ fn project(
     }
 }
 
-#[cube(launch)]
+#[cube]
 fn propagate(
     adjacency: &[u32],
     labels: &[Atomic<u32>],
@@ -259,5 +272,134 @@ fn propagate(
                 }
             }
         }
+    }
+}
+
+#[derive(CubeType, CubeLaunch)]
+pub(super) struct PositiveSupportInput {
+    pub(super) input: Box<[u32]>,
+    pub(super) output: Box<[Atomic<u32>]>,
+    pub(super) entries: u32,
+    pub(super) row_words: u32,
+}
+
+pub(super) struct PositiveSupport;
+
+pub(super) struct CollectPositiveSupport;
+
+impl System for PositiveSupport {
+    type Input = PositiveSupportInput;
+    type Passes = gpu_passes![CollectPositiveSupport];
+}
+
+#[cube]
+impl GpuPass<PositiveSupportInput> for CollectPositiveSupport {
+    type Output = ();
+
+    fn execute(input: PositiveSupportInput) {
+        positive_support(&input.input, &input.output, input.entries, input.row_words);
+    }
+}
+
+#[derive(CubeType, CubeLaunch)]
+pub(super) struct BoundaryEliminationInput {
+    pub(super) adjacency: Box<[u32]>,
+    pub(super) labels: Box<[u32]>,
+    pub(super) nodes: u32,
+    pub(super) row_words: u32,
+    pub(super) pivot: u32,
+}
+
+pub(super) struct BoundaryElimination;
+
+pub(super) struct EliminateNode;
+
+impl System for BoundaryElimination {
+    type Input = BoundaryEliminationInput;
+    type Passes = gpu_passes![EliminateNode];
+}
+
+#[cube]
+impl GpuPass<BoundaryEliminationInput> for EliminateNode {
+    type Output = ();
+
+    fn execute(mut input: BoundaryEliminationInput) {
+        eliminate(
+            &mut input.adjacency,
+            &mut input.labels,
+            input.nodes,
+            input.row_words,
+            input.pivot,
+        );
+    }
+}
+
+#[derive(CubeType, CubeLaunch)]
+pub(super) struct BoundaryProjectionInput {
+    pub(super) input: Box<[u32]>,
+    pub(super) labels: Box<[u32]>,
+    pub(super) output: Box<[u32]>,
+    pub(super) reduced_labels: Box<[u32]>,
+    pub(super) old_stride: u32,
+    pub(super) nodes: u32,
+    pub(super) row_words: u32,
+}
+
+pub(super) struct BoundaryProjection;
+
+pub(super) struct ProjectBoundary;
+
+impl System for BoundaryProjection {
+    type Input = BoundaryProjectionInput;
+    type Passes = gpu_passes![ProjectBoundary];
+}
+
+#[cube]
+impl GpuPass<BoundaryProjectionInput> for ProjectBoundary {
+    type Output = ();
+
+    fn execute(mut input: BoundaryProjectionInput) {
+        project(
+            &input.input,
+            &input.labels,
+            &mut input.output,
+            &mut input.reduced_labels,
+            input.old_stride,
+            input.nodes,
+            input.row_words,
+        );
+    }
+}
+
+#[derive(CubeType, CubeLaunch)]
+pub(super) struct BoundaryPropagationInput {
+    pub(super) adjacency: Box<[u32]>,
+    pub(super) labels: Box<[Atomic<u32>]>,
+    pub(super) changed: Box<[Atomic<u32>]>,
+    pub(super) nodes: u32,
+    pub(super) row_words: u32,
+}
+
+pub(super) struct BoundaryPropagation;
+
+pub(super) struct PropagateBoundary;
+
+impl System for BoundaryPropagation {
+    type Input = BoundaryPropagationInput;
+    type Passes = gpu_passes![PropagateBoundary];
+}
+
+#[cube]
+impl GpuPass<BoundaryPropagationInput> for PropagateBoundary {
+    type Output = ();
+
+    fn execute(input: BoundaryPropagationInput) {
+        propagate(
+            &input.adjacency,
+            &input.labels,
+            &input.changed,
+            input.nodes,
+            input.row_words,
+        );
     }
 }

@@ -39,27 +39,31 @@ pub(in crate::simulation) fn extend(
     let words = 3 * (cells + 1 + count) + count.div_ceil(DISCOVERY_BLOCK as usize) + 1 + count;
     let added = device.tensor(&SpatialIndex::from_actors(scenario, additions).words);
     let output = device.empty(words);
-    clear::launch(
-        &device.client,
+    SpatialClearing::launch(
+        device,
         device.count(words),
         CubeDim::new_1d(device.workgroup),
-        output.clone().into_buffer_arg(),
+        SpatialClearInputLaunch {
+            output: output.clone().into_buffer_arg(),
+        },
     );
-    merge::launch(
-        &device.client,
+    SpatialGrowthSystem::launch(
+        device,
         device.count(count.max(cells + 1)),
         CubeDim::new_1d(device.workgroup),
-        prior.clone().into_buffer_arg(),
-        added.into_buffer_arg(),
-        actors.clone().into_buffer_arg(),
-        output.clone().into_buffer_arg(),
-        SpatialGrowthLaunch {
-            before: growth.before,
-            added: growth.added,
-            side: growth.side,
-            radius: growth.radius,
-            query_side: growth.query_side,
-            query_tile: growth.query_tile,
+        SpatialGrowthInputLaunch {
+            prior: prior.clone().into_buffer_arg(),
+            additions: added.into_buffer_arg(),
+            actors: actors.clone().into_buffer_arg(),
+            output: output.clone().into_buffer_arg(),
+            growth: SpatialGrowthLaunch {
+                before: growth.before,
+                added: growth.added,
+                side: growth.side,
+                radius: growth.radius,
+                query_side: growth.query_side,
+                query_tile: growth.query_tile,
+            },
         },
     );
     output
@@ -98,14 +102,67 @@ fn query_offset(
     low
 }
 
-#[cube(launch)]
+#[derive(CubeType, CubeLaunch)]
+struct SpatialClearInput {
+    output: Box<[u32]>,
+}
+
+#[derive(CubeType, CubeLaunch)]
+struct SpatialGrowthInput {
+    prior: Box<[u32]>,
+    additions: Box<[u32]>,
+    actors: Box<[u32]>,
+    output: Box<[u32]>,
+    growth: SpatialGrowth,
+}
+
+struct SpatialClearing;
+struct SpatialGrowthSystem;
+struct ClearSpatialRows;
+struct MergeSpatialRows;
+
+impl System for SpatialClearing {
+    type Input = SpatialClearInput;
+    type Passes = gpu_passes![ClearSpatialRows];
+}
+
+impl System for SpatialGrowthSystem {
+    type Input = SpatialGrowthInput;
+    type Passes = gpu_passes![MergeSpatialRows];
+}
+
+#[cube]
+impl GpuPass<SpatialClearInput> for ClearSpatialRows {
+    type Output = ();
+
+    fn execute(mut input: SpatialClearInput) {
+        clear(&mut input.output);
+    }
+}
+
+#[cube]
+impl GpuPass<SpatialGrowthInput> for MergeSpatialRows {
+    type Output = ();
+
+    fn execute(mut input: SpatialGrowthInput) {
+        merge(
+            &input.prior,
+            &input.additions,
+            &input.actors,
+            &mut input.output,
+            &input.growth,
+        );
+    }
+}
+
+#[cube]
 fn clear(output: &mut [u32]) {
     if ABSOLUTE_POS < output.len() {
         output[ABSOLUTE_POS] = 0;
     }
 }
 
-#[cube(launch)]
+#[cube]
 fn merge(
     prior: &[u32],
     additions: &[u32],

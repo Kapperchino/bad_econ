@@ -4,28 +4,22 @@ mod configuration;
 mod demography;
 mod economy;
 mod enterprise;
-mod enterprise_opportunities;
 pub mod finance;
 mod flags;
 pub mod households;
 mod layout;
-mod management;
-mod markets;
 mod memory;
 pub mod negotiation;
 mod ops;
-mod ownership;
 mod parallel;
 mod parameters;
 pub mod pass;
 mod payroll;
 mod policy;
 mod random;
-mod reduction;
 mod registry;
 pub mod research;
 mod rows;
-mod scheduler;
 pub mod system;
 mod tensor;
 mod words;
@@ -38,7 +32,8 @@ use crate::{
 use anyhow::{Context, Result, anyhow};
 use burn_wgpu::{CubeBackend, CubeTensor};
 use bytemuck::Zeroable;
-use economy::EconomyStage;
+use economy::{EconomyStage, markets, scheduler};
+use enterprise::{management, ownership};
 use flags::{
     CONTROL_WORDS, ControlLayout, DependencyShape, EventStatus, FaultFlags, SchedulerControl,
 };
@@ -46,10 +41,12 @@ use layout::*;
 pub use memory::MemoryBudget;
 pub use ops::Device;
 use ops::{EconomyBuffers, EconomyOps, SchedulerBuffers};
+use parallel::reduction;
 use parameters::{Discovery, EconomyParameters, SchedulerParameters};
 use policy::MATCHING_ROUNDS;
 use scheduler::SchedulerStage;
 use std::time::Instant;
+use system::System;
 
 const MILLISECONDS_PER_SECOND: f64 = 1000.0;
 
@@ -1105,19 +1102,21 @@ impl Simulation {
                         &self.searches.dispatches,
                     );
                 }
-                _ => economy::economy::launch(
-                    &self.device.client,
+                _ => economy::EconomySystem::launch(
+                    &self.device,
                     dispatch,
                     cubecl::CubeDim::new_1d(self.device.workgroup),
-                    self.state.clone().into_buffer_arg(),
-                    self.actors.clone().into_buffer_arg(),
-                    self.config.launch(),
-                    self.spatial.clone().into_buffer_arg(),
-                    self.proposals.clone().into_buffer_arg(),
-                    events.clone().into_buffer_arg(),
-                    self.control.clone().into_buffer_arg(),
-                    parameters.launch(),
-                    stage,
+                    economy::EconomyInputLaunch {
+                        state: self.state.clone().into_buffer_arg(),
+                        actors: self.actors.clone().into_buffer_arg(),
+                        config: self.config.launch(),
+                        spatial: self.spatial.clone().into_buffer_arg(),
+                        proposals: self.proposals.clone().into_buffer_arg(),
+                        bundles: events.clone().into_buffer_arg(),
+                        control: self.control.clone().into_buffer_arg(),
+                        parameters: parameters.launch(),
+                        stage,
+                    },
                 ),
             }
         };
@@ -1165,18 +1164,20 @@ impl Simulation {
             _ => {
                 launch(EconomyStage::SearchPrepare, count, &parameters);
                 launch(EconomyStage::MarketBoundary, 1, &parameters);
-                economy::search::search::launch(
-                    &self.device.client,
+                economy::search::MarketSearch::launch(
+                    &self.device,
                     markets::dispatch(&self.searches.dispatches, markets::SEARCH_DISPATCH),
                     cubecl::CubeDim::new_1d(32),
-                    self.state.clone().into_buffer_arg(),
-                    self.actors.clone().into_buffer_arg(),
-                    self.config.launch(),
-                    self.spatial.clone().into_buffer_arg(),
-                    self.proposals.clone().into_buffer_arg(),
-                    self.searches.requests.clone().into_buffer_arg(),
-                    self.control.clone().into_buffer_arg(),
-                    parameters.launch(),
+                    economy::search::SearchInputLaunch {
+                        state: self.state.clone().into_buffer_arg(),
+                        actors: self.actors.clone().into_buffer_arg(),
+                        config: self.config.launch(),
+                        spatial: self.spatial.clone().into_buffer_arg(),
+                        proposals: self.proposals.clone().into_buffer_arg(),
+                        searches: self.searches.requests.clone().into_buffer_arg(),
+                        control: self.control.clone().into_buffer_arg(),
+                        parameters: parameters.launch(),
+                    },
                 );
             }
         }
@@ -1212,27 +1213,31 @@ impl Simulation {
         launch(EconomyStage::MarketBoundary, 1, &parameters);
         match market {
             Market::Labor if self.scenario.config().bargaining.is_none() => {
-                economy::batch::labor::settle_labor::launch(
-                    &self.device.client,
+                economy::batch::labor::LaborSettlement::launch(
+                    &self.device,
                     markets::dispatch(&self.searches.dispatches, markets::QUEUE_DISPATCH),
                     cubecl::CubeDim::new_1d(self.device.workgroup),
-                    self.state.clone().into_buffer_arg(),
-                    self.config.launch(),
-                    self.scratch.clone().into_buffer_arg(),
-                    self.control.clone().into_buffer_arg(),
-                    parameters.launch(),
+                    economy::batch::labor::LaborInputLaunch {
+                        state: self.state.clone().into_buffer_arg(),
+                        config: self.config.launch(),
+                        scratch: self.scratch.clone().into_buffer_arg(),
+                        control: self.control.clone().into_buffer_arg(),
+                        parameters: parameters.launch(),
+                    },
                 )
             }
-            Market::Consumer(_) => economy::batch::settle_units::launch(
-                &self.device.client,
+            Market::Consumer(_) => economy::batch::ConsumerSettlement::launch(
+                &self.device,
                 markets::dispatch(&self.searches.dispatches, markets::QUEUE_DISPATCH),
                 cubecl::CubeDim::new_1d(self.device.workgroup),
-                self.state.clone().into_buffer_arg(),
-                self.actors.clone().into_buffer_arg(),
-                self.config.launch(),
-                self.scratch.clone().into_buffer_arg(),
-                self.control.clone().into_buffer_arg(),
-                parameters.launch(),
+                economy::batch::SettlementInputLaunch {
+                    state: self.state.clone().into_buffer_arg(),
+                    actors: self.actors.clone().into_buffer_arg(),
+                    config: self.config.launch(),
+                    scratch: self.scratch.clone().into_buffer_arg(),
+                    control: self.control.clone().into_buffer_arg(),
+                    parameters: parameters.launch(),
+                },
             ),
             _ => launch(EconomyStage::GroupExecute, count, &parameters),
         }

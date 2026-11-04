@@ -43,41 +43,99 @@ impl Scan {
 
     pub(super) fn run(&self, device: &Device, buffer: &CubeTensor, control: &CubeTensor) {
         for level in &self.levels {
-            scan_blocks::launch(
-                &device.client,
+            TickBlockScan::launch(
+                device,
                 cubecl::calculate_cube_count_elemwise(
                     &device.client,
                     level.blocks * self.channels * self.cube_dim.num_elems() as usize,
                     self.cube_dim,
                 ),
                 self.cube_dim,
-                argument(buffer),
-                argument(control),
-                level.offset as u32,
-                level.count as u32,
-                self.channels as u32,
+                TickScanInputLaunch {
+                    buffer: argument(buffer),
+                    control: argument(control),
+                    offset: level.offset as u32,
+                    count: level.count as u32,
+                    channels: self.channels as u32,
+                },
             );
         }
         for level in self.levels.iter().rev().filter(|level| level.blocks > 1) {
-            add_block_offsets::launch(
-                &device.client,
+            TickBlockOffsets::launch(
+                device,
                 cubecl::calculate_cube_count_elemwise(
                     &device.client,
                     level.count * self.channels,
                     self.cube_dim,
                 ),
                 self.cube_dim,
-                argument(buffer),
-                argument(control),
-                level.offset as u32,
-                level.count as u32,
-                self.channels as u32,
+                TickScanInputLaunch {
+                    buffer: argument(buffer),
+                    control: argument(control),
+                    offset: level.offset as u32,
+                    count: level.count as u32,
+                    channels: self.channels as u32,
+                },
             );
         }
     }
 }
 
-#[cube(launch)]
+#[derive(CubeType, CubeLaunch)]
+struct TickScanInput {
+    buffer: Box<[u32]>,
+    control: Box<[Atomic<u32>]>,
+    offset: u32,
+    count: u32,
+    channels: u32,
+}
+
+struct TickBlockScan;
+struct TickBlockOffsets;
+struct ScanTickBlocks;
+struct AddTickOffsets;
+
+impl System for TickBlockScan {
+    type Input = TickScanInput;
+    type Passes = gpu_passes![ScanTickBlocks];
+}
+
+impl System for TickBlockOffsets {
+    type Input = TickScanInput;
+    type Passes = gpu_passes![AddTickOffsets];
+}
+
+#[cube]
+impl GpuPass<TickScanInput> for ScanTickBlocks {
+    type Output = ();
+
+    fn execute(mut input: TickScanInput) {
+        scan_blocks(
+            &mut input.buffer,
+            &input.control,
+            input.offset,
+            input.count,
+            input.channels,
+        );
+    }
+}
+
+#[cube]
+impl GpuPass<TickScanInput> for AddTickOffsets {
+    type Output = ();
+
+    fn execute(mut input: TickScanInput) {
+        add_block_offsets(
+            &mut input.buffer,
+            &input.control,
+            input.offset,
+            input.count,
+            input.channels,
+        );
+    }
+}
+
+#[cube]
 fn scan_blocks(
     buffer: &mut [u32],
     control: &[Atomic<u32>],
@@ -136,7 +194,7 @@ fn scan_blocks(
     }
 }
 
-#[cube(launch)]
+#[cube]
 fn add_block_offsets(
     buffer: &mut [u32],
     control: &[Atomic<u32>],

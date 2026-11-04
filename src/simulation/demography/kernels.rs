@@ -118,7 +118,7 @@ fn death_cause(draw: Ticks, background: Ticks, occupational: Ticks, famine: Tick
     clippy::manual_div_ceil,
     reason = "CubeCL lowers explicit runtime guards"
 )]
-#[cube(launch)]
+#[cube]
 pub fn step(
     state: &mut [u32],
     actors: &[u32],
@@ -394,7 +394,7 @@ pub fn step(
     }
 }
 
-#[cube(launch)]
+#[cube]
 pub fn observe(people: &[u32], policy: &DemographyPolicy, output: &[Atomic<u32>], count: u32) {
     let index = ABSOLUTE_POS;
     if index < count as usize {
@@ -417,7 +417,7 @@ pub fn observe(people: &[u32], policy: &DemographyPolicy, output: &[Atomic<u32>]
     }
 }
 
-#[cube(launch)]
+#[cube]
 pub fn observation_totals(sums: &[u64], output: &mut [u32]) {
     let metric = ABSOLUTE_POS;
     if metric < 7 {
@@ -570,7 +570,7 @@ mod tests {
     }
 }
 
-#[cube(launch)]
+#[cube]
 pub(super) fn grow(
     source: &[Vector<u32, Const<4>>],
     target: &mut [Vector<u32, Const<4>>],
@@ -587,7 +587,7 @@ pub(super) fn grow(
     }
 }
 
-#[cube(launch)]
+#[cube]
 pub(super) fn newborns(
     target: &mut [Vector<u32, Const<4>>],
     old_ranges: &[u32],
@@ -651,7 +651,7 @@ pub(super) fn original_grow(
     }
 }
 
-#[cube(launch)]
+#[cube]
 pub(super) fn birth_prefix(births: &[u32], scratch: &mut [u32]) {
     let actor = ABSOLUTE_POS;
     let mut present = 0u32;
@@ -667,7 +667,7 @@ pub(super) fn birth_prefix(births: &[u32], scratch: &mut [u32]) {
     }
 }
 
-#[cube(launch)]
+#[cube]
 pub(super) fn birth_ranges(old: &[u32], births: &[u32], scratch: &[u32], ranges: &mut [u32]) {
     let actor = ABSOLUTE_POS;
     if actor < births.len() {

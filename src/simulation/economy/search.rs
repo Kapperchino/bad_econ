@@ -451,8 +451,46 @@ fn candidate(
     }
 }
 
-#[cube(launch)]
-pub(in crate::simulation) fn search(
+#[derive(CubeType, CubeLaunch)]
+pub(in crate::simulation) struct SearchInput {
+    pub state: Box<[u32]>,
+    pub actors: Box<[u32]>,
+    pub config: EconomyConfig,
+    pub spatial: Box<[u32]>,
+    pub proposals: Box<[u32]>,
+    pub searches: Box<[u32]>,
+    pub control: Box<[Atomic<u32>]>,
+    pub parameters: EconomyParameters,
+}
+
+pub(in crate::simulation) struct MarketSearch;
+pub(in crate::simulation) struct Search;
+
+impl System for MarketSearch {
+    type Input = SearchInput;
+    type Passes = gpu_passes![Search];
+}
+
+#[cube]
+impl GpuPass<SearchInput> for Search {
+    type Output = ();
+
+    fn execute(mut input: SearchInput) {
+        search(
+            &mut input.state,
+            &input.actors,
+            &input.config,
+            &mut input.spatial,
+            &mut input.proposals,
+            &mut input.searches,
+            &input.control,
+            &input.parameters,
+        );
+    }
+}
+
+#[cube]
+fn search(
     state: &mut [u32],
     actors: &[u32],
     config: &EconomyConfig,

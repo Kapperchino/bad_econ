@@ -57,7 +57,31 @@ fn post_leg(output: &mut [u32], base: usize, leg: PaymentLeg) {
     output[base + LegLayout::CREDIT_HIGH] = leg.credit.extract(1usize);
 }
 
-#[cube(launch)]
+#[derive(CubeType, CubeLaunch)]
+struct PaymentInput {
+    input: Box<[u32]>,
+    output: Box<[u32]>,
+    count: u32,
+}
+
+struct BankPaymentConstruction;
+struct ConstructPayments;
+
+impl System for BankPaymentConstruction {
+    type Input = PaymentInput;
+    type Passes = gpu_passes![ConstructPayments];
+}
+
+#[cube]
+impl GpuPass<PaymentInput> for ConstructPayments {
+    type Output = ();
+
+    fn execute(mut input: PaymentInput) {
+        construct(&input.input, &mut input.output, input.count);
+    }
+}
+
+#[cube]
 fn construct(input: &[u32], output: &mut [u32], count: u32) {
     let id = ABSOLUTE_POS as u32;
     if id < count {
@@ -207,13 +231,15 @@ pub fn post_bank_payments(
         device.empty((payments.len() * ScratchLayout::WORDS_PER_EVENT).max(MIN_BUFFER_WORDS));
     let links = device.empty((payments.len() * LinkLayout::WORDS_PER_EVENT).max(MIN_BUFFER_WORDS));
     let control = device.tensor(bytemuck::cast_slice(&[ControlLayout::zeroed()]));
-    construct::launch(
-        &device.client,
+    BankPaymentConstruction::launch(
+        device,
         count(device, payments.len()),
         CubeDim::new_1d(device.workgroup),
-        argument(&input),
-        argument(&events),
-        payments.len() as u32,
+        PaymentInputLaunch {
+            input: argument(&input),
+            output: argument(&events),
+            count: payments.len() as u32,
+        },
     );
     let result = crate::simulation::execute(
         device,

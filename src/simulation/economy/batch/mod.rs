@@ -148,8 +148,42 @@ impl UnitBalances {
     }
 }
 
-#[cube(launch)]
-pub(in crate::simulation) fn settle_units(
+#[derive(CubeType, CubeLaunch)]
+pub(in crate::simulation) struct SettlementInput {
+    pub state: Box<[u32]>,
+    pub actors: Box<[u32]>,
+    pub config: EconomyConfig,
+    pub scratch: Box<[u32]>,
+    pub control: Box<[Atomic<u32>]>,
+    pub parameters: EconomyParameters,
+}
+
+pub(in crate::simulation) struct ConsumerSettlement;
+pub(in crate::simulation) struct SettleUnits;
+
+impl System for ConsumerSettlement {
+    type Input = SettlementInput;
+    type Passes = gpu_passes![SettleUnits];
+}
+
+#[cube]
+impl GpuPass<SettlementInput> for SettleUnits {
+    type Output = ();
+
+    fn execute(mut input: SettlementInput) {
+        settle_units(
+            &mut input.state,
+            &input.actors,
+            &input.config,
+            &mut input.scratch,
+            &input.control,
+            &input.parameters,
+        );
+    }
+}
+
+#[cube]
+fn settle_units(
     state: &mut [u32],
     actors: &[u32],
     config: &EconomyConfig,
@@ -389,33 +423,37 @@ mod tests {
                     let mut original =
                         expected.parameters(Phase::ProvisionPurchase, market, 0, count)?;
                     original.sort_count = case.length as u32;
-                    crate::simulation::economy::economy::launch(
-                        &device.client,
+                    EconomySystem::launch(
+                        &device,
                         device.count(case.length),
                         CubeDim::new_1d(workgroup),
-                        expected.state.clone().into_buffer_arg(),
-                        expected.actors.clone().into_buffer_arg(),
-                        expected.config.launch(),
-                        expected.spatial.clone().into_buffer_arg(),
-                        expected.proposals.clone().into_buffer_arg(),
-                        expected.scratch.clone().into_buffer_arg(),
-                        expected.control.clone().into_buffer_arg(),
-                        original.launch(),
-                        EconomyStage::GroupExecute,
+                        EconomyInputLaunch {
+                            state: expected.state.clone().into_buffer_arg(),
+                            actors: expected.actors.clone().into_buffer_arg(),
+                            config: expected.config.launch(),
+                            spatial: expected.spatial.clone().into_buffer_arg(),
+                            proposals: expected.proposals.clone().into_buffer_arg(),
+                            bundles: expected.scratch.clone().into_buffer_arg(),
+                            control: expected.control.clone().into_buffer_arg(),
+                            parameters: original.launch(),
+                            stage: EconomyStage::GroupExecute,
+                        },
                     );
                     let mut parameters =
                         actual.parameters(Phase::ProvisionPurchase, market, 0, count)?;
                     parameters.scan = mode;
-                    settle_units::launch(
-                        &device.client,
+                    ConsumerSettlement::launch(
+                        &device,
                         CubeCount::Static(1, 1, 1),
                         CubeDim::new_1d(workgroup),
-                        actual.state.clone().into_buffer_arg(),
-                        actual.actors.clone().into_buffer_arg(),
-                        actual.config.launch(),
-                        actual.scratch.clone().into_buffer_arg(),
-                        actual.control.clone().into_buffer_arg(),
-                        parameters.launch(),
+                        SettlementInputLaunch {
+                            state: actual.state.clone().into_buffer_arg(),
+                            actors: actual.actors.clone().into_buffer_arg(),
+                            config: actual.config.launch(),
+                            scratch: actual.scratch.clone().into_buffer_arg(),
+                            control: actual.control.clone().into_buffer_arg(),
+                            parameters: parameters.launch(),
+                        },
                     );
                     for (name, actual, expected) in [
                         ("state", &actual.state, &expected.state),

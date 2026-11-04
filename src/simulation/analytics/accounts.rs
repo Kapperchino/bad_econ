@@ -295,16 +295,18 @@ pub fn comparator(
             let _ = TickEstimate::new(living as f32)?;
             let output = device.empty(12);
             let control = device.tensor(&[0; CONTROL_WORDS]);
-            kernels::comparator::launch(
-                &device.client,
+            ValueComparison::launch(
+                device,
                 CubeCount::Static(1, 1, 1),
                 CubeDim::new_1d(device.workgroup),
-                argument(&requirement.data),
-                argument(&output),
-                argument(&control),
-                living as u32,
-                (living >> 32) as u32,
-                scale,
+                ValueComparisonInputLaunch {
+                    requirement: argument(&requirement.data),
+                    output: argument(&output),
+                    control: argument(&control),
+                    living_low: living as u32,
+                    living_high: (living >> 32) as u32,
+                    scale,
+                },
             );
             let status = faults(device, &control)?;
             let words = device.read(&output)?;

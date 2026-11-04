@@ -1,10 +1,12 @@
 pub mod boundary;
+mod systems;
 
-use super::super::Device;
+use super::super::{Device, system::System};
 use anyhow::{Context, Result, anyhow};
 use burn_wgpu::CubeTensor;
 use cubecl::prelude::*;
 use serde::{Deserialize, Serialize};
+use systems::*;
 
 #[derive(Clone, Copy, Debug, Serialize, Deserialize, PartialEq, Eq, PartialOrd, Ord)]
 pub struct CapabilityEdge {
@@ -91,15 +93,17 @@ impl CapabilityGraph {
                 let mut next = device.empty(self.nodes.max(1));
                 let changed = device.tensor(&[0]);
                 let argument = |tensor: &CubeTensor| tensor.clone().into_buffer_arg();
-                initialize::launch(
-                    &device.client,
+                ClosureInitialization::launch(
+                    device,
                     device.count(self.nodes),
                     CubeDim::new_1d(device.workgroup),
-                    argument(&seed),
-                    argument(&mask),
-                    argument(&current),
-                    self.nodes as u32,
-                    direction,
+                    ClosureInitializationInputLaunch {
+                        seed: argument(&seed),
+                        mask: argument(&mask),
+                        output: argument(&current),
+                        nodes: self.nodes as u32,
+                        direction,
+                    },
                 );
                 let mut round = 0;
                 let mut progress = ClosureProgress::Propagating;
@@ -107,19 +111,21 @@ impl CapabilityGraph {
                     && progress == ClosureProgress::Propagating
                 {
                     device.write(&changed, &[0]);
-                    propagate::launch(
-                        &device.client,
+                    ClosurePropagation::launch(
+                        device,
                         device.count(self.nodes),
                         CubeDim::new_1d(device.workgroup),
-                        argument(&seed),
-                        argument(&mask),
-                        argument(&offsets),
-                        argument(&sources),
-                        argument(&current),
-                        argument(&next),
-                        argument(&changed),
-                        self.nodes as u32,
-                        direction,
+                        ClosurePropagationInputLaunch {
+                            seed: argument(&seed),
+                            mask: argument(&mask),
+                            offsets: argument(&offsets),
+                            sources: argument(&sources),
+                            previous: argument(&current),
+                            next: argument(&next),
+                            changed: argument(&changed),
+                            nodes: self.nodes as u32,
+                            direction,
+                        },
                     );
                     std::mem::swap(&mut current, &mut next);
                     progress = match device.read(&changed)?[0] {
@@ -171,7 +177,7 @@ enum ClosureProgress {
     Converged,
 }
 
-#[cube(launch)]
+#[cube]
 fn initialize(
     seed: &[u32],
     mask: &[u32],
@@ -188,7 +194,7 @@ fn initialize(
     }
 }
 
-#[cube(launch)]
+#[cube]
 fn propagate(
     seed: &[u32],
     mask: &[u32],

@@ -1,11 +1,13 @@
 mod kernels;
-use super::{Device, layout::WORD_BYTES};
+mod systems;
+use super::{Device, layout::WORD_BYTES, system::System};
 use crate::domain::{Phase, Scenario, State, demography::*};
 use anyhow::{Context, Result, anyhow};
 use burn_wgpu::CubeTensor;
 use bytemuck::{Pod, Zeroable};
 use cubecl::prelude::*;
 use std::{collections::HashMap, mem::offset_of};
+use systems::*;
 
 const OBSERVATION_SHARDS: usize = 1024;
 
@@ -214,20 +216,22 @@ impl DemographyRuntime {
             )?,
             _ => super::tensor::empty(device, [0]),
         };
-        kernels::step::launch(
-            &device.client,
+        HouseholdDemography::launch(
+            device,
             cube_count,
             CubeDim::new_1d(device.workgroup),
-            argument(state),
-            argument(actors),
-            config.launch(),
-            argument(&self.people),
-            argument(&self.ranges),
-            self.policy.launch(),
-            argument(&self.births),
-            samples.clone().into_buffer_arg(),
-            u32::try_from(day)?,
-            stage,
+            DemographyInputLaunch {
+                state: argument(state),
+                actors: argument(actors),
+                config: config.launch(),
+                people: argument(&self.people),
+                ranges: argument(&self.ranges),
+                policy: self.policy.launch(),
+                births: argument(&self.births),
+                samples: samples.clone().into_buffer_arg(),
+                day: u32::try_from(day)?,
+                stage,
+            },
         );
         Ok(())
     }
@@ -330,14 +334,16 @@ impl DemographyRuntime {
         let output = device.empty(8);
         let argument = |tensor: &CubeTensor| tensor.clone().into_buffer_arg();
         let cube_count = device.count(self.count);
-        kernels::observe::launch(
-            &device.client,
+        PopulationCounting::launch(
+            device,
             cube_count,
             CubeDim::new_1d(device.workgroup),
-            argument(&self.people),
-            self.policy.launch(),
-            argument(&shards),
-            self.count as u32,
+            PopulationInputLaunch {
+                people: argument(&self.people),
+                policy: self.policy.launch(),
+                output: argument(&shards),
+                count: self.count as u32,
+            },
         );
         let input = cubecl::std::tensor::TensorHandle::new_contiguous(
             [OBSERVATION_SHARDS, 8],
@@ -351,12 +357,14 @@ impl DemographyRuntime {
             cubek::reduce::components::instructions::ReduceOperationConfig::Sum,
             <u64 as cubecl::prelude::Scalar>::elem_type_native(),
         )?;
-        kernels::observation_totals::launch(
-            &device.client,
+        PopulationTotals::launch(
+            device,
             CubeCount::Static(1, 1, 1),
             CubeDim::new_1d(device.workgroup),
-            sums.into_arg().into_buffer_arg(),
-            argument(&output),
+            PopulationTotalsInputLaunch {
+                sums: sums.into_arg().into_buffer_arg(),
+                output: argument(&output),
+            },
         );
         let totals = device.read(&output)?;
         Ok(PopulationObservation {
@@ -410,12 +418,14 @@ impl DemographyRuntime {
         };
         let argument = |tensor: &CubeTensor| tensor.clone().into_buffer_arg();
         let cube_count = device.count(births.len());
-        kernels::birth_prefix::launch(
-            &device.client,
+        BirthCounting::launch(
+            device,
             cube_count.clone(),
             CubeDim::new_1d(device.workgroup),
-            argument(&self.births),
-            argument(scratch),
+            BirthCountInputLaunch {
+                births: argument(&self.births),
+                scratch: argument(scratch),
+            },
         );
         super::parallel::scan(
             device,
@@ -423,35 +433,41 @@ impl DemographyRuntime {
             births.len(),
             births.len().div_ceil(device.workgroup as usize),
         );
-        kernels::birth_ranges::launch(
-            &device.client,
+        BirthRanges::launch(
+            device,
             cube_count.clone(),
             CubeDim::new_1d(device.workgroup),
-            argument(&self.ranges),
-            argument(&self.births),
-            argument(scratch),
-            argument(&grown.ranges),
+            BirthRangeInputLaunch {
+                old: argument(&self.ranges),
+                births: argument(&self.births),
+                scratch: argument(scratch),
+                ranges: argument(&grown.ranges),
+            },
         );
-        kernels::grow::launch(
-            &device.client,
+        PopulationGrowth::launch(
+            device,
             device.count(self.count * PersonLayout::WORDS / 4),
             CubeDim::new_1d(device.workgroup),
-            argument(&self.people),
-            argument(&grown.people),
-            argument(&self.ranges),
-            argument(&grown.ranges),
-            self.count as u32,
+            PopulationGrowthInputLaunch {
+                source: argument(&self.people),
+                target: argument(&grown.people),
+                old_ranges: argument(&self.ranges),
+                new_ranges: argument(&grown.ranges),
+                people: self.count as u32,
+            },
         );
-        kernels::newborns::launch(
-            &device.client,
+        NewbornInitialization::launch(
+            device,
             cube_count,
             CubeDim::new_1d(device.workgroup),
-            argument(&grown.people),
-            argument(&self.ranges),
-            argument(&grown.ranges),
-            argument(&self.births),
-            next_identity as u32,
-            (next_identity >> 32) as u32,
+            NewbornInputLaunch {
+                target: argument(&grown.people),
+                old_ranges: argument(&self.ranges),
+                new_ranges: argument(&grown.ranges),
+                births: argument(&self.births),
+                next_low: next_identity as u32,
+                next_high: (next_identity >> 32) as u32,
+            },
         );
         device.reclaim_memory(0)?;
         match device

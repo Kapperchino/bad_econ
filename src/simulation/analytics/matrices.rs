@@ -127,15 +127,17 @@ impl DeviceMatrix {
                 tensor::matmul(device, &left, &right, &output.data)?;
                 let elements = output.rows * output.columns * 2;
                 let width = tensor::vector_width(device, elements);
-                kernels::rescale::launch(
-                    &device.client,
+                VectorRescaling::launch_vectorized(
+                    device,
                     count(device, elements / width),
                     CubeDim::new_1d(device.workgroup),
+                    RescaleInputLaunch {
+                        values: argument(&output.data),
+                        control: argument(&control),
+                        scale: self.scale as f32,
+                        length: elements as u32,
+                    },
                     width,
-                    argument(&output.data),
-                    argument(&control),
-                    self.scale as f32,
-                    elements as u32,
                 );
                 faults(device, &control)?;
                 Ok(output)
@@ -206,17 +208,19 @@ impl DeviceMatrix {
                 let column_factors = device.tensor(&encode(columns));
                 let output = Self::empty(device, self.rows, self.columns, self.scale)?;
                 let control = device.tensor(&[0; CONTROL_WORDS]);
-                kernels::dense_units::launch(
-                    &device.client,
+                MatrixUnits::launch(
+                    device,
                     count(device, self.rows * self.columns),
                     CubeDim::new_1d(device.workgroup),
-                    argument(&self.data),
-                    argument(&row_factors),
-                    argument(&column_factors),
-                    argument(&output.data),
-                    argument(&control),
-                    self.rows as u32,
-                    self.columns as u32,
+                    MatrixUnitsInputLaunch {
+                        input: argument(&self.data),
+                        row_factors: argument(&row_factors),
+                        column_factors: argument(&column_factors),
+                        output: argument(&output.data),
+                        control: argument(&control),
+                        rows: self.rows as u32,
+                        columns: self.columns as u32,
+                    },
                 );
                 faults(device, &control)?;
                 Ok(output)
@@ -273,15 +277,17 @@ impl DeviceOperator {
                 budget,
             )?;
             match solution.values(device)? {
-                Diagnostic::Available(values) => kernels::dense_column::launch(
-                    &device.client,
+                Diagnostic::Available(values) => MatrixColumn::launch(
+                    device,
                     count(device, self.rows),
                     CubeDim::new_1d(device.workgroup),
-                    argument(&values.data),
-                    argument(&output.data),
-                    self.rows as u32,
-                    self.columns as u32,
-                    column as u32,
+                    MatrixColumnInputLaunch {
+                        input: argument(&values.data),
+                        output: argument(&output.data),
+                        rows: self.rows as u32,
+                        columns: self.columns as u32,
+                        column: column as u32,
+                    },
                 ),
                 Diagnostic::Inadmissible => result = Diagnostic::Inadmissible,
                 _ => result = Diagnostic::UnresolvedAccuracy,
@@ -385,15 +391,17 @@ impl DeviceSignedVector {
     pub fn read(&self, device: &Device) -> Result<Vec<SignedInterval>> {
         let output = device.empty((self.positive.length * 6).max(6));
         let control = device.tensor(&[0; CONTROL_WORDS]);
-        kernels::signed_vector::launch(
-            &device.client,
+        SignedVectorRead::launch(
+            device,
             count(device, self.positive.length),
             CubeDim::new_1d(device.workgroup),
-            argument(&self.positive.data),
-            argument(&self.negative.data),
-            argument(&output),
-            argument(&control),
-            self.positive.length as u32,
+            SignedVectorReadInputLaunch {
+                positive: argument(&self.positive.data),
+                negative: argument(&self.negative.data),
+                output: argument(&output),
+                control: argument(&control),
+                length: self.positive.length as u32,
+            },
         );
         faults(device, &control)?;
         Ok(device

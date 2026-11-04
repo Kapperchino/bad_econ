@@ -223,8 +223,40 @@ impl LaborBalances {
     }
 }
 
-#[cube(launch)]
-pub(in crate::simulation) fn settle_labor(
+#[derive(CubeType, CubeLaunch)]
+pub(in crate::simulation) struct LaborInput {
+    pub state: Box<[u32]>,
+    pub config: EconomyConfig,
+    pub scratch: Box<[u32]>,
+    pub control: Box<[Atomic<u32>]>,
+    pub parameters: EconomyParameters,
+}
+
+pub(in crate::simulation) struct LaborSettlement;
+pub(in crate::simulation) struct SettleLabor;
+
+impl System for LaborSettlement {
+    type Input = LaborInput;
+    type Passes = gpu_passes![SettleLabor];
+}
+
+#[cube]
+impl GpuPass<LaborInput> for SettleLabor {
+    type Output = ();
+
+    fn execute(mut input: LaborInput) {
+        settle_labor(
+            &mut input.state,
+            &input.config,
+            &mut input.scratch,
+            &input.control,
+            &input.parameters,
+        );
+    }
+}
+
+#[cube]
+fn settle_labor(
     state: &mut [u32],
     config: &EconomyConfig,
     scratch: &mut [u32],
@@ -420,32 +452,36 @@ mod tests {
                     let mut original =
                         expected.parameters(Phase::Commitment, Market::Labor, 0, count)?;
                     original.sort_count = case.length as u32;
-                    crate::simulation::economy::economy::launch(
-                        &device.client,
+                    EconomySystem::launch(
+                        &device,
                         device.count(case.length),
                         CubeDim::new_1d(workgroup),
-                        expected.state.clone().into_buffer_arg(),
-                        expected.actors.clone().into_buffer_arg(),
-                        expected.config.launch(),
-                        expected.spatial.clone().into_buffer_arg(),
-                        expected.proposals.clone().into_buffer_arg(),
-                        expected.scratch.clone().into_buffer_arg(),
-                        expected.control.clone().into_buffer_arg(),
-                        original.launch(),
-                        EconomyStage::GroupExecute,
+                        EconomyInputLaunch {
+                            state: expected.state.clone().into_buffer_arg(),
+                            actors: expected.actors.clone().into_buffer_arg(),
+                            config: expected.config.launch(),
+                            spatial: expected.spatial.clone().into_buffer_arg(),
+                            proposals: expected.proposals.clone().into_buffer_arg(),
+                            bundles: expected.scratch.clone().into_buffer_arg(),
+                            control: expected.control.clone().into_buffer_arg(),
+                            parameters: original.launch(),
+                            stage: EconomyStage::GroupExecute,
+                        },
                     );
                     let mut parameters =
                         actual.parameters(Phase::Commitment, Market::Labor, 0, count)?;
                     parameters.scan = mode;
-                    settle_labor::launch(
-                        &device.client,
+                    LaborSettlement::launch(
+                        &device,
                         CubeCount::Static(1, 1, 1),
                         CubeDim::new_1d(workgroup),
-                        actual.state.clone().into_buffer_arg(),
-                        actual.config.launch(),
-                        actual.scratch.clone().into_buffer_arg(),
-                        actual.control.clone().into_buffer_arg(),
-                        parameters.launch(),
+                        LaborInputLaunch {
+                            state: actual.state.clone().into_buffer_arg(),
+                            config: actual.config.launch(),
+                            scratch: actual.scratch.clone().into_buffer_arg(),
+                            control: actual.control.clone().into_buffer_arg(),
+                            parameters: parameters.launch(),
+                        },
                     );
                     for (name, actual, expected) in [
                         ("state", &actual.state, &expected.state),

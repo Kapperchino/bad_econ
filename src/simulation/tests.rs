@@ -698,19 +698,21 @@ fn vectorized_opening_matches_serial_deliveries_resets_and_faults_on_gpu() -> Re
             let expected_control = simulation.device.tensor(&[0; CONTROL_WORDS]);
             let mut parameters = simulation.parameters(Phase::Opening, Market::Labor, 0, count)?;
             parameters.day = day;
-            economy::economy::launch(
-                &simulation.device.client,
+            economy::EconomySystem::launch(
+                &simulation.device,
                 simulation.device.count(count),
                 cubecl::CubeDim::new_1d(workgroup),
-                expected.clone().into_buffer_arg(),
-                simulation.actors.clone().into_buffer_arg(),
-                simulation.config.launch(),
-                simulation.spatial.clone().into_buffer_arg(),
-                simulation.proposals.clone().into_buffer_arg(),
-                simulation.events.clone().into_buffer_arg(),
-                expected_control.clone().into_buffer_arg(),
-                parameters.launch(),
-                EconomyStage::Local,
+                economy::EconomyInputLaunch {
+                    state: expected.clone().into_buffer_arg(),
+                    actors: simulation.actors.clone().into_buffer_arg(),
+                    config: simulation.config.launch(),
+                    spatial: simulation.spatial.clone().into_buffer_arg(),
+                    proposals: simulation.proposals.clone().into_buffer_arg(),
+                    bundles: simulation.events.clone().into_buffer_arg(),
+                    control: expected_control.clone().into_buffer_arg(),
+                    parameters: parameters.launch(),
+                    stage: EconomyStage::Local,
+                },
             );
             economy::opening::launch(
                 &simulation.device,

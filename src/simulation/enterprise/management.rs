@@ -1,22 +1,22 @@
-use super::{
+use crate::domain::{Field, State, enterprise::EnterpriseState};
+use crate::simulation::configuration::{Configuration, EconomyConfig, Feature};
+use crate::simulation::{
     Device,
     pass::GpuPass,
     system::{System, gpu_passes},
     words::*,
 };
-use crate::domain::{Field, State, enterprise::EnterpriseState};
-use crate::simulation::configuration::{Configuration, EconomyConfig, Feature};
 use burn_wgpu::CubeTensor;
 use cubecl::{CubeDim, prelude::*};
 use std::collections::BTreeMap;
 
-pub(super) struct EnterpriseManagement {
+pub(in crate::simulation) struct EnterpriseManagement {
     groups: u32,
     firms: CubeTensor,
 }
 
 #[derive(CubeType, CubeLaunch)]
-pub(super) struct AssignmentInput {
+pub(in crate::simulation) struct AssignmentInput {
     state: Box<[u32]>,
     config: EconomyConfig,
     firms: Box<[u32]>,
@@ -24,7 +24,7 @@ pub(super) struct AssignmentInput {
     day: u32,
 }
 
-pub(super) struct AssignOwners;
+pub(in crate::simulation) struct AssignOwners;
 
 impl System for EnterpriseManagement {
     type Input = AssignmentInput;

@@ -20,15 +20,17 @@ pub(in crate::simulation) fn launch(
             OpeningStage::Actors => config.actors as usize,
             OpeningStage::Goods => config.actors as usize * Good::COUNT,
         };
-        opening::launch(
-            &device.client,
+        OpeningSystem::launch(
+            device,
             device.count(count),
             CubeDim::new_1d(device.workgroup),
-            state.clone().into_buffer_arg(),
-            config.launch(),
-            control.clone().into_buffer_arg(),
-            day,
-            stage,
+            OpeningInputLaunch {
+                state: state.clone().into_buffer_arg(),
+                config: config.launch(),
+                control: control.clone().into_buffer_arg(),
+                day,
+                stage,
+            },
         );
     }
 }
@@ -38,7 +40,40 @@ fn coordinate(config: &EconomyConfig, field: u32, actor: u32) -> usize {
     (field * config.actors + actor) as usize
 }
 
-#[cube(launch)]
+#[derive(CubeType, CubeLaunch)]
+struct OpeningInput {
+    state: Box<[Ticks]>,
+    config: EconomyConfig,
+    control: Box<[Atomic<u32>]>,
+    day: u32,
+    #[cube(comptime)]
+    stage: OpeningStage,
+}
+
+struct OpeningSystem;
+struct OpenDay;
+
+impl System for OpeningSystem {
+    type Input = OpeningInput;
+    type Passes = gpu_passes![OpenDay];
+}
+
+#[cube]
+impl GpuPass<OpeningInput> for OpenDay {
+    type Output = ();
+
+    fn execute(mut input: OpeningInput) {
+        opening(
+            &mut input.state,
+            &input.config,
+            &input.control,
+            input.day,
+            comptime!(input.stage),
+        );
+    }
+}
+
+#[cube]
 fn opening(
     state: &mut [Ticks],
     config: &EconomyConfig,

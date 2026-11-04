@@ -130,7 +130,7 @@ fn read(words: &[u32], base: usize) -> Ticks {
     ticks(words[base], words[base + 1])
 }
 
-#[cube(launch)]
+#[cube]
 fn lending(input: &[u32], output: &mut [u32], control: &[Atomic<u32>], count: u32) {
     let id = ABSOLUTE_POS as u32;
     if id < count {
@@ -158,7 +158,7 @@ fn lending(input: &[u32], output: &mut [u32], control: &[Atomic<u32>], count: u3
     }
 }
 
-#[cube(launch)]
+#[cube]
 fn funding(
     plans: &[u32],
     flows: &mut [u32],
@@ -193,7 +193,7 @@ fn funding(
     }
 }
 
-#[cube(launch)]
+#[cube]
 fn pools(
     plans: &[u32],
     demands: &mut [u32],
@@ -245,14 +245,16 @@ impl FinancePolicies {
         let input = padded(device, bytemuck::cast_slice(&records));
         let output = device.empty(inputs.len().max(1) * TICK_WORDS);
         let control = device.tensor(&[0; CONTROL_WORDS]);
-        lending::launch(
-            &device.client,
+        LendingEvaluation::launch(
+            device,
             count(device, inputs.len()),
             CubeDim::new_1d(device.workgroup),
-            argument(&input),
-            argument(&output),
-            argument(&control),
-            inputs.len() as u32,
+            PolicyInputLaunch {
+                input: argument(&input),
+                output: argument(&output),
+                control: argument(&control),
+                count: inputs.len() as u32,
+            },
         );
         FaultFlags::read(&device.read(&control)?)?.into_result()?;
         Ok(read_ticks(device, &output, inputs.len())?
@@ -283,15 +285,17 @@ impl FinancePolicies {
         let flows = padded(device, bytemuck::cast_slice(&flows));
         let output = device.empty(inputs.len().max(1) * 2 * TICK_WORDS);
         let control = device.tensor(&[0; CONTROL_WORDS]);
-        funding::launch(
-            &device.client,
+        FundingEvaluation::launch(
+            device,
             count(device, inputs.len()),
             CubeDim::new_1d(device.workgroup),
-            argument(&records),
-            argument(&flows),
-            argument(&output),
-            argument(&control),
-            inputs.len() as u32,
+            FlowInputLaunch {
+                plans: argument(&records),
+                flows: argument(&flows),
+                output: argument(&output),
+                control: argument(&control),
+                count: inputs.len() as u32,
+            },
         );
         FaultFlags::read(&device.read(&control)?)?.into_result()?;
         Ok(read_ticks(device, &output, inputs.len() * 2)?
@@ -324,15 +328,17 @@ impl FinancePolicies {
         let input = padded(device, bytemuck::cast_slice(&demands));
         let output = device.empty(demands.len().max(1) * TICK_WORDS);
         let remaining = device.empty(inputs.len().max(1) * TICK_WORDS);
-        pools::launch(
-            &device.client,
+        PoolAllocation::launch(
+            device,
             count(device, inputs.len()),
             CubeDim::new_1d(device.workgroup),
-            argument(&metadata),
-            argument(&input),
-            argument(&output),
-            argument(&remaining),
-            inputs.len() as u32,
+            PoolInputLaunch {
+                plans: argument(&metadata),
+                demands: argument(&input),
+                output: argument(&output),
+                remaining: argument(&remaining),
+                count: inputs.len() as u32,
+            },
         );
         let filled = read_ticks(device, &output, demands.len())?;
         let remainder = read_ticks(device, &remaining, inputs.len())?;
@@ -449,7 +455,7 @@ impl DiscountRecord {
 
 const DISCOUNT_SCALE: u32 = 1_000_000;
 
-#[cube(launch)]
+#[cube]
 fn budgets(input: &[u32], output: &mut [u32], control: &[Atomic<u32>], count: u32) {
     let id = ABSOLUTE_POS as u32;
     if id < count {
@@ -512,7 +518,7 @@ fn signed_difference(output: &mut [u32], base: u32, credit: Ticks, debit: Ticks)
     store(output, base + 1, amount);
 }
 
-#[cube(launch)]
+#[cube]
 fn discounts(
     plans: &[u32],
     flows: &mut [u32],
@@ -592,14 +598,16 @@ impl FinancePolicies {
         let input = padded(device, bytemuck::cast_slice(&records));
         let output = device.empty(inputs.len().max(1) * 2 * TICK_WORDS);
         let control = device.tensor(&[0; CONTROL_WORDS]);
-        budgets::launch(
-            &device.client,
+        BudgetEvaluation::launch(
+            device,
             count(device, inputs.len()),
             CubeDim::new_1d(device.workgroup),
-            argument(&input),
-            argument(&output),
-            argument(&control),
-            inputs.len() as u32,
+            PolicyInputLaunch {
+                input: argument(&input),
+                output: argument(&output),
+                control: argument(&control),
+                count: inputs.len() as u32,
+            },
         );
         FaultFlags::read(&device.read(&control)?)?.into_result()?;
         Ok(read_ticks(device, &output, inputs.len() * 2)?
@@ -635,15 +643,17 @@ impl FinancePolicies {
         let flows = padded(device, bytemuck::cast_slice(&flows));
         let output = device.empty(inputs.len().max(1) * 4 * TICK_WORDS);
         let control = device.tensor(&[0; CONTROL_WORDS]);
-        discounts::launch(
-            &device.client,
+        DiscountEvaluation::launch(
+            device,
             count(device, inputs.len()),
             CubeDim::new_1d(device.workgroup),
-            argument(&records),
-            argument(&flows),
-            argument(&output),
-            argument(&control),
-            inputs.len() as u32,
+            FlowInputLaunch {
+                plans: argument(&records),
+                flows: argument(&flows),
+                output: argument(&output),
+                control: argument(&control),
+                count: inputs.len() as u32,
+            },
         );
         FaultFlags::read(&device.read(&control)?)?.into_result()?;
         let signed = |sign, magnitude| match (sign, magnitude) {
@@ -658,5 +668,139 @@ impl FinancePolicies {
                 upper: signed(row[2], row[3]),
             })
             .collect())
+    }
+}
+
+#[derive(CubeType, CubeLaunch)]
+pub(super) struct PolicyInput {
+    pub input: Box<[u32]>,
+    pub output: Box<[u32]>,
+    pub control: Box<[Atomic<u32>]>,
+    pub count: u32,
+}
+
+pub(super) struct LendingEvaluation;
+
+pub(super) struct BudgetEvaluation;
+
+pub(super) struct EvaluateLending;
+
+pub(super) struct EvaluateBudget;
+
+impl System for LendingEvaluation {
+    type Input = PolicyInput;
+    type Passes = gpu_passes![EvaluateLending];
+}
+
+impl System for BudgetEvaluation {
+    type Input = PolicyInput;
+    type Passes = gpu_passes![EvaluateBudget];
+}
+
+#[cube]
+impl GpuPass<PolicyInput> for EvaluateLending {
+    type Output = ();
+
+    fn execute(mut input: PolicyInput) {
+        lending(&input.input, &mut input.output, &input.control, input.count);
+    }
+}
+
+#[cube]
+impl GpuPass<PolicyInput> for EvaluateBudget {
+    type Output = ();
+
+    fn execute(mut input: PolicyInput) {
+        budgets(&input.input, &mut input.output, &input.control, input.count);
+    }
+}
+
+#[derive(CubeType, CubeLaunch)]
+pub(super) struct FlowInput {
+    pub plans: Box<[u32]>,
+    pub flows: Box<[u32]>,
+    pub output: Box<[u32]>,
+    pub control: Box<[Atomic<u32>]>,
+    pub count: u32,
+}
+
+pub(super) struct FundingEvaluation;
+
+pub(super) struct DiscountEvaluation;
+
+pub(super) struct EvaluateFunding;
+
+pub(super) struct EvaluateDiscounts;
+
+impl System for FundingEvaluation {
+    type Input = FlowInput;
+    type Passes = gpu_passes![EvaluateFunding];
+}
+
+impl System for DiscountEvaluation {
+    type Input = FlowInput;
+    type Passes = gpu_passes![EvaluateDiscounts];
+}
+
+#[cube]
+impl GpuPass<FlowInput> for EvaluateFunding {
+    type Output = ();
+
+    fn execute(mut input: FlowInput) {
+        funding(
+            &input.plans,
+            &mut input.flows,
+            &mut input.output,
+            &input.control,
+            input.count,
+        );
+    }
+}
+
+#[cube]
+impl GpuPass<FlowInput> for EvaluateDiscounts {
+    type Output = ();
+
+    fn execute(mut input: FlowInput) {
+        discounts(
+            &input.plans,
+            &mut input.flows,
+            &mut input.output,
+            &input.control,
+            input.count,
+        );
+    }
+}
+
+#[derive(CubeType, CubeLaunch)]
+pub(super) struct PoolInput {
+    pub plans: Box<[u32]>,
+    pub demands: Box<[u32]>,
+    pub output: Box<[u32]>,
+    pub remaining: Box<[u32]>,
+    pub count: u32,
+}
+
+pub(super) struct PoolAllocation;
+
+pub(super) struct AllocatePool;
+
+impl System for PoolAllocation {
+    type Input = PoolInput;
+    type Passes = gpu_passes![AllocatePool];
+}
+
+#[cube]
+impl GpuPass<PoolInput> for AllocatePool {
+    type Output = ();
+
+    fn execute(mut input: PoolInput) {
+        pools(
+            &input.plans,
+            &mut input.demands,
+            &mut input.output,
+            &mut input.remaining,
+            input.count,
+        );
     }
 }

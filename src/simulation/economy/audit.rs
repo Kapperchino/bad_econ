@@ -158,27 +158,31 @@ impl AuditBuffers {
     ) {
         let count = actors.meta.num_elements() / ActorLayout::WORDS;
         let argument = |tensor: &CubeTensor| tensor.clone().into_buffer_arg();
-        validate_actors::launch(
-            &device.client,
+        ActorValidation::launch(
+            device,
             device.count(count * (Good::COUNT + 1)),
             CubeDim::new_1d(device.workgroup),
-            argument(state),
-            argument(actors),
-            config.launch(),
-            argument(control),
+            ValidationInputLaunch {
+                state: argument(state),
+                actors: argument(actors),
+                config: config.launch(),
+                control: argument(control),
+            },
         );
         let groups = count.div_ceil(TILE_ACTORS);
-        summarize_metrics::launch(
-            &device.client,
+        MetricSummary::launch(
+            device,
             device.count(groups * SummaryLayout::METRICS * device.workgroup as usize),
             CubeDim::new_1d(device.workgroup),
-            argument(state),
-            argument(actors),
-            config.launch(),
-            argument(&self.metrics),
-            argument(output),
-            argument(control),
-            groups as u32,
+            SummaryInputLaunch {
+                state: argument(state),
+                actors: argument(actors),
+                config: config.launch(),
+                metrics: argument(&self.metrics),
+                output: argument(output),
+                control: argument(control),
+                groups: groups as u32,
+            },
         );
     }
 }
@@ -207,7 +211,43 @@ fn native(value: Ticks) -> u64 {
     u64::cast_from(value.extract(LOW_WORD)) | (u64::cast_from(value.extract(HIGH_WORD)) << 32)
 }
 
-#[cube(launch)]
+#[derive(CubeType, CubeLaunch)]
+struct SummaryInput {
+    state: Box<[Ticks]>,
+    actors: Box<[u32]>,
+    config: EconomyConfig,
+    metrics: Box<[Vector<u32, Const<4>>]>,
+    output: Box<[Ticks]>,
+    control: Box<[Atomic<u32>]>,
+    groups: u32,
+}
+
+struct MetricSummary;
+struct SummarizeMetrics;
+
+impl System for MetricSummary {
+    type Input = SummaryInput;
+    type Passes = gpu_passes![SummarizeMetrics];
+}
+
+#[cube]
+impl GpuPass<SummaryInput> for SummarizeMetrics {
+    type Output = ();
+
+    fn execute(mut input: SummaryInput) {
+        summarize_metrics(
+            &input.state,
+            &input.actors,
+            &input.config,
+            &input.metrics,
+            &mut input.output,
+            &input.control,
+            input.groups,
+        );
+    }
+}
+
+#[cube]
 fn summarize_metrics(
     state: &[Ticks],
     actors: &[u32],
@@ -341,7 +381,32 @@ fn summarize_metrics(
     }
 }
 
-#[cube(launch)]
+#[derive(CubeType, CubeLaunch)]
+struct ValidationInput {
+    state: Box<[Ticks]>,
+    actors: Box<[u32]>,
+    config: EconomyConfig,
+    control: Box<[Atomic<u32>]>,
+}
+
+struct ActorValidation;
+struct ValidateActors;
+
+impl System for ActorValidation {
+    type Input = ValidationInput;
+    type Passes = gpu_passes![ValidateActors];
+}
+
+#[cube]
+impl GpuPass<ValidationInput> for ValidateActors {
+    type Output = ();
+
+    fn execute(input: ValidationInput) {
+        validate_actors(&input.state, &input.actors, &input.config, &input.control);
+    }
+}
+
+#[cube]
 fn validate_actors(
     state: &[Ticks],
     actors: &[u32],

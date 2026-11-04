@@ -1,6 +1,9 @@
-use super::{Device, words::ceildiv};
+pub(super) mod reduction;
+mod systems;
+use super::{Device, system::System, words::ceildiv};
 use burn_wgpu::CubeTensor;
 use cubecl::prelude::*;
+use systems::*;
 
 #[derive(CubeType)]
 pub(super) struct PrefixSum {
@@ -77,14 +80,16 @@ pub(super) fn scan(device: &Device, buffer: &CubeTensor, offset: usize, count: u
     let mut count = count;
     while count > 1 {
         let blocks = count.div_ceil(device.workgroup as usize);
-        scan_blocks::launch(
-            &device.client,
+        BlockScan::launch(
+            device,
             device.count(count),
             CubeDim::new_1d(device.workgroup),
-            buffer.clone().into_buffer_arg(),
-            offset as u32,
-            count as u32,
-            ScanMode::new(device),
+            BlockScanInputLaunch {
+                buffer: buffer.clone().into_buffer_arg(),
+                offset: offset as u32,
+                count: count as u32,
+                mode: ScanMode::new(device),
+            },
         );
         levels.push(ScanLevel {
             offset,
@@ -96,18 +101,20 @@ pub(super) fn scan(device: &Device, buffer: &CubeTensor, offset: usize, count: u
         count = blocks;
     }
     for level in levels.into_iter().rev().filter(|level| level.blocks > 1) {
-        add_block_offsets::launch(
-            &device.client,
+        BlockOffsets::launch(
+            device,
             device.count(level.count),
             CubeDim::new_1d(device.workgroup),
-            buffer.clone().into_buffer_arg(),
-            level.offset as u32,
-            level.count as u32,
+            BlockOffsetInputLaunch {
+                buffer: buffer.clone().into_buffer_arg(),
+                offset: level.offset as u32,
+                count: level.count as u32,
+            },
         );
     }
 }
 
-#[cube(launch)]
+#[cube]
 fn scan_blocks(buffer: &mut [u32], offset: u32, count: u32, #[comptime] mode: ScanMode) {
     let id = ABSOLUTE_POS as u32;
     let block = CUBE_POS as u32;
@@ -124,7 +131,7 @@ fn scan_blocks(buffer: &mut [u32], offset: u32, count: u32, #[comptime] mode: Sc
     }
 }
 
-#[cube(launch)]
+#[cube]
 fn add_block_offsets(buffer: &mut [u32], offset: u32, count: u32) {
     let id = ABSOLUTE_POS as u32;
     let block = CUBE_POS as u32;
@@ -165,14 +172,16 @@ mod tests {
                     let mut words = vec![u32::MAX; offset + count + blocks + 16];
                     words[offset..offset + count].copy_from_slice(&input);
                     let buffer = device.tensor(&words);
-                    scan_blocks::launch(
-                        &device.client,
+                    BlockScan::launch(
+                        &device,
                         device.count(count),
                         CubeDim::new_1d(workgroup),
-                        buffer.clone().into_buffer_arg(),
-                        offset as u32,
-                        count as u32,
-                        mode,
+                        BlockScanInputLaunch {
+                            buffer: buffer.clone().into_buffer_arg(),
+                            offset: offset as u32,
+                            count: count as u32,
+                            mode,
+                        },
                     );
                     let actual = device.read(&buffer)?;
                     assert_eq!(
@@ -239,19 +248,21 @@ pub(super) fn scan_active(
     let mut level_index = 0usize;
     while count > 1 {
         let blocks = count.div_ceil(device.workgroup as usize);
-        scan_active_blocks::launch(
-            &device.client,
+        ActiveBlockScan::launch(
+            device,
             crate::simulation::markets::dispatch(
                 dispatches,
                 crate::simulation::markets::HISTOGRAM_DISPATCH + level_index * 3,
             ),
             CubeDim::new_1d(device.workgroup),
-            buffer.clone().into_buffer_arg(),
-            control.clone().into_buffer_arg(),
-            offset as u32,
-            count as u32,
-            divisor,
-            ScanMode::new(device),
+            ActiveScanInputLaunch {
+                buffer: buffer.clone().into_buffer_arg(),
+                control: control.clone().into_buffer_arg(),
+                offset: offset as u32,
+                bound: count as u32,
+                divisor,
+                mode: ScanMode::new(device),
+            },
         );
         levels.push(ScanLevel {
             offset,
@@ -270,23 +281,25 @@ pub(super) fn scan_active(
         .rev()
         .filter(|(_, level)| level.blocks > 1)
     {
-        add_active_offsets::launch(
-            &device.client,
+        ActiveBlockOffsets::launch(
+            device,
             crate::simulation::markets::dispatch(
                 dispatches,
                 crate::simulation::markets::HISTOGRAM_DISPATCH + index * 3,
             ),
             CubeDim::new_1d(device.workgroup),
-            buffer.clone().into_buffer_arg(),
-            control.clone().into_buffer_arg(),
-            level.offset as u32,
-            level.count as u32,
-            level.divisor,
+            ActiveOffsetInputLaunch {
+                buffer: buffer.clone().into_buffer_arg(),
+                control: control.clone().into_buffer_arg(),
+                offset: level.offset as u32,
+                bound: level.count as u32,
+                divisor: level.divisor,
+            },
         );
     }
 }
 
-#[cube(launch)]
+#[cube]
 fn scan_active_blocks(
     buffer: &mut [u32],
     control: &[Atomic<u32>],
@@ -319,7 +332,7 @@ fn scan_active_blocks(
     }
 }
 
-#[cube(launch)]
+#[cube]
 fn add_active_offsets(
     buffer: &mut [u32],
     control: &[Atomic<u32>],

@@ -1,12 +1,12 @@
-use super::{
+use crate::domain::{Field, State};
+use crate::simulation::configuration::{Configuration, EconomyConfig};
+use crate::simulation::{
     Device,
     flags::FaultFlags,
     pass::GpuPass,
     system::{System, gpu_passes},
     words::*,
 };
-use crate::domain::{Field, State};
-use crate::simulation::configuration::{Configuration, EconomyConfig};
 use anyhow::{Context, Result};
 use burn_wgpu::CubeTensor;
 use cubecl::{CubeDim, prelude::*};
@@ -19,7 +19,7 @@ struct DistributionShare {
     units: u32,
 }
 
-pub(super) struct OwnershipRuntime {
+pub(in crate::simulation) struct OwnershipRuntime {
     shares: CubeTensor,
     offsets: CubeTensor,
     entries: CubeTensor,

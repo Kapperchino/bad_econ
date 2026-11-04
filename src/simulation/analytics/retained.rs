@@ -29,15 +29,17 @@ impl DeviceVector {
             true => {
                 let output = Self::empty(device, 1);
                 let control = device.tensor(&[0; CONTROL_WORDS]);
-                retained_kernels::reciprocal_reference::launch(
-                    &device.client,
+                retained_kernels::ReciprocalReference::launch(
+                    device,
                     CubeCount::Static(1, 1, 1),
                     CubeDim::new_1d(1),
-                    argument(&self.data),
-                    argument(&output.data),
-                    argument(&control),
-                    reference as u32,
-                    scale,
+                    retained_kernels::ReciprocalInputLaunch {
+                        values: argument(&self.data),
+                        output: argument(&output.data),
+                        control: argument(&control),
+                        reference: reference as u32,
+                        scale,
+                    },
                 );
                 Ok(match faults(device, &control)?[0] {
                     0 => Diagnostic::Available(output),
@@ -291,10 +293,46 @@ impl AugmentedInverse {
 
 mod retained_kernels {
     use super::super::kernels::{Bounds, divide_product, interval, write};
+    use crate::simulation::{
+        pass::GpuPass,
+        system::{System, gpu_passes},
+    };
     use cubecl::prelude::*;
 
-    #[cube(launch)]
-    pub fn reciprocal_reference(
+    #[derive(CubeType, CubeLaunch)]
+    pub(super) struct ReciprocalInput {
+        pub(super) values: Box<[f32]>,
+        pub(super) output: Box<[f32]>,
+        pub(super) control: Box<[Atomic<u32>]>,
+        pub(super) reference: u32,
+        pub(super) scale: u32,
+    }
+
+    pub(super) struct ReciprocalReference;
+    pub(super) struct InvertReference;
+
+    impl System for ReciprocalReference {
+        type Input = ReciprocalInput;
+        type Passes = gpu_passes![InvertReference];
+    }
+
+    #[cube]
+    impl GpuPass<ReciprocalInput> for InvertReference {
+        type Output = ();
+
+        fn execute(mut input: ReciprocalInput) {
+            reciprocal_reference(
+                &input.values,
+                &mut input.output,
+                &input.control,
+                input.reference,
+                input.scale,
+            );
+        }
+    }
+
+    #[cube]
+    fn reciprocal_reference(
         input: &[f32],
         output: &mut [f32],
         control: &[Atomic<u32>],

@@ -25,13 +25,15 @@ impl PendingRecords {
     ) -> Result<Self> {
         let actors = requests.meta.num_elements();
         let argument = |tensor: &CubeTensor| tensor.clone().into_buffer_arg();
-        count_records::launch(
-            &device.client,
+        RecordCounting::launch(
+            device,
             device.count(actors),
             CubeDim::new_1d(device.workgroup),
-            argument(requests),
-            argument(births),
-            argument(scratch),
+            RecordCountInputLaunch {
+                requests: argument(requests),
+                births: argument(births),
+                scratch: argument(scratch),
+            },
         );
         parallel::scan(
             device,
@@ -39,14 +41,16 @@ impl PendingRecords {
             actors,
             actors.div_ceil(device.workgroup as usize),
         );
-        write_records::launch(
-            &device.client,
+        RecordCompaction::launch(
+            device,
             device.count(actors),
             CubeDim::new_1d(device.workgroup),
-            argument(requests),
-            argument(births),
-            argument(scratch),
-            argument(output),
+            RecordCompactionInputLaunch {
+                requests: argument(requests),
+                births: argument(births),
+                scratch: argument(scratch),
+                output: argument(output),
+            },
         );
         let count = device.read_range(output, 0, 1)?[0] as usize;
         let words = device.read_range(output, 1, count * 3)?;
@@ -65,7 +69,60 @@ impl PendingRecords {
     }
 }
 
-#[cube(launch)]
+#[derive(CubeType, CubeLaunch)]
+struct RecordCountInput {
+    requests: Box<[u32]>,
+    births: Box<[u32]>,
+    scratch: Box<[u32]>,
+}
+
+#[derive(CubeType, CubeLaunch)]
+struct RecordCompactionInput {
+    requests: Box<[u32]>,
+    births: Box<[u32]>,
+    scratch: Box<[u32]>,
+    output: Box<[u32]>,
+}
+
+struct RecordCounting;
+struct RecordCompaction;
+struct CountRecords;
+struct WriteRecords;
+
+impl System for RecordCounting {
+    type Input = RecordCountInput;
+    type Passes = gpu_passes![CountRecords];
+}
+
+impl System for RecordCompaction {
+    type Input = RecordCompactionInput;
+    type Passes = gpu_passes![WriteRecords];
+}
+
+#[cube]
+impl GpuPass<RecordCountInput> for CountRecords {
+    type Output = ();
+
+    fn execute(mut input: RecordCountInput) {
+        count_records(&input.requests, &input.births, &mut input.scratch);
+    }
+}
+
+#[cube]
+impl GpuPass<RecordCompactionInput> for WriteRecords {
+    type Output = ();
+
+    fn execute(mut input: RecordCompactionInput) {
+        write_records(
+            &input.requests,
+            &input.births,
+            &mut input.scratch,
+            &mut input.output,
+        );
+    }
+}
+
+#[cube]
 fn count_records(requests: &[u32], births: &[u32], scratch: &mut [u32]) {
     let actor = ABSOLUTE_POS;
     let count = requests.len();
@@ -82,7 +139,7 @@ fn count_records(requests: &[u32], births: &[u32], scratch: &mut [u32]) {
     }
 }
 
-#[cube(launch)]
+#[cube]
 fn write_records(requests: &[u32], births: &[u32], scratch: &mut [u32], output: &mut [u32]) {
     let actor = ABSOLUTE_POS;
     let count = requests.len();

@@ -1,4 +1,6 @@
 use super::*;
+use crate::simulation::{pass::GpuPass, system::gpu_passes};
+use cubecl::prelude::*;
 
 pub struct DeviceSignedMatrix {
     positive: DeviceMatrix,
@@ -88,14 +90,16 @@ impl DeviceSignedVector {
 
     pub fn absolute(&self, device: &Device) -> Result<DeviceVector> {
         let output = DeviceVector::empty(device, self.positive.length);
-        derivative_kernels::absolute::launch(
-            &device.client,
+        AbsoluteValue::launch(
+            device,
             count(device, self.positive.length),
             CubeDim::new_1d(device.workgroup),
-            argument(&self.positive.data),
-            argument(&self.negative.data),
-            argument(&output.data),
-            self.positive.length as u32,
+            AbsoluteValueInputLaunch {
+                positive_input: argument(&self.positive.data),
+                negative_input: argument(&self.negative.data),
+                output: argument(&output.data),
+                length: self.positive.length as u32,
+            },
         );
         Ok(output)
     }
@@ -266,19 +270,21 @@ impl Sensitivity {
                 let positive = DeviceVector::empty(device, beta.length);
                 let negative = DeviceVector::empty(device, beta.length);
                 let control = device.tensor(&[0; CONTROL_WORDS]);
-                derivative_kernels::normalized::launch(
-                    &device.client,
+                NormalizedDerivative::launch(
+                    device,
                     count(device, beta.length),
                     CubeDim::new_1d(device.workgroup),
-                    argument(&beta.data),
-                    argument(&beta_change.positive.data),
-                    argument(&beta_change.negative.data),
-                    argument(&positive.data),
-                    argument(&negative.data),
-                    argument(&control),
-                    beta.length as u32,
-                    reference as u32,
-                    scale,
+                    NormalizedDerivativeInputLaunch {
+                        beta: argument(&beta.data),
+                        change_positive: argument(&beta_change.positive.data),
+                        change_negative: argument(&beta_change.negative.data),
+                        positive_output: argument(&positive.data),
+                        negative_output: argument(&negative.data),
+                        control: argument(&control),
+                        length: beta.length as u32,
+                        reference: reference as u32,
+                        scale,
+                    },
                 );
                 let status = faults(device, &control)?;
                 Ok(match status[0] {
@@ -462,15 +468,17 @@ impl LaborTruncation {
                         }
                         let weighted = tensor::empty(device, [2, labor.rows, labor.columns]);
                         let weighted_tail = DeviceVector::empty(device, 1);
-                        derivative_kernels::weighted_values::launch(
-                            &device.client,
+                        WeightedValues::launch(
+                            device,
                             count(device, labor.rows * labor.columns),
                             CubeDim::new_1d(device.workgroup),
-                            argument(&labor.data),
-                            argument(&weights),
-                            argument(&weighted),
-                            labor.rows as u32,
-                            labor.columns as u32,
+                            WeightedValuesInputLaunch {
+                                labor: argument(&labor.data),
+                                weights: argument(&weights),
+                                output: argument(&weighted),
+                                rows: labor.rows as u32,
+                                columns: labor.columns as u32,
+                            },
                         );
                         let weighted = TensorHandle::new_contiguous(
                             [2, labor.rows, labor.columns],
@@ -496,30 +504,34 @@ impl LaborTruncation {
                             ReduceOperationConfig::Max,
                             f32::elem_type_native(),
                         )?;
-                        derivative_kernels::tail_bound::launch(
-                            &device.client,
+                        TailBound::launch(
+                            device,
                             CubeCount::Static(1, 1, 1),
                             CubeDim::new_1d(1),
-                            norm.into_arg().into_buffer_arg(),
-                            argument(&weighted_tail.data),
-                            argument(&control),
-                            contraction.numerator,
-                            contraction.denominator,
-                            terms.0,
+                            TailBoundInputLaunch {
+                                norms: norm.into_arg().into_buffer_arg(),
+                                output: argument(&weighted_tail.data),
+                                control: argument(&control),
+                                numerator: contraction.numerator,
+                                denominator: contraction.denominator,
+                                terms: terms.0,
+                            },
                         );
                         let enclosure =
                             DeviceMatrix::empty(device, labor.rows, labor.columns, labor.scale)?;
-                        derivative_kernels::tail_enclosure::launch(
-                            &device.client,
+                        TailEnclosure::launch(
+                            device,
                             count(device, labor.rows * labor.columns),
                             CubeDim::new_1d(device.workgroup),
-                            argument(&partial.data),
-                            argument(&weighted_tail.data),
-                            argument(&weights),
-                            argument(&enclosure.data),
-                            argument(&control),
-                            labor.rows as u32,
-                            labor.columns as u32,
+                            TailEnclosureInputLaunch {
+                                partial: argument(&partial.data),
+                                tail: argument(&weighted_tail.data),
+                                weights: argument(&weights),
+                                output: argument(&enclosure.data),
+                                control: argument(&control),
+                                rows: labor.rows as u32,
+                                columns: labor.columns as u32,
+                            },
                         );
                         faults(device, &control)?;
                         Ok(Diagnostic::Available(Self {
@@ -563,7 +575,7 @@ mod derivative_kernels {
     use super::super::kernels::{checked, positive};
     use cubecl::prelude::*;
 
-    #[cube(launch)]
+    #[cube]
     pub fn absolute(
         positive_input: &[f32],
         negative_input: &[f32],
@@ -606,7 +618,7 @@ mod derivative_kernels {
         }
     }
 
-    #[cube(launch)]
+    #[cube]
     pub fn normalized(
         beta: &[f32],
         change_positive: &[f32],
@@ -672,7 +684,7 @@ mod derivative_kernels {
         }
     }
 
-    #[cube(launch)]
+    #[cube]
     pub fn weighted_values(
         labor: &[f32],
         weights: &[u32],
@@ -694,7 +706,7 @@ mod derivative_kernels {
         }
     }
 
-    #[cube(launch)]
+    #[cube]
     pub fn tail_bound(
         norms: &[f32],
         output: &mut [f32],
@@ -720,7 +732,7 @@ mod derivative_kernels {
         }
     }
 
-    #[cube(launch)]
+    #[cube]
     pub fn tail_enclosure(
         partial: &[f32],
         tail: &[f32],
@@ -749,5 +761,182 @@ mod derivative_kernels {
                 },
             );
         }
+    }
+}
+
+#[derive(CubeType, CubeLaunch)]
+pub(super) struct AbsoluteValueInput {
+    pub(super) positive_input: Box<[f32]>,
+    pub(super) negative_input: Box<[f32]>,
+    pub(super) output: Box<[f32]>,
+    pub(super) length: u32,
+}
+
+pub(super) struct AbsoluteValue;
+
+pub(super) struct BoundAbsoluteValue;
+
+impl System for AbsoluteValue {
+    type Input = AbsoluteValueInput;
+    type Passes = gpu_passes![BoundAbsoluteValue];
+}
+
+#[cube]
+impl GpuPass<AbsoluteValueInput> for BoundAbsoluteValue {
+    type Output = ();
+
+    fn execute(mut input: AbsoluteValueInput) {
+        derivative_kernels::absolute(
+            &input.positive_input,
+            &input.negative_input,
+            &mut input.output,
+            input.length,
+        );
+    }
+}
+
+#[derive(CubeType, CubeLaunch)]
+pub(super) struct NormalizedDerivativeInput {
+    pub(super) beta: Box<[f32]>,
+    pub(super) change_positive: Box<[f32]>,
+    pub(super) change_negative: Box<[f32]>,
+    pub(super) positive_output: Box<[f32]>,
+    pub(super) negative_output: Box<[f32]>,
+    pub(super) control: Box<[Atomic<u32>]>,
+    pub(super) length: u32,
+    pub(super) reference: u32,
+    pub(super) scale: u32,
+}
+
+pub(super) struct NormalizedDerivative;
+
+pub(super) struct NormalizeDerivative;
+
+impl System for NormalizedDerivative {
+    type Input = NormalizedDerivativeInput;
+    type Passes = gpu_passes![NormalizeDerivative];
+}
+
+#[cube]
+impl GpuPass<NormalizedDerivativeInput> for NormalizeDerivative {
+    type Output = ();
+
+    fn execute(mut input: NormalizedDerivativeInput) {
+        derivative_kernels::normalized(
+            &input.beta,
+            &input.change_positive,
+            &input.change_negative,
+            &mut input.positive_output,
+            &mut input.negative_output,
+            &input.control,
+            input.length,
+            input.reference,
+            input.scale,
+        );
+    }
+}
+
+#[derive(CubeType, CubeLaunch)]
+pub(super) struct WeightedValuesInput {
+    pub(super) labor: Box<[f32]>,
+    pub(super) weights: Box<[u32]>,
+    pub(super) output: Box<[f32]>,
+    pub(super) rows: u32,
+    pub(super) columns: u32,
+}
+
+pub(super) struct WeightedValues;
+
+pub(super) struct WeightValues;
+
+impl System for WeightedValues {
+    type Input = WeightedValuesInput;
+    type Passes = gpu_passes![WeightValues];
+}
+
+#[cube]
+impl GpuPass<WeightedValuesInput> for WeightValues {
+    type Output = ();
+
+    fn execute(mut input: WeightedValuesInput) {
+        derivative_kernels::weighted_values(
+            &input.labor,
+            &input.weights,
+            &mut input.output,
+            input.rows,
+            input.columns,
+        );
+    }
+}
+
+#[derive(CubeType, CubeLaunch)]
+pub(super) struct TailBoundInput {
+    pub(super) norms: Box<[f32]>,
+    pub(super) output: Box<[f32]>,
+    pub(super) control: Box<[Atomic<u32>]>,
+    pub(super) numerator: u32,
+    pub(super) denominator: u32,
+    pub(super) terms: u32,
+}
+
+pub(super) struct TailBound;
+
+pub(super) struct BoundTail;
+
+impl System for TailBound {
+    type Input = TailBoundInput;
+    type Passes = gpu_passes![BoundTail];
+}
+
+#[cube]
+impl GpuPass<TailBoundInput> for BoundTail {
+    type Output = ();
+
+    fn execute(mut input: TailBoundInput) {
+        derivative_kernels::tail_bound(
+            &input.norms,
+            &mut input.output,
+            &input.control,
+            input.numerator,
+            input.denominator,
+            input.terms,
+        );
+    }
+}
+
+#[derive(CubeType, CubeLaunch)]
+pub(super) struct TailEnclosureInput {
+    pub(super) partial: Box<[f32]>,
+    pub(super) tail: Box<[f32]>,
+    pub(super) weights: Box<[u32]>,
+    pub(super) output: Box<[f32]>,
+    pub(super) control: Box<[Atomic<u32>]>,
+    pub(super) rows: u32,
+    pub(super) columns: u32,
+}
+
+pub(super) struct TailEnclosure;
+
+pub(super) struct EncloseTail;
+
+impl System for TailEnclosure {
+    type Input = TailEnclosureInput;
+    type Passes = gpu_passes![EncloseTail];
+}
+
+#[cube]
+impl GpuPass<TailEnclosureInput> for EncloseTail {
+    type Output = ();
+
+    fn execute(mut input: TailEnclosureInput) {
+        derivative_kernels::tail_enclosure(
+            &input.partial,
+            &input.tail,
+            &input.weights,
+            &mut input.output,
+            &input.control,
+            input.rows,
+            input.columns,
+        );
     }
 }

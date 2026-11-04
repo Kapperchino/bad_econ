@@ -1,13 +1,15 @@
-use super::{
+use crate::ledger::{EMPTY, LEG_WORDS, LegLayout, MAX_LEGS};
+use crate::simulation::{
     flags::{
         COMPLETED_WORD, CONTROL_WORDS, DependencyFlag, EventStatus, FaultFlags,
         KernelAuthorization, KernelEventStatus, KernelFaults, PROGRESS_WORD, record_dependency,
     },
     layout::*,
     parameters::SchedulerParameters,
+    pass::GpuPass,
+    system::{System, gpu_passes},
     words::*,
 };
-use crate::ledger::{EMPTY, LEG_WORDS, LegLayout, MAX_LEGS};
 use cubecl::prelude::*;
 
 #[enumflags2::bitflags]
@@ -21,6 +23,43 @@ pub enum SchedulerStage {
     Chains,
     Clear,
     Frontier,
+}
+
+#[derive(CubeType, CubeLaunch)]
+pub(in crate::simulation) struct ScheduleInput {
+    pub balances: Box<[u32]>,
+    pub events: Box<[u32]>,
+    pub scratch: Box<[u32]>,
+    pub control: Box<[Atomic<u32>]>,
+    pub links: Box<[Atomic<u32>]>,
+    pub params: SchedulerParameters,
+    #[cube(comptime)]
+    pub stage: SchedulerStage,
+}
+
+pub(in crate::simulation) struct EventScheduling;
+pub(in crate::simulation) struct ScheduleEvents;
+
+impl System for EventScheduling {
+    type Input = ScheduleInput;
+    type Passes = gpu_passes![ScheduleEvents];
+}
+
+#[cube]
+impl GpuPass<ScheduleInput> for ScheduleEvents {
+    type Output = ();
+
+    fn execute(mut input: ScheduleInput) {
+        schedule(
+            &mut input.balances,
+            &input.events,
+            &mut input.scratch,
+            &input.control,
+            &input.links,
+            input.params,
+            comptime!(input.stage),
+        );
+    }
 }
 
 #[cube]
@@ -38,7 +77,7 @@ fn before(events: &[u32], a: u32, b: u32) -> bool {
     clippy::collapsible_if,
     reason = "Guard the storage read before indexing a partial workgroup"
 )]
-#[cube(launch)]
+#[cube]
 pub fn schedule(
     balances: &mut [u32],
     events: &[u32],
@@ -187,7 +226,7 @@ pub fn schedule(
 }
 
 #[cube]
-pub(super) fn post(
+pub(in crate::simulation) fn post(
     balances: &mut [u32],
     events: &[u32],
     control: &[Atomic<u32>],
@@ -198,7 +237,7 @@ pub(super) fn post(
 }
 
 #[cube]
-pub(super) fn apply(
+pub(in crate::simulation) fn apply(
     balances: &mut [u32],
     events: &[u32],
     control: &[Atomic<u32>],
@@ -208,14 +247,14 @@ pub(super) fn apply(
 }
 
 #[derive(Clone, Copy, PartialEq, Eq)]
-pub(super) enum Posting {
+pub(in crate::simulation) enum Posting {
     All,
     CheckActor,
     ApplyActor,
 }
 
 #[cube]
-pub(super) fn settle(
+pub(in crate::simulation) fn settle(
     balances: &mut [u32],
     events: &[u32],
     control: &[Atomic<u32>],

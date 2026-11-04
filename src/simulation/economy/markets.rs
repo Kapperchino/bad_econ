@@ -1,29 +1,31 @@
-use super::{
+use crate::simulation::{
     configuration::{EconomyConfig, Feature},
     flags::*,
     parallel,
     parameters::*,
+    pass::GpuPass,
+    system::{System, gpu_passes},
     words::ceildiv,
 };
 use cubecl::prelude::*;
 
-pub(super) const LATCH_WORD: usize = CONTROL_WORDS;
-pub(super) const RANGE_SLOTS_WORD: usize = CONTROL_WORDS + 1;
-pub(super) const SEARCHES_WORD: usize = CONTROL_WORDS + 2;
+pub(in crate::simulation) const LATCH_WORD: usize = CONTROL_WORDS;
+pub(in crate::simulation) const RANGE_SLOTS_WORD: usize = CONTROL_WORDS + 1;
+pub(in crate::simulation) const SEARCHES_WORD: usize = CONTROL_WORDS + 2;
 const MAX_RANGE_SPACING: u32 = 32;
-pub(super) const SEARCH_DISPATCH: usize = 0;
-pub(super) const SORT_DISPATCH: usize = 3;
-pub(super) const RANGE_DISPATCH: usize = 6;
-pub(super) const HISTOGRAM_DISPATCH: usize = 9;
-pub(super) const QUEUE_DISPATCH: usize = 27;
+pub(in crate::simulation) const SEARCH_DISPATCH: usize = 0;
+pub(in crate::simulation) const SORT_DISPATCH: usize = 3;
+pub(in crate::simulation) const RANGE_DISPATCH: usize = 6;
+pub(in crate::simulation) const HISTOGRAM_DISPATCH: usize = 9;
+pub(in crate::simulation) const QUEUE_DISPATCH: usize = 27;
 
-pub(super) struct SearchBuffers {
+pub(in crate::simulation) struct SearchBuffers {
     pub requests: burn_wgpu::CubeTensor,
     pub dispatches: burn_wgpu::CubeTensor,
 }
 
 impl SearchBuffers {
-    pub fn new(device: &super::Device, actors: usize) -> Self {
+    pub fn new(device: &crate::simulation::Device, actors: usize) -> Self {
         Self {
             requests: device.empty(actors * 5),
             dispatches: device
@@ -33,7 +35,10 @@ impl SearchBuffers {
     }
 }
 
-pub(super) fn dispatch(control: &burn_wgpu::CubeTensor, offset: usize) -> cubecl::CubeCount {
+pub(in crate::simulation) fn dispatch(
+    control: &burn_wgpu::CubeTensor,
+    offset: usize,
+) -> cubecl::CubeCount {
     let handle = control.handle.clone();
     let size = handle.size_in_used();
     cubecl::CubeCount::Dynamic(
@@ -44,22 +49,48 @@ pub(super) fn dispatch(control: &burn_wgpu::CubeTensor, offset: usize) -> cubecl
     )
 }
 
-pub(super) fn prepare_dispatch(
-    device: &super::Device,
+pub(in crate::simulation) fn prepare_dispatch(
+    device: &crate::simulation::Device,
     control: &burn_wgpu::CubeTensor,
     dispatches: &burn_wgpu::CubeTensor,
 ) {
-    prepare_counts::launch(
-        &device.client,
+    DispatchPreparation::launch(
+        device,
         cubecl::CubeCount::Static(1, 1, 1),
         cubecl::CubeDim::new_1d(1),
-        control.clone().into_buffer_arg(),
-        dispatches.clone().into_buffer_arg(),
-        device.workgroup,
+        DispatchInputLaunch {
+            control: control.clone().into_buffer_arg(),
+            dispatches: dispatches.clone().into_buffer_arg(),
+            workgroup: device.workgroup,
+        },
     );
 }
 
-#[cube(launch)]
+#[derive(CubeType, CubeLaunch)]
+struct DispatchInput {
+    control: Box<[Atomic<u32>]>,
+    dispatches: Box<[u32]>,
+    workgroup: u32,
+}
+
+struct DispatchPreparation;
+struct PrepareCounts;
+
+impl System for DispatchPreparation {
+    type Input = DispatchInput;
+    type Passes = gpu_passes![PrepareCounts];
+}
+
+#[cube]
+impl GpuPass<DispatchInput> for PrepareCounts {
+    type Output = ();
+
+    fn execute(mut input: DispatchInput) {
+        prepare_counts(&input.control, &mut input.dispatches, input.workgroup);
+    }
+}
+
+#[cube]
 fn prepare_counts(control: &[Atomic<u32>], dispatches: &mut [u32], workgroup: u32) {
     control[LATCH_WORD].store(control[crate::simulation::flags::FAULT_WORD].load());
     let mut counts = Array::<u32>::new(10usize);
@@ -79,12 +110,15 @@ fn prepare_counts(control: &[Atomic<u32>], dispatches: &mut [u32], workgroup: u3
     }
 }
 
-pub(super) fn scratch_words(actors: usize) -> usize {
+pub(in crate::simulation) fn scratch_words(actors: usize) -> usize {
     actors * 8 + 512
 }
 
 #[cube]
-pub(super) fn active(control: &[Atomic<u32>], parameters: &EconomyParameters) -> u32 {
+pub(in crate::simulation) fn active(
+    control: &[Atomic<u32>],
+    parameters: &EconomyParameters,
+) -> u32 {
     match comptime!(parameters.discovery) {
         Discovery::Indexed => control[CONSTRUCTED_EVENTS_WORD].load(),
         #[cfg(test)]
@@ -93,7 +127,7 @@ pub(super) fn active(control: &[Atomic<u32>], parameters: &EconomyParameters) ->
 }
 
 #[cube]
-pub(super) fn ranges(
+pub(in crate::simulation) fn ranges(
     scratch: &mut [u32],
     control: &[Atomic<u32>],
     config: &EconomyConfig,
@@ -146,7 +180,7 @@ pub(super) fn ranges(
 }
 
 #[cube]
-pub(super) fn compact_count(
+pub(in crate::simulation) fn compact_count(
     proposals: &mut [u32],
     scratch: &mut [u32],
     parameters: &EconomyParameters,
@@ -173,7 +207,7 @@ pub(super) fn compact_count(
 }
 
 #[cube]
-pub(super) fn compact_fill(
+pub(in crate::simulation) fn compact_fill(
     proposals: &mut [u32],
     scratch: &mut [u32],
     control: &[Atomic<u32>],
@@ -201,7 +235,7 @@ pub(super) fn compact_fill(
 }
 
 #[cube]
-pub(super) fn radix_local(
+pub(in crate::simulation) fn radix_local(
     scratch: &mut [u32],
     control: &[Atomic<u32>],
     parameters: &EconomyParameters,
@@ -268,7 +302,7 @@ pub(super) fn radix_local(
 }
 
 #[cube]
-pub(super) fn radix_scatter(
+pub(in crate::simulation) fn radix_scatter(
     scratch: &mut [u32],
     control: &[Atomic<u32>],
     parameters: &EconomyParameters,
@@ -291,21 +325,46 @@ pub(super) fn radix_scatter(
     }
 }
 
-pub(super) fn feedback_boundary(
-    device: &super::Device,
+pub(in crate::simulation) fn feedback_boundary(
+    device: &crate::simulation::Device,
     control: &burn_wgpu::CubeTensor,
     feedback: &burn_wgpu::CubeTensor,
 ) {
-    latch_feedback::launch(
-        &device.client,
+    FeedbackBoundary::launch(
+        device,
         cubecl::CubeCount::Static(1, 1, 1),
         cubecl::CubeDim::new_1d(1),
-        control.clone().into_buffer_arg(),
-        feedback.clone().into_buffer_arg(),
+        FeedbackInputLaunch {
+            control: control.clone().into_buffer_arg(),
+            feedback: feedback.clone().into_buffer_arg(),
+        },
     );
 }
 
-#[cube(launch)]
+#[derive(CubeType, CubeLaunch)]
+struct FeedbackInput {
+    control: Box<[Atomic<u32>]>,
+    feedback: Box<[Atomic<u32>]>,
+}
+
+struct FeedbackBoundary;
+struct LatchFeedback;
+
+impl System for FeedbackBoundary {
+    type Input = FeedbackInput;
+    type Passes = gpu_passes![LatchFeedback];
+}
+
+#[cube]
+impl GpuPass<FeedbackInput> for LatchFeedback {
+    type Output = ();
+
+    fn execute(input: FeedbackInput) {
+        latch_feedback(&input.control, &input.feedback);
+    }
+}
+
+#[cube]
 fn latch_feedback(control: &[Atomic<u32>], feedback: &[Atomic<u32>]) {
     feedback[CONSTRUCTED_EVENTS_WORD].store(control[LATCH_WORD].load());
 }

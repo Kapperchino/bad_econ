@@ -1,3 +1,7 @@
+pub(super) mod management;
+mod opportunities;
+pub(super) mod ownership;
+
 use super::{
     Device,
     layout::ActorLayout,
@@ -131,9 +135,7 @@ fn requests(
             && !viable
             && !lt(cash, ticks(10_000, 0))
         {
-            let proposal = crate::simulation::enterprise_opportunities::discover(
-                state, actors, config, spatial, actor, day,
-            );
+            let proposal = opportunities::discover(state, actors, config, spatial, actor, day);
             if proposal > 0 {
                 store(
                     state,
@@ -331,9 +333,7 @@ pub(super) fn enter(
         .filter(|(_, request)| {
             (1..=Good::COUNT as u32).contains(*request) || matches!(**request >> 24, 8 | 9)
         })
-        .map(|(owner, &request)| {
-            super::enterprise_opportunities::EntryPlan::new(state, scenario, owner, request)
-        })
+        .map(|(owner, &request)| opportunities::EntryPlan::new(state, scenario, owner, request))
         .collect::<anyhow::Result<Vec<_>>>()?;
     let before = state.actors.len();
     let after = before + entries.len();

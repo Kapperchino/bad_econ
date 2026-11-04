@@ -5,6 +5,7 @@ mod request;
 mod retained;
 pub use retained::*;
 mod sensitivity;
+mod systems;
 mod valuation;
 pub use accounts::*;
 pub use matrices::*;
@@ -12,7 +13,7 @@ pub use request::*;
 pub use sensitivity::*;
 pub use valuation::*;
 
-use super::{Device, flags::FaultFlags, layout::WORD_BYTES, reduction, tensor};
+use super::{Device, flags::FaultFlags, layout::WORD_BYTES, reduction, system::System, tensor};
 use anyhow::{Context, Result, anyhow};
 use burn_wgpu::CubeTensor;
 use cubecl::{
@@ -22,6 +23,7 @@ use cubecl::{
 };
 use cubek::reduce::components::instructions::ReduceOperationConfig;
 use serde::{Deserialize, Serialize};
+use systems::*;
 
 pub const ANALYTICAL_PROFILE: &str = "CubekF32V2";
 const INTERVAL_WORDS: usize = 4;
@@ -346,16 +348,18 @@ impl DeviceVector {
                 let output = Self::empty(device, self.length);
                 let control = device.tensor(&[0; CONTROL_WORDS]);
                 let width = tensor::vector_width(device, self.length * 2);
-                kernels::vector_add::launch(
-                    &device.client,
+                VectorAddition::launch_vectorized(
+                    device,
                     count(device, self.length * 2 / width),
                     CubeDim::new_1d(device.workgroup),
+                    AdditionInputLaunch {
+                        left: argument(&self.data),
+                        right: argument(&other.data),
+                        output: argument(&output.data),
+                        control: argument(&control),
+                        length: self.length as u32,
+                    },
                     width,
-                    argument(&self.data),
-                    argument(&other.data),
-                    argument(&output.data),
-                    argument(&control),
-                    self.length as u32,
                 );
                 faults(device, &control)?;
                 Ok(output)
@@ -375,14 +379,16 @@ impl DeviceVector {
                 let right = tensor::reshape(&other.data, [2, self.length, 1]);
                 let product = tensor::reshape(&output.data, [2, 1, 1]);
                 tensor::matmul(device, &left, &right, &product)?;
-                kernels::rescale::launch(
-                    &device.client,
+                VectorRescaling::launch_vectorized(
+                    device,
                     count(device, 1),
                     CubeDim::new_1d(device.workgroup),
-                    2,
-                    argument(&output.data),
-                    argument(&control),
-                    scale as f32,
+                    RescaleInputLaunch {
+                        values: argument(&output.data),
+                        control: argument(&control),
+                        scale: scale as f32,
+                        length: 2,
+                    },
                     2,
                 );
                 faults(device, &control)?;
@@ -404,16 +410,18 @@ impl DeviceVector {
             true => {
                 let output = Self::empty(device, self.length);
                 let control = device.tensor(&[0; CONTROL_WORDS]);
-                kernels::normalize::launch(
-                    &device.client,
+                VectorNormalization::launch(
+                    device,
                     count(device, self.length),
                     CubeDim::new_1d(device.workgroup),
-                    argument(&self.data),
-                    argument(&output.data),
-                    argument(&control),
-                    self.length as u32,
-                    reference as u32,
-                    scale,
+                    VectorNormalizationInputLaunch {
+                        input: argument(&self.data),
+                        output: argument(&output.data),
+                        control: argument(&control),
+                        length: self.length as u32,
+                        reference: reference as u32,
+                        scale,
+                    },
                 );
                 let status = faults(device, &control)?;
                 Ok(match status[0] {
@@ -460,16 +468,18 @@ impl DeviceOperator {
         )?;
         let product = self.apply(device, &weights)?;
         let rows = device.empty((self.rows * 2).max(2));
-        kernels::certificate_rows::launch(
-            &device.client,
+        CertificateRows::launch(
+            device,
             count(device, self.rows),
             CubeDim::new_1d(device.workgroup),
-            argument(&product.data),
-            argument(&weights.data),
-            argument(&rows),
-            self.rows as u32,
-            certificate.numerator,
-            certificate.denominator,
+            CertificateRowsInputLaunch {
+                product: argument(&product.data),
+                weights: argument(&weights.data),
+                output: argument(&rows),
+                rows: self.rows as u32,
+                numerator: certificate.numerator,
+                denominator: certificate.denominator,
+            },
         );
         let input = TensorHandle::new_contiguous(
             [self.rows, 2],
@@ -483,12 +493,14 @@ impl DeviceOperator {
             ReduceOperationConfig::All,
             u32::elem_type_native(),
         )?;
-        kernels::certificate_status::launch(
-            &device.client,
+        CertificateStatus::launch(
+            device,
             CubeCount::Static(1, 1, 1),
             CubeDim::new_1d(1),
-            flags.into_arg().into_buffer_arg(),
-            argument(control),
+            CertificateStatusInputLaunch {
+                flags: flags.into_arg().into_buffer_arg(),
+                control: argument(control),
+            },
         );
         Ok(())
     }
@@ -547,15 +559,17 @@ impl DeviceOperator {
                 }
                 let product = self.step(device, rhs, &previous)?;
                 let residuals = tensor::empty(device, [self.rows]);
-                kernels::residual::launch(
-                    &device.client,
+                SolutionResidual::launch(
+                    device,
                     count(device, self.rows),
                     CubeDim::new_1d(device.workgroup),
-                    argument(&product.data),
-                    argument(&previous.data),
-                    argument(&weights),
-                    argument(&residuals),
-                    self.rows as u32,
+                    SolutionResidualInputLaunch {
+                        product: argument(&product.data),
+                        estimate: argument(&previous.data),
+                        weights: argument(&weights),
+                        output: argument(&residuals),
+                        rows: self.rows as u32,
+                    },
                 );
                 let residuals = TensorHandle::new_contiguous(
                     [self.rows],
@@ -570,28 +584,32 @@ impl DeviceOperator {
                     f32::elem_type_native(),
                 )?;
                 let error = tensor::empty(device, [1]);
-                kernels::error_bound::launch(
-                    &device.client,
+                SolutionError::launch(
+                    device,
                     CubeCount::Static(1, 1, 1),
                     CubeDim::new_1d(1),
-                    norm.into_arg().into_buffer_arg(),
-                    argument(&error),
-                    argument(&control),
-                    certificate.numerator,
-                    certificate.denominator,
-                    budget.weighted_tolerance as f32,
+                    SolutionErrorInputLaunch {
+                        norm: norm.into_arg().into_buffer_arg(),
+                        error: argument(&error),
+                        control: argument(&control),
+                        numerator: certificate.numerator,
+                        denominator: certificate.denominator,
+                        tolerance: budget.weighted_tolerance as f32,
+                    },
                 );
                 let output = DeviceVector::empty(device, self.rows);
-                kernels::solution_bounds::launch(
-                    &device.client,
+                SolutionBounds::launch(
+                    device,
                     count(device, self.rows),
                     CubeDim::new_1d(device.workgroup),
-                    argument(&previous.data),
-                    argument(&weights),
-                    argument(&error),
-                    argument(&output.data),
-                    argument(&control),
-                    self.rows as u32,
+                    SolutionBoundsInputLaunch {
+                        estimate: argument(&previous.data),
+                        weights: argument(&weights),
+                        error: argument(&error),
+                        output: argument(&output.data),
+                        control: argument(&control),
+                        rows: self.rows as u32,
+                    },
                 );
                 faults(device, &control)?;
                 Ok(DeviceSolution {

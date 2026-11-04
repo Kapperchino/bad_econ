@@ -1,12 +1,12 @@
-use super::{layout::ActorLayout as A, words::*};
 use crate::domain::{Field, Good, enterprise::EnterpriseState};
 use crate::simulation::configuration::EconomyConfig;
+use crate::simulation::{layout::ActorLayout as A, words::*};
 use cubecl::prelude::*;
 
-pub(super) const PRODUCER_ENTRY: u32 = 8 << 24;
-pub(super) const DISTRIBUTOR_ENTRY: u32 = 9 << 24;
+pub(in crate::simulation) const PRODUCER_ENTRY: u32 = 8 << 24;
+pub(in crate::simulation) const DISTRIBUTOR_ENTRY: u32 = 9 << 24;
 
-pub(super) struct EntryPlan {
+pub(in crate::simulation) struct EntryPlan {
     pub owner: usize,
     pub good: Good,
     pub position: crate::domain::Position,
@@ -193,7 +193,7 @@ fn input_price(
 }
 
 #[cube]
-pub(super) fn discover(
+pub(in crate::simulation) fn discover(
     state: &mut [u32],
     actors: &[u32],
     config: &EconomyConfig,

@@ -74,7 +74,7 @@ fn checked_vector<N: Size>(value: Vector<f32, N>, control: &[Atomic<u32>]) -> Ve
     value
 }
 
-#[cube(launch)]
+#[cube]
 pub fn rescale<N: Size>(
     values: &mut [Vector<f32, N>],
     control: &[Atomic<u32>],
@@ -87,7 +87,7 @@ pub fn rescale<N: Size>(
     }
 }
 
-#[cube(launch)]
+#[cube]
 pub fn vector_add<N: Size>(
     left: &[Vector<f32, N>],
     right: &[Vector<f32, N>],
@@ -101,7 +101,7 @@ pub fn vector_add<N: Size>(
     }
 }
 
-#[cube(launch)]
+#[cube]
 pub fn normalize(
     input: &[f32],
     output: &mut [f32],
@@ -138,7 +138,7 @@ pub fn normalize(
     }
 }
 
-#[cube(launch)]
+#[cube]
 pub fn certificate_rows(
     product: &[f32],
     weights: &[f32],
@@ -159,7 +159,7 @@ pub fn certificate_rows(
     }
 }
 
-#[cube(launch)]
+#[cube]
 pub fn certificate_status(flags: &[u32], control: &[Atomic<u32>]) {
     if ABSOLUTE_POS == 0 {
         control[0].store(select(
@@ -170,7 +170,7 @@ pub fn certificate_status(flags: &[u32], control: &[Atomic<u32>]) {
     }
 }
 
-#[cube(launch)]
+#[cube]
 pub fn residual(product: &[f32], estimate: &[f32], weights: &[u32], output: &mut [f32], rows: u32) {
     let row = ABSOLUTE_POS;
     if row < rows as usize {
@@ -183,7 +183,7 @@ pub fn residual(product: &[f32], estimate: &[f32], weights: &[u32], output: &mut
     }
 }
 
-#[cube(launch)]
+#[cube]
 pub fn error_bound(
     norm: &[f32],
     error: &mut [f32],
@@ -204,7 +204,7 @@ pub fn error_bound(
     }
 }
 
-#[cube(launch)]
+#[cube]
 pub fn solution_bounds(
     estimate: &[f32],
     weights: &[u32],
@@ -247,7 +247,7 @@ fn signed_difference(
     output[offset + 2] = (magnitude >> 32) as u32;
 }
 
-#[cube(launch)]
+#[cube]
 pub fn comparator(
     requirement: &[f32],
     output: &mut [u32],
@@ -285,7 +285,7 @@ pub fn comparator(
     }
 }
 
-#[cube(launch)]
+#[cube]
 pub fn dense_units(
     input: &[f32],
     row_factors: &[u32],
@@ -314,7 +314,7 @@ pub fn dense_units(
     }
 }
 
-#[cube(launch)]
+#[cube]
 pub fn dense_column(input: &[f32], output: &mut [f32], rows: u32, columns: u32, column: u32) {
     let row = ABSOLUTE_POS;
     if row < rows as usize {
@@ -326,7 +326,7 @@ pub fn dense_column(input: &[f32], output: &mut [f32], rows: u32, columns: u32, 
     }
 }
 
-#[cube(launch)]
+#[cube]
 pub fn signed_vector(
     positive: &[f32],
     negative: &[f32],

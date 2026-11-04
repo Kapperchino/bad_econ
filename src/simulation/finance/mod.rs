@@ -2,12 +2,15 @@ mod kernels;
 mod payments;
 mod policies;
 mod scan;
+mod systems;
 
 use super::rows::{RowIndex, row_layout};
 use super::{
     Device,
     flags::{CONTROL_WORDS, FaultFlags},
     layout::{TICK_WORDS, WORD_BYTES},
+    pass::GpuPass,
+    system::{System, gpu_passes},
     words::*,
 };
 use crate::{domain::finance::*, ledger::Coordinate};
@@ -16,6 +19,7 @@ use burn_wgpu::CubeTensor;
 use bytemuck::{Pod, Zeroable};
 use cubecl::prelude::*;
 use std::{collections::BTreeMap, mem::offset_of};
+use systems::*;
 
 pub use payments::{
     BankAccount, BankPayment, BankPaymentResult, bank_payments, post_bank_payments,
@@ -288,19 +292,21 @@ impl FinanceRuntime {
     ) -> Result<()> {
         self.check_state(state)?;
         self.clear(device);
-        kernels::banks::launch(
-            &device.client,
+        BankAccounting::launch(
+            device,
             count(device, self.bank_count),
             CubeDim::new_1d(device.workgroup),
-            argument(state),
-            argument(&self.banks),
-            argument(&self.loans),
-            argument(&self.scanned),
-            argument(&self.decisions),
-            argument(&self.control),
-            day,
-            self.bank_count as u32,
-            stage,
+            BankInputLaunch {
+                state: argument(state),
+                banks: argument(&self.banks),
+                loans: argument(&self.loans),
+                output: argument(&self.scanned),
+                decisions: argument(&self.decisions),
+                control: argument(&self.control),
+                day,
+                count: self.bank_count as u32,
+                stage,
+            },
         );
         let control = device.read(&self.control)?;
         self.last_event_count
@@ -316,42 +322,48 @@ impl FinanceRuntime {
         match self.support_mode {
             SupportMode::Absent => (),
             SupportMode::Present => {
-                kernels::support_needs::launch(
-                    &device.client,
+                SupportNeeds::launch(
+                    device,
                     count(device, self.support_count),
                     CubeDim::new_1d(device.workgroup),
-                    argument(state),
-                    argument(&self.support),
-                    argument(&self.scanned),
-                    self.support_count as u32,
+                    SupportNeedsInputLaunch {
+                        state: argument(state),
+                        recipients: argument(&self.support),
+                        output: argument(&self.scanned),
+                        count: self.support_count as u32,
+                    },
                 );
                 let scanned = self.scan(device, &self.support_scan)?;
-                kernels::support_plan::launch(
-                    &device.client,
+                SupportPlanning::launch(
+                    device,
                     count(device, self.support_count + 1),
                     CubeDim::new_1d(device.workgroup),
-                    argument(state),
-                    argument(&self.support),
-                    argument(scanned),
-                    argument(&self.output),
-                    argument(&self.control),
-                    self.support_count as u32,
-                    self.layout.treasury,
+                    SupportPlanInputLaunch {
+                        state: argument(state),
+                        recipients: argument(&self.support),
+                        scanned: argument(scanned),
+                        output: argument(&self.output),
+                        control: argument(&self.control),
+                        count: self.support_count as u32,
+                        treasury: self.layout.treasury,
+                    },
                 );
                 let control = device.read(&self.control)?;
                 FaultFlags::read(&control)?.into_result()?;
                 self.last_event_count
                     .set(super::flags::ControlLayout::new(&control)?.phase_data as usize);
                 self.last_support_count.set(self.last_event_count.get());
-                kernels::support_post::launch(
-                    &device.client,
+                SupportPosting::launch(
+                    device,
                     count(device, self.support_count + 1),
                     CubeDim::new_1d(device.workgroup),
-                    argument(state),
-                    argument(&self.support),
-                    argument(&self.output),
-                    self.support_count as u32,
-                    self.layout.treasury,
+                    SupportPostInputLaunch {
+                        state: argument(state),
+                        recipients: argument(&self.support),
+                        output: argument(&self.output),
+                        count: self.support_count as u32,
+                        treasury: self.layout.treasury,
+                    },
                 );
             }
         }

@@ -240,7 +240,40 @@ enum Transfer {
     Scatter,
 }
 
-#[cube(launch)]
+#[derive(CubeType, CubeLaunch)]
+struct TransferInput {
+    source: Box<[Ticks]>,
+    target: Box<[Ticks]>,
+    indices: Box<[u32]>,
+    actors: u32,
+    #[cube(comptime)]
+    stage: Transfer,
+}
+
+struct RegistryTransfers;
+struct TransferRows;
+
+impl System for RegistryTransfers {
+    type Input = TransferInput;
+    type Passes = gpu_passes![TransferRows];
+}
+
+#[cube]
+impl GpuPass<TransferInput> for TransferRows {
+    type Output = ();
+
+    fn execute(mut input: TransferInput) {
+        transfer_rows(
+            &input.source,
+            &mut input.target,
+            &input.indices,
+            input.actors,
+            comptime!(input.stage),
+        );
+    }
+}
+
+#[cube]
 fn transfer_rows(
     source: &[Ticks],
     target: &mut [Ticks],
@@ -294,14 +327,16 @@ fn transfer(
         _ => target.meta.shape()[0],
     };
     let cube_count = device.count(count / TICK_WORDS);
-    transfer_rows::launch(
-        &device.client,
+    RegistryTransfers::launch(
+        device,
         cube_count,
         CubeDim::new_1d(device.workgroup),
-        argument(source),
-        argument(target),
-        argument(indices),
-        actors as u32,
-        stage,
+        TransferInputLaunch {
+            source: argument(source),
+            target: argument(target),
+            indices: argument(indices),
+            actors: actors as u32,
+            stage,
+        },
     );
 }
