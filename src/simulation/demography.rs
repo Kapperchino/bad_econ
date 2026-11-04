@@ -27,6 +27,7 @@ struct PersonLayout {
 impl PersonLayout {
     const WORDS: usize = size_of::<Self>() / WORD_BYTES;
     const IDENTITY: usize = offset_of!(Self, identity) / WORD_BYTES;
+    const HOUSEHOLD: usize = offset_of!(Self, household) / WORD_BYTES;
     const AGE: usize = offset_of!(Self, age) / WORD_BYTES;
     const SEX: usize = offset_of!(Self, sex) / WORD_BYTES;
     const CAUSE: usize = offset_of!(Self, cause) / WORD_BYTES;
@@ -433,9 +434,18 @@ impl DemographyRuntime {
         );
         kernels::grow::launch(
             &device.client,
-            cube_count,
+            device.count(self.count * PersonLayout::WORDS / 4),
             CubeDim::new_1d(device.workgroup),
             argument(&self.people),
+            argument(&grown.people),
+            argument(&self.ranges),
+            argument(&grown.ranges),
+            self.count as u32,
+        );
+        kernels::newborns::launch(
+            &device.client,
+            cube_count,
+            CubeDim::new_1d(device.workgroup),
             argument(&grown.people),
             argument(&self.ranges),
             argument(&grown.ranges),
@@ -503,7 +513,7 @@ impl DemographyRuntime {
         };
         let argument = |tensor: &CubeTensor| tensor.clone().into_buffer_arg();
         let cube_count = device.count(births.len());
-        kernels::grow::launch(
+        kernels::original_grow::launch(
             &device.client,
             cube_count,
             CubeDim::new_1d(device.workgroup),

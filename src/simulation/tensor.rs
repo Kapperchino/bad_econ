@@ -8,6 +8,15 @@ use cubek::{
     std::InputBinding,
 };
 
+pub(super) fn vector_width(device: &Device, elements: usize) -> usize {
+    device
+        .client
+        .io_optimized_vector_sizes(size_of::<f32>())
+        .filter(|&width| width <= 4 && elements.max(1).is_multiple_of(width))
+        .max()
+        .unwrap_or(1)
+}
+
 pub(super) fn floats(device: &Device, shape: impl Into<Shape>, values: &[f32]) -> CubeTensor {
     let handle = match values.len() {
         0 => device.client.empty(size_of::<f32>()),

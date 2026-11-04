@@ -1,6 +1,7 @@
 use super::{
     Device,
     flags::{FaultFlags, KernelFaults},
+    words::{Ticks, ticks},
 };
 use anyhow::{Context, Result};
 use burn_wgpu::CubeTensor;
@@ -64,7 +65,7 @@ pub(super) fn reduce(
                         })),
                     },
                     vectorization: VectorizationStrategy {
-                        parallel_output_vectorization: false,
+                        parallel_output_vectorization: true,
                     },
                     autotune_level: Default::default(),
                 },
@@ -150,7 +151,7 @@ pub(super) fn summary(
 }
 
 #[cube(launch)]
-fn summary_tiles(input: &[u32], output: &mut [u32], control: &[Atomic<u32>], groups: u32) {
+fn summary_tiles(input: &[Ticks], output: &mut [Ticks], control: &[Atomic<u32>], groups: u32) {
     use crate::simulation::layout::SummaryLayout as S;
     let metric = CUBE_POS as u32;
     if metric < S::METRICS as u32 {
@@ -169,9 +170,9 @@ fn summary_tiles(input: &[u32], output: &mut [u32], control: &[Atomic<u32>], gro
         let mut total = select(minimum, u64::MAX, 0u64);
         let mut group = UNIT_POS;
         while group < groups {
-            let index = (group * S::METRICS as u32 + metric) * 2;
-            let value = u64::cast_from(input[index as usize])
-                | (u64::cast_from(input[(index + 1) as usize]) << 32);
+            let words = input[(group * S::METRICS as u32 + metric) as usize];
+            let value = u64::cast_from(words.extract(0usize))
+                | (u64::cast_from(words.extract(1usize)) << 32);
             let sum = total + value;
             if !minimum && !maximum && sum < total {
                 KernelFaults::new(comptime!(FaultFlags::ARITHMETIC_OVERFLOW)).record(control);
@@ -202,8 +203,10 @@ fn summary_tiles(input: &[u32], output: &mut [u32], control: &[Atomic<u32>], gro
             stride /= 2;
         }
         if UNIT_POS == 0 {
-            output[(metric * 2) as usize] = u32::cast_from(shared[0usize]);
-            output[(metric * 2 + 1) as usize] = u32::cast_from(shared[0usize] >> 32);
+            output[metric as usize] = ticks(
+                u32::cast_from(shared[0usize]),
+                u32::cast_from(shared[0usize] >> 32),
+            );
         }
     }
 }

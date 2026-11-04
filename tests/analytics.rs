@@ -899,3 +899,44 @@ fn contraction_rounded_to_one_does_not_admit_an_identity_operator() -> Result<()
     assert!(matches!(solution.read(&device)?, Diagnostic::Inadmissible));
     Ok(())
 }
+
+#[test]
+fn vector_arithmetic_preserves_partial_workgroups_empty_shapes_and_lane_faults() -> Result<()> {
+    for workgroup in [32, 64, 128, 256] {
+        let device = support::device(workgroup)?;
+        for length in [0, 1, 2, 3, 31, 32, 33, 63, 64, 65, 257] {
+            let left = (0..length)
+                .map(|index| index as u64 % 17)
+                .collect::<Vec<_>>();
+            let right = (0..length)
+                .map(|index| index as u64 % 11)
+                .collect::<Vec<_>>();
+            let a = DeviceVector::from_ticks(&device, &left)?;
+            let b = DeviceVector::from_ticks(&device, &right)?;
+            let expected = left
+                .iter()
+                .zip(&right)
+                .map(|(a, b)| Interval {
+                    lower: a + b,
+                    upper: a + b,
+                })
+                .collect::<Vec<_>>();
+            assert_eq!(a.add(&device, &b)?.read(&device)?, expected);
+            let dot = left.iter().zip(&right).map(|(a, b)| a * b).sum();
+            assert_eq!(
+                a.dot(&device, &b, 1)?.read(&device)?,
+                [Interval {
+                    lower: dot,
+                    upper: dot
+                }]
+            );
+        }
+        for lane in 0..4 {
+            let mut values = [1; 4];
+            values[lane] = 1 << 63;
+            let values = DeviceVector::from_ticks(&device, &values)?;
+            assert!(values.add(&device, &values).is_err());
+        }
+    }
+    Ok(())
+}

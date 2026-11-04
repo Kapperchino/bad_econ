@@ -248,20 +248,29 @@ impl EconomyOps for CubeBackend {
         parameters: &EconomyParameters,
     ) {
         let argument = |tensor: &CubeTensor| tensor.clone().into_buffer_arg();
-        economy::economy::launch(
-            &device.client,
-            device.count(count),
-            CubeDim::new_1d(device.workgroup),
-            argument(buffers.state),
-            argument(buffers.actors),
-            buffers.config.launch(),
-            argument(buffers.spatial),
-            argument(buffers.proposals),
-            argument(buffers.events),
-            argument(buffers.control),
-            parameters.launch(),
-            stage,
-        );
+        match (stage, parameters.phase) {
+            (EconomyStage::Local, crate::domain::Phase::Opening) => economy::opening::launch(
+                device,
+                buffers.state,
+                buffers.config,
+                buffers.control,
+                parameters.day,
+            ),
+            _ => economy::economy::launch(
+                &device.client,
+                device.count(count),
+                CubeDim::new_1d(device.workgroup),
+                argument(buffers.state),
+                argument(buffers.actors),
+                buffers.config.launch(),
+                argument(buffers.spatial),
+                argument(buffers.proposals),
+                argument(buffers.events),
+                argument(buffers.control),
+                parameters.launch(),
+                stage,
+            ),
+        }
     }
     fn schedule(
         device: &Device,

@@ -65,34 +65,39 @@ pub(super) fn divide_product(
     }
 }
 
+#[cube]
+fn checked_vector<N: Size>(value: Vector<f32, N>, control: &[Atomic<u32>]) -> Vector<f32, N> {
+    #[unroll]
+    for lane in 0..N::value() {
+        checked(value.extract(lane), control);
+    }
+    value
+}
+
 #[cube(launch)]
-pub fn rescale(values: &mut [f32], control: &[Atomic<u32>], scale: f32) {
+pub fn rescale<N: Size>(
+    values: &mut [Vector<f32, N>],
+    control: &[Atomic<u32>],
+    scale: f32,
+    length: u32,
+) {
     let index = ABSOLUTE_POS;
-    if index < values.len() {
-        values[index] = checked(values[index] / scale, control);
+    if index < length as usize / N::value() {
+        values[index] = checked_vector(values[index] / Vector::new(scale), control);
     }
 }
 
 #[cube(launch)]
-pub fn vector_add(
-    left: &[f32],
-    right: &[f32],
-    output: &mut [f32],
+pub fn vector_add<N: Size>(
+    left: &[Vector<f32, N>],
+    right: &[Vector<f32, N>],
+    output: &mut [Vector<f32, N>],
     control: &[Atomic<u32>],
     length: u32,
 ) {
     let index = ABSOLUTE_POS;
-    if index < length as usize {
-        let a = interval(left, index);
-        let b = interval(right, index);
-        write(
-            output,
-            index,
-            Bounds {
-                lower: sum(a.lower, b.lower, control),
-                upper: sum(a.upper, b.upper, control),
-            },
-        );
+    if index < length as usize * 2 / N::value() {
+        output[index] = checked_vector(left[index] + right[index], control);
     }
 }
 

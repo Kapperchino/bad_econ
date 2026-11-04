@@ -666,3 +666,103 @@ fn speculative_candidates_only_commit_faults_inside_the_visited_prefix() -> Resu
     }
     Ok(())
 }
+
+#[test]
+fn vectorized_opening_matches_serial_deliveries_resets_and_faults_on_gpu() -> Result<()> {
+    let scenario = Scenario::baseline(97, 42, Experiment::Transport)?;
+    let initial = scenario.initial()?;
+    let count = initial.actors.len();
+    for workgroup in [32, 64, 128, 256] {
+        let simulation = Simulation::new(scenario.clone(), device(workgroup)?)?;
+        for day in [0, 1, simulation.config.ring - 1, simulation.config.ring + 1] {
+            let mut values = initial.values.clone();
+            for actor in 0..count {
+                let mut transit = 0;
+                for good in 0..Good::COUNT {
+                    let delivery = (1u64 << 32) + (actor * Good::COUNT + good) as u64;
+                    let slot =
+                        BASE_FIELDS + good * scenario.ring() + day as usize % scenario.ring();
+                    values[slot * count + actor] = delivery;
+                    values[(TRANSIT_FIELDS + good) * count + actor] = delivery;
+                    transit += delivery;
+                }
+                values[Field::Transit as usize * count + actor] = transit;
+                values[Field::ResearchMinutes as usize * count + actor] = 123;
+            }
+            values[Field::Grain as usize * count] = u64::MAX;
+            values[(TRANSIT_FIELDS + Good::COUNT - 1) * count + count - 1] = 0;
+            let words = encode(&values);
+            let actual = simulation.device.tensor(bytemuck::cast_slice(&words));
+            let expected = simulation.device.tensor(bytemuck::cast_slice(&words));
+            let actual_control = simulation.device.tensor(&[0; CONTROL_WORDS]);
+            let expected_control = simulation.device.tensor(&[0; CONTROL_WORDS]);
+            let mut parameters = simulation.parameters(Phase::Opening, Market::Labor, 0, count)?;
+            parameters.day = day;
+            economy::economy::launch(
+                &simulation.device.client,
+                simulation.device.count(count),
+                cubecl::CubeDim::new_1d(workgroup),
+                expected.clone().into_buffer_arg(),
+                simulation.actors.clone().into_buffer_arg(),
+                simulation.config.launch(),
+                simulation.spatial.clone().into_buffer_arg(),
+                simulation.proposals.clone().into_buffer_arg(),
+                simulation.events.clone().into_buffer_arg(),
+                expected_control.clone().into_buffer_arg(),
+                parameters.launch(),
+                EconomyStage::Local,
+            );
+            economy::opening::launch(
+                &simulation.device,
+                &actual,
+                &simulation.config,
+                &actual_control,
+                day,
+            );
+            assert_eq!(
+                simulation.device.read(&actual)?,
+                simulation.device.read(&expected)?
+            );
+            let faults = FaultFlags::read(&simulation.device.read(&actual_control)?)?;
+            assert_eq!(
+                faults,
+                FaultFlags::read(&simulation.device.read(&expected_control)?)?
+            );
+            assert_eq!(
+                faults,
+                FaultFlags::ARITHMETIC_OVERFLOW | FaultFlags::TRANSIT_UNDERFLOW
+            );
+        }
+    }
+    Ok(())
+}
+
+#[test]
+fn parallel_transit_audits_match_serial_mismatch_and_overflow_faults_on_gpu() -> Result<()> {
+    let scenario = Scenario::baseline(97, 42, Experiment::Transport)?;
+    for workgroup in [32, 64, 128, 256] {
+        let mut simulation = Simulation::new(scenario.clone(), device(workgroup)?)?;
+        let mut state = scenario.initial()?;
+        let count = state.actors.len();
+        state.values[(BASE_FIELDS + scenario.ring() * (Good::COUNT - 1)) * count + count - 1] =
+            u64::MAX;
+        state.values[(BASE_FIELDS + scenario.ring() * (Good::COUNT - 1) + 1) * count + count - 1] =
+            1;
+        state.values[(TRANSIT_FIELDS + Good::COUNT - 1) * count + count - 1] = 7;
+        simulation.device.write(
+            &simulation.state,
+            bytemuck::cast_slice(&encode(&state.values)),
+        );
+        assert!(simulation.observe().is_err());
+        let actual = FaultFlags::read(&simulation.device.read(&simulation.control)?)?;
+        simulation.audit_execution = AuditExecution::Original;
+        assert!(simulation.observe().is_err());
+        let expected = FaultFlags::read(&simulation.device.read(&simulation.control)?)?;
+        assert_eq!(actual, expected);
+        assert_eq!(
+            actual,
+            FaultFlags::ARITHMETIC_OVERFLOW | FaultFlags::TRANSIT_MISMATCH
+        );
+    }
+    Ok(())
+}

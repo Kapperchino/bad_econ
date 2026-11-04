@@ -160,7 +160,7 @@ impl AuditBuffers {
         let argument = |tensor: &CubeTensor| tensor.clone().into_buffer_arg();
         validate_actors::launch(
             &device.client,
-            device.count(count),
+            device.count(count * (Good::COUNT + 1)),
             CubeDim::new_1d(device.workgroup),
             argument(state),
             argument(actors),
@@ -184,6 +184,16 @@ impl AuditBuffers {
 }
 
 #[cube]
+fn value(state: &[Ticks], config: &EconomyConfig, field: u32, actor: u32) -> Ticks {
+    state[(field * config.actors + actor) as usize]
+}
+
+#[cube]
+fn number(state: &[Ticks], config: &EconomyConfig, field: u32, actor: u32) -> u32 {
+    value(state, config, field, actor).extract(LOW_WORD)
+}
+
+#[cube]
 fn checked_sum(a: u64, b: u64, control: &[Atomic<u32>]) -> u64 {
     let total = a + b;
     if total < a {
@@ -199,11 +209,11 @@ fn native(value: Ticks) -> u64 {
 
 #[cube(launch)]
 fn summarize_metrics(
-    state: &mut [u32],
+    state: &[Ticks],
     actors: &[u32],
     config: &EconomyConfig,
-    metrics: &[u32],
-    output: &mut [u32],
+    metrics: &[Vector<u32, Const<4>>],
+    output: &mut [Ticks],
     control: &[Atomic<u32>],
     groups: u32,
 ) {
@@ -211,10 +221,11 @@ fn summarize_metrics(
     let metric = block / groups;
     let group = block % groups;
     if metric < SummaryLayout::METRICS as u32 {
-        let field = metrics[(metric * 4) as usize];
-        let selected_kind = metrics[(metric * 4 + 1) as usize];
-        let operation = metrics[(metric * 4 + 2) as usize];
-        let source = metrics[(metric * 4 + 3) as usize];
+        let definition = metrics[metric as usize];
+        let field = definition.extract(0usize);
+        let selected_kind = definition.extract(1usize);
+        let operation = definition.extract(2usize);
+        let source = definition.extract(3usize);
         let identity = select(operation == 1, u64::MAX, 0u64);
         let mut total = identity;
         let mut actor = group * TILE_ACTORS as u32 + UNIT_POS;
@@ -321,21 +332,60 @@ fn summarize_metrics(
             stride /= 2;
         }
         if UNIT_POS == 0 {
-            let base = (group * SummaryLayout::METRICS as u32 + metric) * 2;
-            output[base as usize] = u32::cast_from(shared[0usize]);
-            output[(base + 1) as usize] = u32::cast_from(shared[0usize] >> 32);
+            let base = group * SummaryLayout::METRICS as u32 + metric;
+            output[base as usize] = ticks(
+                u32::cast_from(shared[0usize]),
+                u32::cast_from(shared[0usize] >> 32),
+            );
         }
     }
 }
 
 #[cube(launch)]
 fn validate_actors(
-    state: &mut [u32],
+    state: &[Ticks],
     actors: &[u32],
     config: &EconomyConfig,
     control: &[Atomic<u32>],
 ) {
-    let actor = ABSOLUTE_POS as u32;
+    let index = ABSOLUTE_POS as u32;
+    let actor = index % config.actors;
+    let task = index / config.actors;
+    match task {
+        0 => validate_actor(state, actors, config, control, actor),
+        _ => {
+            if task <= Good::COUNT as u32 {
+                let good = task - 1;
+                let held = value(state, config, TRANSIT_FIELDS as u32 + good, actor);
+                let mut in_ring = zero();
+                for slot in 0u32..config.ring {
+                    in_ring = add_checked(
+                        control,
+                        in_ring,
+                        value(
+                            state,
+                            config,
+                            BASE_FIELDS as u32 + good * config.ring + slot,
+                            actor,
+                        ),
+                    );
+                }
+                if !equal(in_ring, held) {
+                    KernelFaults::new(comptime!(FaultFlags::TRANSIT_MISMATCH)).record(control);
+                }
+            }
+        }
+    }
+}
+
+#[cube]
+fn validate_actor(
+    state: &[Ticks],
+    actors: &[u32],
+    config: &EconomyConfig,
+    control: &[Atomic<u32>],
+    actor: u32,
+) {
     if actor < config.actors {
         let payroll_reserve = value(
             state,
@@ -403,22 +453,6 @@ fn validate_actors(
         let mut transit = zero();
         for good in 0u32..Good::COUNT as u32 {
             let held = value(state, config, TRANSIT_FIELDS as u32 + good, actor);
-            let mut in_ring = zero();
-            for slot in 0u32..config.ring {
-                in_ring = add_checked(
-                    control,
-                    in_ring,
-                    value(
-                        state,
-                        config,
-                        BASE_FIELDS as u32 + good * config.ring + slot,
-                        actor,
-                    ),
-                );
-            }
-            if !equal(in_ring, held) {
-                KernelFaults::new(comptime!(FaultFlags::TRANSIT_MISMATCH)).record(control);
-            }
             transit = add_checked(control, transit, held);
         }
         if !equal(

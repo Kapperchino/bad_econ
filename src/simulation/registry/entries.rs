@@ -1,6 +1,6 @@
 use super::*;
 use crate::domain::Good;
-use crate::simulation::{decode, encode, enterprise, layout::TICK_WORDS};
+use crate::simulation::{decode, encode, enterprise, layout::TICK_WORDS, words::Ticks};
 use std::collections::BTreeSet;
 
 pub(in crate::simulation) struct EntryRequests {
@@ -242,8 +242,8 @@ enum Transfer {
 
 #[cube(launch)]
 fn transfer_rows(
-    source: &[u32],
-    target: &mut [u32],
+    source: &[Ticks],
+    target: &mut [Ticks],
     indices: &[u32],
     actors: u32,
     #[comptime] stage: Transfer,
@@ -252,32 +252,29 @@ fn transfer_rows(
     match stage {
         Transfer::Gather => {
             if id < target.len() {
-                let field = id / (indices.len() * TICK_WORDS);
-                let actor = indices[id / TICK_WORDS % indices.len()] as usize;
-                target[id] =
-                    source[(field * actors as usize + actor) * TICK_WORDS + id % TICK_WORDS];
+                let field = id / indices.len();
+                let actor = indices[id % indices.len()] as usize;
+                target[id] = source[field * actors as usize + actor];
             }
         }
         Transfer::Grow => {
             if id < target.len() {
-                let fields = source.len() / (actors as usize * TICK_WORDS);
-                let count = target.len() / (fields * TICK_WORDS);
-                let actor = id / TICK_WORDS % count;
-                let field = id / (count * TICK_WORDS);
-                let mut value = 0;
+                let fields = source.len() / actors as usize;
+                let count = target.len() / fields;
+                let actor = id % count;
+                let field = id / count;
+                let mut value = Ticks::new(0);
                 if actor < actors as usize {
-                    value =
-                        source[(field * actors as usize + actor) * TICK_WORDS + id % TICK_WORDS];
+                    value = source[field * actors as usize + actor];
                 }
                 target[id] = value;
             }
         }
         Transfer::Scatter => {
             if id < source.len() {
-                let field = id / (indices.len() * TICK_WORDS);
-                let actor = indices[id / TICK_WORDS % indices.len()] as usize;
-                target[(field * actors as usize + actor) * TICK_WORDS + id % TICK_WORDS] =
-                    source[id];
+                let field = id / indices.len();
+                let actor = indices[id % indices.len()] as usize;
+                target[field * actors as usize + actor] = source[id];
             }
         }
     }
@@ -296,7 +293,7 @@ fn transfer(
         Transfer::Scatter => source.meta.shape()[0],
         _ => target.meta.shape()[0],
     };
-    let cube_count = device.count(count);
+    let cube_count = device.count(count / TICK_WORDS);
     transfer_rows::launch(
         &device.client,
         cube_count,

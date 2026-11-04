@@ -29,6 +29,7 @@ pub(super) mod batch;
 mod clearing;
 pub(super) mod enterprises;
 mod household_production;
+pub(super) mod opening;
 pub(super) mod search;
 use super::scheduler::Posting;
 use clearing::{PeerBalances, PeerOffer, actor_settlement};

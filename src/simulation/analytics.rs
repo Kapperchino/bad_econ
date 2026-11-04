@@ -345,10 +345,12 @@ impl DeviceVector {
             true => {
                 let output = Self::empty(device, self.length);
                 let control = device.tensor(&[0; CONTROL_WORDS]);
+                let width = tensor::vector_width(device, self.length * 2);
                 kernels::vector_add::launch(
                     &device.client,
-                    count(device, self.length),
+                    count(device, self.length * 2 / width),
                     CubeDim::new_1d(device.workgroup),
+                    width,
                     argument(&self.data),
                     argument(&other.data),
                     argument(&output.data),
@@ -375,11 +377,13 @@ impl DeviceVector {
                 tensor::matmul(device, &left, &right, &product)?;
                 kernels::rescale::launch(
                     &device.client,
-                    count(device, 2),
+                    count(device, 1),
                     CubeDim::new_1d(device.workgroup),
+                    2,
                     argument(&output.data),
                     argument(&control),
                     scale as f32,
+                    2,
                 );
                 faults(device, &control)?;
                 Ok(output)

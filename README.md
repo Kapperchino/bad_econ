@@ -98,6 +98,8 @@ To enable an upgrade in a custom scenario, add its enum name to the owning resea
 
 Kernel interfaces use CubeCL `CubeType` and `CubeLaunch` records. Stages, markets, discovery strategies, economy modes, and optional policy modes use comptime enums; days, populations, rates, balances, and per-actor decisions remain runtime data. Tax brackets use a typed `Sequence` with an unrolled structural loop. Research and demography pass named launch parameters and table buffers. Burn tensor arguments and CubeCL dispatch sizing handle buffer metadata and device limits; CubeK supplies matrix multiplication, reductions, and random sampling.
 
+Opening deliveries and transit audits run across actors and goods. Tick buffers use two-word vector access in opening, audits, registry transfers, and fractional dividends; population growth copies four words per lane. Dividend payments are calculated per share, then gathered per account to avoid concurrent balance updates. Analytical addition and rescaling choose aligned vector widths supported by the device, and CubeK reductions vectorize adjacent outputs. GPU regression tests compare these paths with serial references, including rounding, overflow, partial workgroups, and empty analytical inputs.
+
 ## Lean correspondence
 
 Compared against `../marx-lean-proof` at `1ad0e02`. The executable contracts correspond to the following proof modules; the Rust tests check finite arithmetic and execution, rather than extending the Lean proofs to the runtime.

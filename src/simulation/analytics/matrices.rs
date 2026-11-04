@@ -125,13 +125,17 @@ impl DeviceMatrix {
                 let left = tensor::reshape(&self.data, [2, self.rows, self.columns]);
                 let right = tensor::reshape(&right.data, [2, right.rows, right.columns]);
                 tensor::matmul(device, &left, &right, &output.data)?;
+                let elements = output.rows * output.columns * 2;
+                let width = tensor::vector_width(device, elements);
                 kernels::rescale::launch(
                     &device.client,
-                    count(device, output.rows * output.columns * 2),
+                    count(device, elements / width),
                     CubeDim::new_1d(device.workgroup),
+                    width,
                     argument(&output.data),
                     argument(&control),
                     self.scale as f32,
+                    elements as u32,
                 );
                 faults(device, &control)?;
                 Ok(output)

@@ -572,6 +572,52 @@ mod tests {
 
 #[cube(launch)]
 pub(super) fn grow(
+    source: &[Vector<u32, Const<4>>],
+    target: &mut [Vector<u32, Const<4>>],
+    old_ranges: &[u32],
+    new_ranges: &[u32],
+    people: u32,
+) {
+    let index = ABSOLUTE_POS;
+    if index < people as usize * (P::WORDS / 4) {
+        let person = index / (P::WORDS / 4);
+        let household = source[person * (P::WORDS / 4)].extract(P::HOUSEHOLD) as usize;
+        let offset = new_ranges[household * 2] - old_ranges[household * 2];
+        target[index + offset as usize * (P::WORDS / 4)] = source[index];
+    }
+}
+
+#[cube(launch)]
+pub(super) fn newborns(
+    target: &mut [Vector<u32, Const<4>>],
+    old_ranges: &[u32],
+    new_ranges: &[u32],
+    births: &[u32],
+    next_low: u32,
+    next_high: u32,
+) {
+    let household = ABSOLUTE_POS;
+    if household < births.len() && births[household] > 0 {
+        let start = old_ranges[household * 2];
+        let count = old_ranges[household * 2 + 1];
+        let destination = new_ranges[household * 2];
+        let base = (destination + count) as usize * (P::WORDS / 4);
+        let identity = plus(ticks(next_low, next_high), ticks(destination - start, 0)).value;
+        let mut header = Vector::<u32, Const<4>>::new(0);
+        header.insert(P::IDENTITY, identity.extract(0usize));
+        header.insert(P::IDENTITY + 1, identity.extract(1usize));
+        header.insert(P::HOUSEHOLD, household as u32);
+        let mut status = Vector::<u32, Const<4>>::new(0);
+        status.insert(P::SEX - 4, births[household] - 1);
+        target[base] = header;
+        target[base + 1] = status;
+        target[base + 2] = Vector::new(0);
+    }
+}
+
+#[cfg(test)]
+#[cube(launch)]
+pub(super) fn original_grow(
     source: &[u32],
     target: &mut [u32],
     old_ranges: &[u32],
