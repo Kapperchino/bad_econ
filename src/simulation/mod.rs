@@ -574,20 +574,23 @@ impl Simulation {
         grown
     }
     fn commit_enterprises(&mut self) -> Result<()> {
+        let records = registry::records::RecordBuffers {
+            requests: &self.enterprise_requests,
+            births: self.demography.birth_buffer(),
+            scratch: &self.scratch,
+        };
         enterprise::propose(
             &self.device,
             &self.state,
             &self.actors,
             &self.config,
             &self.spatial,
-            &self.enterprise_requests,
+            records,
             self.day as u32,
         );
         let pending = registry::records::PendingRecords::read(
             &self.device,
-            &self.enterprise_requests,
-            self.demography.birth_buffer(),
-            &self.scratch,
+            records,
             &self.searches.requests,
         )?;
         self.readback_bytes += pending.readback_bytes;
@@ -1140,12 +1143,18 @@ impl Simulation {
                 count,
                 members.div_ceil(self.device.workgroup as usize),
             );
-            launch(
-                EconomyStage::IndexOffsets,
-                (side * side + 1) as usize,
-                &parameters,
+            economy::indexing::MarketIndex::launch(
+                &self.device,
+                self.device.count(members.max((side * side + 1) as usize)),
+                cubecl::CubeDim::new_1d(self.device.workgroup),
+                economy::indexing::IndexInputLaunch {
+                    config: self.config.launch(),
+                    spatial: self.spatial.clone().into_buffer_arg(),
+                    scratch: self.scratch.clone().into_buffer_arg(),
+                    control: self.control.clone().into_buffer_arg(),
+                    parameters: parameters.launch(),
+                },
             );
-            launch(EconomyStage::IndexFill, members, &parameters);
             if matches!(
                 market,
                 Market::Household | Market::Input(Good::Bread) | Market::Consumer(Good::Bread)

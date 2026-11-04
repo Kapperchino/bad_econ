@@ -6,6 +6,9 @@ use super::{
     Device,
     layout::ActorLayout,
     pass::GpuPass,
+    registry::records::{
+        CountRecords, ProposedRecord, RecordBuffers, RecordCountBuffers, RecordCountBuffersLaunch,
+    },
     system::{System, gpu_passes},
     words::*,
 };
@@ -21,6 +24,7 @@ struct ProposalInput {
     config: EconomyConfig,
     spatial: Box<[u32]>,
     output: Box<[u32]>,
+    records: RecordCountBuffers,
     day: u32,
 }
 
@@ -29,15 +33,15 @@ struct ProposeEnterprises;
 
 impl System for EnterpriseProposals {
     type Input = ProposalInput;
-    type Passes = gpu_passes![ProposeEnterprises];
+    type Passes = gpu_passes![ProposeEnterprises, CountRecords];
 }
 
 #[cube]
 impl GpuPass<ProposalInput> for ProposeEnterprises {
-    type Output = ();
+    type Output = ProposedRecord;
 
-    fn execute(mut input: ProposalInput) {
-        requests(
+    fn execute(mut input: ProposalInput) -> ProposedRecord {
+        let request = requests(
             &mut input.state,
             &input.actors,
             &input.config,
@@ -45,6 +49,10 @@ impl GpuPass<ProposalInput> for ProposeEnterprises {
             &mut input.output,
             input.day,
         );
+        ProposedRecord {
+            buffers: input.records,
+            request,
+        }
     }
 }
 
@@ -60,8 +68,9 @@ fn requests(
     spatial: &[u32],
     output: &mut [u32],
     day: u32,
-) {
+) -> u32 {
     let actor = ABSOLUTE_POS as u32;
+    let mut action = 0u32;
     if actor < config.actors {
         let count = config.actors;
         if comptime!(config.home_mode == Feature::Enabled)
@@ -122,7 +131,7 @@ fn requests(
                 );
             }
         }
-        let mut action = select(funded && viable, target, 0);
+        action = select(funded && viable, target, 0);
         let household =
             actors[ActorLayout::KIND * (actors.len() / ActorLayout::WORDS) + actor as usize] == 0;
         let invested = load(
@@ -289,6 +298,7 @@ fn requests(
         }
         output[actor as usize] = action;
     }
+    action
 }
 
 pub(super) fn propose(
@@ -297,11 +307,11 @@ pub(super) fn propose(
     actors: &CubeTensor,
     config: &Configuration,
     spatial: &CubeTensor,
-    output: &CubeTensor,
+    records: RecordBuffers<'_>,
     day: u32,
 ) {
     let argument = |tensor: &CubeTensor| tensor.clone().into_buffer_arg();
-    let cube_count = device.count(output.meta.num_elements());
+    let cube_count = device.count(records.requests.meta.num_elements());
     EnterpriseProposals::launch(
         device,
         cube_count,
@@ -311,7 +321,12 @@ pub(super) fn propose(
             actors: argument(actors),
             config: config.launch(),
             spatial: argument(spatial),
-            output: argument(output),
+            output: argument(records.requests),
+            records: RecordCountBuffersLaunch {
+                births: argument(records.births),
+                scratch: argument(records.scratch),
+                scan: super::parallel::ScanMode::new(device),
+            },
             day,
         },
     );

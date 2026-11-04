@@ -3,7 +3,7 @@ use crate::simulation::parallel;
 use bytemuck::{Pod, Zeroable};
 
 #[repr(C)]
-#[derive(Clone, Copy, Pod, Zeroable)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Pod, Zeroable)]
 pub(in crate::simulation) struct PendingRecord {
     pub actor: u32,
     pub request: u32,
@@ -15,26 +15,22 @@ pub(in crate::simulation) struct PendingRecords {
     pub readback_bytes: u64,
 }
 
+#[derive(Clone, Copy)]
+pub(in crate::simulation) struct RecordBuffers<'a> {
+    pub requests: &'a CubeTensor,
+    pub births: &'a CubeTensor,
+    pub scratch: &'a CubeTensor,
+}
+
 impl PendingRecords {
-    pub fn read(
-        device: &Device,
-        requests: &CubeTensor,
-        births: &CubeTensor,
-        scratch: &CubeTensor,
-        output: &CubeTensor,
-    ) -> Result<Self> {
+    pub fn read(device: &Device, buffers: RecordBuffers<'_>, output: &CubeTensor) -> Result<Self> {
+        let RecordBuffers {
+            requests,
+            births,
+            scratch,
+        } = buffers;
         let actors = requests.meta.num_elements();
         let argument = |tensor: &CubeTensor| tensor.clone().into_buffer_arg();
-        RecordCounting::launch(
-            device,
-            device.count(actors),
-            CubeDim::new_1d(device.workgroup),
-            RecordCountInputLaunch {
-                requests: argument(requests),
-                births: argument(births),
-                scratch: argument(scratch),
-            },
-        );
         parallel::scan(
             device,
             scratch,
@@ -70,10 +66,17 @@ impl PendingRecords {
 }
 
 #[derive(CubeType, CubeLaunch)]
-struct RecordCountInput {
-    requests: Box<[u32]>,
-    births: Box<[u32]>,
-    scratch: Box<[u32]>,
+pub(in crate::simulation) struct RecordCountBuffers {
+    pub births: Box<[u32]>,
+    pub scratch: Box<[u32]>,
+    #[cube(comptime)]
+    pub scan: parallel::ScanMode,
+}
+
+#[derive(CubeType)]
+pub(in crate::simulation) struct ProposedRecord {
+    pub buffers: RecordCountBuffers,
+    pub request: u32,
 }
 
 #[derive(CubeType, CubeLaunch)]
@@ -84,15 +87,9 @@ struct RecordCompactionInput {
     output: Box<[u32]>,
 }
 
-struct RecordCounting;
 struct RecordCompaction;
-struct CountRecords;
+pub(in crate::simulation) struct CountRecords;
 struct WriteRecords;
-
-impl System for RecordCounting {
-    type Input = RecordCountInput;
-    type Passes = gpu_passes![CountRecords];
-}
 
 impl System for RecordCompaction {
     type Input = RecordCompactionInput;
@@ -100,11 +97,23 @@ impl System for RecordCompaction {
 }
 
 #[cube]
-impl GpuPass<RecordCountInput> for CountRecords {
+impl GpuPass<ProposedRecord> for CountRecords {
     type Output = ();
 
-    fn execute(mut input: RecordCountInput) {
-        count_records(&input.requests, &input.births, &mut input.scratch);
+    fn execute(mut input: ProposedRecord) {
+        let actor = ABSOLUTE_POS;
+        let count = input.buffers.births.len();
+        let mut present = 0u32;
+        if actor < count {
+            present = u32::cast_from(input.request > 0 || input.buffers.births[actor] > 0);
+        }
+        let prefix = parallel::scan_prefix(present, comptime!(input.buffers.scan));
+        if actor < count {
+            input.buffers.scratch[actor] = prefix.inclusive;
+        }
+        if UNIT_POS == 0 {
+            input.buffers.scratch[count + CUBE_POS] = prefix.total;
+        }
     }
 }
 
@@ -119,23 +128,6 @@ impl GpuPass<RecordCompactionInput> for WriteRecords {
             &mut input.scratch,
             &mut input.output,
         );
-    }
-}
-
-#[cube]
-fn count_records(requests: &[u32], births: &[u32], scratch: &mut [u32]) {
-    let actor = ABSOLUTE_POS;
-    let count = requests.len();
-    let mut present = 0u32;
-    if actor < count {
-        present = u32::cast_from(requests[actor] > 0 || births[actor] > 0);
-    }
-    let prefix = parallel::prefix_sum(present);
-    if actor < count {
-        scratch[actor] = prefix.inclusive;
-    }
-    if UNIT_POS == 0 {
-        scratch[count + CUBE_POS] = prefix.total;
     }
 }
 
@@ -155,5 +147,100 @@ fn write_records(requests: &[u32], births: &[u32], scratch: &mut [u32], output: 
         output[base] = actor as u32;
         output[base + 1] = requests[actor];
         output[base + 2] = births[actor];
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[derive(CubeType, CubeLaunch)]
+    struct RequestsInput {
+        requests: Box<[u32]>,
+        records: RecordCountBuffers,
+    }
+
+    struct PendingCounting;
+    struct LoadRequest;
+
+    impl System for PendingCounting {
+        type Input = RequestsInput;
+        type Passes = gpu_passes![LoadRequest, CountRecords];
+    }
+
+    #[cube]
+    impl GpuPass<RequestsInput> for LoadRequest {
+        type Output = ProposedRecord;
+
+        fn execute(input: RequestsInput) -> ProposedRecord {
+            let mut request = 0u32;
+            if ABSOLUTE_POS < input.requests.len() {
+                request = input.requests[ABSOLUTE_POS];
+            }
+            ProposedRecord {
+                buffers: input.records,
+                request,
+            }
+        }
+    }
+
+    #[test]
+    fn pending_records_preserve_sparse_actor_order_and_partial_workgroups_on_gpu() -> Result<()> {
+        for workgroup in [32, 64, 128, 256] {
+            let device = crate::simulation::tests::device(workgroup)?;
+            for scan in [parallel::ScanMode::Shared, parallel::ScanMode::new(&device)] {
+                for count in [1, 31, 32, 33, 65, 257, 4097] {
+                    let requests = (0..count)
+                        .map(|actor| match actor % 7 {
+                            1 | 3 => actor as u32 + 1,
+                            _ => 0,
+                        })
+                        .collect::<Vec<_>>();
+                    let births = (0..count)
+                        .map(|actor| match actor % 7 {
+                            2 | 3 => actor as u32 % 2 + 1,
+                            _ => 0,
+                        })
+                        .collect::<Vec<_>>();
+                    let expected = (0..count)
+                        .filter(|&actor| requests[actor] > 0 || births[actor] > 0)
+                        .map(|actor| PendingRecord {
+                            actor: actor as u32,
+                            request: requests[actor],
+                            birth: births[actor],
+                        })
+                        .collect::<Vec<_>>();
+                    let requests = device.tensor(&requests);
+                    let births = device.tensor(&births);
+                    let scratch = device.tensor(&vec![u32::MAX; count * 2 + 256]);
+                    let output = device.tensor(&vec![u32::MAX; count * 3 + 1]);
+                    PendingCounting::launch(
+                        &device,
+                        device.count(count),
+                        CubeDim::new_1d(workgroup),
+                        RequestsInputLaunch {
+                            requests: requests.clone().into_buffer_arg(),
+                            records: RecordCountBuffersLaunch {
+                                births: births.clone().into_buffer_arg(),
+                                scratch: scratch.clone().into_buffer_arg(),
+                                scan,
+                            },
+                        },
+                    );
+                    let actual = PendingRecords::read(
+                        &device,
+                        RecordBuffers {
+                            requests: &requests,
+                            births: &births,
+                            scratch: &scratch,
+                        },
+                        &output,
+                    )?;
+                    assert_eq!(actual.records, expected, "{workgroup} {scan:?} {count}");
+                    assert_eq!(actual.readback_bytes, (1 + expected.len() * 3) as u64 * 4);
+                }
+            }
+        }
+        Ok(())
     }
 }

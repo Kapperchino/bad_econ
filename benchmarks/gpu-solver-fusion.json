@@ -1,0 +1,249 @@
+{
+  "date": "2026-11-04",
+  "stage": "Analytical fixed-point solver: fused rescaling/addition, two reusable iteration buffers, and one final fault readback",
+  "device": "Apple M5 Pro / Metal",
+  "baseline_revision": "5cfb672fbb4dd53d69474e54696c3a2e2c0f54fb",
+  "baseline_preexisting_changes": {
+    "src/simulation/economy/mod.rs": "4b5b3dbbdf4d3416ca581d2e904b966671e67a7a590aa0bb5e8b9da4a9fdd7fc",
+    "src/simulation/enterprise/mod.rs": "af43a9bbb99a1e652a031a32a6741bc81582f764147148846d466df8152bb625",
+    "src/simulation/mod.rs": "dff5447cf16b2b5ba0dd318864672a0e5b4f15d91da65dc91a3140258e035851",
+    "src/simulation/registry/records.rs": "38eae8712444b1b2f48465f934645d55b5e46bba73db79a9f745fc6c7736ffd8",
+    "src/simulation/tests.rs": "fa9b2fa76a3a1fd4bdf36d93c313318019db1fcfeb46dc01de7be75ffbc07359",
+    "src/simulation/economy/indexing.rs": "37ccf87119f7d75a282506889b364a6cc9bc618199b72eeb4a34e13b7d0906e2"
+  },
+  "candidate_source_sha256": {
+    "src/simulation/analytics/mod.rs": "382a2ebe720e78be5f2f05524f014774f639a5b951318388ec4cc005ca64b665",
+    "src/simulation/analytics/kernels.rs": "f73cf997a59d1ddfa1f3dee27b8fda25878832a019fa5690a15d9a38d934ad44",
+    "src/simulation/analytics/solver.rs": "d3695eb5388486a24997eecc46392736914e2b60142626b19b45cdf74c9f2de1",
+    "tests/analytics.rs": "43742790aae06e62371b29d559c4475896f4e3c0095e67c1b75602921c149d5f",
+    "examples/analytics_throughput.rs": "bec450021a6f0f9af4170fc5c7c78b7a3f5677c3f97a6ed5481ec8d85d0a1b5f"
+  },
+  "binary_sha256": {
+    "baseline": "890cbaf22c74c9cc01c9983f5c964b8edfc7254c27b2354767d7a38d837e8664",
+    "candidate": "e61c81dd049da3d33d648e9c3868ac0e71d97fe471467e3b5cf7b27938c6a933"
+  },
+  "protocol": {
+    "command": "cargo run --release --locked --example analytics_throughput -- --sizes 16,128,512 --iterations 128 --repeats 10 --trials 3 --workgroup 64 --output /tmp/analytics-benchmark.json",
+    "matrix": "Square dense storage with coefficient 1/4 on the diagonal and next column, wrapping the last row; all other coefficients zero",
+    "right_hand_side": 1000,
+    "contraction": "1/2 with unit weights",
+    "iterations": 128,
+    "workgroup": 64,
+    "warmup_solves_per_size": 2,
+    "fresh_process_runs_per_revision": 3,
+    "trials_per_process_per_size": 3,
+    "solves_per_trial": 10,
+    "revision_order": [
+      "baseline",
+      "candidate",
+      "candidate",
+      "baseline",
+      "baseline",
+      "candidate"
+    ],
+    "summary_statistic": "Median of the three process medians",
+    "timed": "Complete solve including initial-vector allocation, certificate checks, iterations, residual/error evaluation, and final GPU fault readback; explicit synchronization at each trial end",
+    "excluded": "GPU initialization, matrix/vector upload, warmup, JSON report reads and writes, exploratory baseline.json/candidate.json runs",
+    "correctness": "Independent closed-form fixed-point check, repeated result-report equality within every trial, and exact result-report equality across revisions",
+    "gpu_tests_and_benchmarks_overlapped": false
+  },
+  "comparisons": [
+    {
+      "rows": 16,
+      "median_milliseconds_per_solve": {
+        "baseline": 49.6313792,
+        "candidate": 1.0590667
+      },
+      "speedup": 46.8633176739482,
+      "identical_result_reports": true,
+      "result_sha256": "9fa82db9be402129ec54ae5664f9af41f0f0677eae5c7c76d5e7a650d4b5d315",
+      "process_medians_milliseconds": {
+        "baseline": [
+          51.30689579999999,
+          49.1298708,
+          49.6313792
+        ],
+        "candidate": [
+          1.1426041,
+          1.0590667,
+          1.0525625
+        ]
+      },
+      "trials_milliseconds": {
+        "baseline": [
+          [
+            52.35561250000001,
+            51.30689579999999,
+            48.9601667
+          ],
+          [
+            49.6644833,
+            49.1298708,
+            48.6863
+          ],
+          [
+            48.7689584,
+            49.6313792,
+            49.7716917
+          ]
+        ],
+        "candidate": [
+          [
+            1.7861999999999998,
+            1.1426041,
+            1.0225833
+          ],
+          [
+            1.1610834,
+            1.0392708000000002,
+            1.0590667
+          ],
+          [
+            2.1388917,
+            1.0525625,
+            1.0177792
+          ]
+        ]
+      }
+    },
+    {
+      "rows": 128,
+      "median_milliseconds_per_solve": {
+        "baseline": 47.6987709,
+        "candidate": 1.30025
+      },
+      "speedup": 36.68430755623919,
+      "identical_result_reports": true,
+      "result_sha256": "f53bf13a7e3bf64c2f54c5032397330277ad6d958866798739ee51f95893d241",
+      "process_medians_milliseconds": {
+        "baseline": [
+          47.6987709,
+          47.6944167,
+          48.5613958
+        ],
+        "candidate": [
+          1.3273667,
+          1.2441958,
+          1.30025
+        ]
+      },
+      "trials_milliseconds": {
+        "baseline": [
+          [
+            48.3022709,
+            47.6987709,
+            47.0960625
+          ],
+          [
+            47.6096959,
+            47.6944167,
+            47.7384833
+          ],
+          [
+            48.5613958,
+            49.221825,
+            47.996420799999996
+          ]
+        ],
+        "candidate": [
+          [
+            1.6122542,
+            1.3273667,
+            1.2817125
+          ],
+          [
+            1.2285833,
+            1.2441958,
+            1.2637125
+          ],
+          [
+            1.7758500000000002,
+            1.30025,
+            1.1947832999999999
+          ]
+        ]
+      }
+    },
+    {
+      "rows": 512,
+      "median_milliseconds_per_solve": {
+        "baseline": 49.711508300000006,
+        "candidate": 2.8284332999999995
+      },
+      "speedup": 17.575633938406824,
+      "identical_result_reports": true,
+      "result_sha256": "839e081594fbea89cead0c139072932085c74d7ef8528ad9982a98e11b2c789f",
+      "process_medians_milliseconds": {
+        "baseline": [
+          48.700854199999995,
+          49.711508300000006,
+          50.000804200000005
+        ],
+        "candidate": [
+          2.8340083,
+          2.8284332999999995,
+          2.8042917
+        ]
+      },
+      "trials_milliseconds": {
+        "baseline": [
+          [
+            48.658425,
+            48.700854199999995,
+            48.8260375
+          ],
+          [
+            49.711508300000006,
+            49.9849125,
+            48.265641699999996
+          ],
+          [
+            50.000804200000005,
+            51.269970799999996,
+            48.7540542
+          ]
+        ],
+        "candidate": [
+          [
+            3.03795,
+            2.7540334,
+            2.8340083
+          ],
+          [
+            2.9256042,
+            2.8284332999999995,
+            2.8227416
+          ],
+          [
+            2.7245209,
+            2.8063042,
+            2.8042917
+          ]
+        ]
+      }
+    }
+  ],
+  "explicit_fault_readbacks_per_128_iteration_solve": {
+    "baseline": 260,
+    "candidate": 1,
+    "method": "Source inspection; excludes later DeviceSolution::read calls and runtime-internal operations"
+  },
+  "validation": {
+    "library_tests": 39,
+    "gpu_tests": 7,
+    "integration_tests": 164,
+    "total_passed": 210,
+    "failed": 0,
+    "ignored": 0,
+    "gpu_compute_only": true,
+    "format": "passed",
+    "clippy": "passed with all targets, viewer feature, and warnings denied",
+    "added_regressions": [
+      "GPU reference steps across all workgroups, empty shapes, zero/odd/even iteration budgets, and aliased immutable inputs",
+      "Transient overflow remains an error after later iterates return to finite values; subsequent solves recover",
+      "Certificate overflow remains an error with zero iterations"
+    ]
+  },
+  "scope": "These measurements cover analytical solves on one Metal device; they do not measure daily simulation throughput.",
+  "raw_artifacts": "target/solver-fusion/"
+}

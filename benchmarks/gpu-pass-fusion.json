@@ -1,0 +1,210 @@
+{
+  "baseline_revision": "5cfb672fbb4dd53d69474e54696c3a2e2c0f54fb",
+  "candidate_source_sha256": {
+    "src/simulation/economy/mod.rs": "4b5b3dbbdf4d3416ca581d2e904b966671e67a7a590aa0bb5e8b9da4a9fdd7fc",
+    "src/simulation/enterprise/mod.rs": "af43a9bbb99a1e652a031a32a6741bc81582f764147148846d466df8152bb625",
+    "src/simulation/mod.rs": "dff5447cf16b2b5ba0dd318864672a0e5b4f15d91da65dc91a3140258e035851",
+    "src/simulation/registry/records.rs": "38eae8712444b1b2f48465f934645d55b5e46bba73db79a9f745fc6c7736ffd8",
+    "src/simulation/tests.rs": "fa9b2fa76a3a1fd4bdf36d93c313318019db1fcfeb46dc01de7be75ffbc07359",
+    "src/simulation/economy/indexing.rs": "37ccf87119f7d75a282506889b364a6cc9bc618199b72eeb4a34e13b7d0906e2"
+  },
+  "binary_sha256": {
+    "baseline": "cb4a76dbc880a6926c400383dc25540e3648124804406cde0de48450fb2688d3",
+    "candidate": "865945b2e1a3cad4d450296a0c3996905fab6c415e24d733712a0e8d8573d5bf"
+  },
+  "harness_sha256": "d3e33e09e619550b6c978a47da165489d23797d4b9d3acaabd7dc92e15a497ed",
+  "scope": "Market index and enterprise proposal/count fusion before the analytical solver change",
+  "result": "No consistent end-to-end throughput improvement demonstrated",
+  "dispatches_removed_per_industrial_day": 93,
+  "protocol": {
+    "harness": "examples/gpu_throughput.rs",
+    "days": 60,
+    "warmup_days": 2,
+    "preflight_days": 62,
+    "seed": 42,
+    "workgroup": 64,
+    "completed_trials": {
+      "baseline": [
+        2,
+        3,
+        4
+      ],
+      "candidate": [
+        1,
+        2
+      ]
+    },
+    "excluded": "baseline-1 was exploratory; candidate-3 was interrupted with SIGKILL and was not included",
+    "gpu_tests_and_benchmarks_overlapped": false
+  },
+  "comparisons": [
+    {
+      "households": 10000,
+      "median_milliseconds_per_day": {
+        "baseline": 24.601544450000002,
+        "candidate": 24.689244108333334
+      },
+      "matching_state_hashes": true,
+      "runs": {
+        "baseline": [
+          {
+            "trial": 2,
+            "milliseconds_per_day": 24.601544450000002,
+            "final_state_hash": "e19fcb5a3d9d051a630523d75aa9524da12dee98884167713a3b2a1cce5144df",
+            "scenario_hash": "aa44a01ff450bcce73e6bf621ed089a124004b9cf94da7a1e16a469e943bb1e3",
+            "maximum_reserved_bytes": 57306880,
+            "memory_budget_bytes": 27830837248
+          },
+          {
+            "trial": 3,
+            "milliseconds_per_day": 24.4391632,
+            "final_state_hash": "e19fcb5a3d9d051a630523d75aa9524da12dee98884167713a3b2a1cce5144df",
+            "scenario_hash": "aa44a01ff450bcce73e6bf621ed089a124004b9cf94da7a1e16a469e943bb1e3",
+            "maximum_reserved_bytes": 57306880,
+            "memory_budget_bytes": 27830837248
+          },
+          {
+            "trial": 4,
+            "milliseconds_per_day": 25.29983195,
+            "final_state_hash": "e19fcb5a3d9d051a630523d75aa9524da12dee98884167713a3b2a1cce5144df",
+            "scenario_hash": "aa44a01ff450bcce73e6bf621ed089a124004b9cf94da7a1e16a469e943bb1e3",
+            "maximum_reserved_bytes": 57306880,
+            "memory_budget_bytes": 27830837248
+          }
+        ],
+        "candidate": [
+          {
+            "trial": 1,
+            "milliseconds_per_day": 24.629978483333332,
+            "final_state_hash": "e19fcb5a3d9d051a630523d75aa9524da12dee98884167713a3b2a1cce5144df",
+            "scenario_hash": "aa44a01ff450bcce73e6bf621ed089a124004b9cf94da7a1e16a469e943bb1e3",
+            "maximum_reserved_bytes": 57306112,
+            "memory_budget_bytes": 27830837248
+          },
+          {
+            "trial": 2,
+            "milliseconds_per_day": 24.748509733333332,
+            "final_state_hash": "e19fcb5a3d9d051a630523d75aa9524da12dee98884167713a3b2a1cce5144df",
+            "scenario_hash": "aa44a01ff450bcce73e6bf621ed089a124004b9cf94da7a1e16a469e943bb1e3",
+            "maximum_reserved_bytes": 57306112,
+            "memory_budget_bytes": 27830837248
+          }
+        ]
+      }
+    },
+    {
+      "households": 100000,
+      "median_milliseconds_per_day": {
+        "baseline": 70.43849583333333,
+        "candidate": 70.36965833333333
+      },
+      "matching_state_hashes": true,
+      "runs": {
+        "baseline": [
+          {
+            "trial": 2,
+            "milliseconds_per_day": 68.87402638333334,
+            "final_state_hash": "12ccf521b9ccd96fa67d9d25a9db9414f7bc759f94dd8415ae691d19c40dc6c9",
+            "scenario_hash": "b3962a16a8d3ba6ac4d4fa953d6f56be8b9f323563ac42de870e84c7d667a72b",
+            "maximum_reserved_bytes": 737442048,
+            "memory_budget_bytes": 27802697728
+          },
+          {
+            "trial": 3,
+            "milliseconds_per_day": 70.43849583333333,
+            "final_state_hash": "12ccf521b9ccd96fa67d9d25a9db9414f7bc759f94dd8415ae691d19c40dc6c9",
+            "scenario_hash": "b3962a16a8d3ba6ac4d4fa953d6f56be8b9f323563ac42de870e84c7d667a72b",
+            "maximum_reserved_bytes": 737442048,
+            "memory_budget_bytes": 27802697728
+          },
+          {
+            "trial": 4,
+            "milliseconds_per_day": 71.14813958333333,
+            "final_state_hash": "12ccf521b9ccd96fa67d9d25a9db9414f7bc759f94dd8415ae691d19c40dc6c9",
+            "scenario_hash": "b3962a16a8d3ba6ac4d4fa953d6f56be8b9f323563ac42de870e84c7d667a72b",
+            "maximum_reserved_bytes": 737442048,
+            "memory_budget_bytes": 27802697728
+          }
+        ],
+        "candidate": [
+          {
+            "trial": 1,
+            "milliseconds_per_day": 70.49379583333334,
+            "final_state_hash": "12ccf521b9ccd96fa67d9d25a9db9414f7bc759f94dd8415ae691d19c40dc6c9",
+            "scenario_hash": "b3962a16a8d3ba6ac4d4fa953d6f56be8b9f323563ac42de870e84c7d667a72b",
+            "maximum_reserved_bytes": 737441792,
+            "memory_budget_bytes": 27802697728
+          },
+          {
+            "trial": 2,
+            "milliseconds_per_day": 70.24552083333333,
+            "final_state_hash": "12ccf521b9ccd96fa67d9d25a9db9414f7bc759f94dd8415ae691d19c40dc6c9",
+            "scenario_hash": "b3962a16a8d3ba6ac4d4fa953d6f56be8b9f323563ac42de870e84c7d667a72b",
+            "maximum_reserved_bytes": 737441792,
+            "memory_budget_bytes": 27802697728
+          }
+        ]
+      }
+    },
+    {
+      "households": 1000000,
+      "median_milliseconds_per_day": {
+        "baseline": 483.2994347166667,
+        "candidate": 487.55536041666664
+      },
+      "matching_state_hashes": true,
+      "runs": {
+        "baseline": [
+          {
+            "trial": 2,
+            "milliseconds_per_day": 486.39600973333336,
+            "final_state_hash": "4be8836e4beba8d890ee00706a9b1ef0015bd8db29b8017d5229123f074333eb",
+            "scenario_hash": "285c3867fe6fbcaf134dd0cebc3746fe256007c17f8b6f5d55badeba5dffb913",
+            "maximum_reserved_bytes": 7114450432,
+            "memory_budget_bytes": 27608530944
+          },
+          {
+            "trial": 3,
+            "milliseconds_per_day": 480.0504041666667,
+            "final_state_hash": "4be8836e4beba8d890ee00706a9b1ef0015bd8db29b8017d5229123f074333eb",
+            "scenario_hash": "285c3867fe6fbcaf134dd0cebc3746fe256007c17f8b6f5d55badeba5dffb913",
+            "maximum_reserved_bytes": 7114450432,
+            "memory_budget_bytes": 27608530944
+          },
+          {
+            "trial": 4,
+            "milliseconds_per_day": 483.2994347166667,
+            "final_state_hash": "4be8836e4beba8d890ee00706a9b1ef0015bd8db29b8017d5229123f074333eb",
+            "scenario_hash": "285c3867fe6fbcaf134dd0cebc3746fe256007c17f8b6f5d55badeba5dffb913",
+            "maximum_reserved_bytes": 7114450432,
+            "memory_budget_bytes": 27608530944
+          }
+        ],
+        "candidate": [
+          {
+            "trial": 1,
+            "milliseconds_per_day": 486.93000208333336,
+            "final_state_hash": "4be8836e4beba8d890ee00706a9b1ef0015bd8db29b8017d5229123f074333eb",
+            "scenario_hash": "285c3867fe6fbcaf134dd0cebc3746fe256007c17f8b6f5d55badeba5dffb913",
+            "maximum_reserved_bytes": 7114451712,
+            "memory_budget_bytes": 27608530944
+          },
+          {
+            "trial": 2,
+            "milliseconds_per_day": 488.18071875,
+            "final_state_hash": "4be8836e4beba8d890ee00706a9b1ef0015bd8db29b8017d5229123f074333eb",
+            "scenario_hash": "285c3867fe6fbcaf134dd0cebc3746fe256007c17f8b6f5d55badeba5dffb913",
+            "maximum_reserved_bytes": 7114451712,
+            "memory_budget_bytes": 27608530944
+          }
+        ]
+      }
+    }
+  ],
+  "validation": {
+    "passed_tests": 207,
+    "clippy": "passed",
+    "format": "passed"
+  },
+  "raw_artifacts": "target/pass-fusion/"
+}

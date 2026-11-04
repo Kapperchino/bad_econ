@@ -66,7 +66,10 @@ pub(super) fn divide_product(
 }
 
 #[cube]
-fn checked_vector<N: Size>(value: Vector<f32, N>, control: &[Atomic<u32>]) -> Vector<f32, N> {
+pub(super) fn checked_vector<N: Size>(
+    value: Vector<f32, N>,
+    control: &[Atomic<u32>],
+) -> Vector<f32, N> {
     #[unroll]
     for lane in 0..N::value() {
         checked(value.extract(lane), control);

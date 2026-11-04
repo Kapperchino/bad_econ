@@ -4,7 +4,7 @@ use std::{
     sync::{Mutex, OnceLock},
 };
 
-fn device(workgroup: u32) -> Result<Device> {
+pub(super) fn device(workgroup: u32) -> Result<Device> {
     static DEVICES: OnceLock<Mutex<HashMap<u32, Device>>> = OnceLock::new();
     let mut devices = DEVICES
         .get_or_init(Mutex::default)

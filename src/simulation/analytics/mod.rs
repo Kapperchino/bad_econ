@@ -5,6 +5,7 @@ mod request;
 mod retained;
 pub use retained::*;
 mod sensitivity;
+mod solver;
 mod systems;
 mod valuation;
 pub use accounts::*;
@@ -466,7 +467,27 @@ impl DeviceOperator {
                 .map(|&value| u64::from(value))
                 .collect::<Vec<_>>(),
         )?;
-        let product = self.apply(device, &weights)?;
+        let product = DeviceVector::empty(device, self.rows);
+        tensor::matmul(
+            device,
+            &self.matrix.data,
+            &tensor::reshape(&weights.data, [2, self.columns, 1]),
+            &tensor::reshape(&product.data, [2, self.rows, 1]),
+        )?;
+        let elements = self.rows * 2;
+        let width = tensor::vector_width(device, elements);
+        VectorRescaling::launch_vectorized(
+            device,
+            count(device, elements / width),
+            CubeDim::new_1d(device.workgroup),
+            RescaleInputLaunch {
+                values: argument(&product.data),
+                control: argument(control),
+                scale: self.matrix.scale as f32,
+                length: elements as u32,
+            },
+            width,
+        );
         let rows = device.empty((self.rows * 2).max(2));
         CertificateRows::launch(
             device,
@@ -546,26 +567,24 @@ impl DeviceOperator {
                 let weights = device.tensor(&padded(certificate.weights.clone()));
                 let control = device.tensor(&[0; CONTROL_WORDS]);
                 self.certificate(device, certificate, &control)?;
-                let mut previous = DeviceVector {
-                    data: initial.data.clone(),
-                    length: initial.length,
-                };
+                let mut buffers = solver::IterationBuffers::new(device, initial);
                 let iterations = match self.rows {
                     0 => 0,
                     _ => budget.iterations,
                 };
                 for _ in 0..iterations {
-                    previous = self.step(device, rhs, &previous)?;
+                    buffers.step(device, self, rhs, &control)?;
+                    buffers.advance();
                 }
-                let product = self.step(device, rhs, &previous)?;
+                buffers.step(device, self, rhs, &control)?;
                 let residuals = tensor::empty(device, [self.rows]);
                 SolutionResidual::launch(
                     device,
                     count(device, self.rows),
                     CubeDim::new_1d(device.workgroup),
                     SolutionResidualInputLaunch {
-                        product: argument(&product.data),
-                        estimate: argument(&previous.data),
+                        product: argument(&buffers.next),
+                        estimate: argument(&buffers.current),
                         weights: argument(&weights),
                         output: argument(&residuals),
                         rows: self.rows as u32,
@@ -603,7 +622,7 @@ impl DeviceOperator {
                     count(device, self.rows),
                     CubeDim::new_1d(device.workgroup),
                     SolutionBoundsInputLaunch {
-                        estimate: argument(&previous.data),
+                        estimate: argument(&buffers.current),
                         weights: argument(&weights),
                         error: argument(&error),
                         output: argument(&output.data),

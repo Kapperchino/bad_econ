@@ -34,6 +34,7 @@ pub(super) mod batch;
 mod clearing;
 pub(super) mod enterprises;
 mod household_production;
+pub(super) mod indexing;
 pub(super) mod opening;
 pub(super) mod search;
 mod systems;

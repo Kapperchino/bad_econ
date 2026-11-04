@@ -940,3 +940,139 @@ fn vector_arithmetic_preserves_partial_workgroups_empty_shapes_and_lane_faults()
     }
     Ok(())
 }
+
+#[test]
+fn iterative_solver_matches_gpu_steps_and_preserves_aliased_inputs() -> Result<()> {
+    for workgroup in [32, 64, 128, 256] {
+        let device = support::device(workgroup)?;
+        for rows in [0, 1, 2, 3, 32, 33, 65] {
+            let entries = (0..rows)
+                .flat_map(|row| match rows {
+                    1 => vec![Coefficient {
+                        row,
+                        column: row,
+                        numerator: 1,
+                        denominator: 2,
+                    }],
+                    _ => [row, (row + 1) % rows]
+                        .map(|column| Coefficient {
+                            row,
+                            column,
+                            numerator: 1,
+                            denominator: 4,
+                        })
+                        .to_vec(),
+                })
+                .collect();
+            let operator = DeviceOperator::new(&device, &SparseMatrix::new(rows, rows, entries)?);
+            let values = (0..rows).map(|row| 10 + row as u64 % 7).collect::<Vec<_>>();
+            let input = DeviceVector::from_ticks(&device, &values)?;
+            let before = input.read(&device)?;
+            let certificate = Contraction::new(1, 2, vec![1; rows])?;
+            for iterations in [0, 1, 2, 7] {
+                let mut expected = DeviceVector::from_ticks(&device, &values)?;
+                for _ in 0..iterations {
+                    expected = operator.step(&device, &input, &expected)?;
+                }
+                let reference = available(
+                    operator
+                        .solve_from(
+                            &device,
+                            &input,
+                            &expected,
+                            &certificate,
+                            SolveBudget {
+                                iterations: 0,
+                                weighted_tolerance: u64::MAX,
+                            },
+                        )?
+                        .read(&device)?,
+                )?;
+                let actual = available(
+                    operator
+                        .solve_from(
+                            &device,
+                            &input,
+                            &input,
+                            &certificate,
+                            SolveBudget {
+                                iterations,
+                                weighted_tolerance: u64::MAX,
+                            },
+                        )?
+                        .read(&device)?,
+                )?;
+                assert_eq!(
+                    actual.values, reference.values,
+                    "{workgroup} {rows} {iterations}"
+                );
+                assert_eq!(actual.weighted_error, reference.weighted_error);
+                assert_eq!(
+                    actual.iterations,
+                    match rows {
+                        0 => 0,
+                        _ => iterations,
+                    }
+                );
+                assert_eq!(input.read(&device)?, before);
+            }
+        }
+    }
+    Ok(())
+}
+
+#[test]
+fn iterative_solver_retains_transient_overflow_and_recovers_on_the_next_solve() -> Result<()> {
+    for workgroup in [32, 64, 128, 256] {
+        let device = support::device(workgroup)?;
+        let operator = DeviceOperator::new(&device, &dense(2, 2, &[0, 2, 0, 0], &[1; 4])?);
+        let initial = DeviceVector::from_ticks(&device, &[0, 1 << 63])?;
+        let before = initial.read(&device)?;
+        let zero = DeviceVector::from_ticks(&device, &[0, 0])?;
+        let certificate = Contraction::new(1, 2, vec![4, 1])?;
+        let budget = SolveBudget {
+            iterations: 2,
+            weighted_tolerance: 0,
+        };
+        assert!(operator.step(&device, &zero, &initial).is_err());
+        assert!(
+            operator
+                .solve_from(&device, &zero, &initial, &certificate, budget)
+                .is_err()
+        );
+        assert_eq!(initial.read(&device)?, before);
+        let recovered = available(
+            operator
+                .solve(&device, &zero, &certificate, budget)?
+                .read(&device)?,
+        )?;
+        assert_eq!(recovered.values, [Interval { lower: 0, upper: 0 }; 2]);
+        assert_eq!(recovered.weighted_error, 0);
+    }
+    Ok(())
+}
+
+#[test]
+fn solver_preserves_certificate_overflow_without_any_iterations() -> Result<()> {
+    for workgroup in [32, 64, 128, 256] {
+        let device = support::device(workgroup)?;
+        let operator = DeviceOperator::new(&device, &dense(1, 1, &[u32::MAX], &[1])?);
+        let weights = DeviceVector::from_ticks(&device, &[u64::from(u32::MAX)])?;
+        let zero = DeviceVector::from_ticks(&device, &[0])?;
+        assert!(operator.apply(&device, &weights).is_err());
+        assert!(
+            operator
+                .solve(
+                    &device,
+                    &zero,
+                    &Contraction::new(1, 2, vec![u32::MAX])?,
+                    SolveBudget {
+                        iterations: 0,
+                        weighted_tolerance: 0,
+                    },
+                )
+                .is_err()
+        );
+    }
+    Ok(())
+}
