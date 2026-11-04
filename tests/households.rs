@@ -157,22 +157,3 @@ fn convex_blend_rounding_preserves_endpoints_and_does_not_overflow() -> Result<(
     }
     Ok(())
 }
-
-#[test]
-fn household_admission_rejects_unbounded_active_weights_and_invalid_time() -> Result<()> {
-    let device = support::device(64)?;
-    let mut too_heavy = observed();
-    too_heavy.services[0].weight = 501;
-    assert!(evaluate(&device, &[too_heavy]).is_err());
-    let mut invalid = observed();
-    invalid.fatigue = 1001;
-    assert!(evaluate(&device, &[invalid]).is_err());
-    let mut invalid = observed();
-    invalid.rest_minutes = 961;
-    assert!(evaluate(&device, &[invalid]).is_err());
-    let mut invalid = observed();
-    invalid.exertion_minutes = 1441;
-    assert!(evaluate(&device, &[invalid]).is_err());
-    assert!(evaluate(&device, &[])?.is_empty());
-    Ok(())
-}

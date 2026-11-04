@@ -244,16 +244,19 @@ pub(in crate::simulation) fn radix_local(
     let count = parameters.count;
     let active_count = active(control, parameters);
     let block = CUBE_POS as u32;
-    let blocks = ceildiv(active(control, parameters), CUBE_DIM);
+    let blocks = ceildiv(active_count, CUBE_DIM);
     let lane = UNIT_POS as usize;
     let source = parameters.sort_source;
     let shift = parameters.sort_width;
-    if UNIT_POS < 16 && block < blocks {
-        scratch[(7 * count + UNIT_POS * blocks + block) as usize] = 0;
-    }
     if block * CUBE_DIM < active_count {
         let mut keys = Shared::<[u32]>::new_slice(256usize);
         let mut items = Shared::<[u32]>::new_slice(256usize);
+        let mut starts = Shared::<[u32]>::new_slice(16usize);
+        let mut ends = Shared::<[u32]>::new_slice(16usize);
+        if UNIT_POS < 16 {
+            starts[lane] = 0;
+            ends[lane] = 0;
+        }
         let mut key = u32::new(comptime!(i64::from(u32::MAX)));
         let mut item = 0u32;
         if id < active_count {
@@ -277,26 +280,23 @@ pub(in crate::simulation) fn radix_local(
             sync_cube();
         }
         let digit = (key >> shift) & 15;
-        let mut low = 0u32;
-        let mut high = UNIT_POS;
-        while low < high {
-            let mid = (low + high) / 2;
-            let before = ((keys[mid as usize] >> shift) & 15) < digit;
-            low = select(before, mid + 1, low);
-            high = select(before, high, mid);
+        let length = min(CUBE_DIM, active_count - block * CUBE_DIM);
+        let previous = (keys[(max(UNIT_POS, 1) - 1) as usize] >> shift) & 15;
+        let next = (keys[min(UNIT_POS + 1, CUBE_DIM - 1) as usize] >> shift) & 15;
+        if id < active_count && (UNIT_POS == 0 || previous != digit) {
+            starts[digit as usize] = UNIT_POS;
         }
+        if id < active_count && (UNIT_POS + 1 == length || next != digit) {
+            ends[digit as usize] = UNIT_POS + 1;
+        }
+        sync_cube();
         if id < active_count {
             scratch[(source + id) as usize] = key;
             scratch[(source + count + id) as usize] = item;
-            scratch[(6 * count + id) as usize] = UNIT_POS - low;
+            scratch[(6 * count + id) as usize] = UNIT_POS - starts[digit as usize];
         }
         if UNIT_POS < 16 {
-            let mut total = 0u32;
-            let length = min(CUBE_DIM, active_count - block * CUBE_DIM);
-            for index in 0..length {
-                total += u32::cast_from(((keys[index as usize] >> shift) & 15) == UNIT_POS);
-            }
-            scratch[(7 * count + UNIT_POS * blocks + block) as usize] = total;
+            scratch[(7 * count + UNIT_POS * blocks + block) as usize] = ends[lane] - starts[lane];
         }
     }
 }

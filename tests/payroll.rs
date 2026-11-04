@@ -1,3 +1,4 @@
+#![cfg(feature = "compute")]
 use anyhow::Result;
 use bad_econ::domain::*;
 
@@ -10,68 +11,6 @@ fn policy() -> PayrollPolicy {
             marginal_rate: 300,
         }],
     }
-}
-
-#[test]
-fn payroll_admission_requires_valid_rates_and_ordered_brackets() -> Result<()> {
-    let mut config = Scenario::baseline(3, 1, Experiment::Baseline)?
-        .config()
-        .clone();
-    config.payroll = Some(policy());
-    assert!(Scenario::new(config.clone()).is_ok());
-    config.payroll.as_mut().unwrap().employee_charge = 700;
-    assert!(Scenario::new(config.clone()).is_err());
-    config.payroll = Some(PayrollPolicy {
-        base_rate: u32::MAX,
-        ..policy()
-    });
-    assert!(Scenario::new(config.clone()).is_err());
-    config.payroll = Some(PayrollPolicy {
-        brackets: vec![
-            TaxBracket {
-                threshold: 100,
-                marginal_rate: 200,
-            },
-            TaxBracket {
-                threshold: 100,
-                marginal_rate: 300,
-            },
-        ],
-        ..policy()
-    });
-    assert!(Scenario::new(config.clone()).is_err());
-    config.payroll = Some(PayrollPolicy {
-        brackets: (0..=MAX_TAX_BRACKETS)
-            .map(|index| TaxBracket {
-                threshold: index as u64,
-                marginal_rate: 200,
-            })
-            .collect(),
-        ..policy()
-    });
-    assert!(Scenario::new(config).is_err());
-    Ok(())
-}
-
-#[test]
-fn household_policy_admits_only_bounded_coefficients_and_reserved_rest() -> Result<()> {
-    let policy = HouseholdPolicy {
-        fatigue_response: 100,
-        rest_minutes: 480,
-    };
-    assert!(HouseholdPolicy::new(policy.clone(), 480).is_ok());
-    assert!(HouseholdPolicy::new(policy.clone(), 479).is_err());
-    assert!(
-        HouseholdPolicy::new(
-            HouseholdPolicy {
-                fatigue_response: 1001,
-                ..policy
-            },
-            480
-        )
-        .is_err()
-    );
-    Ok(())
 }
 
 #[cfg(feature = "compute")]

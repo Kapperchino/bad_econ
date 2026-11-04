@@ -71,18 +71,17 @@ impl UnitBalances {
         config: &EconomyConfig,
         peer: u32,
         good: u32,
+        length: u32,
     ) -> Self {
         let cash = value(state, config, comptime!(Field::Cash as u32), peer);
         let stock = value(state, config, good, peer);
         let sales = value(state, config, comptime!(Field::Sales as u32), peer);
         let quote = number(state, config, comptime!(Field::Price as u32), peer);
-        let mut cash_capacity = ticks(u32::MAX, u32::MAX);
-        if quote > 0 {
-            cash_capacity = divide(
-                ticks(!cash.extract(LOW_WORD), !cash.extract(HIGH_WORD)),
-                quote,
-            );
-        }
+        let cash_capacity = bounded_capacity(
+            ticks(!cash.extract(LOW_WORD), !cash.extract(HIGH_WORD)),
+            ticks(quote, 0),
+            length,
+        );
         UnitBalances {
             cash,
             stock,
@@ -92,7 +91,7 @@ impl UnitBalances {
                 stock,
                 household_production::reserve(state, actors, config, peer, good),
             ),
-            cash_capacity,
+            cash_capacity: ticks(cash_capacity, 0),
             sales_capacity: ticks(!sales.extract(LOW_WORD), !sales.extract(HIGH_WORD)),
         }
     }
@@ -199,7 +198,7 @@ fn settle_units(
         let end = start + length;
         let peer = scratch[(parameters.sort_source + start) as usize];
         let good = comptime!(parameters.market.good().expect("consumer good") as u32);
-        let mut balances = UnitBalances::new(state, actors, config, peer, good);
+        let mut balances = UnitBalances::new(state, actors, config, peer, good, length);
         let mut cursor = start;
         let mut faulted = 0u32;
         while cursor < end {

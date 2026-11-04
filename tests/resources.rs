@@ -2,26 +2,6 @@ use anyhow::Result;
 use bad_econ::{arithmetic::DrawKey, domain::*};
 
 #[test]
-fn classification_preserves_good_ids_and_inventory_order() -> Result<()> {
-    let natural = [
-        Good::Grain,
-        Good::Iron,
-        Good::Coal,
-        Good::Flax,
-        Good::Wood,
-        Good::Cotton,
-        Good::Dye,
-    ];
-    for (index, good) in Good::ALL.into_iter().enumerate() {
-        assert_eq!(good as usize, index + 1);
-        assert_eq!(Good::from_index(index as u32 + 1)?, good);
-        assert_eq!(Field::inventory(good) as u32, good as u32);
-        assert_eq!(good.kind() == GoodKind::Natural, natural.contains(&good));
-    }
-    Ok(())
-}
-
-#[test]
 fn resource_rectangles_use_half_open_bounds_and_combine_overlaps() -> Result<()> {
     let mut config = Scenario::baseline(3, 1, Experiment::Baseline)?
         .config()

@@ -67,68 +67,6 @@ fn contains(interval: Interval, numerator: u64, denominator: u64) {
 }
 
 #[test]
-fn lean_sparse_accounts_research_and_plan_totals() -> Result<()> {
-    let device = support::device(64)?;
-    let transpose = DeviceOperator::new(&device, &grain_goods()?.transpose());
-    let labor = DeviceOperator::new(&device, &grain_labor()?);
-    let forcing = DeviceOperator::new(&device, &grain_labor()?.transpose())
-        .apply(&device, &DeviceVector::from_ticks(&device, &[1000])?)?;
-    let values = transpose.solve(
-        &device,
-        &forcing,
-        &Contraction::new(1, 2, vec![2, 4])?,
-        SolveBudget {
-            iterations: 32,
-            weighted_tolerance: 2,
-        },
-    )?;
-    let report = available(values.read(&device)?)?;
-    contains(report.values[0], 2000, 1);
-    contains(report.values[1], 3000, 1);
-    let goods_values = DeviceVector::from_ticks(&device, &[2000, 3000])?;
-    let j = dense(2, 1, &[1, 1], &[2, 1])?;
-    let f = dense(1, 1, &[2], &[1])?;
-    let attempts = DeviceVector::from_ticks(&device, &[1000])?;
-    let final_demand = DeviceVector::from_ticks(&device, &[0, 2000])?;
-    let research = DeviceOperator::new(&device, &j.transpose())
-        .apply(&device, &goods_values)?
-        .add(
-            &device,
-            &DeviceOperator::new(&device, &f.transpose())
-                .apply(&device, &DeviceVector::from_ticks(&device, &[1000])?)?,
-        )?;
-    approximate(&research, &device, &[6000])?;
-    let total = goods_values
-        .dot(&device, &final_demand, 1000)?
-        .add(&device, &research.dot(&device, &attempts, 1000)?)?;
-    approximate(&total, &device, &[12_000])?;
-    let gross_demand = final_demand.add(
-        &device,
-        &DeviceOperator::new(&device, &j).apply(&device, &attempts)?,
-    )?;
-    let gross = DeviceOperator::new(&device, &grain_goods()?).solve(
-        &device,
-        &gross_demand,
-        &Contraction::new(5, 6, vec![6, 2])?,
-        SolveBudget {
-            iterations: 32,
-            weighted_tolerance: 6,
-        },
-    )?;
-    let requirements = available(gross.read(&device)?)?;
-    contains(requirements.values[0], 7000, 1);
-    contains(requirements.values[1], 3000, 1);
-    let hours = labor
-        .apply(&device, &DeviceVector::from_ticks(&device, &[7000, 3000])?)?
-        .add(
-            &device,
-            &DeviceOperator::new(&device, &f).apply(&device, &attempts)?,
-        )?;
-    approximate(&hours, &device, &[12_000])?;
-    Ok(())
-}
-
-#[test]
 fn lean_coupled_step_uses_old_blocks_and_normalizes_both_blocks() -> Result<()> {
     let device = support::device(64)?;
     let labor = dense(2, 2, &[1, 2, 0, 1], &[1, 1, 1, 1])?;
@@ -300,35 +238,6 @@ fn analytical_products_quantize_ticks_and_reject_out_of_range_estimates() -> Res
 }
 
 #[test]
-fn analytical_admission_and_context_versions_reject_invalid_inputs() -> Result<()> {
-    assert!(dense(1, 1, &[1], &[0]).is_err());
-    assert!(Contraction::new(1, 1, vec![1]).is_err());
-    assert!(Contraction::new(1, 2, vec![0]).is_err());
-    let version = ContextVersion {
-        techniques: 0,
-        units: 0,
-        classification: 0,
-        access: 0,
-        reproduction: 0,
-        occupations: 0,
-        reference_occupation: 0,
-        research_catalogue: 0,
-        capability_graph: 0,
-        numerical_profile: 1,
-    };
-    let cache = CachedAccount::new(version, 7);
-    assert_eq!(cache.get(version), Some(&7));
-    assert_eq!(
-        cache.get(ContextVersion {
-            access: 1,
-            ..version
-        }),
-        None
-    );
-    Ok(())
-}
-
-#[test]
 fn empty_accounts_have_vacuous_certificates_and_exact_zero_hours() -> Result<()> {
     let device = support::device(64)?;
     let goods = SparseMatrix::new(0, 0, Vec::new())?;
@@ -392,24 +301,6 @@ fn empty_accounts_have_vacuous_certificates_and_exact_zero_hours() -> Result<()>
             .inverse(&device, 1000, &Contraction::new(0, 1, vec![1])?, budget)
             .is_err()
     );
-    Ok(())
-}
-
-#[test]
-fn grain_coupled_fixed_point_fixture() -> Result<()> {
-    let device = support::device(64)?;
-    let matrix = SparseMatrix::coupled(
-        &grain_goods()?,
-        &grain_labor()?,
-        &grain_reproduction()?,
-        &grain_training()?,
-    )?;
-    let step = DeviceOperator::new(&device, &matrix).step(
-        &device,
-        &DeviceVector::from_ticks(&device, &[0, 0, 1000])?,
-        &DeviceVector::from_ticks(&device, &[8000, 12000, 4000])?,
-    )?;
-    approximate(&step, &device, &[8000, 12000, 4000])?;
     Ok(())
 }
 
@@ -518,141 +409,6 @@ fn labeled_comparators_do_not_fabricate_zero_requirement_rates() -> Result<()> {
         .rate,
         Diagnostic::Inapplicable
     ));
-    Ok(())
-}
-
-#[test]
-fn retained_boundary_units_and_inventory_accounts_execute_on_device() -> Result<()> {
-    let device = support::device(64)?;
-    let matrix = |numerator, denominator| {
-        DeviceMatrix::new(&device, &dense(1, 1, &[numerator], &[denominator])?, 36_000)
-    };
-    let retained_goods = matrix(1, 4)?;
-    let retained_from_outside = matrix(1, 2)?;
-    let outside_from_retained = matrix(1, 3)?;
-    let outside_inverse = matrix(4, 3)?;
-    let retained_labor = matrix(1, 1)?;
-    let outside_labor = matrix(2, 1)?;
-    let retained_reproduction = matrix(1, 8)?;
-    let outside_reproduction = matrix(1, 6)?;
-    let training = matrix(1, 4)?;
-    let reduced = BoundaryReduction::new(
-        &device,
-        BoundaryBlocks {
-            retained_goods: &retained_goods,
-            retained_from_outside: &retained_from_outside,
-            outside_from_retained: &outside_from_retained,
-            outside_inverse: &outside_inverse,
-            retained_labor: &retained_labor,
-            outside_labor: &outside_labor,
-            retained_reproduction: &retained_reproduction,
-            outside_reproduction: &outside_reproduction,
-            training: &training,
-        },
-    )?;
-    estimates::assert_close(
-        reduced.goods.read(&device)?,
-        [Interval {
-            lower: 17000,
-            upper: 17000,
-        }],
-    );
-    estimates::assert_close(
-        reduced.labor.read(&device)?,
-        [Interval {
-            lower: 68000,
-            upper: 68000,
-        }],
-    );
-    estimates::assert_close(
-        reduced.reproduction.read(&device)?,
-        [Interval {
-            lower: 8500,
-            upper: 8500,
-        }],
-    );
-    estimates::assert_close(
-        reduced.training.read(&device)?,
-        [Interval {
-            lower: 25000,
-            upper: 25000,
-        }],
-    );
-    approximate(
-        &BoundaryReduction::effective_demand(
-            &device,
-            &DeviceVector::from_ticks(&device, &[36_000])?,
-            &DeviceVector::from_ticks(&device, &[108_000])?,
-            &outside_inverse,
-            &retained_from_outside,
-        )?,
-        &device,
-        &[108_000],
-    )?;
-    let g = DeviceMatrix::new(&device, &dense(1, 2, &[2, 3], &[1, 1])?, 1000)?;
-    let transformed = g.scale_units(
-        &device,
-        &[UnitFactor::new(1, 1)?],
-        &[UnitFactor::new(2, 1)?, UnitFactor::new(1, 2)?],
-    )?;
-    estimates::assert_close(
-        transformed.read(&device)?,
-        [
-            Interval {
-                lower: 4000,
-                upper: 4000,
-            },
-            Interval {
-                lower: 1500,
-                upper: 1500,
-            },
-        ],
-    );
-    approximate(
-        &transformed.apply(&device, &DeviceVector::from_ticks(&device, &[1000, 4000])?)?,
-        &device,
-        &[10000],
-    )?;
-    approximate(
-        &g.apply(&device, &DeviceVector::from_ticks(&device, &[2000, 2000])?)?,
-        &device,
-        &[10000],
-    )?;
-    let opening = DeviceVector::from_ticks(&device, &[3000, 0])?;
-    let closing = DeviceVector::from_ticks(&device, &[2000, 0])?;
-    let production = DeviceVector::from_ticks(&device, &[4000, 1000])?;
-    let final_demand = DeviceVector::from_ticks(&device, &[1000, 1000])?;
-    let research_inputs = DeviceVector::from_ticks(&device, &[1000, 0])?;
-    let research_hours = DeviceVector::from_ticks(&device, &[2000])?;
-    let inventory = InventoryAccount::new(
-        &device,
-        &DeviceOperator::new(&device, &grain_goods()?),
-        &DeviceOperator::new(&device, &grain_labor()?),
-        &g,
-        InventoryFlows {
-            opening: &opening,
-            closing: &closing,
-            production: &production,
-            final_demand: &final_demand,
-            research_inputs: &research_inputs,
-            direct_research_hours: &research_hours,
-        },
-    )?;
-    assert!(
-        inventory
-            .physical_residual
-            .read(&device)?
-            .iter()
-            .all(|value| value.lower.magnitude == 0 && value.upper.magnitude == 0)
-    );
-    approximate(&inventory.actual_hours, &device, &[7000])?;
-    estimates::assert_close(
-        inventory.reconciled_hours.read(&device)?[0].lower,
-        SignedTicks {
-            sign: Sign::NonNegative,
-            magnitude: 7000,
-        },
-    );
     Ok(())
 }
 

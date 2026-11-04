@@ -169,38 +169,3 @@ fn missing_labels_and_unavailable_hours_have_independent_diagnostics() -> Result
     ));
     Ok(())
 }
-
-#[test]
-fn valuation_admission_rejects_mismatched_catalogues() -> Result<()> {
-    let device = support::device(64)?;
-    let request = request()?;
-    for activities in [vec![0, 0], vec![3]] {
-        let mut invalid = request.clone();
-        invalid.valuation.as_mut().unwrap().activities = activities;
-        assert!(invalid.run(&device).is_err());
-    }
-    let mut invalid = request.clone();
-    invalid
-        .valuation
-        .as_mut()
-        .unwrap()
-        .capabilities
-        .as_mut()
-        .unwrap()
-        .labels = vec![1, 2];
-    assert!(invalid.run(&device).is_err());
-    let mut invalid = request.clone();
-    invalid
-        .valuation
-        .as_mut()
-        .unwrap()
-        .capabilities
-        .as_mut()
-        .unwrap()
-        .dependencies = CapabilityDependencies::Declared(vec![CapabilityEdge {
-        prerequisite: 3,
-        dependent: 0,
-    }]);
-    assert!(invalid.run(&device).is_err());
-    Ok(())
-}

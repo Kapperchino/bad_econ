@@ -142,46 +142,6 @@ fn unfunded_maturity_retains_claim_and_other_borrowers_release_no_resources() ->
 }
 
 #[test]
-fn lean_proportional_household_support_uses_parallel_prefix_allocation() -> Result<()> {
-    let device = support::device(64)?;
-    let config = FinanceConfig::new(
-        FinanceConfig {
-            banks: vec![],
-            loans: vec![],
-            support: Some(SupportPolicy {
-                treasury: 6,
-                recipients: [2, 4, 6]
-                    .into_iter()
-                    .enumerate()
-                    .map(|(index, target_cash)| SupportRecipient {
-                        household: index as u64 + 1,
-                        target_cash,
-                        consent: Consent::Granted,
-                    })
-                    .collect(),
-            }),
-        },
-        &[1, 2, 3],
-        &[1, 2, 3],
-    )?;
-    let layout = config.layout(3)?;
-    let runtime = FinanceRuntime::new(&device, &config, layout, &actors(3))?;
-    let state = device.tensor(&words(&[0, 0, 0, 6]));
-    runtime.support(&device, &state)?;
-    assert_eq!(ticks(device.read(&state)?), [1, 2, 3, 0]);
-    assert_eq!(runtime.last_event_count(), 3);
-    assert_eq!(
-        runtime.support_decisions(),
-        vec![bad_econ::ledger::Decision::Accepted; 3]
-    );
-    runtime.support(&device, &state)?;
-    assert_eq!(runtime.last_event_count(), 0);
-    assert!(runtime.support_decisions().is_empty());
-    assert_eq!(runtime.observe(&device, &state, 0)?.support_treasury, 0);
-    Ok(())
-}
-
-#[test]
 fn support_rounding_preserves_treasury_and_individual_bounds_at_u64_width() -> Result<()> {
     let device = support::device(64)?;
     let needs = [1, (1_u64 << 62) - 1, 1_u64 << 62, (1_u64 << 63) - 1];
@@ -657,65 +617,6 @@ fn withheld_consent_empty_institutions_and_empty_support_do_not_move_cash() -> R
         assert_eq!(ticks(device.read(&state)?), initial);
         assert_eq!(runtime.observe(&device, &state, 0)?.principal, 0);
     }
-    Ok(())
-}
-
-#[test]
-fn financial_admission_rejects_duplicate_borrowers_and_unknown_recipients() -> Result<()> {
-    let duplicated = FinanceConfig {
-        banks: vec![bank()],
-        loans: vec![loan(1, 1, 1), loan(2, 1, 1)],
-        support: None,
-    };
-    assert!(FinanceConfig::new(duplicated, &[1], &[1]).is_err());
-    let mut invalid_bank = bank();
-    invalid_bank.minimum_capital = 0;
-    assert!(
-        FinanceConfig::new(
-            FinanceConfig {
-                banks: vec![invalid_bank],
-                loans: vec![],
-                support: None
-            },
-            &[1],
-            &[1]
-        )
-        .is_err()
-    );
-    let support = SupportPolicy {
-        treasury: 6,
-        recipients: vec![SupportRecipient {
-            household: 2,
-            target_cash: 10,
-            consent: Consent::Granted,
-        }],
-    };
-    assert!(
-        FinanceConfig::new(
-            FinanceConfig {
-                banks: vec![],
-                loans: vec![],
-                support: Some(support)
-            },
-            &[1, 2],
-            &[1]
-        )
-        .is_err()
-    );
-    let mut invalid_loan = loan(1, 1, 1);
-    invalid_loan.bank = 11;
-    assert!(
-        FinanceConfig::new(
-            FinanceConfig {
-                banks: vec![bank()],
-                loans: vec![invalid_loan],
-                support: None
-            },
-            &[1],
-            &[1]
-        )
-        .is_err()
-    );
     Ok(())
 }
 

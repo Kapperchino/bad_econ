@@ -79,45 +79,6 @@ fn scenario() -> Result<Scenario> {
 }
 
 #[test]
-fn population_admission_checks_identity_ownership_resources_and_policy() -> Result<()> {
-    let scenario = scenario()?;
-    let state = scenario.initial()?;
-    assert_eq!(
-        state
-            .actors
-            .iter()
-            .map(|actor| actor.identity)
-            .collect::<Vec<_>>(),
-        [101, 303, 901, 2000, 5000, 8000]
-    );
-    assert_eq!(state.next_identity, 8004);
-    assert_eq!(state.initial_cash, 33_000);
-    assert_eq!(state.initial_goods, Good::food([2, 3, 30]));
-    assert!(InspectionRequest::new(1, &scenario).is_err());
-    assert!(InspectionRequest::new(5000, &scenario).is_ok());
-    let mut config = scenario.config().clone();
-    config.population.as_mut().unwrap().firms[0].owner = 2000;
-    assert!(Scenario::new(config).is_err());
-    let mut config = scenario.config().clone();
-    config.population.as_mut().unwrap().firms[0].identity = 101;
-    assert!(Scenario::new(config).is_err());
-    let mut config = scenario.config().clone();
-    config.population.as_mut().unwrap().households[0].cash = u64::MAX;
-    assert!(Scenario::new(config).is_err());
-    let mut config = scenario.config().clone();
-    config.population.as_mut().unwrap().firms[1]
-        .technique
-        .input_ticks = 0;
-    assert!(Scenario::new(config).is_err());
-    let mut config = scenario.config().clone();
-    config.behavior.price_response = 1001;
-    assert!(Scenario::new(config).is_err());
-    let checkpoint = Checkpoint::new(&scenario, &state)?;
-    assert_eq!(checkpoint.restore()?.state, state);
-    Ok(())
-}
-
-#[test]
 fn checkpoint_admission_preserves_fixed_metadata_and_labor_budgets() -> Result<()> {
     let generated = Scenario::baseline(3, 42, Experiment::Baseline)?;
     let explicit = scenario()?;

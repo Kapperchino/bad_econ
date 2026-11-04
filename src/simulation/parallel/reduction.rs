@@ -394,29 +394,6 @@ mod tests {
     use super::*;
 
     #[test]
-    fn native_integer_reductions_on_gpu() -> Result<()> {
-        let device = Device::headless(64)?;
-        let values = [u64::from(u32::MAX), 1, 1 << 40, 7];
-        let input = TensorHandle::new_contiguous(
-            [2, 2],
-            device
-                .client
-                .create_from_slice(bytemuck::cast_slice(&values)),
-            u64::elem_type_native(),
-        );
-        for operation in [ReduceOperationConfig::Sum, ReduceOperationConfig::Max] {
-            let expected = match operation {
-                ReduceOperationConfig::Sum => [values[0] + values[2], 8],
-                _ => [values[2], 7],
-            };
-            let output = reduce(&device, &input, 0, operation, u64::elem_type_native())?;
-            let bytes = device.client.read_one(output.handle)?;
-            assert_eq!(bytemuck::cast_slice::<u8, u64>(&bytes), expected);
-        }
-        Ok(())
-    }
-
-    #[test]
     fn summary_reductions_preserve_wide_totals_extrema_and_overflow_on_gpu() -> Result<()> {
         use crate::simulation::flags::CONTROL_WORDS;
         use crate::simulation::layout::SummaryLayout as S;

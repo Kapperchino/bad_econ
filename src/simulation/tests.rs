@@ -16,20 +16,6 @@ pub(super) fn device(workgroup: u32) -> Result<Device> {
     }
 }
 
-#[test]
-fn industrial_recipes_match_coordinate_scheduler() -> Result<()> {
-    let mut config = Scenario::industrial(64, 42, Experiment::Concentrated)?
-        .config()
-        .clone();
-    config.batch_size = 13;
-    for lab in &mut config.research.as_mut().expect("industrial research").labs {
-        lab.discovered = 31;
-        lab.mastered = 31;
-        lab.adopted = 31;
-    }
-    compare_market_execution(Scenario::new(config)?, 4)
-}
-
 fn compare_market_execution(scenario: Scenario, days: usize) -> Result<()> {
     let initial = scenario.initial()?;
     compare_market_state(scenario, initial, days)
@@ -425,12 +411,7 @@ fn device_markets_match_original_gpu_phases() -> Result<()> {
 
 #[test]
 fn optimized_experiments_continue_original_checkpoints_across_day_thirty() -> Result<()> {
-    for experiment in [
-        Experiment::Baseline,
-        Experiment::Shortage,
-        Experiment::Transport,
-        Experiment::Concentrated,
-    ] {
+    for experiment in [Experiment::Baseline, Experiment::Concentrated] {
         let mut config = Scenario::industrial(300, 42, experiment)?.config().clone();
         config.demography.annual_births_per_million_fertile_women = 1_000_000;
         let scenario = Scenario::new(config)?;

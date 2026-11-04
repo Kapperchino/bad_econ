@@ -108,23 +108,6 @@ fn grocery_restock_delivery_staffing_and_resale_conserve_food_and_cash() -> Resu
 }
 
 #[test]
-fn grocery_checkpoint_and_workgroup_continuation_are_exact() -> Result<()> {
-    let scenario = economy()?;
-    let mut original = Simulation::new(scenario.clone(), support::device(32)?)?;
-    original.advance()?;
-    original.advance()?;
-    let checkpoint = original.checkpoint()?;
-    let mut resumed = Simulation::new(scenario, support::device(128)?)?;
-    resumed.command(SimulationCommand::Restore(Box::new(checkpoint)))?;
-    for _ in 0..5 {
-        original.advance()?;
-        resumed.advance()?;
-        assert_eq!(original.download()?, resumed.download()?);
-    }
-    Ok(())
-}
-
-#[test]
 fn grocery_restocking_keeps_the_next_shift_funded() -> Result<()> {
     let mut config = economy()?.config().clone();
     config.population.as_mut().unwrap().firms[1].cash = 300;

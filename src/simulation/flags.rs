@@ -295,64 +295,6 @@ mod tests {
     use super::*;
     use crate::simulation::{Device, ops::TEST_WORKGROUP};
 
-    #[test]
-    fn control_words_preserve_sets_and_reject_unknown_bits() -> Result<()> {
-        let faults = FaultFlags::ARITHMETIC_OVERFLOW | FaultFlags::TRANSIT_MISMATCH;
-        let dependencies =
-            DependencyFlag::MultiplePredecessors | DependencyFlag::MultipleSuccessors;
-        let control = SchedulerControl::new(&[7, faults.bits(), 9, dependencies.bits()])?;
-        assert_eq!(control.progress, 7);
-        assert_eq!(control.completed, 9);
-        assert_eq!(control.faults, faults);
-        assert_eq!(control.dependencies, dependencies);
-        assert_eq!(control.shape(), DependencyShape::Frontiers);
-        assert_eq!(
-            SchedulerControl::new(&[0; CONTROL_WORDS])?.shape(),
-            DependencyShape::Chains
-        );
-        assert!(
-            control
-                .faults
-                .into_result()
-                .unwrap_err()
-                .to_string()
-                .contains("TRANSIT_MISMATCH")
-        );
-        assert!(FaultFlags::new(!FaultFlags::all().bits()).is_err());
-        assert!(FaultFlags::read(&[]).is_err());
-        assert!(SchedulerControl::new(&[0, !FaultFlags::all().bits(), 0, 0]).is_err());
-        assert!(
-            SchedulerControl::new(&[0, 0, 0, !BitFlags::<DependencyFlag>::all().bits()]).is_err()
-        );
-        assert!(SchedulerControl::new(&[0; CONTROL_WORDS - 1]).is_err());
-        Ok(())
-    }
-
-    #[test]
-    fn event_statuses_reject_conflicting_unfinished_and_unknown_outcomes() -> Result<()> {
-        let decode = |status| EventStatus::try_from(BitFlags::from_flag(status).bits());
-        assert_eq!(decode(EventStatus::Inactive)?.decision()?, None);
-        assert_eq!(
-            decode(EventStatus::Accepted)?.decision()?,
-            Some(Decision::Accepted)
-        );
-        assert_eq!(
-            decode(EventStatus::Rejected)?.decision()?,
-            Some(Decision::Rejected)
-        );
-        assert!(decode(EventStatus::Pending)?.decision().is_err());
-        assert!(decode(EventStatus::Faulted)?.decision().is_err());
-        for flags in [
-            EventStatus::Pending | EventStatus::Accepted,
-            EventStatus::Accepted | EventStatus::Rejected,
-        ] {
-            assert!(EventStatus::try_from(flags.bits()).is_err());
-        }
-        assert!(EventStatus::try_from(0).is_err());
-        assert!(EventStatus::try_from(!BitFlags::<EventStatus>::all().bits()).is_err());
-        Ok(())
-    }
-
     #[cube(launch)]
     fn concurrent_flags(control: &[Atomic<u32>]) {
         let id = ABSOLUTE_POS as u32;

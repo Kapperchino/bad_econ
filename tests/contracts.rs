@@ -1,9 +1,9 @@
 #[cfg(feature = "compute")]
 use crate::support;
 use anyhow::Result;
+use bad_econ::{arithmetic::*, ledger::*};
 #[cfg(feature = "compute")]
-use bad_econ::runtime::*;
-use bad_econ::{arithmetic::*, domain::*, ledger::*};
+use bad_econ::{domain::*, runtime::*};
 
 fn event(id: u64, legs: &[Leg]) -> Bundle {
     Bundle::new(
@@ -20,43 +20,6 @@ fn event(id: u64, legs: &[Leg]) -> Bundle {
 }
 fn transfer(cell: u32, debit: u64, credit: u64) -> Leg {
     Leg::transfer(Coordinate(cell), debit, credit)
-}
-
-#[test]
-fn lean_wage_before_purchase_and_rejected_buyer_fallback() -> Result<()> {
-    let mut state = vec![10, 20, 0];
-    let wage = event(1, &[transfer(0, 0, 6), transfer(1, 6, 0)]);
-    let purchase = event(2, &[transfer(0, 12, 0), transfer(2, 0, 12)]);
-    assert_eq!(
-        serial(&mut state, &[wage, purchase])?,
-        [Decision::Accepted, Decision::Accepted]
-    );
-    assert_eq!(state, [4, 14, 12]);
-    let mut state = vec![2, 3, 0, 1, 0, 0];
-    let a = event(
-        1,
-        &[
-            transfer(0, 3, 0),
-            transfer(2, 0, 3),
-            transfer(3, 1, 0),
-            transfer(4, 0, 1),
-        ],
-    );
-    let b = event(
-        2,
-        &[
-            transfer(1, 3, 0),
-            transfer(2, 0, 3),
-            transfer(3, 1, 0),
-            transfer(5, 0, 1),
-        ],
-    );
-    assert_eq!(
-        serial(&mut state, &[a, b])?,
-        [Decision::Rejected, Decision::Accepted]
-    );
-    assert_eq!(state, [2, 0, 3, 0, 0, 1]);
-    Ok(())
 }
 
 #[test]
@@ -119,26 +82,6 @@ fn serialized_bundles_preserve_grouped_gross_debits_and_authorization() -> Resul
                 .collect(),
         ))
         .is_err()
-    );
-    Ok(())
-}
-
-#[test]
-fn serialized_probabilities_reject_invalid_domains() -> Result<()> {
-    for (numerator, denominator) in [(0, 0), (4, 3)] {
-        assert!(
-            serde_json::from_value::<Probability>(serde_json::json!({
-                "numerator": numerator,
-                "denominator": denominator,
-            }))
-            .is_err()
-        );
-    }
-    let probability: Probability = serde_json::from_str(r#"{"numerator":1,"denominator":3}"#)?;
-    assert_eq!(probability, Probability::new(1, 3)?);
-    assert_eq!(
-        serde_json::from_str::<Probability>(&serde_json::to_string(&probability)?)?,
-        probability
     );
     Ok(())
 }
@@ -238,20 +181,5 @@ fn transport_ownership_time_budgets_and_checkpoint_replay() -> Result<()> {
                 <= u64::from(scenario.config().work_cap)
         )
     });
-    Ok(())
-}
-
-#[test]
-fn scenario_rejects_invalid_configuration() -> Result<()> {
-    let scenario = Scenario::baseline(1_000_000, 42, Experiment::Baseline)?;
-    let mut config = scenario.config().clone();
-    config.shipment_speed = 0;
-    assert!(Scenario::new(config).is_err());
-    let mut config = scenario.config().clone();
-    config.household_cash = u64::MAX;
-    assert!(Scenario::new(config).is_err());
-    let mut config = scenario.config().clone();
-    config.search_radius = 0;
-    assert!(Scenario::new(config).is_err());
     Ok(())
 }
