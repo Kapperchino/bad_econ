@@ -1,4 +1,10 @@
-use super::{Device, flags::FaultFlags, words::*};
+use super::{
+    Device,
+    flags::FaultFlags,
+    pass::GpuPass,
+    system::{System, gpu_passes},
+    words::*,
+};
 use crate::domain::{Field, State};
 use crate::simulation::configuration::{Configuration, EconomyConfig};
 use anyhow::{Context, Result};
@@ -70,33 +76,104 @@ impl OwnershipRuntime {
     ) -> Result<()> {
         let argument = |tensor: &CubeTensor| tensor.clone().into_buffer_arg();
         device.write(&self.control, &[0; 4]);
-        payments::launch(
-            &device.client,
+        OwnershipPayments::launch(
+            device,
             device.count(self.shares.meta.num_elements() / 2),
             CubeDim::new_1d(device.workgroup),
-            argument(state),
-            config.launch(),
-            argument(&self.shares),
-            argument(&self.payments),
-            argument(&self.control),
+            PaymentInputLaunch {
+                state: argument(state),
+                config: config.launch(),
+                shares: argument(&self.shares),
+                payments: argument(&self.payments),
+                control: argument(&self.control),
+            },
         );
-        distribute::launch(
-            &device.client,
+        OwnershipDistribution::launch(
+            device,
             device.count(config.actors as usize),
             CubeDim::new_1d(device.workgroup),
-            argument(state),
-            config.launch(),
-            argument(&self.shares),
-            argument(&self.offsets),
-            argument(&self.entries),
-            argument(&self.payments),
-            argument(&self.control),
+            DistributionInputLaunch {
+                state: argument(state),
+                config: config.launch(),
+                shares: argument(&self.shares),
+                offsets: argument(&self.offsets),
+                entries: argument(&self.entries),
+                payments: argument(&self.payments),
+                control: argument(&self.control),
+            },
         );
         FaultFlags::read(&device.read(&self.control)?)?.into_result()
     }
 }
 
-#[cube(launch)]
+#[derive(CubeType, CubeLaunch)]
+struct PaymentInput {
+    state: Box<[Ticks]>,
+    config: EconomyConfig,
+    shares: Box<[Vector<u32, Const<2>>]>,
+    payments: Box<[Ticks]>,
+    control: Box<[Atomic<u32>]>,
+}
+
+#[derive(CubeType, CubeLaunch)]
+struct DistributionInput {
+    state: Box<[Ticks]>,
+    config: EconomyConfig,
+    shares: Box<[Vector<u32, Const<2>>]>,
+    offsets: Box<[u32]>,
+    entries: Box<[u32]>,
+    payments: Box<[Ticks]>,
+    control: Box<[Atomic<u32>]>,
+}
+
+struct OwnershipPayments;
+struct OwnershipDistribution;
+struct CalculatePayments;
+struct DistributePayments;
+
+impl System for OwnershipPayments {
+    type Input = PaymentInput;
+    type Passes = gpu_passes![CalculatePayments];
+}
+
+impl System for OwnershipDistribution {
+    type Input = DistributionInput;
+    type Passes = gpu_passes![DistributePayments];
+}
+
+#[cube]
+impl GpuPass<PaymentInput> for CalculatePayments {
+    type Output = ();
+
+    fn execute(mut input: PaymentInput) {
+        payments(
+            &input.state,
+            &input.config,
+            &input.shares,
+            &mut input.payments,
+            &input.control,
+        );
+    }
+}
+
+#[cube]
+impl GpuPass<DistributionInput> for DistributePayments {
+    type Output = ();
+
+    fn execute(mut input: DistributionInput) {
+        distribute(
+            &mut input.state,
+            &input.config,
+            &input.shares,
+            &input.offsets,
+            &input.entries,
+            &input.payments,
+            &input.control,
+        );
+    }
+}
+
+#[cube]
 fn payments(
     state: &[Ticks],
     config: &EconomyConfig,
@@ -131,7 +208,7 @@ fn payments(
     }
 }
 
-#[cube(launch)]
+#[cube]
 fn distribute(
     state: &mut [Ticks],
     config: &EconomyConfig,

@@ -1,4 +1,4 @@
-use super::{Device, flags::FaultFlags, layout::WORD_BYTES};
+use super::{Device, flags::FaultFlags, layout::WORD_BYTES, system::System};
 use crate::ledger::TickLayout;
 use anyhow::{Result, anyhow};
 use burn_wgpu::CubeTensor;
@@ -245,14 +245,16 @@ pub fn evaluate(device: &Device, requests: &[BargainingRequest]) -> Result<Vec<B
     let output = device.empty(requests.len().max(1) * ResultLayout::WORDS);
     let control = device.tensor(&[0; 4]);
     let argument = |tensor: &CubeTensor| tensor.clone().into_buffer_arg();
-    kernels::evaluate::launch(
-        &device.client,
+    kernels::BargainingEvaluation::launch(
+        device,
         device.count(requests.len()),
         CubeDim::new_1d(device.workgroup),
-        argument(&input),
-        argument(&output),
-        argument(&control),
-        requests.len() as u32,
+        kernels::BargainingInputLaunch {
+            requests: argument(&input),
+            output: argument(&output),
+            control: argument(&control),
+            count: requests.len() as u32,
+        },
     );
     FaultFlags::read(&device.read(&control)?)?.into_result()?;
     let words = device.read(&output)?;

@@ -1,5 +1,5 @@
 mod kernels;
-use super::{Device, flags::FaultFlags, layout::WORD_BYTES};
+use super::{Device, flags::FaultFlags, layout::WORD_BYTES, system::System};
 use crate::ledger::TickLayout;
 use anyhow::{Result, anyhow};
 use burn_wgpu::CubeTensor;
@@ -210,15 +210,17 @@ pub fn evaluate(
     let control = device.tensor(&[0; 4]);
     let argument = |tensor: &CubeTensor| tensor.clone().into_buffer_arg();
     let cube_count = device.count(count as usize);
-    kernels::evaluate::launch(
-        &device.client,
+    kernels::HouseholdPolicy::launch(
+        device,
         cube_count,
         CubeDim::new_1d(device.workgroup),
-        argument(&input),
-        argument(&services),
-        argument(&output),
-        argument(&control),
-        count,
+        kernels::HouseholdInputLaunch {
+            requests: argument(&input),
+            services: argument(&services),
+            output: argument(&output),
+            control: argument(&control),
+            count,
+        },
     );
     FaultFlags::read(&device.read(&control)?)?.into_result()?;
     let output = device.read(&output)?;

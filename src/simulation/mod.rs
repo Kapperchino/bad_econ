@@ -17,6 +17,7 @@ mod ops;
 mod ownership;
 mod parallel;
 mod parameters;
+pub mod pass;
 mod payroll;
 mod policy;
 mod random;
@@ -25,6 +26,7 @@ mod registry;
 pub mod research;
 mod rows;
 mod scheduler;
+pub mod system;
 mod tensor;
 mod words;
 use crate::{

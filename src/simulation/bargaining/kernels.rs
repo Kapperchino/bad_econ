@@ -2,6 +2,8 @@ use super::{BARGAINING_SCALE, RequestLayout, ResultLayout};
 use crate::simulation::{
     flags::KernelFaults,
     layout::{HIGH_WORD, LOW_WORD},
+    pass::GpuPass,
+    system::{System, gpu_passes},
     words::*,
 };
 use cubecl::prelude::*;
@@ -209,8 +211,38 @@ fn write(output: &mut [u32], offset: usize, value: Ticks) {
     output[offset + 1] = value.extract(HIGH_WORD);
 }
 
-#[cube(launch)]
-pub fn evaluate(input: &[u32], output: &mut [u32], control: &[Atomic<u32>], count: u32) {
+#[derive(CubeType, CubeLaunch)]
+pub(super) struct BargainingInput {
+    pub requests: Box<[u32]>,
+    pub output: Box<[u32]>,
+    pub control: Box<[Atomic<u32>]>,
+    pub count: u32,
+}
+
+pub(super) struct BargainingEvaluation;
+pub(super) struct EvaluateBargaining;
+
+impl System for BargainingEvaluation {
+    type Input = BargainingInput;
+    type Passes = gpu_passes![EvaluateBargaining];
+}
+
+#[cube]
+impl GpuPass<BargainingInput> for EvaluateBargaining {
+    type Output = ();
+
+    fn execute(mut input: BargainingInput) {
+        evaluate(
+            &input.requests,
+            &mut input.output,
+            &input.control,
+            input.count,
+        );
+    }
+}
+
+#[cube]
+fn evaluate(input: &[u32], output: &mut [u32], control: &[Atomic<u32>], count: u32) {
     let index = ABSOLUTE_POS;
     if index < count as usize {
         let base = index * RequestLayout::WORDS;

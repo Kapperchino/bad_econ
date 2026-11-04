@@ -5,12 +5,13 @@ mod layout;
 mod nonlinear;
 
 use self::{
-    kernels::{ResearchStage, research},
+    kernels::{ResearchInputLaunch, ResearchStage, ResearchSystem},
     layout::*,
 };
 use super::{
     Device,
     flags::{CONTROL_WORDS, FaultFlags},
+    system::System,
 };
 use crate::arithmetic::hex;
 use crate::domain::{Phase, Scenario, State, research::*};
@@ -541,24 +542,26 @@ impl ResearchRuntime {
             _ => launch.count,
         };
         let cube_count = device.count(count);
-        research::launch(
-            &device.client,
+        ResearchSystem::launch(
+            device,
             cube_count,
             CubeDim::new_1d(device.workgroup),
-            argument(launch.main),
-            argument(launch.state),
-            KernelResearchConfigLaunch {
-                parameters: self.header.launch(),
-                records: self.configuration.clone().into_buffer_arg(),
+            ResearchInputLaunch {
+                main: argument(launch.main),
+                state: argument(launch.state),
+                config: KernelResearchConfigLaunch {
+                    parameters: self.header.launch(),
+                    records: self.configuration.clone().into_buffer_arg(),
+                },
+                table: argument(&self.table),
+                samples: argument(&samples),
+                output: argument(match launch.stage {
+                    ResearchStage::Summary => &self.summary_shards,
+                    _ => launch.output,
+                }),
+                control: argument(&self.control),
+                stage: launch.stage,
             },
-            argument(&self.table),
-            argument(&samples),
-            argument(match launch.stage {
-                ResearchStage::Summary => &self.summary_shards,
-                _ => launch.output,
-            }),
-            argument(&self.control),
-            launch.stage,
         );
         if let ResearchStage::Summary = launch.stage {
             let shards = self.summary_shards.meta.shape()[0] / SummaryLayout::WORDS;

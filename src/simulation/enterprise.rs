@@ -1,14 +1,54 @@
-use super::{Device, layout::ActorLayout, words::*};
+use super::{
+    Device,
+    layout::ActorLayout,
+    pass::GpuPass,
+    system::{System, gpu_passes},
+    words::*,
+};
 use crate::domain::{Field, Good, enterprise::EnterpriseState};
 use crate::simulation::configuration::{Configuration, EconomyConfig, Feature};
 use burn_wgpu::CubeTensor;
 use cubecl::{CubeDim, prelude::*};
 
+#[derive(CubeType, CubeLaunch)]
+struct ProposalInput {
+    state: Box<[u32]>,
+    actors: Box<[u32]>,
+    config: EconomyConfig,
+    spatial: Box<[u32]>,
+    output: Box<[u32]>,
+    day: u32,
+}
+
+struct EnterpriseProposals;
+struct ProposeEnterprises;
+
+impl System for EnterpriseProposals {
+    type Input = ProposalInput;
+    type Passes = gpu_passes![ProposeEnterprises];
+}
+
+#[cube]
+impl GpuPass<ProposalInput> for ProposeEnterprises {
+    type Output = ();
+
+    fn execute(mut input: ProposalInput) {
+        requests(
+            &mut input.state,
+            &input.actors,
+            &input.config,
+            &input.spatial,
+            &mut input.output,
+            input.day,
+        );
+    }
+}
+
 #[allow(
     clippy::manual_is_multiple_of,
     reason = "CubeCL lowers explicit integer remainder"
 )]
-#[cube(launch)]
+#[cube]
 fn requests(
     state: &mut [u32],
     actors: &[u32],
@@ -260,16 +300,18 @@ pub(super) fn propose(
 ) {
     let argument = |tensor: &CubeTensor| tensor.clone().into_buffer_arg();
     let cube_count = device.count(output.meta.num_elements());
-    requests::launch(
-        &device.client,
+    EnterpriseProposals::launch(
+        device,
         cube_count,
         CubeDim::new_1d(device.workgroup),
-        argument(state),
-        argument(actors),
-        config.launch(),
-        argument(spatial),
-        argument(output),
-        day,
+        ProposalInputLaunch {
+            state: argument(state),
+            actors: argument(actors),
+            config: config.launch(),
+            spatial: argument(spatial),
+            output: argument(output),
+            day,
+        },
     );
 }
 

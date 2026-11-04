@@ -1,5 +1,7 @@
 use super::super::{
     flags::{FaultFlags, KernelFaults},
+    pass::GpuPass,
+    system::{System, gpu_passes},
     words::*,
 };
 use super::{layout::*, nonlinear::*};
@@ -234,8 +236,47 @@ fn attempt(
     }
 }
 
-#[cube(launch)]
-pub fn research(
+#[derive(CubeType, CubeLaunch)]
+pub(super) struct ResearchInput {
+    pub main: Box<[u32]>,
+    pub state: Box<[u32]>,
+    pub config: KernelResearchConfig,
+    pub table: Box<[u32]>,
+    pub samples: Box<[f32]>,
+    pub output: Box<[u32]>,
+    pub control: Box<[Atomic<u32>]>,
+    #[cube(comptime)]
+    pub stage: ResearchStage,
+}
+
+pub(super) struct ResearchSystem;
+pub(super) struct EvaluateResearch;
+
+impl System for ResearchSystem {
+    type Input = ResearchInput;
+    type Passes = gpu_passes![EvaluateResearch];
+}
+
+#[cube]
+impl GpuPass<ResearchInput> for EvaluateResearch {
+    type Output = ();
+
+    fn execute(mut input: ResearchInput) {
+        research(
+            &mut input.main,
+            &mut input.state,
+            &input.config,
+            &input.table,
+            &input.samples,
+            &mut input.output,
+            &input.control,
+            comptime!(input.stage),
+        );
+    }
+}
+
+#[cube]
+fn research(
     main: &mut [u32],
     state: &mut [u32],
     config: &KernelResearchConfig,

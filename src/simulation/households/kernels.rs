@@ -4,6 +4,8 @@ use super::{
 };
 use crate::simulation::{
     layout::{HIGH_WORD, LOW_WORD},
+    pass::GpuPass,
+    system::{System, gpu_passes},
     words::*,
 };
 use cubecl::prelude::*;
@@ -129,58 +131,121 @@ fn read(input: &[u32], offset: usize) -> Ticks {
     ticks(input[offset], input[offset + 1])
 }
 
-#[cube(launch)]
-pub fn evaluate(
-    requests: &[u32],
-    services: &[u32],
-    output: &mut [u32],
-    control: &[Atomic<u32>],
-    count: u32,
-) {
-    let index = ABSOLUTE_POS;
-    if index < count as usize {
-        let base = index * RequestLayout::WORDS;
-        let target = index * ResultLayout::WORDS;
-        let mut lower = 0u32;
-        let mut upper = 0u32;
-        let start = requests[base + RequestLayout::SERVICE_OFFSET];
-        let end = start + requests[base + RequestLayout::SERVICE_COUNT];
-        for service in start..end {
-            let source = service as usize * ServiceLayout::WORDS;
-            let deficit = service_deficit(
-                read(services, source + ServiceLayout::NEED),
-                read(services, source + ServiceLayout::DELIVERED),
-                services[source + ServiceLayout::WEIGHT],
-            );
-            lower += deficit.lower;
-            upper += deficit.upper;
+#[derive(CubeType, CubeLaunch)]
+pub(super) struct HouseholdInput {
+    pub requests: Box<[u32]>,
+    pub services: Box<[u32]>,
+    pub output: Box<[u32]>,
+    pub control: Box<[Atomic<u32>]>,
+    pub count: u32,
+}
+
+pub(super) struct HouseholdPolicy;
+pub(super) struct MeasureDeficits;
+pub(super) struct EvaluateCapacity;
+pub(super) struct UpdateFatigue;
+pub(super) struct UpdateForecast;
+
+impl System for HouseholdPolicy {
+    type Input = HouseholdInput;
+    type Passes = gpu_passes![
+        MeasureDeficits,
+        EvaluateCapacity,
+        UpdateFatigue,
+        UpdateForecast,
+    ];
+}
+
+#[cube]
+impl GpuPass<HouseholdInput> for MeasureDeficits {
+    type Output = HouseholdInput;
+
+    fn execute(mut input: HouseholdInput) -> HouseholdInput {
+        let index = ABSOLUTE_POS;
+        if index < input.count as usize {
+            let base = index * RequestLayout::WORDS;
+            let target = index * ResultLayout::WORDS;
+            let mut lower = 0u32;
+            let mut upper = 0u32;
+            let start = input.requests[base + RequestLayout::SERVICE_OFFSET];
+            let end = start + input.requests[base + RequestLayout::SERVICE_COUNT];
+            for service in start..end {
+                let source = service as usize * ServiceLayout::WORDS;
+                let deficit = service_deficit(
+                    read(&input.services, source + ServiceLayout::NEED),
+                    read(&input.services, source + ServiceLayout::DELIVERED),
+                    input.services[source + ServiceLayout::WEIGHT],
+                );
+                lower += deficit.lower;
+                upper += deficit.upper;
+            }
+            input.output[target + ResultLayout::DEFICIT_LOWER] = lower;
+            input.output[target + ResultLayout::DEFICIT_UPPER] = upper;
         }
-        let available = available_minutes(KernelCapacity {
-            participation: requests[base + RequestLayout::PARTICIPATION],
-            capacity_minutes: requests[base + RequestLayout::CAPACITY],
-            fatigue: requests[base + RequestLayout::FATIGUE],
-            reserved_minutes: requests[base + RequestLayout::RESERVED],
-        });
-        let fatigue = next_fatigue(KernelFatigue {
-            fatigue: requests[base + RequestLayout::FATIGUE],
-            response: requests[base + RequestLayout::FATIGUE_RESPONSE],
-            exertion_minutes: requests[base + RequestLayout::EXERTION],
-            rest_minutes: requests[base + RequestLayout::REST],
-        });
-        let forecast = observed_blend(
-            read(requests, base + RequestLayout::FORECAST),
-            KernelObservation {
-                kind: requests[base + RequestLayout::OBSERVATION],
-                value: read(requests, base + RequestLayout::SIGNAL),
-            },
-            requests[base + RequestLayout::WEIGHT],
-            control,
-        );
-        output[target + ResultLayout::FORECAST + LOW_WORD] = forecast.extract(LOW_WORD);
-        output[target + ResultLayout::FORECAST + HIGH_WORD] = forecast.extract(HIGH_WORD);
-        output[target + ResultLayout::DEFICIT_LOWER] = lower;
-        output[target + ResultLayout::DEFICIT_UPPER] = upper;
-        output[target + ResultLayout::AVAILABLE] = available;
-        output[target + ResultLayout::FATIGUE] = fatigue;
+        input
+    }
+}
+
+#[cube]
+impl GpuPass<HouseholdInput> for EvaluateCapacity {
+    type Output = HouseholdInput;
+
+    fn execute(mut input: HouseholdInput) -> HouseholdInput {
+        let index = ABSOLUTE_POS;
+        if index < input.count as usize {
+            let base = index * RequestLayout::WORDS;
+            let available = available_minutes(KernelCapacity {
+                participation: input.requests[base + RequestLayout::PARTICIPATION],
+                capacity_minutes: input.requests[base + RequestLayout::CAPACITY],
+                fatigue: input.requests[base + RequestLayout::FATIGUE],
+                reserved_minutes: input.requests[base + RequestLayout::RESERVED],
+            });
+            input.output[index * ResultLayout::WORDS + ResultLayout::AVAILABLE] = available;
+        }
+        input
+    }
+}
+
+#[cube]
+impl GpuPass<HouseholdInput> for UpdateFatigue {
+    type Output = HouseholdInput;
+
+    fn execute(mut input: HouseholdInput) -> HouseholdInput {
+        let index = ABSOLUTE_POS;
+        if index < input.count as usize {
+            let base = index * RequestLayout::WORDS;
+            let fatigue = next_fatigue(KernelFatigue {
+                fatigue: input.requests[base + RequestLayout::FATIGUE],
+                response: input.requests[base + RequestLayout::FATIGUE_RESPONSE],
+                exertion_minutes: input.requests[base + RequestLayout::EXERTION],
+                rest_minutes: input.requests[base + RequestLayout::REST],
+            });
+            input.output[index * ResultLayout::WORDS + ResultLayout::FATIGUE] = fatigue;
+        }
+        input
+    }
+}
+
+#[cube]
+impl GpuPass<HouseholdInput> for UpdateForecast {
+    type Output = ();
+
+    fn execute(mut input: HouseholdInput) {
+        let index = ABSOLUTE_POS;
+        if index < input.count as usize {
+            let base = index * RequestLayout::WORDS;
+            let target = index * ResultLayout::WORDS;
+            let forecast = observed_blend(
+                read(&input.requests, base + RequestLayout::FORECAST),
+                KernelObservation {
+                    kind: input.requests[base + RequestLayout::OBSERVATION],
+                    value: read(&input.requests, base + RequestLayout::SIGNAL),
+                },
+                input.requests[base + RequestLayout::WEIGHT],
+                &input.control,
+            );
+            input.output[target + ResultLayout::FORECAST + LOW_WORD] = forecast.extract(LOW_WORD);
+            input.output[target + ResultLayout::FORECAST + HIGH_WORD] = forecast.extract(HIGH_WORD);
+        }
     }
 }

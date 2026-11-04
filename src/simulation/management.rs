@@ -1,4 +1,9 @@
-use super::{Device, words::*};
+use super::{
+    Device,
+    pass::GpuPass,
+    system::{System, gpu_passes},
+    words::*,
+};
 use crate::domain::{Field, State, enterprise::EnterpriseState};
 use crate::simulation::configuration::{Configuration, EconomyConfig, Feature};
 use burn_wgpu::CubeTensor;
@@ -8,6 +13,37 @@ use std::collections::BTreeMap;
 pub(super) struct EnterpriseManagement {
     groups: u32,
     firms: CubeTensor,
+}
+
+#[derive(CubeType, CubeLaunch)]
+pub(super) struct AssignmentInput {
+    state: Box<[u32]>,
+    config: EconomyConfig,
+    firms: Box<[u32]>,
+    groups: u32,
+    day: u32,
+}
+
+pub(super) struct AssignOwners;
+
+impl System for EnterpriseManagement {
+    type Input = AssignmentInput;
+    type Passes = gpu_passes![AssignOwners];
+}
+
+#[cube]
+impl GpuPass<AssignmentInput> for AssignOwners {
+    type Output = ();
+
+    fn execute(mut input: AssignmentInput) {
+        assign(
+            &mut input.state,
+            &input.config,
+            &input.firms,
+            input.groups,
+            input.day,
+        );
+    }
 }
 
 impl EnterpriseManagement {
@@ -35,21 +71,23 @@ impl EnterpriseManagement {
     pub fn assign(&self, device: &Device, state: &CubeTensor, config: &Configuration, day: u32) {
         if self.groups > 0 {
             let argument = |tensor: &CubeTensor| tensor.clone().into_buffer_arg();
-            assign::launch(
-                &device.client,
+            Self::launch(
+                device,
                 device.count(self.groups as usize),
                 CubeDim::new_1d(device.workgroup),
-                argument(state),
-                config.launch(),
-                argument(&self.firms),
-                self.groups,
-                day,
+                AssignmentInputLaunch {
+                    state: argument(state),
+                    config: config.launch(),
+                    firms: argument(&self.firms),
+                    groups: self.groups,
+                    day,
+                },
             );
         }
     }
 }
 
-#[cube(launch)]
+#[cube]
 fn assign(state: &mut [u32], config: &EconomyConfig, firms: &[u32], groups: u32, day: u32) {
     let group = ABSOLUTE_POS as u32;
     if group < groups && comptime!(config.home_mode == Feature::Enabled) {
