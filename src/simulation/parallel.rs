@@ -16,14 +16,21 @@ pub(super) fn prefix_sum(value: u32) -> PrefixSum {
     sync_cube();
     let mut stride = 1u32;
     while stride < CUBE_DIM {
-        let mut previous = 0u32;
-        if UNIT_POS >= stride {
-            previous = values[lane - stride as usize];
+        let index = (UNIT_POS + 1) * stride * 2 - 1;
+        if index < CUBE_DIM {
+            values[index as usize] += values[(index - stride) as usize];
         }
         sync_cube();
-        values[lane] += previous;
-        sync_cube();
         stride *= 2;
+    }
+    stride = CUBE_DIM / 4;
+    while stride > 0 {
+        let index = (UNIT_POS + 1) * stride * 2 - 1;
+        if index + stride < CUBE_DIM {
+            values[(index + stride) as usize] += values[index as usize];
+        }
+        sync_cube();
+        stride /= 2;
     }
     PrefixSum {
         inclusive: values[lane],
@@ -130,6 +137,57 @@ fn add_block_offsets(buffer: &mut [u32], offset: u32, count: u32) {
 mod tests {
     use super::*;
     use anyhow::Result;
+
+    #[test]
+    fn block_prefix_sums_preserve_inclusive_values_and_totals_on_gpu() -> Result<()> {
+        for workgroup in [32, 64, 128, 256] {
+            let device = Device::headless(workgroup)?;
+            for mode in [ScanMode::Shared, ScanMode::new(&device)] {
+                for count in [0usize, 1, 31, 32, 33, 127, 128, 129, 257, 1025] {
+                    let offset = 7;
+                    let blocks = count.div_ceil(workgroup as usize);
+                    let input = (0..count)
+                        .map(|index| match index % 5 {
+                            0 => u32::MAX,
+                            _ => (index % 7) as u32,
+                        })
+                        .collect::<Vec<_>>();
+                    let mut expected = Vec::new();
+                    let mut totals = Vec::new();
+                    for block in input.chunks(workgroup as usize) {
+                        let mut sum = 0u32;
+                        for value in block {
+                            sum = sum.wrapping_add(*value);
+                            expected.push(sum);
+                        }
+                        totals.push(sum);
+                    }
+                    let mut words = vec![u32::MAX; offset + count + blocks + 16];
+                    words[offset..offset + count].copy_from_slice(&input);
+                    let buffer = device.tensor(&words);
+                    scan_blocks::launch(
+                        &device.client,
+                        device.count(count),
+                        CubeDim::new_1d(workgroup),
+                        buffer.clone().into_buffer_arg(),
+                        offset as u32,
+                        count as u32,
+                        mode,
+                    );
+                    let actual = device.read(&buffer)?;
+                    assert_eq!(
+                        actual[offset..offset + count],
+                        expected,
+                        "workgroup {workgroup}, mode {mode:?}, count {count}"
+                    );
+                    assert_eq!(actual[offset + count..offset + count + blocks], totals);
+                    assert_eq!(actual[..offset], words[..offset]);
+                    assert_eq!(actual[actual.len() - 16..], [u32::MAX; 16]);
+                }
+            }
+        }
+        Ok(())
+    }
 
     #[test]
     fn hierarchical_prefix_sums_preserve_partial_blocks_on_gpu() -> Result<()> {

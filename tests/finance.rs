@@ -227,6 +227,84 @@ fn support_rounding_preserves_treasury_and_individual_bounds_at_u64_width() -> R
 }
 
 #[test]
+fn hierarchical_finance_scans_preserve_support_allocations_and_bank_totals() -> Result<()> {
+    let device = support::device(64)?;
+    let count = 4097;
+    let identities = (1..=count as u64).collect::<Vec<_>>();
+    let needs = (0..count)
+        .map(|index| (1u64 << 32) + index as u64 % 17)
+        .collect::<Vec<_>>();
+    let total = needs.iter().map(|value| u128::from(*value)).sum::<u128>();
+    let treasury = (total * 2 / 3) as u64;
+    let config = FinanceConfig::new(
+        FinanceConfig {
+            banks: (0..65)
+                .map(|index| BankSeed {
+                    identity: 10000 + index,
+                    reserves: (1 << 40) + index,
+                    ..bank()
+                })
+                .collect(),
+            loans: vec![],
+            support: Some(SupportPolicy {
+                treasury,
+                recipients: identities
+                    .iter()
+                    .zip(&needs)
+                    .map(|(&household, &target_cash)| SupportRecipient {
+                        household,
+                        target_cash,
+                        consent: Consent::Granted,
+                    })
+                    .collect(),
+            }),
+        },
+        &identities,
+        &identities,
+    )?;
+    let layout = config.layout(count)?;
+    let runtime = FinanceRuntime::new(&device, &config, layout, &actors(count))?;
+    let initial = vec![0; count]
+        .into_iter()
+        .chain(config.initial_values())
+        .collect::<Vec<_>>();
+    let state = device.tensor(&words(&initial));
+    let reserves = config.banks.iter().map(|bank| bank.reserves).sum();
+    assert_eq!(
+        runtime.observe(&device, &state, 0)?,
+        FinanceObservation {
+            bank_reserves: reserves,
+            support_treasury: treasury,
+            ..Default::default()
+        }
+    );
+    runtime.support(&device, &state)?;
+    let actual = ticks(device.read(&state)?);
+    let mut prefix = 0u128;
+    let mut paid = 0u128;
+    for (index, need) in needs.iter().enumerate() {
+        prefix += u128::from(*need);
+        let due = u128::from(treasury) * prefix / total;
+        assert_eq!(u128::from(actual[index]), due - paid);
+        paid = due;
+    }
+    assert_eq!(paid, u128::from(treasury));
+    assert_eq!(runtime.last_event_count(), count);
+    assert_eq!(actual[layout.treasury as usize], 0);
+    assert_eq!(
+        runtime.observe(&device, &state, 0)?,
+        FinanceObservation {
+            bank_reserves: reserves,
+            ..Default::default()
+        }
+    );
+    runtime.support(&device, &state)?;
+    assert_eq!(runtime.last_event_count(), 0);
+    assert_eq!(ticks(device.read(&state)?), actual);
+    Ok(())
+}
+
+#[test]
 fn lean_dated_funding_and_divisible_pool_examples_run_in_shared_kernels() -> Result<()> {
     let device = support::device(64)?;
     let plans = [0, 3]

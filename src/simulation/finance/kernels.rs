@@ -506,27 +506,6 @@ pub(super) fn support_needs(state: &mut [u32], recipients: &[u32], output: &mut 
     }
 }
 
-#[cube(launch)]
-pub(super) fn scan(
-    input: &mut [u32],
-    output: &mut [u32],
-    control: &[Atomic<u32>],
-    count: u32,
-    channels: u32,
-    offset: u32,
-) {
-    let id = ABSOLUTE_POS as u32;
-    if id < count * channels {
-        let mut sum = load(input, id);
-        if id % count >= offset {
-            let addition = plus(sum, load(input, id - offset));
-            addition.faults.record(control);
-            sum = addition.value;
-        }
-        store(output, id, sum);
-    }
-}
-
 #[cube]
 pub(super) fn bounded_product_ratio(a: Ticks, b: Ticks, denominator: Ticks) -> Ticks {
     let mut quotient = zero();

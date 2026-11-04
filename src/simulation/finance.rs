@@ -1,6 +1,7 @@
 mod kernels;
 mod payments;
 mod policies;
+mod scan;
 
 use super::rows::{RowIndex, row_layout};
 use super::{
@@ -99,8 +100,9 @@ pub struct FinanceRuntime {
     banks: CubeTensor,
     loans: CubeTensor,
     support: CubeTensor,
-    scan_a: CubeTensor,
-    scan_b: CubeTensor,
+    scanned: CubeTensor,
+    bank_scan: scan::Scan,
+    support_scan: scan::Scan,
     output: CubeTensor,
     control: CubeTensor,
     decisions: CubeTensor,
@@ -213,6 +215,8 @@ impl FinanceRuntime {
             })
             .unwrap_or_default();
         let scratch = recipients.len().max(banks.len() * 5).max(1) * TICK_WORDS;
+        let bank_scan = scan::Scan::new(device, banks.len(), 5);
+        let support_scan = scan::Scan::new(device, recipients.len(), 1);
         Ok(Self {
             banks: device.tensor(
                 banks
@@ -241,8 +245,9 @@ impl FinanceRuntime {
                     .collect::<Vec<_>>()
                     .as_slice(),
             ),
-            scan_a: device.empty(scratch),
-            scan_b: device.empty(scratch),
+            scanned: device.empty(bank_scan.words().max(support_scan.words())),
+            bank_scan,
+            support_scan,
             output: device.empty(scratch + 4 * TICK_WORDS),
             control: device.tensor(&[0; CONTROL_WORDS]),
             decisions: device.empty(loans.len().max(1)),
@@ -290,7 +295,7 @@ impl FinanceRuntime {
             argument(state),
             argument(&self.banks),
             argument(&self.loans),
-            argument(&self.scan_a),
+            argument(&self.scanned),
             argument(&self.decisions),
             argument(&self.control),
             day,
@@ -317,10 +322,10 @@ impl FinanceRuntime {
                     CubeDim::new_1d(device.workgroup),
                     argument(state),
                     argument(&self.support),
-                    argument(&self.scan_a),
+                    argument(&self.scanned),
                     self.support_count as u32,
                 );
-                let scanned = self.scan(device, self.support_count, 1)?;
+                let scanned = self.scan(device, &self.support_scan)?;
                 kernels::support_plan::launch(
                     &device.client,
                     count(device, self.support_count + 1),
@@ -353,32 +358,10 @@ impl FinanceRuntime {
         Ok(())
     }
 
-    fn scan<'a>(
-        &'a self,
-        device: &Device,
-        length: usize,
-        channels: usize,
-    ) -> Result<&'a CubeTensor> {
-        let mut offset = 1;
-        let mut current = &self.scan_a;
-        let mut next = &self.scan_b;
-        while offset < length {
-            kernels::scan::launch(
-                &device.client,
-                count(device, length * channels),
-                CubeDim::new_1d(device.workgroup),
-                argument(current),
-                argument(next),
-                argument(&self.control),
-                length as u32,
-                channels as u32,
-                offset as u32,
-            );
-            std::mem::swap(&mut current, &mut next);
-            offset *= 2;
-        }
+    fn scan<'a>(&'a self, device: &Device, plan: &scan::Scan) -> Result<&'a CubeTensor> {
+        plan.run(device, &self.scanned, &self.control);
         self.faults(device)?;
-        Ok(current)
+        Ok(&self.scanned)
     }
 
     pub fn observe(
@@ -388,7 +371,7 @@ impl FinanceRuntime {
         day: u32,
     ) -> Result<FinanceObservation> {
         self.phase(device, state, day, FinanceStage::Audit)?;
-        let totals = self.scan(device, self.bank_count, 5)?;
+        let totals = self.scan(device, &self.bank_scan)?;
         let values = match self.bank_count {
             0 => vec![0; 5],
             count => (0..5)
