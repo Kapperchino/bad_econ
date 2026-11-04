@@ -327,8 +327,18 @@ fn gpu_firm_growth_matches_full_rebuild_with_births_and_migration() -> Result<()
         requests[1] = (8 << 24) + source as u32 + 1;
         requests[2] = (9 << 24) + source as u32 + 1;
         requests[3] = (2 << 24) + 5;
+        let mut births = vec![0; requests.len()];
+        births[0] = 1;
+        births[299] = 2;
+        for simulation in [&gpu, &reference] {
+            simulation
+                .device
+                .write(simulation.demography.birth_buffer(), &births);
+        }
+        let pending = registry::records::PendingRecords::from_dense(&requests, &births)?;
         let entries =
-            registry::entries::EntryRequests::new(&scenario, &requests).expect("entry requests");
+            registry::entries::EntryRequests::new(&scenario, requests.len(), &pending.records)
+                .expect("entry requests");
         if day == 0 {
             let before = gpu.download()?;
             let budget = gpu.device.memory_budget;
@@ -341,7 +351,7 @@ fn gpu_firm_growth_matches_full_rebuild_with_births_and_migration() -> Result<()
             )?
             .expect("supported transitions");
             assert!(
-                gpu.commit_entries(&requests, &entries, plan, &vec![0; requests.len()])
+                gpu.commit_entries(&entries, plan, &pending.records)
                     .is_err()
             );
             gpu.device.memory_budget = budget;
@@ -354,10 +364,14 @@ fn gpu_firm_growth_matches_full_rebuild_with_births_and_migration() -> Result<()
             &entries.transitions,
         )?
         .expect("supported transitions");
-        let births = vec![0; requests.len()];
-        gpu.commit_entries(&requests, &entries, plan, &births)
+        gpu.commit_entries(&entries, plan, &pending.records)
             .context("GPU growth")?;
         let mut expected = reference.download()?;
+        expected.people = reference
+            .demography
+            .reference_births(&reference.device, &births, expected.next_identity)?
+            .download(&reference.device, &expected, CopyDirection::Save)?;
+        expected.next_identity += 2;
         enterprise::enter(&mut expected, &scenario, &requests)?;
         enterprise::transitions(&mut expected, &scenario, &requests)?;
         reference.replace(scenario.clone(), expected)?;
@@ -462,6 +476,8 @@ fn capacity_changes_preserve_spatial_membership_and_rollback_preparation() -> Re
     let spatial = simulation.device.read(&simulation.spatial)?;
     let mut requests = vec![0; simulation.actors().len()];
     requests[97] = (6 << 24) | 5;
+    let pending =
+        registry::records::PendingRecords::from_dense(&requests, &vec![0; requests.len()])?;
     simulation
         .device
         .write(&simulation.enterprise_requests, &requests);
@@ -469,26 +485,22 @@ fn capacity_changes_preserve_spatial_membership_and_rollback_preparation() -> Re
         &scenario,
         &simulation.metadata,
         &simulation.migrations,
-        &requests,
+        &pending.records,
     )?
     .context("capacity transition")?;
     let budget = simulation.device.memory_budget;
     simulation.device.memory_budget = MemoryBudget::Reported { available_bytes: 2 };
-    assert!(
-        simulation
-            .commit_registry(plan, &vec![0; requests.len()])
-            .is_err()
-    );
+    assert!(simulation.commit_registry(plan, &[]).is_err());
     simulation.device.memory_budget = budget;
     assert_eq!(simulation.download()?, initial);
     let plan = registry::RegistryPlan::new(
         &scenario,
         &simulation.metadata,
         &simulation.migrations,
-        &requests,
+        &pending.records,
     )?
     .context("capacity transition")?;
-    simulation.commit_registry(plan, &vec![0; requests.len()])?;
+    simulation.commit_registry(plan, &[])?;
     let mut expected = initial;
     enterprise::transitions(&mut expected, &scenario, &requests)?;
     assert_eq!(simulation.download()?, expected);
@@ -508,6 +520,8 @@ fn restored_zero_capacity_growth_matches_complete_gpu_metadata() -> Result<()> {
     let checkpoint = Checkpoint::new(&scenario, &initial)?;
     let mut requests = vec![0; initial.actors.len()];
     requests[97] = (6 << 24) | 5;
+    let pending =
+        registry::records::PendingRecords::from_dense(&requests, &vec![0; requests.len()])?;
     for workgroup in [32, 64, 128, 256] {
         let mut simulation =
             Simulation::from_checkpoint(checkpoint.clone(), Device::headless(workgroup)?)?;
@@ -526,10 +540,10 @@ fn restored_zero_capacity_growth_matches_complete_gpu_metadata() -> Result<()> {
             &scenario,
             &simulation.metadata,
             &simulation.migrations,
-            &requests,
+            &pending.records,
         )?
         .context("restored capacity transition")?;
-        simulation.commit_registry(plan, &vec![0; requests.len()])?;
+        simulation.commit_registry(plan, &[])?;
         assert_eq!(simulation.download()?.digest(), expected.digest());
         assert_eq!(simulation.device.read(&simulation.spatial)?, spatial);
         for (index, (actual, expected)) in simulation

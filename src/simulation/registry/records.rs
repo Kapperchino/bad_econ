@@ -23,6 +23,27 @@ pub(in crate::simulation) struct RecordBuffers<'a> {
 }
 
 impl PendingRecords {
+    #[cfg(test)]
+    pub fn from_dense(requests: &[u32], births: &[u32]) -> Result<Self> {
+        match requests.len() == births.len() {
+            true => Ok(Self {
+                records: requests
+                    .iter()
+                    .zip(births)
+                    .enumerate()
+                    .filter(|(_, (request, birth))| **request != 0 || **birth != 0)
+                    .map(|(actor, (&request, &birth))| PendingRecord {
+                        actor: actor as u32,
+                        request,
+                        birth,
+                    })
+                    .collect(),
+                readback_bytes: 0,
+            }),
+            false => Err(anyhow::anyhow!("registry request and birth counts differ")),
+        }
+    }
+
     pub fn read(device: &Device, buffers: RecordBuffers<'_>, output: &CubeTensor) -> Result<Self> {
         let RecordBuffers {
             requests,
@@ -62,6 +83,76 @@ impl PendingRecords {
             records,
             readback_bytes: ((1 + count * 3) * size_of::<u32>()) as u64,
         })
+    }
+}
+
+pub(in crate::simulation) fn upload_requests(
+    device: &Device,
+    records: &[PendingRecord],
+    actors: usize,
+) -> CubeTensor {
+    let input = device.tensor(bytemuck::cast_slice(records));
+    let requests = device.empty(actors);
+    for stage in [RequestStage::Clear, RequestStage::Scatter] {
+        let count = match stage {
+            RequestStage::Clear => actors,
+            RequestStage::Scatter => records.len(),
+        };
+        RequestExpansion::launch(
+            device,
+            device.count(count),
+            CubeDim::new_1d(device.workgroup),
+            RequestInputLaunch {
+                records: input.clone().into_buffer_arg(),
+                requests: requests.clone().into_buffer_arg(),
+                stage,
+            },
+        );
+    }
+    requests
+}
+
+#[derive(Clone, Copy, Debug, Hash, PartialEq, Eq)]
+enum RequestStage {
+    Clear,
+    Scatter,
+}
+
+#[derive(CubeType, CubeLaunch)]
+struct RequestInput {
+    records: Box<[u32]>,
+    requests: Box<[u32]>,
+    #[cube(comptime)]
+    stage: RequestStage,
+}
+
+struct RequestExpansion;
+struct ExpandRequests;
+
+impl System for RequestExpansion {
+    type Input = RequestInput;
+    type Passes = gpu_passes![ExpandRequests];
+}
+
+#[cube]
+impl GpuPass<RequestInput> for ExpandRequests {
+    type Output = ();
+
+    fn execute(mut input: RequestInput) {
+        let id = ABSOLUTE_POS;
+        match comptime!(input.stage) {
+            RequestStage::Clear => {
+                if id < input.requests.len() {
+                    input.requests[id] = 0;
+                }
+            }
+            RequestStage::Scatter => {
+                if id < input.records.len() / 3 {
+                    let actor = input.records[id * 3] as usize;
+                    input.requests[actor] = input.records[id * 3 + 1];
+                }
+            }
+        }
     }
 }
 
@@ -210,6 +301,8 @@ mod tests {
                             birth: births[actor],
                         })
                         .collect::<Vec<_>>();
+                    let mut expected_requests = requests.clone();
+                    expected_requests.resize(count + 3, 0);
                     let requests = device.tensor(&requests);
                     let births = device.tensor(&births);
                     let scratch = device.tensor(&vec![u32::MAX; count * 2 + 256]);
@@ -238,6 +331,12 @@ mod tests {
                     )?;
                     assert_eq!(actual.records, expected, "{workgroup} {scan:?} {count}");
                     assert_eq!(actual.readback_bytes, (1 + expected.len() * 3) as u64 * 4);
+                    let expanded = upload_requests(&device, &actual.records, count + 3);
+                    assert_eq!(
+                        device.read(&expanded)?,
+                        expected_requests,
+                        "request expansion {workgroup} {scan:?} {count}"
+                    );
                 }
             }
         }

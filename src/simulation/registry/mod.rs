@@ -14,6 +14,7 @@ use crate::domain::{ActorRows, Field, Position, Scenario, State};
 use anyhow::{Context, Result};
 use burn_wgpu::CubeTensor;
 use cubecl::{CubeDim, prelude::*};
+use records::PendingRecord;
 use std::collections::BTreeMap;
 use systems::*;
 
@@ -68,15 +69,15 @@ impl RegistryPlan {
         scenario: &Scenario,
         metadata: &State,
         migrations: &MigrationRegistry,
-        requests: &[u32],
+        requests: &[PendingRecord],
     ) -> Result<Option<Self>> {
         let heirs_possible =
             metadata.actors.len() - metadata.actors.firms() > scenario.config().households as usize;
-        let supported = requests.iter().all(|&action| match action >> 24 {
-            0 => action == 0,
+        let supported = requests.iter().all(|record| match record.request >> 24 {
+            0 => record.request == 0,
             2 | 3 => true,
             5 => !heirs_possible,
-            6 => action & 0x00ffffff > 0,
+            6 => record.request & 0x00ffffff > 0,
             _ => false,
         });
         match supported {
@@ -85,10 +86,12 @@ impl RegistryPlan {
                 let mut next = migrations.clone();
                 let mut actors = requests
                     .iter()
-                    .any(|action| matches!(action >> 24, 3 | 6))
+                    .any(|record| matches!(record.request >> 24, 3 | 6))
                     .then(|| metadata.actors.clone());
                 let mut capacity_update = CapacityUpdate::Patch;
-                for (index, action) in requests.iter().enumerate() {
+                for record in requests {
+                    let index = record.actor as usize;
+                    let action = record.request;
                     match action >> 24 {
                         2 => {
                             let destination = (action & 0x00ffffff) as usize - 1;
@@ -129,8 +132,8 @@ impl RegistryPlan {
                     }
                 }
                 let transition = match (
-                    requests.iter().any(|action| action >> 24 == 3),
-                    requests.iter().any(|action| action >> 24 == 6),
+                    requests.iter().any(|record| record.request >> 24 == 3),
+                    requests.iter().any(|record| record.request >> 24 == 6),
                 ) {
                     (true, _) => RegistryTransition::Migration,
                     (_, true) => RegistryTransition::Capacity(capacity_update),

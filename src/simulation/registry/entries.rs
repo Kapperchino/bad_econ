@@ -4,20 +4,19 @@ use crate::simulation::{decode, encode, enterprise, layout::TICK_WORDS, words::T
 use std::collections::BTreeSet;
 
 pub(in crate::simulation) struct EntryRequests {
-    pub transitions: Vec<u32>,
-    entries: Vec<usize>,
+    pub transitions: Vec<PendingRecord>,
+    entries: Vec<PendingRecord>,
 }
 
 impl EntryRequests {
-    pub fn new(scenario: &Scenario, requests: &[u32]) -> Option<Self> {
+    pub fn new(scenario: &Scenario, actors: usize, requests: &[PendingRecord]) -> Option<Self> {
         let entries = requests
             .iter()
-            .enumerate()
-            .filter(|(_, action)| Self::is_entry(**action))
-            .map(|(actor, _)| actor)
+            .copied()
+            .filter(|record| Self::is_entry(record.request))
             .collect::<Vec<_>>();
-        let sources = requests.iter().all(|&action| match action >> 24 {
-            8 | 9 => (1..=requests.len() as u32).contains(&(action & 0x00ffffff)),
+        let sources = requests.iter().all(|record| match record.request >> 24 {
+            8 | 9 => (1..=actors as u32).contains(&(record.request & 0x00ffffff)),
             _ => true,
         });
         match (
@@ -28,10 +27,8 @@ impl EntryRequests {
             (None, false, true) => Some(Self {
                 transitions: requests
                     .iter()
-                    .map(|&action| match Self::is_entry(action) {
-                        true => 0,
-                        false => action,
-                    })
+                    .copied()
+                    .filter(|record| !Self::is_entry(record.request))
                     .collect(),
                 entries,
             }),
@@ -54,9 +51,9 @@ impl EntryGrowth {
         scenario: &Scenario,
         metadata: &State,
         migrations: &MigrationRegistry,
-        requests: &[u32],
+        requests: &[PendingRecord],
     ) -> Result<Option<Self>> {
-        EntryRequests::new(scenario, requests)
+        EntryRequests::new(scenario, metadata.actors.len(), requests)
             .map(|requests| {
                 RegistryPlan::new(scenario, metadata, migrations, &requests.transitions)
                     .map(|plan| plan.map(|plan| Self { requests, plan }))
@@ -79,19 +76,18 @@ impl EntryBatch {
         scenario: &Scenario,
         metadata: &State,
         state: &CubeTensor,
-        requests: &[u32],
         entries: &EntryRequests,
         next_identity: u64,
     ) -> Result<Self> {
         let selected = entries
             .entries
             .iter()
-            .flat_map(|&owner| {
-                let source = match requests[owner] >> 24 {
-                    8 | 9 => Some((requests[owner] & 0x00ffffff) as usize - 1),
+            .flat_map(|record| {
+                let source = match record.request >> 24 {
+                    8 | 9 => Some((record.request & 0x00ffffff) as usize - 1),
                     _ => None,
                 };
-                std::iter::once(owner).chain(source)
+                std::iter::once(record.actor as usize).chain(source)
             })
             .collect::<BTreeSet<_>>()
             .into_iter()
@@ -144,16 +140,17 @@ impl EntryBatch {
             initial_population: metadata.initial_population,
         };
         let mut compact_requests = vec![0; selected.len()];
-        for &owner in &entries.entries {
+        for record in &entries.entries {
+            let owner = record.actor as usize;
             let index = selected.binary_search(&owner).expect("selected owner");
-            compact_requests[index] = match requests[owner] >> 24 {
+            compact_requests[index] = match record.request >> 24 {
                 kind @ (8 | 9) => {
-                    let source = (requests[owner] & 0x00ffffff) as usize - 1;
+                    let source = (record.request & 0x00ffffff) as usize - 1;
                     (kind << 24)
                         + selected.binary_search(&source).expect("selected source") as u32
                         + 1
                 }
-                _ => requests[owner],
+                _ => record.request,
             };
         }
         enterprise::enter(&mut compact, scenario, &compact_requests)?;
@@ -167,17 +164,20 @@ impl EntryBatch {
             }));
         grown.next_identity = compact.next_identity;
         grown.ownership.extend(compact.ownership.iter().cloned());
-        let owners = entries
-            .entries
-            .iter()
-            .map(|owner| selected.binary_search(owner).expect("selected owner"));
+        let owners = entries.entries.iter().map(|record| {
+            selected
+                .binary_search(&(record.actor as usize))
+                .expect("selected owner")
+        });
         let patches = owners
             .chain(selected.len()..compact.actors.len())
             .collect::<Vec<_>>();
-        for (offset, &owner) in entries.entries.iter().enumerate() {
+        for (offset, record) in entries.entries.iter().enumerate() {
             compact.set(
                 Field::InvestmentFirm,
-                selected.binary_search(&owner).expect("selected owner"),
+                selected
+                    .binary_search(&(record.actor as usize))
+                    .expect("selected owner"),
                 (before + offset + 1) as u64,
             );
         }

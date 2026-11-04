@@ -9,6 +9,9 @@ use crate::simulation::{
 };
 use cubecl::prelude::*;
 
+#[cfg(test)]
+mod tests;
+
 pub(in crate::simulation) const LATCH_WORD: usize = CONTROL_WORDS;
 pub(in crate::simulation) const RANGE_SLOTS_WORD: usize = CONTROL_WORDS + 1;
 pub(in crate::simulation) const SEARCHES_WORD: usize = CONTROL_WORDS + 2;
@@ -264,14 +267,21 @@ pub(in crate::simulation) fn radix_local(
             item = scratch[(source + count + id) as usize];
         }
         #[unroll]
-        for bit in 0..4u32 {
-            let zero = u32::cast_from((key >> (shift + bit)) & 1 == 0);
-            let prefix = parallel::scan_prefix(zero, comptime!(parameters.scan));
-            let target = select(
-                zero == 1,
-                prefix.inclusive - 1,
-                prefix.total + UNIT_POS - prefix.inclusive,
+        for pair in 0..2u32 {
+            let digit = (key >> (shift + 2 * pair)) & 3;
+            let encoded = select(digit < 3, 1u32 << (9 * digit), 0u32);
+            let prefix = parallel::scan_prefix(encoded, comptime!(parameters.scan));
+            let preceding = prefix.total & ((1u32 << (9 * digit)) - 1);
+            let base = (preceding & 511) + ((preceding >> 9) & 511) + (preceding >> 18);
+            let counted = (prefix.inclusive & 511)
+                + ((prefix.inclusive >> 9) & 511)
+                + (prefix.inclusive >> 18);
+            let inclusive = select(
+                digit < 3,
+                (prefix.inclusive >> (9 * digit)) & 511,
+                UNIT_POS + 1 - counted,
             );
+            let target = base + inclusive - 1;
             keys[target as usize] = key;
             items[target as usize] = item;
             sync_cube();

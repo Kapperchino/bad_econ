@@ -1,5 +1,6 @@
 mod kernels;
 mod systems;
+use super::registry::records::PendingRecord;
 use super::{Device, layout::WORD_BYTES, system::System};
 use crate::domain::{Phase, Scenario, State, demography::*};
 use anyhow::{Context, Result, anyhow};
@@ -376,16 +377,17 @@ impl DemographyRuntime {
             famine_exposure: u64::from(totals[6]) + (u64::from(totals[7]) << 32),
         })
     }
-    pub fn grow_births(
+    pub(super) fn grow_births(
         &self,
         device: &Device,
-        births: &[u32],
+        births: &[PendingRecord],
         next_identity: u64,
         scratch: &CubeTensor,
     ) -> Result<Self> {
-        let count = self.count + births.iter().filter(|&&birth| birth > 0).count();
-        let growth = count as u64 * ((PersonLayout::WORDS * 2 + 5) * WORD_BYTES) as u64
-            + births.len() as u64 * 8;
+        let count = self.count + births.iter().filter(|record| record.birth > 0).count();
+        let actors = self.range_counts.len();
+        let growth =
+            count as u64 * ((PersonLayout::WORDS * 2 + 5) * WORD_BYTES) as u64 + actors as u64 * 8;
         device.reclaim_memory(growth)?;
         let required = growth
             + device
@@ -399,16 +401,14 @@ impl DemographyRuntime {
                 "person registry capacity exhausted: {required} bytes exceed device budget"
             ))?,
         }
-        let range_counts = self
-            .range_counts
-            .iter()
-            .zip(births)
-            .map(|(&count, &birth)| count + u32::from(birth > 0))
-            .collect::<Vec<_>>();
+        let mut range_counts = self.range_counts.clone();
+        for record in births.iter().filter(|record| record.birth > 0) {
+            range_counts[record.actor as usize] += 1;
+        }
         let grown = Self {
             people: device.empty(count.max(1) * PersonLayout::WORDS),
             audited: device.empty(count.max(1) * PersonLayout::WORDS),
-            ranges: device.empty(births.len() * 2),
+            ranges: device.empty(actors * 2),
             policy: self.policy.clone(),
             births: self.births.clone(),
             count,
@@ -417,7 +417,7 @@ impl DemographyRuntime {
             seed: self.seed,
         };
         let argument = |tensor: &CubeTensor| tensor.clone().into_buffer_arg();
-        let cube_count = device.count(births.len());
+        let cube_count = device.count(actors);
         BirthCounting::launch(
             device,
             cube_count.clone(),
@@ -430,8 +430,8 @@ impl DemographyRuntime {
         super::parallel::scan(
             device,
             scratch,
-            births.len(),
-            births.len().div_ceil(device.workgroup as usize),
+            actors,
+            actors.div_ceil(device.workgroup as usize),
         );
         BirthRanges::launch(
             device,

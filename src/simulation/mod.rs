@@ -44,6 +44,7 @@ use ops::{EconomyBuffers, EconomyOps, SchedulerBuffers};
 use parallel::reduction;
 use parameters::{Discovery, EconomyParameters, SchedulerParameters};
 use policy::MATCHING_ROUNDS;
+use registry::records::PendingRecord;
 use scheduler::SchedulerStage;
 use std::time::Instant;
 use system::System;
@@ -550,12 +551,16 @@ impl Simulation {
         self.account_research_readbacks();
         Ok(evidence)
     }
-    fn grow_births(&self, births: &[u32]) -> Result<demography::DemographyRuntime> {
+    fn grow_births(&self, births: &[PendingRecord]) -> Result<demography::DemographyRuntime> {
         #[cfg(test)]
         let grown = match self.registry_execution {
             RegistryExecution::Reference => {
+                let mut dense = vec![0; self.metadata.actors.len()];
+                for record in births {
+                    dense[record.actor as usize] = record.birth;
+                }
                 self.demography
-                    .reference_births(&self.device, births, self.metadata.next_identity)
+                    .reference_births(&self.device, &dense, self.metadata.next_identity)
             }
             RegistryExecution::Gpu => self.demography.grow_births(
                 &self.device,
@@ -594,26 +599,24 @@ impl Simulation {
             &self.searches.requests,
         )?;
         self.readback_bytes += pending.readback_bytes;
-        let mut requests = vec![0; self.metadata.actors.len()];
-        let mut births = vec![0; self.metadata.actors.len()];
-        for record in pending.records {
-            requests[record.actor as usize] = record.request;
-            births[record.actor as usize] = record.birth;
-        }
         #[cfg(test)]
-        if let RegistryExecution::Reference = self.registry_execution {
-            requests = self.device.read(&self.enterprise_requests)?;
-            births = self.device.read(self.demography.birth_buffer())?;
-        }
-        let count = requests.iter().filter(|&&action| action > 0).count();
-        let newborns = births.iter().filter(|&&birth| birth > 0).count();
+        let pending = match self.registry_execution {
+            RegistryExecution::Gpu => pending,
+            RegistryExecution::Reference => registry::records::PendingRecords::from_dense(
+                &self.device.read(&self.enterprise_requests)?,
+                &self.device.read(self.demography.birth_buffer())?,
+            )?,
+        };
+        let records = &pending.records;
+        let count = records.iter().filter(|record| record.request > 0).count();
+        let newborns = records.iter().filter(|record| record.birth > 0).count();
         if count == 0 && newborns > 0 {
             let next_identity = self
                 .metadata
                 .next_identity
                 .checked_add(newborns as u64)
                 .context("identity capacity exhausted")?;
-            let grown = self.grow_births(&births)?;
+            let grown = self.grow_births(records)?;
             let population = grown.observation(&self.device)?;
             self.device.reclaim_memory(0)?;
             match self.memory_usage().bytes_reserved <= self.device.memory_budget.bytes() {
@@ -626,12 +629,8 @@ impl Simulation {
             self.metadata.next_identity = next_identity;
             self.snapshot.population = population;
         }
-        let plan = registry::RegistryPlan::new(
-            &self.scenario,
-            &self.metadata,
-            &self.migrations,
-            &requests,
-        )?;
+        let plan =
+            registry::RegistryPlan::new(&self.scenario, &self.metadata, &self.migrations, records)?;
         #[cfg(test)]
         let plan = match self.registry_execution {
             RegistryExecution::Gpu => plan,
@@ -641,7 +640,7 @@ impl Simulation {
             &self.scenario,
             &self.metadata,
             &self.migrations,
-            &requests,
+            records,
         )?;
         #[cfg(test)]
         let entries = match self.registry_execution {
@@ -650,9 +649,9 @@ impl Simulation {
         };
         match (count, plan, entries) {
             (0, _, _) => (),
-            (_, Some(plan), _) => self.commit_registry(plan, &births)?,
+            (_, Some(plan), _) => self.commit_registry(plan, records)?,
             (_, None, Some(growth)) => {
-                self.commit_entries(&requests, &growth.requests, growth.plan, &births)?
+                self.commit_entries(&growth.requests, growth.plan, records)?
             }
             (_, None, None) => {
                 let mut state = self.download()?;
@@ -665,20 +664,16 @@ impl Simulation {
                         "registry capacity exhausted: {estimated} bytes exceed device budget"
                     ))?,
                 }
-                for (household, birth) in births
-                    .into_iter()
-                    .enumerate()
-                    .filter(|(_, birth)| *birth > 0)
-                {
+                for record in records.iter().filter(|record| record.birth > 0) {
                     let identity = state.next_identity;
                     state.next_identity = identity
                         .checked_add(1)
                         .context("identity capacity exhausted")?;
                     state.people.push(crate::domain::demography::Person {
                         identity,
-                        household: state.actors.at(household).identity,
+                        household: state.actors.at(record.actor as usize).identity,
                         age_days: 0,
-                        sex: match birth {
+                        sex: match record.birth {
                             1 => crate::domain::demography::Sex::Female,
                             _ => crate::domain::demography::Sex::Male,
                         },
@@ -689,6 +684,10 @@ impl Simulation {
                         famine_exposure: 0,
                         birth_cooldown: 0,
                     });
+                }
+                let mut requests = vec![0; state.actors.len()];
+                for record in records {
+                    requests[record.actor as usize] = record.request;
                 }
                 enterprise::enter(&mut state, &self.scenario, &requests)?;
                 enterprise::transitions(&mut state, &self.scenario, &requests)?;
@@ -703,12 +702,11 @@ impl Simulation {
     }
     fn commit_entries(
         &mut self,
-        requests: &[u32],
         entries: &registry::entries::EntryRequests,
         plan: registry::RegistryPlan,
-        births: &[u32],
+        births: &[PendingRecord],
     ) -> Result<()> {
-        let newborns = births.iter().filter(|&&birth| birth > 0).count();
+        let newborns = births.iter().filter(|record| record.birth > 0).count();
         let next_identity = self
             .metadata
             .next_identity
@@ -719,7 +717,6 @@ impl Simulation {
             &self.scenario,
             &self.metadata,
             &self.state,
-            requests,
             entries,
             next_identity,
         )?;
@@ -757,9 +754,8 @@ impl Simulation {
             .map(|actor| ActorLayout::new(&actor, &self.scenario))
             .collect::<ActorMetadataRows>();
         let previous_actors = registry::extend_actors(&self.device, &self.actors, &rows);
-        let mut transitions = entries.transitions.clone();
-        transitions.resize(count, 0);
-        let enterprise_requests = self.device.tensor(&transitions);
+        let enterprise_requests =
+            registry::records::upload_requests(&self.device, &entries.transitions, count);
         let actors = match plan.transition {
             registry::RegistryTransition::Unchanged => previous_actors.clone(),
             registry::RegistryTransition::Capacity(registry::CapacityUpdate::Patch) => {
@@ -878,8 +874,12 @@ impl Simulation {
         }
         Ok(())
     }
-    fn commit_registry(&mut self, plan: registry::RegistryPlan, births: &[u32]) -> Result<()> {
-        let newborns = births.iter().filter(|&&birth| birth > 0).count();
+    fn commit_registry(
+        &mut self,
+        plan: registry::RegistryPlan,
+        births: &[PendingRecord],
+    ) -> Result<()> {
+        let newborns = births.iter().filter(|record| record.birth > 0).count();
         let next_identity = self
             .metadata
             .next_identity
