@@ -164,6 +164,103 @@ fn untaxed_wages_remain_observed_income_for_household_investment() -> Result<()>
 
 #[cfg(feature = "compute")]
 #[test]
+fn payroll_specializations_and_runtime_rates_share_a_gpu_client() -> Result<()> {
+    use bad_econ::simulation::Simulation;
+
+    struct Case {
+        policy: Option<PayrollPolicy>,
+        minutes: u32,
+        cash: u64,
+        tax: u64,
+        charge: u64,
+    }
+
+    let device = support::device(64)?;
+    let cases = [
+        Case {
+            policy: None,
+            minutes: 80,
+            cash: 80,
+            tax: 0,
+            charge: 0,
+        },
+        Case {
+            policy: Some(policy()),
+            minutes: 80,
+            cash: 68,
+            tax: 8,
+            charge: 4,
+        },
+        Case {
+            policy: Some(PayrollPolicy {
+                brackets: vec![
+                    TaxBracket {
+                        threshold: 100,
+                        marginal_rate: 300,
+                    },
+                    TaxBracket {
+                        threshold: 140,
+                        marginal_rate: 500,
+                    },
+                ],
+                ..policy()
+            }),
+            minutes: 160,
+            cash: 120,
+            tax: 32,
+            charge: 8,
+        },
+        Case {
+            policy: Some(PayrollPolicy {
+                base_rate: 200,
+                brackets: vec![TaxBracket {
+                    threshold: 40,
+                    marginal_rate: 400,
+                }],
+                ..policy()
+            }),
+            minutes: 80,
+            cash: 52,
+            tax: 24,
+            charge: 4,
+        },
+        Case {
+            policy: Some(PayrollPolicy::default()),
+            minutes: 80,
+            cash: 80,
+            tax: 0,
+            charge: 0,
+        },
+        Case {
+            policy: None,
+            minutes: 80,
+            cash: 80,
+            tax: 0,
+            charge: 0,
+        },
+    ];
+    for case in cases {
+        let mut config = scenario(case.minutes)?.config().clone();
+        config.payroll = case.policy;
+        let mut simulation = Simulation::new(Scenario::new(config)?, device.clone())?;
+        simulation.advance()?;
+        let state = simulation.download()?;
+        for household in 0..3 {
+            assert_eq!(state.get(Field::Cash, household), case.cash);
+            assert_eq!(
+                state.get(Field::GrossIncome, household),
+                u64::from(case.minutes)
+            );
+            assert_eq!(state.get(Field::TaxTreasury, household), case.tax);
+            assert_eq!(state.get(Field::ChargeTreasury, household), case.charge);
+            assert_eq!(state.get(Field::PayrollReserve, household), 0);
+        }
+    }
+    Ok(())
+}
+
+#[cfg(feature = "compute")]
+#[test]
 fn payroll_is_atomic_device_accounting_and_survives_checkpoints() -> Result<()> {
     use bad_econ::{runtime::SimulationCommand, simulation::Simulation};
     let mut simulation = Simulation::new(scenario(80)?, support::device(64)?)?;

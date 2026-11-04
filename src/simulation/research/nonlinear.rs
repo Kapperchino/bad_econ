@@ -71,12 +71,10 @@ mod tests {
         );
         let table = device.tensor(&HAZARD_TABLE);
         let output = device.empty(25002);
-        let argument = |tensor: &burn_wgpu::CubeTensor| unsafe {
-            BufferArg::from_raw_parts(tensor.handle.clone(), tensor.meta.shape()[0])
-        };
+        let argument = |tensor: &burn_wgpu::CubeTensor| tensor.clone().into_buffer_arg();
         probe::launch(
             &device.client,
-            CubeCount::Static(16001u32.div_ceil(device.workgroup), 1, 1),
+            device.count(16001),
             CubeDim::new_1d(device.workgroup),
             argument(&table),
             argument(&output),

@@ -54,7 +54,7 @@ Additional checks passed:
 
 Final GPT-6.1 Sol review found no blocking issues after the isolation fix and reviewed the runtime inventory and validation logs. That review was read-only; the reviewer did not independently rerun the GPU checks. Other hardware/backend combinations remain unverified.
 
-## Validation after merging upstream main
+## Validation after merging CubeK upstream main
 
 Upstream `ba6421a45665a1b90e42b4be4e6b5c471f2322a8` adds CubeK analytics, reductions and random streams, updated checkpoint semantics, and additional tests. The merge preserves those production changes and assertions. The analytics, retained-account and sensitivity modules import one shared `estimates` helper registered in `tests/integration.rs`, alongside the cached GPU support module. Allocation-budget cases retain fresh devices.
 
@@ -72,6 +72,23 @@ Validation on RTX 3090 / Vulkan:
 GPU contention remains uncontrolled. This validation establishes correctness coverage; no measured speedup is claimed. The earlier timing table applies only to the original pre-CubeK revisions.
 
 Local evidence is in `target/pr6-merge-main/`: `runtime-inventory-final.json`, `validated-summary.json`, the target logs in `full/` and `full-final/`, `fast-final.log`, `clippy-final.log` and `no-default.log`. `validated-summary.json` contains exactly the passing 186-case inventory from the unchanged library target and final integration/GPU targets.
+
+## Validation after merging settlement and registry updates
+
+Upstream `1c2854f023e2aa935b2f5b0281a009cf12f81007` adds settlement batches, GPU market counters, tiled audits, registry changes, and more regression coverage. This merge preserves those production changes, scenarios and assertions. The market-fault test retains all four upstream execution/trace combinations while using the cached device. The workgroup matrix obtains one cached device per workgroup and clones it for each experiment. Allocation-budget cases retain their fresh devices, and the README keeps upstream's benchmark documentation alongside the fast/full test commands.
+
+On November 3, 2026, the runtime inventory matched all **196** upstream test names after normalizing integration-module prefixes: **30 library**, **159 integration** and **7 GPU-specific** checks. Every upstream integration module remains registered, including the new payroll specialization case, and all 11 fast-alias names resolve.
+
+Validation on RTX 3090 / Vulkan:
+
+- All 196 checks passed, with no failures, ignored cases, missing cases or extra cases.
+- `cargo gpu-fast` passed all 11 cases on the final merged build.
+- `cargo fmt --all -- --check` passed.
+- `cargo clippy --locked --all-targets --features viewer --jobs 2 -- -D warnings` passed.
+- `cargo check --locked --no-default-features --lib --tests --jobs 2` passed (compile only). The existing Windows incremental-cache hard-link fallback warnings remain.
+- GPT-6.1 Sol reviewed the conflict resolution and retained coverage with no blocking source findings. The review was read-only; the reviewer did not independently run tests.
+
+These checks establish correctness coverage, not a controlled speedup measurement. Local evidence is in `target/pr6-merge-main-1c2854f/`: `source-inventory.json`, `runtime-inventory.json`, `validated-summary.json`, `full/summary.json`, the full-suite target logs, `fast.log`, `clippy.log` and `no-default.log`.
 
 ## Reproduce the timing inventory
 

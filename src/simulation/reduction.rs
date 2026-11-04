@@ -119,13 +119,11 @@ pub(super) fn sum_ticks(
     if elements > 0 {
         finish_sum::launch(
             &device.client,
-            CubeCount::Static((elements as u32).div_ceil(device.workgroup), 1, 1),
+            device.count(elements),
             CubeDim::new_1d(device.workgroup),
-            unsafe { BufferArg::from_raw_parts(sums.handle, elements * 2) },
-            unsafe { BufferArg::from_raw_parts(output.handle.clone(), elements) },
-            unsafe {
-                BufferArg::from_raw_parts(control.handle.clone(), control.meta.num_elements())
-            },
+            sums.into_arg().into_buffer_arg(),
+            output.clone().into_arg().into_buffer_arg(),
+            control.clone().into_buffer_arg(),
         );
     }
     Ok(output)
@@ -139,6 +137,93 @@ pub(super) fn summary(
     groups: usize,
 ) -> Result<()> {
     use super::layout::SummaryLayout as S;
+    summary_tiles::launch(
+        &device.client,
+        device.count(S::METRICS * device.workgroup as usize),
+        CubeDim::new_1d(device.workgroup),
+        input.clone().into_buffer_arg(),
+        output.clone().into_buffer_arg(),
+        control.clone().into_buffer_arg(),
+        groups as u32,
+    );
+    Ok(())
+}
+
+#[cube(launch)]
+fn summary_tiles(input: &[u32], output: &mut [u32], control: &[Atomic<u32>], groups: u32) {
+    use crate::simulation::layout::SummaryLayout as S;
+    let metric = CUBE_POS as u32;
+    if metric < S::METRICS as u32 {
+        let minimum = metric == S::MINIMUM_WAGE
+            || metric == S::MINIMUM_PRICE
+            || (metric >= S::WAGE_MINIMA
+                && metric < S::WAGE_MINIMA + crate::domain::Good::COUNT as u32)
+            || (metric >= S::PRICE_MINIMA
+                && metric < S::PRICE_MINIMA + crate::domain::Good::COUNT as u32);
+        let maximum = metric == S::MAXIMUM_WAGE
+            || metric == S::MAXIMUM_PRICE
+            || (metric >= S::WAGE_MAXIMA
+                && metric < S::WAGE_MAXIMA + crate::domain::Good::COUNT as u32)
+            || (metric >= S::PRICE_MAXIMA
+                && metric < S::PRICE_MAXIMA + crate::domain::Good::COUNT as u32);
+        let mut total = select(minimum, u64::MAX, 0u64);
+        let mut group = UNIT_POS;
+        while group < groups {
+            let index = (group * S::METRICS as u32 + metric) * 2;
+            let value = u64::cast_from(input[index as usize])
+                | (u64::cast_from(input[(index + 1) as usize]) << 32);
+            let sum = total + value;
+            if !minimum && !maximum && sum < total {
+                KernelFaults::new(comptime!(FaultFlags::ARITHMETIC_OVERFLOW)).record(control);
+            }
+            total = select(
+                minimum,
+                min(total, value),
+                select(maximum, max(total, value), sum),
+            );
+            group += CUBE_DIM;
+        }
+        let mut shared = Shared::<[u64]>::new_slice(256usize);
+        shared[UNIT_POS as usize] = total;
+        sync_cube();
+        let mut stride = CUBE_DIM / 2;
+        while stride > 0 {
+            if UNIT_POS < stride {
+                let a = shared[UNIT_POS as usize];
+                let b = shared[(UNIT_POS + stride) as usize];
+                let sum = a + b;
+                if !minimum && !maximum && sum < a {
+                    KernelFaults::new(comptime!(FaultFlags::ARITHMETIC_OVERFLOW)).record(control);
+                }
+                shared[UNIT_POS as usize] =
+                    select(minimum, min(a, b), select(maximum, max(a, b), sum));
+            }
+            sync_cube();
+            stride /= 2;
+        }
+        if UNIT_POS == 0 {
+            output[(metric * 2) as usize] = u32::cast_from(shared[0usize]);
+            output[(metric * 2 + 1) as usize] = u32::cast_from(shared[0usize] >> 32);
+        }
+    }
+}
+
+#[cfg(test)]
+pub(super) fn original_summary(
+    device: &Device,
+    input: &CubeTensor,
+    output: &CubeTensor,
+    control: &CubeTensor,
+    groups: usize,
+) -> Result<()> {
+    use super::layout::SummaryLayout as S;
+    let input = TensorHandle::new_contiguous(
+        [groups, S::METRICS],
+        input.handle.clone(),
+        u64::elem_type_native(),
+    );
+    let output =
+        TensorHandle::new_contiguous([S::METRICS], output.handle.clone(), u64::elem_type_native());
     let mut start = 0;
     while start < S::METRICS {
         let operation = summary_operation(start as u32);
@@ -154,16 +239,10 @@ pub(super) fn summary(
         );
         columns::launch(
             &device.client,
-            CubeCount::Static(
-                ((groups * width) as u32).div_ceil(device.workgroup).max(1),
-                1,
-                1,
-            ),
+            device.count(groups * width),
             CubeDim::new_1d(device.workgroup),
-            unsafe {
-                BufferArg::from_raw_parts(input.handle.clone(), input.meta.num_elements() / 2)
-            },
-            unsafe { BufferArg::from_raw_parts(values.handle.clone(), groups * width) },
+            input.clone().into_arg().into_buffer_arg(),
+            values.clone().into_arg().into_buffer_arg(),
             S::METRICS as u32,
             width as u32,
             start as u32,
@@ -174,12 +253,10 @@ pub(super) fn summary(
         };
         store_columns::launch(
             &device.client,
-            CubeCount::Static((width as u32).div_ceil(device.workgroup), 1, 1),
+            device.count(width),
             CubeDim::new_1d(device.workgroup),
-            unsafe { BufferArg::from_raw_parts(total.handle, width) },
-            unsafe {
-                BufferArg::from_raw_parts(output.handle.clone(), output.meta.num_elements() / 2)
-            },
+            total.into_arg().into_buffer_arg(),
+            output.clone().into_arg().into_buffer_arg(),
             start as u32,
         );
         start += width;
@@ -187,8 +264,15 @@ pub(super) fn summary(
     Ok(())
 }
 
+#[cfg(test)]
 #[cube(launch)]
-fn columns(input: &[u64], output: &mut [u64], input_columns: u32, columns: u32, start: u32) {
+fn columns(
+    input: &[u64],
+    output: &mut [u64],
+    #[comptime] input_columns: u32,
+    #[comptime] columns: u32,
+    start: u32,
+) {
     let index = ABSOLUTE_POS;
     if index < output.len() {
         output[index] = input[index / columns as usize * input_columns as usize
@@ -197,6 +281,7 @@ fn columns(input: &[u64], output: &mut [u64], input_columns: u32, columns: u32, 
     }
 }
 
+#[cfg(test)]
 #[cube(launch)]
 fn store_columns(input: &[u64], output: &mut [u64], start: u32) {
     let index = ABSOLUTE_POS;
@@ -205,6 +290,7 @@ fn store_columns(input: &[u64], output: &mut [u64], start: u32) {
     }
 }
 
+#[cfg(test)]
 fn summary_operation(metric: u32) -> ReduceOperationConfig {
     use super::layout::SummaryLayout as S;
     use crate::domain::Good;
@@ -281,6 +367,8 @@ mod tests {
         let control = device.tensor(&[0; CONTROL_WORDS]);
         summary(&device, &input, &output, &control, groups)?;
         let actual = device.read(&output)?;
+        original_summary(&device, &input, &output, &control, groups)?;
+        assert_eq!(actual, device.read(&output)?);
         for metric in 0..S::METRICS {
             let column = (0..groups).map(|group| values[group * S::METRICS + metric]);
             let expected = match summary_operation(metric as u32) {

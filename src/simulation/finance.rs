@@ -477,11 +477,9 @@ impl FinanceRuntime {
 }
 
 fn argument(tensor: &CubeTensor) -> BufferArg {
-    unsafe { BufferArg::from_raw_parts(tensor.handle.clone(), tensor.meta.shape()[0]) }
+    tensor.clone().into_buffer_arg()
 }
 
 fn count(device: &Device, length: usize) -> CubeCount {
-    let groups = (length as u32).div_ceil(device.workgroup).max(1);
-    let x = groups.min(u16::MAX as u32);
-    CubeCount::Static(x, groups.div_ceil(x), 1)
+    device.count(length)
 }

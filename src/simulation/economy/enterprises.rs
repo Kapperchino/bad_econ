@@ -1,10 +1,11 @@
 use super::*;
 use crate::domain::enterprise::EnterpriseState;
+use crate::simulation::configuration::{EconomyConfig, Feature};
 
 #[cube]
 pub(super) fn construct_home(
     state: &mut [u32],
-    config: &[u32],
+    config: &EconomyConfig,
     control: &[Atomic<u32>],
     owner: u32,
 ) {
@@ -79,7 +80,7 @@ pub(super) fn construct_home(
                 owner,
                 accrued,
             );
-            if config[ConfigLayout::PAYROLL_ENABLED] != 0 {
+            if comptime!(config.payroll == Feature::Enabled) {
                 let before = PayrollAccrual::new(gross, config, control);
                 let after = PayrollAccrual::new(accrued, config, control);
                 net = minus(after.net, before.net);
@@ -147,7 +148,7 @@ pub(super) fn construct_home(
 }
 
 #[cube]
-pub(super) fn investment(state: &mut [u32], config: &[u32], owner: u32) {
+pub(super) fn investment(state: &mut [u32], config: &EconomyConfig, owner: u32) {
     let cash = value(state, config, comptime!(Field::Cash as u32), owner);
     let sales = value(state, config, comptime!(Field::Sales as u32), owner);
     let earned = value(state, config, comptime!(Field::GrossIncome as u32), owner);
@@ -176,7 +177,7 @@ pub(super) fn investment(state: &mut [u32], config: &[u32], owner: u32) {
 #[cube]
 pub(super) fn maintain(
     state: &mut [u32],
-    config: &[u32],
+    config: &EconomyConfig,
     control: &[Atomic<u32>],
     firm: u32,
     packets: u32,
@@ -279,7 +280,7 @@ pub(super) fn maintain(
 pub(crate) fn mobility(
     state: &mut [u32],
     actors: &[u32],
-    config: &[u32],
+    config: &EconomyConfig,
     household: u32,
     day: u32,
 ) {
@@ -303,7 +304,7 @@ pub(crate) fn mobility(
     let mut nearest = u32::new(comptime!(i64::from(u32::MAX)));
     if needs_food && idle && landless && settled && alive {
         for sample in 0..16u32 {
-            let candidate = (household + day * 17 + sample * 31) % config[ConfigLayout::ACTORS];
+            let candidate = (household + day * 17 + sample * 31) % config.actors;
             let accessible = household_production::offers(
                 state,
                 actors,
@@ -312,8 +313,7 @@ pub(crate) fn mobility(
                 comptime!(Good::Bread as u32),
             );
             let trip = distance(actors, household, candidate);
-            let days = max(ceildiv(trip, config[ConfigLayout::SHIPMENT_SPEED]), 1)
-                + config[ConfigLayout::COVERAGE];
+            let days = max(ceildiv(trip, config.shipment_speed), 1) + config.coverage;
             let food = times32(
                 number(state, config, comptime!(Field::FoodNeed as u32), household),
                 number(state, config, comptime!(Field::Price as u32), candidate),
@@ -339,7 +339,7 @@ pub(crate) fn mobility(
 }
 
 #[cube]
-pub(super) fn lifecycle(state: &mut [u32], config: &[u32], firm: u32) {
+pub(super) fn lifecycle(state: &mut [u32], config: &EconomyConfig, firm: u32) {
     let status = number(
         state,
         config,
@@ -382,7 +382,7 @@ pub(super) fn lifecycle(state: &mut [u32], config: &[u32], firm: u32) {
 fn method_output(
     state: &mut [u32],
     actors: &[u32],
-    config: &[u32],
+    config: &EconomyConfig,
     control: &[Atomic<u32>],
     firm: u32,
     recipe: u32,
@@ -392,7 +392,7 @@ fn method_output(
     let output = max(number(state, config, recipe + 2, firm), 1);
     let desired = proposed_starts(
         KernelStarts {
-            coverage: config[ConfigLayout::COVERAGE],
+            coverage: config.coverage,
             demand: value(state, config, comptime!(Field::Demand as u32), firm),
             finished: value(state, config, kind(actors, firm).output(), firm),
             pipeline: value(state, config, comptime!(Field::Pipeline as u32), firm),
@@ -407,6 +407,7 @@ fn method_output(
             0,
         ),
     );
+    #[unroll]
     for input in 0..2u32 {
         let good = number(state, config, recipe + 3 + input, firm);
         if good > 0 {
@@ -433,12 +434,13 @@ fn method_output(
 pub(super) fn available_method(
     state: &mut [u32],
     actors: &[u32],
-    config: &[u32],
+    config: &EconomyConfig,
     control: &[Atomic<u32>],
     firm: u32,
 ) {
     let method = number(state, config, comptime!(Field::ActiveMethod as u32), firm);
     let mut available = true;
+    #[unroll]
     for input in 0..2u32 {
         let good = number(
             state,
@@ -512,7 +514,7 @@ pub(super) fn available_method(
 #[cube]
 pub(super) fn operating_plan(
     state: &mut [u32],
-    config: &[u32],
+    config: &EconomyConfig,
     control: &[Atomic<u32>],
     firm: u32,
 ) {
@@ -522,7 +524,7 @@ pub(super) fn operating_plan(
         comptime!(Field::EnterpriseModel as u32),
         firm,
     ) == 1;
-    if config[ConfigLayout::HOME] > 0 || distributor {
+    if comptime!(config.home_mode == Feature::Enabled) || distributor {
         let labor = number(state, config, comptime!(Field::Wage as u32), firm)
             * number(state, config, comptime!(Field::LaborMinutes as u32), firm);
         let inputs = number(state, config, comptime!(Field::InputTicks as u32), firm);
@@ -579,7 +581,7 @@ pub(super) fn operating_plan(
             config,
             comptime!(Field::Price as u32),
             firm,
-            minimum(quote, ticks(config[ConfigLayout::MAXIMUM_PRICE], 0)),
+            minimum(quote, ticks(config.maximum_price, 0)),
         );
         let demand = value(state, config, comptime!(Field::Demand as u32), firm);
         let packets = maximum(
@@ -592,8 +594,8 @@ pub(super) fn operating_plan(
             select(
                 distributor,
                 number(state, config, comptime!(Field::StockCoverage as u32), firm),
-                config[ConfigLayout::COVERAGE],
-            ) + config[ConfigLayout::RING],
+                config.coverage,
+            ) + config.ring,
         );
         let reserve = multiply(
             control,
@@ -614,7 +616,7 @@ pub(super) fn operating_plan(
 pub(super) fn purchasing_power(
     state: &mut [u32],
     actors: &[u32],
-    config: &[u32],
+    config: &EconomyConfig,
     control: &[Atomic<u32>],
     actor: u32,
 ) -> Ticks {
@@ -627,7 +629,7 @@ pub(super) fn purchasing_power(
     ) == 1;
     let mut available = cash;
     if !kind(actors, actor).is(comptime!(ActorKind::Household))
-        && (config[ConfigLayout::HOME] > 0 || distributor)
+        && (comptime!(config.home_mode == Feature::Enabled) || distributor)
     {
         let labor = times32(
             number(state, config, comptime!(Field::Wage as u32), actor),
@@ -638,6 +640,7 @@ pub(super) fn purchasing_power(
             1,
         );
         let mut replacement = zero();
+        #[unroll]
         for input in 0..2u32 {
             if number(
                 state,
@@ -696,10 +699,10 @@ pub(super) fn purchasing_power(
 }
 
 #[cube]
-pub(super) fn household_quote(state: &mut [u32], config: &[u32], household: u32) {
+pub(super) fn household_quote(state: &mut [u32], config: &EconomyConfig, household: u32) {
     let reserve = ticks(
         number(state, config, comptime!(Field::FoodNeed as u32), household)
-            * (config[ConfigLayout::COVERAGE] + config[ConfigLayout::RING]),
+            * (config.coverage + config.ring),
         0,
     );
     let excess = positive(
@@ -711,13 +714,10 @@ pub(super) fn household_quote(state: &mut [u32], config: &[u32], household: u32)
     let adjustment = max(quote / 20, 1);
     let mut next = quote;
     if lt(excess, sales) {
-        next = min(quote + adjustment, config[ConfigLayout::MAXIMUM_PRICE]);
+        next = min(quote + adjustment, config.maximum_price);
     }
     if lt(sales, excess) {
-        next = max(
-            max(quote, adjustment) - adjustment,
-            config[ConfigLayout::MINIMUM_PRICE],
-        );
+        next = max(max(quote, adjustment) - adjustment, config.minimum_price);
     }
     set32(
         state,
@@ -732,7 +732,7 @@ pub(super) fn household_quote(state: &mut [u32], config: &[u32], household: u32)
 pub(super) fn expand(
     state: &mut [u32],
     actors: &[u32],
-    config: &[u32],
+    config: &EconomyConfig,
     control: &[Atomic<u32>],
     owner: u32,
 ) {

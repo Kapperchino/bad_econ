@@ -2,6 +2,7 @@ use crate::domain::Good;
 use crate::ledger::TickLayout;
 use crate::simulation::rows::row_layout;
 use bytemuck::{Pod, Zeroable};
+use cubecl::prelude::*;
 use std::mem::offset_of;
 
 macro_rules! layout {
@@ -16,27 +17,83 @@ macro_rules! layout {
     };
 }
 
-layout!(Header {
-    actors: u32 => ACTORS,
-    lab_count: u32 => LAB_COUNT,
-    project_count: u32 => PROJECT_COUNT,
-    machine_count: u32 => MACHINE_COUNT,
-    stock_count: u32 => STOCK_COUNT,
-    strike_count: u32 => STRIKE_COUNT,
-    labs: u32 => LABS,
-    methods: u32 => METHODS,
-    method_count: u32 => METHOD_COUNT,
-    projects: u32 => PROJECTS,
-    machines: u32 => MACHINES,
-    stocks: u32 => STOCKS,
-    strikes: u32 => STRIKES,
-    lab_state: u32 => LAB_STATE,
-    project_state: u32 => PROJECT_STATE,
-    machine_state: u32 => MACHINE_STATE,
-    stock_state: u32 => STOCK_STATE,
-    strike_state: u32 => STRIKE_STATE,
-    seed: TickLayout => SEED,
-});
+#[repr(C)]
+#[derive(Clone, Copy, Pod, Zeroable)]
+pub struct Header {
+    pub actors: u32,
+    pub lab_count: u32,
+    pub project_count: u32,
+    pub machine_count: u32,
+    pub stock_count: u32,
+    pub strike_count: u32,
+    pub labs: u32,
+    pub methods: u32,
+    pub method_count: u32,
+    pub projects: u32,
+    pub machines: u32,
+    pub stocks: u32,
+    pub strikes: u32,
+    pub lab_state: u32,
+    pub project_state: u32,
+    pub machine_state: u32,
+    pub stock_state: u32,
+    pub strike_state: u32,
+    pub seed: TickLayout,
+}
+impl Header {
+    pub const WORDS: usize = size_of::<Self>() / size_of::<u32>();
+}
+
+#[derive(CubeType, CubeLaunch)]
+pub struct ResearchParameters {
+    pub actors: u32,
+    pub lab_count: u32,
+    pub project_count: u32,
+    pub machine_count: u32,
+    pub stock_count: u32,
+    pub strike_count: u32,
+    pub labs: u32,
+    pub methods: u32,
+    pub method_count: u32,
+    pub projects: u32,
+    pub machines: u32,
+    pub stocks: u32,
+    pub strikes: u32,
+    pub lab_state: u32,
+    pub project_state: u32,
+    pub machine_state: u32,
+    pub stock_state: u32,
+    pub strike_state: u32,
+}
+impl Header {
+    pub fn launch(self) -> ResearchParametersLaunch {
+        ResearchParametersLaunch {
+            actors: self.actors,
+            lab_count: self.lab_count,
+            project_count: self.project_count,
+            machine_count: self.machine_count,
+            stock_count: self.stock_count,
+            strike_count: self.strike_count,
+            labs: self.labs - Self::WORDS as u32,
+            methods: self.methods - Self::WORDS as u32,
+            method_count: self.method_count,
+            projects: self.projects - Self::WORDS as u32,
+            machines: self.machines - Self::WORDS as u32,
+            stocks: self.stocks - Self::WORDS as u32,
+            strikes: self.strikes - Self::WORDS as u32,
+            lab_state: self.lab_state,
+            project_state: self.project_state,
+            machine_state: self.machine_state,
+            stock_state: self.stock_state,
+            strike_state: self.strike_state,
+        }
+    }
+}
+#[derive(CubeType, CubeLaunch)]
+pub struct KernelResearchConfig {
+    pub parameters: ResearchParameters,
+    pub records: Box<[u32]>,
+}
 
 row_layout!(LabLayoutRows, LabLayout {
     owner: u32 => OWNER,

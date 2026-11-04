@@ -500,7 +500,7 @@ impl LaborTruncation {
                             &device.client,
                             CubeCount::Static(1, 1, 1),
                             CubeDim::new_1d(1),
-                            unsafe { BufferArg::from_raw_parts(norm.handle, 1) },
+                            norm.into_arg().into_buffer_arg(),
                             argument(&weighted_tail.data),
                             argument(&control),
                             contraction.numerator,

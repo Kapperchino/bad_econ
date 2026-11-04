@@ -4,7 +4,7 @@ use crate::ledger::TickLayout;
 use anyhow::{Result, anyhow};
 use burn_wgpu::CubeTensor;
 use bytemuck::{Pod, Zeroable};
-use cubecl::{CubeCount, CubeDim, prelude::BufferArg};
+use cubecl::CubeDim;
 pub use kernels::{
     KernelCapacity, KernelDeficit, KernelFatigue, KernelObservation, available_minutes,
     next_fatigue, observed_blend, service_deficit,
@@ -208,14 +208,11 @@ pub fn evaluate(
     let services = device.tensor(bytemuck::cast_slice(&services));
     let output = device.empty(requests.len().max(1) * ResultLayout::WORDS);
     let control = device.tensor(&[0; 4]);
-    let argument = |tensor: &CubeTensor| unsafe {
-        BufferArg::from_raw_parts(tensor.handle.clone(), tensor.meta.shape()[0])
-    };
-    let groups = count.div_ceil(device.workgroup).max(1);
-    let x = groups.min(u16::MAX.into());
+    let argument = |tensor: &CubeTensor| tensor.clone().into_buffer_arg();
+    let cube_count = device.count(count as usize);
     kernels::evaluate::launch(
         &device.client,
-        CubeCount::Static(x, groups.div_ceil(x), 1),
+        cube_count,
         CubeDim::new_1d(device.workgroup),
         argument(&input),
         argument(&services),

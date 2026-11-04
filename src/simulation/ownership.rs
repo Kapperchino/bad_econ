@@ -1,5 +1,6 @@
-use super::{Device, flags::FaultFlags, layout::ConfigLayout, words::*};
+use super::{Device, flags::FaultFlags, words::*};
 use crate::domain::{Field, State};
+use crate::simulation::configuration::{Configuration, EconomyConfig};
 use anyhow::{Context, Result};
 use burn_wgpu::CubeTensor;
 use cubecl::{CubeCount, CubeDim, prelude::*};
@@ -42,18 +43,16 @@ impl OwnershipRuntime {
         &self,
         device: &Device,
         state: &CubeTensor,
-        config: &CubeTensor,
+        config: &Configuration,
     ) -> Result<()> {
-        let argument = |tensor: &CubeTensor| unsafe {
-            BufferArg::from_raw_parts(tensor.handle.clone(), tensor.meta.shape()[0])
-        };
+        let argument = |tensor: &CubeTensor| tensor.clone().into_buffer_arg();
         device.write(&self.control, &[0; 4]);
         distribute::launch(
             &device.client,
             CubeCount::Static(1, 1, 1),
             CubeDim::new_1d(device.workgroup),
             argument(state),
-            argument(config),
+            config.launch(),
             argument(&self.shares),
             argument(&self.control),
         );
@@ -62,9 +61,9 @@ impl OwnershipRuntime {
 }
 
 #[cube(launch)]
-fn distribute(state: &mut [u32], config: &[u32], shares: &[u32], control: &[Atomic<u32>]) {
+fn distribute(state: &mut [u32], config: &EconomyConfig, shares: &[u32], control: &[Atomic<u32>]) {
     if ABSOLUTE_POS == 0 {
-        let actors = config[ConfigLayout::ACTORS];
+        let actors = config.actors;
         let mut cursor = 1usize;
         for _ in 0..shares[0usize] {
             let firm = shares[cursor];
@@ -84,16 +83,9 @@ fn distribute(state: &mut [u32], config: &[u32], shares: &[u32], control: &[Atom
                         comptime!(Field::OperatingReserve as u32) * actors + firm,
                     ),
                 ),
-                ticks(
-                    config[ConfigLayout::RESERVE_LOW],
-                    config[ConfigLayout::RESERVE_HIGH],
-                ),
+                ticks(config.reserve_low, config.reserve_high),
             );
-            let amount = ratio(
-                positive(cash, reserve),
-                config[ConfigLayout::DISTRIBUTION_RATE],
-                1000,
-            );
+            let amount = ratio(positive(cash, reserve), config.distribution_rate, 1000);
             amount.faults.record(control);
             let mut distributed = zero();
             for _ in 0..count {

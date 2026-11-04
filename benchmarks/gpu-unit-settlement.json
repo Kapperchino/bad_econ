@@ -1,0 +1,56 @@
+{
+  "stage": "Consumer settlement in ordered batches. Later actor-count and indexing changes are excluded.",
+  "protocol": {
+    "households": 1000000,
+    "seed": 42,
+    "workgroup": 64,
+    "warmup_days": 2,
+    "measured_days": 10,
+    "runs": 1,
+    "profiling": false,
+    "acceptance_measurement": false
+  },
+  "comparison_note": "The earlier adaptive-queue measurement precedes incremental entry indexing; this short trajectory does not reach the day-30 entry changes. Repeated 60-day acceptance measurements remain required.",
+  "runs": {
+    "continued-adaptive": {
+      "milliseconds_per_day": 472.07655830000004,
+      "final_state_hash": "c3e78f368c1542c22c5e33f3172bcd5e7ed403eebc34ab83ca9e93c03658c7af",
+      "maximum_reserved_bytes": 3865321472,
+      "memory_budget_bytes": 27830837248,
+      "mean_phase_milliseconds": {
+        "Commitment": 80.2106584,
+        "ProvisionPurchase": 309.8565292,
+        "Audit": 58.5276915
+      }
+    },
+    "unit-batch": {
+      "milliseconds_per_day": 397.54979579999997,
+      "final_state_hash": "c3e78f368c1542c22c5e33f3172bcd5e7ed403eebc34ab83ca9e93c03658c7af",
+      "maximum_reserved_bytes": 3865321472,
+      "memory_budget_bytes": 27830837248,
+      "mean_phase_milliseconds": {
+        "Commitment": 76.3216416,
+        "ProvisionPurchase": 239.55820830000002,
+        "Audit": 58.463525000000004
+      }
+    }
+  },
+  "identical_hashes": true,
+  "validation": {
+    "unit_settlement": "13 boundary fixtures, workgroups 32/64/128/256, shared and subgroup scans, compared with original sequential GPU settlement",
+    "phases": "11 GPU phase/registry/checkpoint tests passed",
+    "lint": "cargo clippy --all-targets --features viewer -- -D warnings passed"
+  },
+  "source_sha256_relative_to_206c531": {
+    "src/domain.rs": "b3d7457b4c48daf0cfd6081d6eb9d2b6fbd3af7be61313ef5fd71eb81c648fb3",
+    "src/simulation/economy.rs": "feaf84d52abe84399821a1c7dd2a172f66a393aa22275c13ee9f9d5345780350",
+    "src/simulation/economy/batch.rs": "69641ed4a4b9b034f3a00fc1981c53ca1a0f58403055236603e3e05b188b37ea",
+    "src/simulation/layout.rs": "bc044a4593c45f90bfafbcc37e9b45bc3028551309c62233c5d5b71fdc4da52a",
+    "src/simulation/markets.rs": "cfa9e18d8f79672c5435141c0d44295d23f091e6597c966dc4f7b8ab5875acea",
+    "src/simulation/mod.rs": "f3466f98a779775be5bd51815617ed44cb83f07e236eba7bd4d83f361c71b562",
+    "src/simulation/registry.rs": "4a5c316c07e9e368689b114ab0c6e575ddb4e170ae5761f761e77065ed807e1c",
+    "src/simulation/registry/entries.rs": "e0b8cdded613c918003cd86e85abcc7a30a01a08e839f7e11e00aac361aebf74",
+    "src/simulation/registry/spatial.rs": "ca5423fdf25937c7552202789fc2cffccc1a1f70f1f126ac2ac0c78c2f9f2eda"
+  },
+  "binary_sha256": "a29e901d07757ef0104086cd967addd302ceb2192184898a4bbeb2f144f98c68"
+}

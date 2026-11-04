@@ -2,56 +2,39 @@ use super::{
     bargaining::{
         KernelBargainingFactors, KernelWageBounds, bargaining_weight, second_offer, wage_bounds,
     },
-    layout::{ConfigLayout, HIGH_WORD, LOW_WORD, TICK_WORDS},
+    configuration::Feature,
+    layout::LOW_WORD,
     policy::MAXIMUM_WAGE,
     words::*,
 };
 use crate::domain::{PAYROLL_SCALE, bargaining::BargainingPolicy};
-use bytemuck::{Pod, Zeroable};
+use crate::simulation::configuration::EconomyConfig;
 use cubecl::prelude::*;
-use std::mem::offset_of;
 
-#[repr(C)]
-#[derive(Clone, Copy, Pod, Zeroable)]
-pub struct PolicyLayout {
-    enabled: u32,
-    legal_minimum: u32,
-    quantum: u32,
-    daily_cash_cost: u32,
-    funded_other: u32,
-    participating_adults: u32,
-    normal_day_minutes: u32,
-    work_cost_per_minute: u32,
-    desired_wage: u32,
-    mandate: u32,
-    withdrawal: u32,
-    alternatives: u32,
-    concentration: u32,
-    replacements: u32,
+#[derive(CubeType, CubeLaunch, Clone, Copy, Default)]
+pub struct BargainingConfig {
+    #[cube(comptime)]
+    pub enabled: Feature,
+    pub legal_minimum: u32,
+    pub quantum: u32,
+    pub daily_cash_cost: u32,
+    pub funded_other: u32,
+    pub participating_adults: u32,
+    pub normal_day_minutes: u32,
+    pub work_cost_per_minute: u32,
+    pub desired_wage: u32,
+    pub mandate: u32,
+    pub withdrawal: u32,
+    pub alternatives: u32,
+    pub concentration: u32,
+    pub replacements: u32,
 }
-
-impl PolicyLayout {
-    pub const WORDS: usize = size_of::<Self>() / size_of::<u32>();
-    pub const ENABLED: usize = offset_of!(Self, enabled) / size_of::<u32>();
-    const LEGAL: usize = offset_of!(Self, legal_minimum) / size_of::<u32>();
-    const QUANTUM: usize = offset_of!(Self, quantum) / size_of::<u32>();
-    const CASH_COST: usize = offset_of!(Self, daily_cash_cost) / size_of::<u32>();
-    const FUNDED_OTHER: usize = offset_of!(Self, funded_other) / size_of::<u32>();
-    const ADULTS: usize = offset_of!(Self, participating_adults) / size_of::<u32>();
-    const NORMAL_DAY: usize = offset_of!(Self, normal_day_minutes) / size_of::<u32>();
-    const WORK_COST: usize = offset_of!(Self, work_cost_per_minute) / size_of::<u32>();
-    const DESIRED: usize = offset_of!(Self, desired_wage) / size_of::<u32>();
-    const MANDATE: usize = offset_of!(Self, mandate) / size_of::<u32>();
-    const WITHDRAWAL: usize = offset_of!(Self, withdrawal) / size_of::<u32>();
-    const ALTERNATIVES: usize = offset_of!(Self, alternatives) / size_of::<u32>();
-    const CONCENTRATION: usize = offset_of!(Self, concentration) / size_of::<u32>();
-    const REPLACEMENTS: usize = offset_of!(Self, replacements) / size_of::<u32>();
-
+impl BargainingConfig {
     pub fn new(policy: Option<&BargainingPolicy>) -> Self {
         match policy {
-            None => Self::zeroed(),
+            None => Self::default(),
             Some(policy) => Self {
-                enabled: 1,
+                enabled: Feature::Enabled,
                 legal_minimum: policy.legal_minimum,
                 quantum: policy.quantum,
                 daily_cash_cost: policy.daily_cash_cost,
@@ -66,6 +49,24 @@ impl PolicyLayout {
                 concentration: policy.concentration,
                 replacements: policy.replacements,
             },
+        }
+    }
+    pub fn launch(self) -> BargainingConfigLaunch {
+        BargainingConfigLaunch {
+            enabled: self.enabled,
+            legal_minimum: self.legal_minimum,
+            quantum: self.quantum,
+            daily_cash_cost: self.daily_cash_cost,
+            funded_other: self.funded_other,
+            participating_adults: self.participating_adults,
+            normal_day_minutes: self.normal_day_minutes,
+            work_cost_per_minute: self.work_cost_per_minute,
+            desired_wage: self.desired_wage,
+            mandate: self.mandate,
+            withdrawal: self.withdrawal,
+            alternatives: self.alternatives,
+            concentration: self.concentration,
+            replacements: self.replacements,
         }
     }
 }
@@ -175,17 +176,18 @@ fn required_gross(
     prior: Ticks,
     mut need: NetAmount,
     denominator: u32,
-    config: &[u32],
+    config: &EconomyConfig,
     control: &[Atomic<u32>],
 ) -> Ticks {
     let mut result = zero();
     let mut lower = zero();
-    let mut rate = config[ConfigLayout::TAX_BASE_RATE];
-    let charge = config[ConfigLayout::EMPLOYEE_CHARGE];
+    let mut rate = config.tax_base_rate;
+    let charge = config.employee_charge;
     let mut status = u32::new(comptime!(IncomeSearch::Pending as i64));
-    for bracket in 0..config[ConfigLayout::TAX_BRACKET_COUNT] {
-        let offset = ConfigLayout::TAX_THRESHOLDS + bracket as usize * TICK_WORDS;
-        let upper = ticks(config[offset + LOW_WORD], config[offset + HIGH_WORD]);
+    #[unroll]
+    for bracket in 0..config.tax_brackets.len() {
+        let bracket = config.tax_brackets.index(bracket);
+        let upper = ticks(bracket.low, bracket.high);
         let start = maximum(prior, lower);
         if status == comptime!(IncomeSearch::Pending as u32) && lt(start, upper) {
             let span = minus(upper, start);
@@ -204,7 +206,7 @@ fn required_gross(
             result = sum.value;
         }
         lower = upper;
-        rate = config[ConfigLayout::TAX_RATES + bracket as usize];
+        rate = bracket.rate;
     }
     if status == comptime!(IncomeSearch::Pending as u32) {
         let remaining = need.gross(PAYROLL_SCALE - rate - charge, denominator, control);
@@ -217,19 +219,18 @@ fn required_gross(
 }
 
 #[cube]
-pub fn legal_grid_rate(config: &[u32], #[comptime] policy_offset: usize) -> u32 {
-    let quantum = config[policy_offset + PolicyLayout::QUANTUM];
-    ceildiv(config[policy_offset + PolicyLayout::LEGAL], quantum) * quantum
+pub fn legal_grid_rate(config: &EconomyConfig) -> u32 {
+    let quantum = config.bargaining.quantum;
+    ceildiv(config.bargaining.legal_minimum, quantum) * quantum
 }
 
 #[cube]
 pub fn negotiate(
     request: NegotiationRequest,
-    config: &[u32],
+    config: &EconomyConfig,
     control: &[Atomic<u32>],
-    #[comptime] policy_offset: usize,
 ) -> NegotiationQuote {
-    let cash_cost = config[policy_offset + PolicyLayout::CASH_COST];
+    let cash_cost = config.bargaining.daily_cash_cost;
     let mut cover = 10_500u32;
     if cash_cost > 0 {
         let bounded_cash = minimum(request.household_cash, times32(cash_cost, 11));
@@ -237,21 +238,16 @@ pub fn negotiate(
         scaled.faults.record(control);
         cover = min(scaled.value.extract(LOW_WORD), 10_500);
     }
-    let base = cash_cost
-        - min(
-            cash_cost,
-            config[policy_offset + PolicyLayout::FUNDED_OTHER],
-        );
+    let base = cash_cost - min(cash_cost, config.bargaining.funded_other);
     let refusal = select(cash_cost == 0, 42_000, 21_000 + 2 * cover);
-    let denominator = 35_000
-        * config[policy_offset + PolicyLayout::ADULTS]
-        * config[policy_offset + PolicyLayout::NORMAL_DAY];
+    let denominator =
+        35_000 * config.bargaining.participating_adults * config.bargaining.normal_day_minutes;
     let rate_numerator = times32(base, refusal);
     let rate = NetAmount::ratio(rate_numerator, denominator);
     let displayed = plus(
         rate.whole,
         ticks(
-            u32::cast_from(rate.remainder > 0) + config[policy_offset + PolicyLayout::WORK_COST],
+            u32::cast_from(rate.remainder > 0) + config.bargaining.work_cost_per_minute,
             0,
         ),
     );
@@ -260,7 +256,7 @@ pub fn negotiate(
     let required = plus(
         payment.whole,
         times32(
-            config[policy_offset + PolicyLayout::WORK_COST],
+            config.bargaining.work_cost_per_minute,
             request.payable_minutes,
         ),
     );
@@ -273,31 +269,31 @@ pub fn negotiate(
     let gross = required_gross(request.prior_gross, payment, denominator, config, control);
     let quote = wage_bounds(
         KernelWageBounds {
-            legal: ticks(config[policy_offset + PolicyLayout::LEGAL], 0),
+            legal: ticks(config.bargaining.legal_minimum, 0),
             gross_needed: gross,
             funded: request.funded_per_packet,
             payable_hours: request.payable_minutes,
             employer_charge: 0,
-            quantum: config[policy_offset + PolicyLayout::QUANTUM],
+            quantum: config.bargaining.quantum,
         },
         control,
     );
-    let quantum = config[policy_offset + PolicyLayout::QUANTUM];
+    let quantum = config.bargaining.quantum;
     let ceiling = minimum(quote.maximum, ticks(MAXIMUM_WAGE / quantum * quantum, 0));
     let weight = bargaining_weight(KernelBargainingFactors {
-        mandate: config[policy_offset + PolicyLayout::MANDATE],
-        withdrawal: config[policy_offset + PolicyLayout::WITHDRAWAL],
-        alternatives: config[policy_offset + PolicyLayout::ALTERNATIVES],
-        concentration: config[policy_offset + PolicyLayout::CONCENTRATION],
-        replacements: config[policy_offset + PolicyLayout::REPLACEMENTS],
+        mandate: config.bargaining.mandate,
+        withdrawal: config.bargaining.withdrawal,
+        alternatives: config.bargaining.alternatives,
+        concentration: config.bargaining.concentration,
+        replacements: config.bargaining.replacements,
     });
     let desired = maximum(
         quote.minimum,
         ticks(
             select(
-                config[policy_offset + PolicyLayout::DESIRED] == 0,
+                config.bargaining.desired_wage == 0,
                 request.candidate_wage,
-                config[policy_offset + PolicyLayout::DESIRED],
+                config.bargaining.desired_wage,
             ),
             0,
         ),
@@ -329,6 +325,8 @@ pub fn negotiate(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::simulation::configuration::{Configuration, TaxBracket};
+    use crate::simulation::layout::HIGH_WORD;
     use crate::{
         ledger::TickLayout,
         simulation::{
@@ -337,6 +335,8 @@ mod tests {
         },
     };
     use anyhow::Result;
+    use bytemuck::{Pod, Zeroable};
+    use std::mem::offset_of;
 
     #[repr(C)]
     #[derive(Clone, Copy, Debug, Pod, Zeroable)]
@@ -355,7 +355,12 @@ mod tests {
     }
 
     #[cube(launch)]
-    fn income_probe(input: &[u32], output: &mut [u32], config: &[u32], control: &[Atomic<u32>]) {
+    fn income_probe(
+        input: &[u32],
+        output: &mut [u32],
+        config: &EconomyConfig,
+        control: &[Atomic<u32>],
+    ) {
         let id = ABSOLUTE_POS;
         if id < input.len() / IncomeCase::WORDS {
             let base = id * IncomeCase::WORDS;
@@ -399,17 +404,23 @@ mod tests {
             ) as u128
         }
 
-        fn words(&self) -> Vec<u32> {
-            let mut words = vec![0; size_of::<ConfigLayout>() / size_of::<u32>()];
-            words[ConfigLayout::TAX_BASE_RATE] = self.rates[0];
-            words[ConfigLayout::EMPLOYEE_CHARGE] = self.employee_charge;
-            words[ConfigLayout::TAX_BRACKET_COUNT] = self.thresholds.len() as u32;
-            for (index, threshold) in self.thresholds.iter().enumerate() {
-                words[ConfigLayout::TAX_THRESHOLDS + index * 2] = *threshold as u32;
-                words[ConfigLayout::TAX_THRESHOLDS + index * 2 + 1] = (*threshold >> 32) as u32;
-                words[ConfigLayout::TAX_RATES + index] = self.rates[index + 1];
-            }
-            words
+        fn configuration(&self, device: &Device) -> Result<Configuration> {
+            let scenario =
+                crate::domain::Scenario::baseline(1, 42, crate::domain::Experiment::Baseline)?;
+            let mut config = Configuration::new(device, &scenario, &scenario.initial()?);
+            config.tax_base_rate = self.rates[0];
+            config.employee_charge = self.employee_charge;
+            config.tax_brackets = self
+                .thresholds
+                .iter()
+                .zip(&self.rates[1..])
+                .map(|(&threshold, &rate)| TaxBracket {
+                    low: threshold as u32,
+                    high: (threshold >> 32) as u32,
+                    rate,
+                })
+                .collect();
+            Ok(config)
         }
 
         fn expected(&self, case: &IncomeCase) -> u64 {
@@ -459,18 +470,16 @@ mod tests {
         }
         let input = device.tensor(bytemuck::cast_slice(&cases));
         let output = device.empty(cases.len() * 2);
-        let config = device.tensor(&fixture.words());
+        let config = fixture.configuration(&device)?;
         let control = device.tensor(&[0; CONTROL_WORDS]);
-        let argument = |tensor: &burn_wgpu::CubeTensor| unsafe {
-            BufferArg::from_raw_parts(tensor.handle.clone(), tensor.meta.shape()[0])
-        };
+        let argument = |tensor: &burn_wgpu::CubeTensor| tensor.clone().into_buffer_arg();
         income_probe::launch(
             &device.client,
-            CubeCount::Static((cases.len() as u32).div_ceil(device.workgroup), 1, 1),
+            device.count(cases.len()),
             CubeDim::new_1d(device.workgroup),
             argument(&input),
             argument(&output),
-            argument(&config),
+            config.launch(),
             argument(&control),
         );
         let actual = device.read(&output)?;

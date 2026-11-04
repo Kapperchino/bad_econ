@@ -4,6 +4,7 @@ use super::{
     words::*,
 };
 use crate::domain::PAYROLL_SCALE;
+use crate::simulation::configuration::EconomyConfig;
 use cubecl::prelude::*;
 
 #[derive(CubeType, Clone, Copy)]
@@ -45,26 +46,27 @@ pub struct PayrollAccrual {
 
 #[cube]
 impl PayrollAccrual {
-    pub fn new(gross: Ticks, config: &[u32], control: &[Atomic<u32>]) -> Self {
+    pub fn new(gross: Ticks, config: &EconomyConfig, control: &[Atomic<u32>]) -> Self {
         let mut tax = ScaledAmount {
             whole: zero(),
             remainder: 0,
         };
         let mut lower = zero();
-        let mut rate = config[ConfigLayout::TAX_BASE_RATE];
-        for bracket in 0..config[ConfigLayout::TAX_BRACKET_COUNT] {
-            let base = ConfigLayout::TAX_THRESHOLDS + bracket as usize * TICK_WORDS;
-            let upper = ticks(config[base + LOW_WORD], config[base + HIGH_WORD]);
+        let mut rate = config.tax_base_rate;
+        #[unroll]
+        for bracket in 0..config.tax_brackets.len() {
+            let bracket = config.tax_brackets.index(bracket);
+            let upper = ticks(bracket.low, bracket.high);
             let taxable = positive(minimum(gross, upper), lower);
             tax.add(ScaledAmount::new(taxable, rate, control), control);
             lower = upper;
-            rate = config[ConfigLayout::TAX_RATES + bracket as usize];
+            rate = bracket.rate;
         }
         tax.add(
             ScaledAmount::new(positive(gross, lower), rate, control),
             control,
         );
-        let charge = ScaledAmount::new(gross, config[ConfigLayout::EMPLOYEE_CHARGE], control);
+        let charge = ScaledAmount::new(gross, config.employee_charge, control);
         let fractional = tax.remainder + charge.remainder;
         let reserve = ticks(ceildiv(fractional, PAYROLL_SCALE), 0);
         let retained = plus(tax.whole, charge.whole);
@@ -85,6 +87,7 @@ impl PayrollAccrual {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::simulation::configuration::{Configuration, TaxBracket};
     use crate::simulation::{
         Device,
         flags::{CONTROL_WORDS, FAULT_WORD},
@@ -93,7 +96,12 @@ mod tests {
     use anyhow::Result;
 
     #[cube(launch)]
-    fn teaching_cases(gross: &[u32], output: &mut [u32], config: &[u32], control: &[Atomic<u32>]) {
+    fn teaching_cases(
+        gross: &[u32],
+        output: &mut [u32],
+        config: &EconomyConfig,
+        control: &[Atomic<u32>],
+    ) {
         let id = ABSOLUTE_POS;
         if id < gross.len() / TICK_WORDS {
             let income = ticks(gross[id * TICK_WORDS], gross[id * TICK_WORDS + HIGH_WORD]);
@@ -120,26 +128,27 @@ mod tests {
     #[test]
     fn lean_payroll_and_proposed_starts_teaching_values_on_gpu() -> Result<()> {
         let device = Device::headless(64)?;
-        let mut words = vec![0; size_of::<ConfigLayout>() / size_of::<u32>()];
-        words[ConfigLayout::TAX_BASE_RATE] = 100;
-        words[ConfigLayout::EMPLOYEE_CHARGE] = 50;
-        words[ConfigLayout::TAX_BRACKET_COUNT] = 1;
-        words[ConfigLayout::TAX_THRESHOLDS] = 10_000;
-        words[ConfigLayout::TAX_RATES] = 300;
-        let config = device.tensor(&words);
+        let scenario =
+            crate::domain::Scenario::baseline(1, 42, crate::domain::Experiment::Baseline)?;
+        let mut config = Configuration::new(&device, &scenario, &scenario.initial()?);
+        config.tax_base_rate = 100;
+        config.employee_charge = 50;
+        config.tax_brackets = vec![TaxBracket {
+            low: 10_000,
+            high: 0,
+            rate: 300,
+        }];
         let gross = device.tensor(&[8000, 0, 10_000, 0, 11_080, 0]);
         let output = device.empty(4 * TICK_WORDS);
         let control = device.tensor(&[0; CONTROL_WORDS]);
-        let argument = |tensor: &burn_wgpu::CubeTensor| unsafe {
-            BufferArg::from_raw_parts(tensor.handle.clone(), tensor.meta.shape()[0])
-        };
+        let argument = |tensor: &burn_wgpu::CubeTensor| tensor.clone().into_buffer_arg();
         teaching_cases::launch(
             &device.client,
             CubeCount::Static(1, 1, 1),
             CubeDim::new_1d(device.workgroup),
             argument(&gross),
             argument(&output),
-            argument(&config),
+            config.launch(),
             argument(&control),
         );
         let actual = device.read(&output)?;

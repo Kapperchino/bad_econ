@@ -162,6 +162,7 @@ pub fn fraction_index(numerator: Ticks, denominator: Ticks) -> u32 {
     let bounded = minimum(numerator, denominator);
     let mut remainder = bounded;
     let mut result = 0u32;
+    #[unroll]
     for _step in 0..PRICE_INDEX_BITS {
         let carry = remainder.extract(HIGH_WORD) >> WORD_TOP_BIT;
         remainder = ticks(
@@ -346,14 +347,10 @@ mod tests {
         let output = device.empty(cases.len() * ProbeOutput::WORDS);
         probe::launch(
             &device.client,
-            CubeCount::Static((cases.len() as u32).div_ceil(TEST_WORKGROUP), 1, 1),
+            device.count(cases.len()),
             CubeDim::new_1d(TEST_WORKGROUP),
-            unsafe {
-                BufferArg::from_raw_parts(input.handle.clone(), cases.len() * ProbeInput::WORDS)
-            },
-            unsafe {
-                BufferArg::from_raw_parts(output.handle.clone(), cases.len() * ProbeOutput::WORDS)
-            },
+            input.clone().into_buffer_arg(),
+            output.clone().into_buffer_arg(),
         );
         let actual = device.read(&output)?;
         for (case, output) in cases

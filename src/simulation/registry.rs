@@ -1,13 +1,12 @@
+use crate::simulation::configuration::{Configuration, EconomyConfig};
 pub(super) mod entries;
-use super::{
-    Device,
-    layout::{ActorLayout as A, ConfigLayout as C},
-    words::*,
-};
+pub(super) mod records;
+pub(super) mod spatial;
+use super::{Device, layout::ActorLayout as A, words::*};
 use crate::domain::{ActorRows, Field, Position, Scenario, State};
 use anyhow::{Context, Result};
 use burn_wgpu::CubeTensor;
-use cubecl::{CubeCount, CubeDim, prelude::*};
+use cubecl::{CubeDim, prelude::*};
 use std::collections::BTreeMap;
 
 #[derive(Clone, Default)]
@@ -33,7 +32,26 @@ impl MigrationRegistry {
     }
 }
 
+#[derive(Clone, Copy)]
+pub(super) enum CapacityUpdate {
+    Patch,
+    Rebuild,
+}
+
+#[derive(Clone, Copy)]
+pub(super) enum RegistryTransition {
+    Unchanged,
+    Capacity(CapacityUpdate),
+    Migration,
+}
+
+pub(super) struct RegistryBuffers {
+    pub actors: CubeTensor,
+    pub spatial: CubeTensor,
+}
+
 pub(super) struct RegistryPlan {
+    pub transition: RegistryTransition,
     pub actors: Option<ActorRows>,
     pub migrations: MigrationRegistry,
 }
@@ -44,12 +62,8 @@ impl RegistryPlan {
         migrations: &MigrationRegistry,
         requests: &[u32],
     ) -> Result<Option<Self>> {
-        let heirs_possible = metadata
-            .actors
-            .iter()
-            .filter(|actor| actor.kind == 0)
-            .count()
-            > scenario.config().households as usize;
+        let heirs_possible =
+            metadata.actors.len() - metadata.actors.firms() > scenario.config().households as usize;
         let supported = requests.iter().all(|&action| match action >> 24 {
             0 => action == 0,
             2 | 3 => true,
@@ -65,6 +79,7 @@ impl RegistryPlan {
                     .iter()
                     .any(|action| matches!(action >> 24, 3 | 6))
                     .then(|| metadata.actors.clone());
+                let mut capacity_update = CapacityUpdate::Patch;
                 for (index, action) in requests.iter().enumerate() {
                     match action >> 24 {
                         2 => {
@@ -93,6 +108,9 @@ impl RegistryPlan {
                         6 => {
                             let rows = actors.as_mut().context("missing capacity registry")?;
                             let mut actor = rows.at(index);
+                            if actor.capacity == 0 {
+                                capacity_update = CapacityUpdate::Rebuild;
+                            }
                             actor.capacity = actor
                                 .capacity
                                 .checked_add(action & 0x00ffffff)
@@ -102,7 +120,16 @@ impl RegistryPlan {
                         _ => (),
                     }
                 }
+                let transition = match (
+                    requests.iter().any(|action| action >> 24 == 3),
+                    requests.iter().any(|action| action >> 24 == 6),
+                ) {
+                    (true, _) => RegistryTransition::Migration,
+                    (_, true) => RegistryTransition::Capacity(capacity_update),
+                    _ => RegistryTransition::Unchanged,
+                };
                 Ok(Some(Self {
+                    transition,
                     actors,
                     migrations: next,
                 }))
@@ -126,14 +153,14 @@ enum Stage {
 fn transition(
     state: &mut [u32],
     actors: &[u32],
-    config: &[u32],
+    config: &EconomyConfig,
     requests: &[u32],
     incoming: &[Atomic<u32>],
     day: u32,
     #[comptime] stage: Stage,
 ) {
     let actor = ABSOLUTE_POS as u32;
-    let count = config[C::ACTORS];
+    let count = config.actors;
     if actor < count {
         let action = requests[actor as usize];
         let kind = action >> 24;
@@ -173,7 +200,7 @@ fn transition(
                     actors[A::Y * stride + destination as usize],
                 );
                 let distance = max(x, dx) - min(x, dx) + max(y, dy) - min(y, dy);
-                let speed = config[C::SHIPMENT_SPEED];
+                let speed = config.shipment_speed;
                 let duration = max((distance + speed - 1) / speed, 1);
                 store(
                     state,
@@ -235,30 +262,93 @@ pub(super) fn apply(
     device: &Device,
     state: &CubeTensor,
     actors: &CubeTensor,
-    config: &CubeTensor,
+    config: &Configuration,
     requests: &CubeTensor,
     scratch: &CubeTensor,
     day: u32,
 ) {
-    let argument = |tensor: &CubeTensor| unsafe {
-        BufferArg::from_raw_parts(tensor.handle.clone(), tensor.meta.shape()[0])
-    };
-    let groups = (requests.meta.shape()[0] as u32)
-        .div_ceil(device.workgroup)
-        .max(1);
-    let x = groups.min(u16::MAX.into());
+    let argument = |tensor: &CubeTensor| tensor.clone().into_buffer_arg();
+    let cube_count = device.count(requests.meta.num_elements());
     for stage in [Stage::Clear, Stage::Count, Stage::Apply] {
         transition::launch(
             &device.client,
-            CubeCount::Static(x, groups.div_ceil(x), 1),
+            cube_count.clone(),
             CubeDim::new_1d(device.workgroup),
             argument(state),
             argument(actors),
-            argument(config),
+            config.launch(),
             argument(requests),
             argument(scratch),
             day,
             stage,
         );
+    }
+}
+
+pub(super) fn patch_capacity(
+    device: &Device,
+    actors: &CubeTensor,
+    requests: &CubeTensor,
+) -> CubeTensor {
+    let output = device.empty(actors.meta.num_elements());
+    capacity_rows::launch(
+        &device.client,
+        device.count(actors.meta.num_elements()),
+        CubeDim::new_1d(device.workgroup),
+        actors.clone().into_buffer_arg(),
+        requests.clone().into_buffer_arg(),
+        output.clone().into_buffer_arg(),
+    );
+    output
+}
+
+#[cube(launch)]
+fn capacity_rows(actors: &[u32], requests: &[u32], output: &mut [u32]) {
+    let index = ABSOLUTE_POS;
+    if index < actors.len() {
+        let count = requests.len();
+        let action = requests[index % count];
+        let mut value = actors[index];
+        let capacity = index / count == A::CAPACITY;
+        let geographic = index / count == A::GEOGRAPHIC_CAPACITY && value > 0;
+        if (capacity || geographic) && action >> 24 == 6 {
+            value += action & 0x00ffffff;
+        }
+        output[index] = value;
+    }
+}
+
+pub(super) fn extend_actors(
+    device: &Device,
+    actors: &CubeTensor,
+    additions: &super::layout::ActorMetadataRows,
+) -> CubeTensor {
+    let additions = device.tensor(&additions.words());
+    let output = device.empty(actors.meta.num_elements() + additions.meta.num_elements());
+    extend_rows::launch(
+        &device.client,
+        device.count(output.meta.num_elements()),
+        CubeDim::new_1d(device.workgroup),
+        actors.clone().into_buffer_arg(),
+        additions.into_buffer_arg(),
+        output.clone().into_buffer_arg(),
+    );
+    output
+}
+
+#[cube(launch)]
+fn extend_rows(actors: &[u32], additions: &[u32], output: &mut [u32]) {
+    let index = ABSOLUTE_POS;
+    if index < output.len() {
+        let before = actors.len() / A::WORDS;
+        let added = additions.len() / A::WORDS;
+        let count = before + added;
+        let actor = index % count;
+        let field = index / count;
+        if actor < before {
+            output[index] = actors[field * before + actor];
+        } else {
+            output[index] = additions[field * added + actor - before];
+        }
     }
 }

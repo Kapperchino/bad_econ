@@ -382,7 +382,7 @@ mod tests {
             &device.client,
             CubeCount::Static(8, 1, 1),
             CubeDim::new_1d(TEST_WORKGROUP),
-            unsafe { BufferArg::from_raw_parts(control.handle.clone(), CONTROL_WORDS) },
+            control.clone().into_buffer_arg(),
         );
         let result = SchedulerControl::new(&device.read(&control)?)?;
         assert_eq!(result.faults, FaultFlags::all());

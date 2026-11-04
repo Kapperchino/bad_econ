@@ -1,24 +1,22 @@
-use super::{OBSERVATION_SHARDS, PersonLayout as P, PolicyLayout as D, Stage};
+use super::{DemographyPolicy, OBSERVATION_SHARDS, PersonLayout as P, Stage};
+use crate::simulation::configuration::EconomyConfig;
 use crate::{
     domain::{
         Field,
         demography::{DAYS_PER_YEAR, PROBABILITY_SCALE},
     },
-    simulation::{
-        layout::{ActorLayout as A, ConfigLayout as C},
-        words::*,
-    },
+    simulation::{layout::ActorLayout as A, words::*},
 };
 use cubecl::prelude::*;
 
 #[cube]
-fn get(state: &mut [u32], config: &[u32], field: u32, actor: u32) -> u32 {
-    load(state, field * config[C::ACTORS] + actor).extract(0usize)
+fn get(state: &mut [u32], config: &EconomyConfig, field: u32, actor: u32) -> u32 {
+    load(state, field * config.actors + actor).extract(0usize)
 }
 
 #[cube]
-fn put(state: &mut [u32], config: &[u32], field: u32, actor: u32, value: u32) {
-    store(state, field * config[C::ACTORS] + actor, ticks(value, 0));
+fn put(state: &mut [u32], config: &EconomyConfig, field: u32, actor: u32, value: u32) {
+    store(state, field * config.actors + actor, ticks(value, 0));
 }
 
 #[cube]
@@ -124,17 +122,17 @@ fn death_cause(draw: Ticks, background: Ticks, occupational: Ticks, famine: Tick
 pub fn step(
     state: &mut [u32],
     actors: &[u32],
-    config: &[u32],
+    config: &EconomyConfig,
     people: &mut [u32],
     ranges: &[u32],
-    policy: &[u32],
+    policy: &DemographyPolicy,
     births: &mut [u32],
     samples: &[f32],
     day: u32,
     #[comptime] stage: Stage,
 ) {
     let household = ABSOLUTE_POS as u32;
-    if household < config[C::ACTORS] {
+    if household < config.actors {
         let start = ranges[household as usize * 2];
         let count = ranges[household as usize * 2 + 1];
         let mut living = 0;
@@ -162,18 +160,19 @@ pub fn step(
             if people[base + P::CAUSE] == 0 {
                 let age = people[base + P::AGE];
                 living += 1;
-                demand += policy[D::FOOD + band(age) as usize] * config[C::HOUSEHOLD_NEED];
-                let eligible = age >= policy[D::MINIMUM_AGE] && age < policy[D::RETIREMENT_AGE];
+                demand += policy.food[band(age) as usize] * config.household_need;
+                let eligible =
+                    age >= policy.parameters.minimum_age && age < policy.parameters.retirement_age;
                 let capacity = min(
-                    config[C::WORK_CAP] * (1000 - people[base + P::FATIGUE]) / 1000,
-                    1440 - config[C::RESERVED_MINUTES],
+                    config.work_cap * (1000 - people[base + P::FATIGUE]) / 1000,
+                    1440 - config.reserved_minutes,
                 );
                 household_time += select(eligible, capacity, 0);
                 if eligible && worker == u32::MAX {
                     worker = index;
                     available = min(
-                        config[C::WORK_CAP] * (1000 - people[base + P::FATIGUE]) / 1000,
-                        1440 - config[C::RESERVED_MINUTES],
+                        config.work_cap * (1000 - people[base + P::FATIGUE]) / 1000,
+                        1440 - config.reserved_minutes,
                     );
                 }
                 if comptime!(stage == Stage::Observation) {
@@ -235,7 +234,7 @@ pub fn step(
                     comptime!(Field::HomeMinutes as u32),
                     household,
                 );
-            let additional = work * policy[D::WORK_FOOD] * config[C::HOUSEHOLD_NEED] / 480;
+            let additional = work * policy.parameters.work_food * config.household_need / 480;
             let total = demand
                 + additional
                 + get(
@@ -281,28 +280,29 @@ pub fn step(
                     let age = people[base + P::AGE];
                     let group = band(age);
                     let work = select(index == selected, minutes, 0);
-                    let eligible = age >= policy[D::MINIMUM_AGE] && age < policy[D::RETIREMENT_AGE];
+                    let eligible = age >= policy.parameters.minimum_age
+                        && age < policy.parameters.retirement_age;
                     let capacity = min(
-                        config[C::WORK_CAP] * (1000 - people[base + P::FATIGUE]) / 1000,
-                        1440 - config[C::RESERVED_MINUTES],
+                        config.work_cap * (1000 - people[base + P::FATIGUE]) / 1000,
+                        1440 - config.reserved_minutes,
                     );
                     let home_work =
                         select(eligible, min(home_remaining, max(capacity, work) - work), 0);
                     home_remaining -= home_work;
                     let prior = people[base + P::EXPOSURE];
-                    let exposure = famine_exposure(prior, deficit, policy[D::RECOVERY]);
+                    let exposure = famine_exposure(prior, deficit, policy.parameters.recovery);
                     people[base + P::EXPOSURE] = exposure;
                     people[base + P::EMPLOYER] = select(work > 0, employer, 0);
                     people[base + P::WORK] = work + home_work;
-                    let background = rate(policy[D::BACKGROUND + group as usize]);
+                    let background = rate(policy.background[group as usize]);
                     let mut occupational = zero();
                     if employer > 0 && work > 0 {
                         let firm = employer - 1;
                         let good = actors[A::KIND * (actors.len() / A::WORDS) + firm as usize];
                         occupational = occupation(
-                            policy[D::OCCUPATIONAL + good as usize - 1],
+                            policy.occupational[good as usize - 1],
                             work,
-                            policy[D::REFERENCE_MINUTES],
+                            policy.parameters.reference_minutes,
                             get(
                                 state,
                                 config,
@@ -321,9 +321,9 @@ pub fn step(
                     }
                     if home_work > 0 {
                         let household_risk = occupation(
-                            policy[D::OCCUPATIONAL],
+                            policy.occupational[0],
                             home_work,
-                            policy[D::REFERENCE_MINUTES],
+                            policy.parameters.reference_minutes,
                             1000,
                             0,
                             people[base + P::FATIGUE],
@@ -333,8 +333,8 @@ pub fn step(
                     }
                     let famine = famine_risk(
                         exposure,
-                        policy[D::FAMINE],
-                        policy[D::VULNERABILITY + group as usize],
+                        policy.parameters.famine,
+                        policy.vulnerability[group as usize],
                     );
                     let draw = probability_draw(
                         samples[index as usize * 5],
@@ -350,17 +350,16 @@ pub fn step(
                     if independent && (day + people[base + P::IDENTITY]) % 365 == 0 && living > 1 {
                         store(
                             state,
-                            comptime!(Field::SplitPerson as u32) * config[C::ACTORS] + household,
+                            comptime!(Field::SplitPerson as u32) * config.actors + household,
                             ticks(people[base + P::IDENTITY], people[base + P::IDENTITY + 1]),
                         );
                     }
                     people[base + P::DEATH_DAY] = select(cause > 0, day + 1, 0);
                     people[base + P::AGE] += 1;
                     let fatigue = people[base + P::FATIGUE];
-                    let exertion = people[base + P::WORK] * config[C::WORK_FATIGUE] / 480;
+                    let exertion = people[base + P::WORK] * config.work_fatigue / 480;
                     people[base + P::FATIGUE] = min(
-                        max(fatigue + exertion, config[C::REST_RECOVERY])
-                            - config[C::REST_RECOVERY],
+                        max(fatigue + exertion, config.rest_recovery) - config.rest_recovery,
                         1000,
                     );
                     let cooldown = people[base + P::COOLDOWN];
@@ -375,12 +374,12 @@ pub fn step(
                         samples[index as usize * 5 + 3],
                     );
                     if fertile
-                        && lt(birth_draw, rate(policy[D::BIRTHS]))
+                        && lt(birth_draw, rate(policy.parameters.births))
                         && births[household as usize] == 0
                     {
                         births[household as usize] =
                             1 + u32::cast_from(samples[index as usize * 5 + 4] >= 0.5);
-                        people[base + P::COOLDOWN] = policy[D::SPACING];
+                        people[base + P::COOLDOWN] = policy.parameters.spacing;
                     }
                 }
             }
@@ -396,7 +395,7 @@ pub fn step(
 }
 
 #[cube(launch)]
-pub fn observe(people: &[u32], policy: &[u32], output: &[Atomic<u32>], count: u32) {
+pub fn observe(people: &[u32], policy: &DemographyPolicy, output: &[Atomic<u32>], count: u32) {
     let index = ABSOLUTE_POS;
     if index < count as usize {
         let base = index * P::WORDS;
@@ -406,7 +405,7 @@ pub fn observe(people: &[u32], policy: &[u32], output: &[Atomic<u32>], count: u3
             output[shard].fetch_add(1);
             let age = people[base + P::AGE];
             output[shard + 1].fetch_add(u32::cast_from(
-                age < policy[D::MINIMUM_AGE] || age >= policy[D::RETIREMENT_AGE],
+                age < policy.parameters.minimum_age || age >= policy.parameters.retirement_age,
             ));
         } else {
             output[shard + (cause + 1) as usize].fetch_add(1);
@@ -495,9 +494,7 @@ mod tests {
         ];
         let input = device.tensor(bytemuck::cast_slice(&cases));
         let output = device.empty(cases.len() * 4);
-        let argument = |tensor: &CubeTensor| unsafe {
-            BufferArg::from_raw_parts(tensor.handle.clone(), tensor.meta.shape()[0])
-        };
+        let argument = |tensor: &CubeTensor| tensor.clone().into_buffer_arg();
         famine_probe::launch(
             &device.client,
             CubeCount::Static(1, 1, 1),
@@ -541,9 +538,7 @@ mod tests {
         ];
         let input = device.tensor(bytemuck::cast_slice(&cases));
         let output = device.empty(cases.len() * 4);
-        let argument = |tensor: &CubeTensor| unsafe {
-            BufferArg::from_raw_parts(tensor.handle.clone(), tensor.meta.shape()[0])
-        };
+        let argument = |tensor: &CubeTensor| tensor.clone().into_buffer_arg();
         probe::launch(
             &device.client,
             CubeCount::Static(1, 1, 1),
@@ -607,5 +602,35 @@ pub(super) fn grow(
             target[base + 2] = household as u32;
             target[base + P::SEX] = births[household] - 1;
         }
+    }
+}
+
+#[cube(launch)]
+pub(super) fn birth_prefix(births: &[u32], scratch: &mut [u32]) {
+    let actor = ABSOLUTE_POS;
+    let mut present = 0u32;
+    if actor < births.len() {
+        present = u32::cast_from(births[actor] > 0);
+    }
+    let prefix = crate::simulation::parallel::prefix_sum(present);
+    if actor < births.len() {
+        scratch[actor] = prefix.inclusive;
+    }
+    if UNIT_POS == 0 {
+        scratch[births.len() + CUBE_POS] = prefix.total;
+    }
+}
+
+#[cube(launch)]
+pub(super) fn birth_ranges(old: &[u32], births: &[u32], scratch: &[u32], ranges: &mut [u32]) {
+    let actor = ABSOLUTE_POS;
+    if actor < births.len() {
+        let birth = u32::cast_from(births[actor] > 0);
+        let mut offset = scratch[actor] - birth;
+        if CUBE_POS > 0 {
+            offset += scratch[births.len() + CUBE_POS - 1];
+        }
+        ranges[actor * 2] = old[actor * 2] + offset;
+        ranges[actor * 2 + 1] = old[actor * 2 + 1] + birth;
     }
 }

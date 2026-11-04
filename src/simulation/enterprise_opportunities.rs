@@ -1,8 +1,6 @@
-use super::{
-    layout::{ActorLayout as A, ConfigLayout as C},
-    words::*,
-};
+use super::{layout::ActorLayout as A, words::*};
 use crate::domain::{Field, Good, enterprise::EnterpriseState};
+use crate::simulation::configuration::EconomyConfig;
 use cubecl::prelude::*;
 
 pub(super) const PRODUCER_ENTRY: u32 = 8 << 24;
@@ -121,8 +119,8 @@ impl EntryPlan {
 }
 
 #[cube]
-fn number(state: &mut [u32], config: &[u32], actor: u32, field: u32) -> u32 {
-    load(state, field * config[C::ACTORS] + actor).extract(0usize)
+fn number(state: &mut [u32], config: &EconomyConfig, actor: u32, field: u32) -> u32 {
+    load(state, field * config.actors + actor).extract(0usize)
 }
 
 #[cube]
@@ -136,25 +134,23 @@ fn distance(actors: &[u32], first: u32, second: u32) -> u32 {
 }
 
 #[cube]
-fn firms(spatial: &[u32], config: &[u32]) -> u32 {
-    let cells = config[C::SPATIAL_SIDE] * config[C::SPATIAL_SIDE];
-    spatial[(2 * (cells + 1 + config[C::ACTORS]) + cells) as usize]
+fn firms(spatial: &[u32], config: &EconomyConfig) -> u32 {
+    let cells = config.spatial_side * config.spatial_side;
+    spatial[(2 * (cells + 1 + config.actors) + cells) as usize]
 }
 
 #[cube]
-fn firm_at(spatial: &[u32], config: &[u32], offset: u32) -> u32 {
-    let cells = config[C::SPATIAL_SIDE] * config[C::SPATIAL_SIDE];
-    spatial[(2 * (cells + 1 + config[C::ACTORS])
-        + cells
-        + 1
-        + offset % max(firms(spatial, config), 1)) as usize]
+fn firm_at(spatial: &[u32], config: &EconomyConfig, offset: u32) -> u32 {
+    let cells = config.spatial_side * config.spatial_side;
+    spatial[(2 * (cells + 1 + config.actors) + cells + 1 + offset % max(firms(spatial, config), 1))
+        as usize]
 }
 
 #[cube]
 fn input_price(
     state: &mut [u32],
     actors: &[u32],
-    config: &[u32],
+    config: &EconomyConfig,
     spatial: &[u32],
     site: u32,
     good: u32,
@@ -169,7 +165,7 @@ fn input_price(
         for sample in 0..min(32u32, firms(spatial, config)) {
             let supplier = firm_at(spatial, config, site + day * 17 + sample);
             let kind = actors[A::KIND * (actors.len() / A::WORDS) + supplier as usize];
-            let stock = load(state, good * config[C::ACTORS] + supplier);
+            let stock = load(state, good * config.actors + supplier);
             if kind == good
                 && number(
                     state,
@@ -184,7 +180,7 @@ fn input_price(
                     comptime!(Field::EnterpriseStatus as u32),
                 ) == comptime!(EnterpriseState::Operating as u32)
                 && !lt(stock, ticks(quantity, 0))
-                && distance(actors, site, supplier) <= config[C::SEARCH_RADIUS]
+                && distance(actors, site, supplier) <= config.search_radius
             {
                 price = min(
                     price,
@@ -200,15 +196,15 @@ fn input_price(
 pub(super) fn discover(
     state: &mut [u32],
     actors: &[u32],
-    config: &[u32],
+    config: &EconomyConfig,
     spatial: &[u32],
     owner: u32,
     day: u32,
 ) -> u32 {
-    let count = config[C::ACTORS];
+    let count = config.actors;
     let cash = load(state, comptime!(Field::Cash as u32) * count + owner);
     let investment = divide(cash, 2);
-    let wage = config[C::STARTING_WAGE];
+    let wage = config.starting_wage;
     let mut selected = 0;
     let mut best = zero();
     let mut first_cost = 0;
@@ -228,10 +224,7 @@ pub(super) fn discover(
             source,
             comptime!(Field::EnterpriseModel as u32),
         ) == 0;
-        if kind > 0
-            && active
-            && producer
-            && distance(actors, owner, source) <= config[C::SEARCH_RADIUS]
+        if kind > 0 && active && producer && distance(actors, owner, source) <= config.search_radius
         {
             let price = number(state, config, source, comptime!(Field::Price as u32));
             let unfilled = load(state, comptime!(Field::Unfilled as u32) * count + source);
@@ -295,7 +288,7 @@ pub(super) fn discover(
                     let revenue = times32(output, price);
                     let margin = minus(revenue, minimum(revenue, cost));
                     let needed = plus(
-                        times(cost, config[C::COVERAGE] + config[C::RING]).value,
+                        times(cost, config.coverage + config.ring).value,
                         times32(720, wage),
                     )
                     .value;
@@ -309,8 +302,8 @@ pub(super) fn discover(
             }
             let stock = load(state, kind * count + source);
             let consumer = kind == comptime!(Good::Bread as u32)
-                || (config[C::INDUSTRIAL] > 0
-                    && config[C::CONSUMPTION_INTERVALS + kind as usize - 1] > 1);
+                || (comptime!(config.economy == crate::domain::Economy::Industrial)
+                    && config.consumption_intervals[kind as usize - 1] > 1);
             if consumer && !lt(stock, ticks(24, 0)) {
                 let quote = price * 1250 / 1000 + ceildiv(60 * wage, 24);
                 let mut buyers = 0;
@@ -326,8 +319,8 @@ pub(super) fn discover(
                     );
                     if household
                         && number(state, config, buyer, comptime!(Field::LivingMembers as u32)) > 0
-                        && distance(actors, owner, buyer) <= config[C::SEARCH_RADIUS]
-                        && distance(actors, source, buyer) > config[C::SEARCH_RADIUS]
+                        && distance(actors, owner, buyer) <= config.search_radius
+                        && distance(actors, source, buyer) > config.search_radius
                         && !lt(buyer_cash, times32(need, quote))
                     {
                         buyers += need;
@@ -337,12 +330,8 @@ pub(super) fn discover(
                 let revenue = times32(units, quote);
                 let cost = plus(times32(units, price), times32(60, wage)).value;
                 let margin = minus(revenue, minimum(revenue, cost));
-                let required =
-                    plus(times32(24 * price, 3 + config[C::RING]), times32(780, wage)).value;
-                if lt(best, margin)
-                    && !lt(investment, required)
-                    && quote <= config[C::MAXIMUM_PRICE]
-                {
+                let required = plus(times32(24 * price, 3 + config.ring), times32(780, wage)).value;
+                if lt(best, margin) && !lt(investment, required) && quote <= config.maximum_price {
                     selected = comptime!(DISTRIBUTOR_ENTRY) + source + 1;
                     best = margin;
                     first_cost = price;

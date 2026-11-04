@@ -3,7 +3,7 @@ use crate::ledger::TickLayout;
 use anyhow::{Result, anyhow};
 use burn_wgpu::CubeTensor;
 use bytemuck::{Pod, Zeroable};
-use cubecl::{CubeCount, CubeDim, prelude::BufferArg};
+use cubecl::CubeDim;
 use std::mem::offset_of;
 
 mod kernels;
@@ -244,16 +244,10 @@ pub fn evaluate(device: &Device, requests: &[BargainingRequest]) -> Result<Vec<B
     let input = device.tensor(bytemuck::cast_slice(&encoded));
     let output = device.empty(requests.len().max(1) * ResultLayout::WORDS);
     let control = device.tensor(&[0; 4]);
-    let argument = |tensor: &CubeTensor| unsafe {
-        BufferArg::from_raw_parts(tensor.handle.clone(), tensor.meta.shape()[0])
-    };
+    let argument = |tensor: &CubeTensor| tensor.clone().into_buffer_arg();
     kernels::evaluate::launch(
         &device.client,
-        CubeCount::Static(
-            (requests.len() as u32).div_ceil(device.workgroup).max(1),
-            1,
-            1,
-        ),
+        device.count(requests.len()),
         CubeDim::new_1d(device.workgroup),
         argument(&input),
         argument(&output),
