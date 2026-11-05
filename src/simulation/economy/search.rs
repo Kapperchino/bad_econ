@@ -1,6 +1,9 @@
 use super::*;
 use crate::simulation::markets::{LATCH_WORD, SEARCHES_WORD};
 
+#[cfg(test)]
+mod tests;
+
 #[cube]
 pub(super) fn prepare(
     state: &mut [u32],

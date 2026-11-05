@@ -7,13 +7,114 @@ use crate::simulation::{
 };
 use anyhow::{Context, Result};
 use burn_wgpu::CubeTensor;
-use cubecl::{prelude::*, std::tensor::TensorHandle};
+use cubecl::{
+    features::Plane,
+    ir::{FloatKind, UIntKind},
+    prelude::*,
+    std::tensor::TensorHandle,
+};
 use cubek::reduce::{
     ReduceDtypes, ReduceStrategy,
     components::instructions::ReduceOperationConfig,
     launch::{RoutineStrategy, VectorizationStrategy},
-    routines::{BlueprintStrategy, cube::CubeStrategy, unit::UnitStrategy},
+    routines::{BlueprintStrategy, cube::CubeStrategy, plane::PlaneStrategy, unit::UnitStrategy},
 };
+
+enum ReductionLayout {
+    Contiguous,
+    Strided,
+}
+
+enum ReductionPlanes {
+    Available,
+    Unavailable,
+}
+
+impl ReductionPlanes {
+    fn new(device: &Device, dtypes: ReduceDtypes) -> Self {
+        let supported_types = [dtypes.input, dtypes.output, dtypes.accumulation]
+            .iter()
+            .all(|dtype| {
+                matches!(
+                    dtype,
+                    ElemType::Float(FloatKind::F32) | ElemType::UInt(UIntKind::U32)
+                )
+            });
+        match supported_types
+            && device
+                .client
+                .properties()
+                .features
+                .plane
+                .contains(Plane::Ops)
+        {
+            true => Self::Available,
+            false => Self::Unavailable,
+        }
+    }
+}
+
+struct ReductionShape {
+    output: Vec<usize>,
+    length: usize,
+    elements: usize,
+    layout: ReductionLayout,
+}
+
+impl ReductionShape {
+    fn new(input: &TensorHandle, axis: usize) -> Result<Self> {
+        let mut output = input.shape().to_vec();
+        let length = *output
+            .get(axis)
+            .context("reduction axis exceeds tensor rank")?;
+        output[axis] = 1;
+        let elements = output.iter().product();
+        let layout = match input.strides()[axis] {
+            1 => ReductionLayout::Contiguous,
+            _ => ReductionLayout::Strided,
+        };
+        Ok(Self {
+            output,
+            length,
+            elements,
+            layout,
+        })
+    }
+
+    fn strategy(&self, device: &Device, dtypes: ReduceDtypes) -> ReduceStrategy {
+        let plane_size = device.client.properties().hardware.plane_size_max.max(1) as usize;
+        let planes = ReductionPlanes::new(device, dtypes);
+        let routine = match (self.length, &self.layout, planes) {
+            (length, _, _) if length < plane_size => {
+                RoutineStrategy::Unit(BlueprintStrategy::Inferred(UnitStrategy))
+            }
+            (_, ReductionLayout::Contiguous, ReductionPlanes::Available)
+                if self.elements >= plane_size =>
+            {
+                RoutineStrategy::Plane(BlueprintStrategy::Inferred(PlaneStrategy {
+                    independent: false,
+                }))
+            }
+            (_, _, ReductionPlanes::Available) => {
+                RoutineStrategy::Cube(BlueprintStrategy::Inferred(CubeStrategy {
+                    use_planes: true,
+                }))
+            }
+            (_, _, ReductionPlanes::Unavailable) => {
+                RoutineStrategy::Cube(BlueprintStrategy::Inferred(CubeStrategy {
+                    use_planes: false,
+                }))
+            }
+        };
+        ReduceStrategy {
+            routine,
+            vectorization: VectorizationStrategy {
+                parallel_output_vectorization: true,
+            },
+            autotune_level: Default::default(),
+        }
+    }
+}
 
 pub(in crate::simulation) fn reduce(
     device: &Device,
@@ -22,13 +123,13 @@ pub(in crate::simulation) fn reduce(
     operation: ReduceOperationConfig,
     dtype: ElemType,
 ) -> Result<TensorHandle> {
-    let mut shape = input.shape().to_vec();
-    let length = *shape
-        .get(axis)
-        .context("reduction axis exceeds tensor rank")?;
-    shape[axis] = 1;
-    let elements: usize = shape.iter().product();
-    let output = match (length, elements) {
+    let shape = ReductionShape::new(input, axis)?;
+    let dtypes = ReduceDtypes {
+        input: input.dtype,
+        output: dtype,
+        accumulation: dtype,
+    };
+    let output = match (shape.length, shape.elements) {
         (0, _) | (_, 0) => {
             let identity = match (dtype, operation) {
                 (ElemType::Float(_), ReduceOperationConfig::Min) => {
@@ -45,13 +146,18 @@ pub(in crate::simulation) fn reduce(
                 _ => 0,
             };
             let bytes = identity.to_le_bytes();
-            let values = bytes[..dtype.size()].repeat(elements.max(1));
-            TensorHandle::new_contiguous(shape, device.client.create_from_slice(&values), dtype)
+            let values = bytes[..dtype.size()].repeat(shape.elements.max(1));
+            TensorHandle::new_contiguous(
+                shape.output,
+                device.client.create_from_slice(&values),
+                dtype,
+            )
         }
         _ => {
+            let strategy = shape.strategy(device, dtypes);
             let output = TensorHandle::new_contiguous(
-                shape,
-                device.client.empty(elements * dtype.size()),
+                shape.output,
+                device.client.empty(shape.elements * dtype.size()),
                 dtype,
             );
             cubek::reduce::reduce(
@@ -59,24 +165,9 @@ pub(in crate::simulation) fn reduce(
                 input.clone().binding(),
                 output.clone().binding(),
                 axis,
-                ReduceStrategy {
-                    routine: match length {
-                        0..32 => RoutineStrategy::Unit(BlueprintStrategy::Inferred(UnitStrategy)),
-                        _ => RoutineStrategy::Cube(BlueprintStrategy::Inferred(CubeStrategy {
-                            use_planes: false,
-                        })),
-                    },
-                    vectorization: VectorizationStrategy {
-                        parallel_output_vectorization: true,
-                    },
-                    autotune_level: Default::default(),
-                },
+                strategy,
                 operation,
-                ReduceDtypes {
-                    input: input.dtype,
-                    output: dtype,
-                    accumulation: dtype,
-                },
+                dtypes,
             )?;
             output
         }
@@ -392,6 +483,218 @@ fn finish_sum(sums: &[u64], output: &mut [u64], control: &[Atomic<u32>]) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[derive(Clone, Copy)]
+    enum InputLayout {
+        Contiguous,
+        Strided,
+    }
+
+    struct FloatReductionCase {
+        outputs: usize,
+        length: usize,
+        layout: InputLayout,
+    }
+
+    #[test]
+    fn float_reductions_match_reference_across_layouts_and_tails_on_gpu() -> Result<()> {
+        let device = Device::headless(64)?;
+        let cases = [
+            FloatReductionCase {
+                outputs: 1,
+                length: 17,
+                layout: InputLayout::Contiguous,
+            },
+            FloatReductionCase {
+                outputs: 1,
+                length: 4097,
+                layout: InputLayout::Contiguous,
+            },
+            FloatReductionCase {
+                outputs: 257,
+                length: 127,
+                layout: InputLayout::Contiguous,
+            },
+            FloatReductionCase {
+                outputs: 64,
+                length: 513,
+                layout: InputLayout::Contiguous,
+            },
+            FloatReductionCase {
+                outputs: 3,
+                length: 129,
+                layout: InputLayout::Strided,
+            },
+            FloatReductionCase {
+                outputs: 257,
+                length: 33,
+                layout: InputLayout::Strided,
+            },
+        ];
+        for case in cases {
+            let strides = match case.layout {
+                InputLayout::Contiguous => [case.length, 1],
+                InputLayout::Strided => [1, case.outputs],
+            };
+            let values = (0..case.outputs * case.length)
+                .map(|index| (index % 97) as f32 / 101.0 - 0.25)
+                .collect::<Vec<_>>();
+            let input = TensorHandle::new(
+                device
+                    .client
+                    .create_from_slice(bytemuck::cast_slice(&values)),
+                [case.outputs, case.length],
+                strides,
+                f32::elem_type_native(),
+            );
+            for operation in [ReduceOperationConfig::Sum, ReduceOperationConfig::Max] {
+                let output = reduce(&device, &input, 1, operation, f32::elem_type_native())?;
+                let bytes = device.client.read_one(output.handle)?;
+                let actual = bytemuck::cast_slice::<u8, f32>(&bytes);
+                for (row, &actual) in actual.iter().enumerate().take(case.outputs) {
+                    let column = (0..case.length)
+                        .map(|index| values[row * strides[0] + index * strides[1]] as f64);
+                    let expected = match operation {
+                        ReduceOperationConfig::Max => column.fold(f64::NEG_INFINITY, f64::max),
+                        _ => column.sum::<f64>(),
+                    };
+                    let tolerance = match operation {
+                        ReduceOperationConfig::Max => 0.0,
+                        _ => expected.abs().max(1.0) * 2e-5,
+                    };
+                    assert!(
+                        (f64::from(actual) - expected).abs() <= tolerance,
+                        "{operation:?}, {} outputs, length {}, row {row}: {actual} versus {expected}",
+                        case.outputs,
+                        case.length
+                    );
+                }
+            }
+        }
+        Ok(())
+    }
+
+    #[test]
+    fn widened_integer_reductions_preserve_carries_and_overflow_on_gpu() -> Result<()> {
+        use crate::simulation::flags::CONTROL_WORDS;
+        let device = Device::headless(64)?;
+        let length = 1025;
+        let columns = 7;
+        let values = (0..length * columns)
+            .map(|index| (1u64 << 40) + u64::from(u32::MAX) - index as u64)
+            .collect::<Vec<_>>();
+        let input = TensorHandle::new_contiguous(
+            [length, columns],
+            device
+                .client
+                .create_from_slice(bytemuck::cast_slice(&values)),
+            u64::elem_type_native(),
+        );
+        let control = device.tensor(&[0; CONTROL_WORDS]);
+        let sums = sum_ticks(&device, &input, 0, &control)?;
+        let bytes = device.client.read_one(sums.handle)?;
+        let actual = bytemuck::cast_slice::<u8, u64>(&bytes);
+        for (column, &actual) in actual.iter().enumerate().take(columns) {
+            let expected = (0..length)
+                .map(|row| values[row * columns + column])
+                .sum::<u64>();
+            assert_eq!(actual, expected);
+        }
+        FaultFlags::read(&device.read(&control)?)?.into_result()?;
+        for operation in [ReduceOperationConfig::Min, ReduceOperationConfig::Max] {
+            let extrema = reduce(&device, &input, 0, operation, u64::elem_type_native())?;
+            let bytes = device.client.read_one(extrema.handle)?;
+            let actual = bytemuck::cast_slice::<u8, u64>(&bytes);
+            for (column, &actual) in actual.iter().enumerate().take(columns) {
+                let source = (0..length).map(|row| values[row * columns + column]);
+                let expected = match operation {
+                    ReduceOperationConfig::Min => source.min().unwrap(),
+                    _ => source.max().unwrap(),
+                };
+                assert_eq!(actual, expected);
+            }
+        }
+        let mut overflowing = vec![0u64; length * columns];
+        overflowing[0] = u64::MAX;
+        overflowing[columns] = 1;
+        let input = TensorHandle::new_contiguous(
+            [length, columns],
+            device
+                .client
+                .create_from_slice(bytemuck::cast_slice(&overflowing)),
+            u64::elem_type_native(),
+        );
+        let sums = sum_ticks(&device, &input, 0, &control)?;
+        let bytes = device.client.read_one(sums.handle)?;
+        assert_eq!(bytemuck::cast_slice::<u8, u64>(&bytes)[0], 0);
+        assert_eq!(
+            FaultFlags::read(&device.read(&control)?)?,
+            FaultFlags::ARITHMETIC_OVERFLOW
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn strided_all_reductions_observe_tail_flags_on_gpu() -> Result<()> {
+        let device = Device::headless(64)?;
+        for length in [17, 129, 4097] {
+            let mut values = vec![1u32; length * 2];
+            values[(length - 1) * 2] = 0;
+            let input = TensorHandle::new_contiguous(
+                [length, 2],
+                device
+                    .client
+                    .create_from_slice(bytemuck::cast_slice(&values)),
+                u32::elem_type_native(),
+            );
+            let output = reduce(
+                &device,
+                &input,
+                0,
+                ReduceOperationConfig::All,
+                u32::elem_type_native(),
+            )?;
+            let bytes = device.client.read_one(output.handle)?;
+            assert_eq!(bytemuck::cast_slice::<u8, u32>(&bytes), [0, 1]);
+        }
+        Ok(())
+    }
+
+    #[test]
+    fn reductions_preserve_empty_identities_and_zero_output_shapes_on_gpu() -> Result<()> {
+        let device = Device::headless(64)?;
+        let input =
+            TensorHandle::new_contiguous([0, 3], device.client.empty(4), f32::elem_type_native());
+        for operation in [
+            ReduceOperationConfig::Sum,
+            ReduceOperationConfig::Prod,
+            ReduceOperationConfig::All,
+            ReduceOperationConfig::Min,
+            ReduceOperationConfig::Max,
+        ] {
+            let output = reduce(&device, &input, 0, operation, f32::elem_type_native())?;
+            assert_eq!(output.shape().to_vec(), [1, 3]);
+            let bytes = device.client.read_one(output.handle)?;
+            let expected = match operation {
+                ReduceOperationConfig::Min => f32::INFINITY,
+                ReduceOperationConfig::Max => f32::NEG_INFINITY,
+                ReduceOperationConfig::All | ReduceOperationConfig::Prod => 1.0,
+                _ => 0.0,
+            };
+            assert_eq!(bytemuck::cast_slice::<u8, f32>(&bytes), [expected; 3]);
+        }
+        let input =
+            TensorHandle::new_contiguous([3, 0], device.client.empty(4), u32::elem_type_native());
+        let output = reduce(
+            &device,
+            &input,
+            0,
+            ReduceOperationConfig::Sum,
+            u64::elem_type_native(),
+        )?;
+        assert_eq!(output.shape().to_vec(), [1, 0]);
+        Ok(())
+    }
 
     #[test]
     fn summary_reductions_preserve_wide_totals_extrema_and_overflow_on_gpu() -> Result<()> {
