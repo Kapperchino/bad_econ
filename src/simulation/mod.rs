@@ -103,6 +103,7 @@ pub struct Simulation {
     events: CubeTensor,
     scratch: CubeTensor,
     searches: markets::SearchBuffers,
+    market_sort: economy::sorting::MarketSort,
     #[cfg(test)]
     links: CubeTensor,
     market_execution: MarketExecution,
@@ -278,6 +279,7 @@ impl Simulation {
             events,
             scratch,
             searches,
+            market_sort: economy::sorting::MarketSort::default(),
             #[cfg(test)]
             links,
             market_execution: MarketExecution::Grouped,
@@ -832,6 +834,7 @@ impl Simulation {
             events: self.device.empty(event_words),
             scratch: self.device.empty(scratch_words),
             searches: markets::SearchBuffers::new(&self.device, count),
+            market_sort: economy::sorting::MarketSort::default(),
             #[cfg(test)]
             links: self.device.empty(batch_size * LinkLayout::WORDS_PER_EVENT),
             market_execution: self.market_execution,
@@ -1205,20 +1208,13 @@ impl Simulation {
             launch(EconomyStage::GroupPrepare, count, &parameters);
         }
         launch(EconomyStage::MarketBoundary, 1, &parameters);
-        for shift in (0..count.max(1).ilog2() + 1).step_by(4) {
-            parameters.sort_width = shift;
-            launch(EconomyStage::GroupRadixLocal, count, &parameters);
-            parallel::scan_active(
-                &self.device,
-                &self.scratch,
-                7 * count,
-                16 * count.div_ceil(self.device.workgroup as usize),
-                &self.control,
-                &self.searches.dispatches,
-            );
-            launch(EconomyStage::GroupRadixScatter, count, &parameters);
-            parameters.sort_source = 2 * count as u32 - parameters.sort_source;
-        }
+        parameters.sort_source = self.market_sort.run(
+            &self.device,
+            &self.scratch,
+            &self.control,
+            &self.searches.dispatches,
+            &parameters,
+        )?;
         launch(EconomyStage::GroupRanges, count, &parameters);
         launch(EconomyStage::MarketBoundary, 1, &parameters);
         match market {

@@ -1,12 +1,17 @@
 use super::markets;
 use crate::simulation::{
     Device, parallel,
+    parameters::EconomyParameters,
     pass::GpuPass,
     system::{System, gpu_passes},
 };
 use anyhow::Result;
+use burn::tensor::StreamId;
 use burn_wgpu::CubeTensor;
 use cubecl::{client::Graph, prelude::*};
+
+#[cfg(test)]
+mod tests;
 
 #[derive(Default)]
 pub(in crate::simulation) enum MarketSort {
@@ -17,10 +22,88 @@ pub(in crate::simulation) enum MarketSort {
 
 pub(in crate::simulation) struct RecordedSort {
     graph: Graph,
+    plan: SortPlan,
+    workgroup: u32,
     thread: std::thread::ThreadId,
-    _scratch: CubeTensor,
-    _control: CubeTensor,
-    _dispatches: CubeTensor,
+    stream: StreamId,
+    scratch: CubeTensor,
+    control: CubeTensor,
+    dispatches: CubeTensor,
+}
+
+#[derive(Clone, Copy, PartialEq, Eq)]
+struct SortPlan {
+    count: u32,
+    source: u32,
+    active: u32,
+    discovery: crate::simulation::parameters::Discovery,
+    scan: parallel::ScanMode,
+}
+
+impl SortPlan {
+    fn new(parameters: &EconomyParameters) -> Self {
+        Self {
+            count: parameters.count,
+            source: parameters.sort_source,
+            active: parameters.sort_count,
+            discovery: parameters.discovery,
+            scan: parameters.scan,
+        }
+    }
+
+    fn output(self) -> u32 {
+        match (self.count.max(1).ilog2() + 1).div_ceil(4) % 2 {
+            0 => self.source,
+            _ => 2 * self.count - self.source,
+        }
+    }
+}
+
+impl RecordedSort {
+    fn compatible(
+        &self,
+        device: &Device,
+        scratch: &CubeTensor,
+        control: &CubeTensor,
+        dispatches: &CubeTensor,
+        plan: SortPlan,
+    ) -> bool {
+        [
+            (self.plan, self.workgroup, self.thread, self.stream)
+                == (
+                    plan,
+                    device.workgroup,
+                    std::thread::current().id(),
+                    StreamId::current(),
+                ),
+            self.scratch.handle.service == device.client.service_id(),
+            same_buffer(&self.scratch, scratch),
+            same_buffer(&self.control, control),
+            same_buffer(&self.dispatches, dispatches),
+        ]
+        .into_iter()
+        .all(std::convert::identity)
+    }
+}
+
+fn same_buffer(recorded: &CubeTensor, current: &CubeTensor) -> bool {
+    (
+        recorded.handle.memory.descriptor(),
+        recorded.handle.service,
+        recorded.handle.offset_start,
+        recorded.handle.offset_end,
+        recorded.handle.size(),
+        &recorded.meta,
+        recorded.dtype,
+    ) == (
+        current.handle.memory.descriptor(),
+        current.handle.service,
+        current.handle.offset_start,
+        current.handle.offset_end,
+        current.handle.size(),
+        &current.meta,
+        current.dtype,
+    )
 }
 
 impl MarketSort {
@@ -30,31 +113,36 @@ impl MarketSort {
         scratch: &CubeTensor,
         control: &CubeTensor,
         dispatches: &CubeTensor,
-        count: usize,
+        parameters: &EconomyParameters,
     ) -> Result<u32> {
+        let plan = SortPlan::new(parameters);
         match self {
-            Self::Recorded(recorded) if recorded.thread == std::thread::current().id() => {
+            Self::Recorded(recorded)
+                if recorded.compatible(device, scratch, control, dispatches, plan) =>
+            {
                 unsafe { recorded.graph.replay() }?;
             }
             _ => {
+                *self = Self::Unrecorded;
                 let client = &device.client;
-                let recorded = RecordedSort {
-                    graph: {
-                        client.graph_prepare()?;
-                        encode(device, scratch, control, dispatches, count);
-                        client.start_capture()?;
-                        encode(device, scratch, control, dispatches, count);
-                        client.stop_capture()?
-                    },
+                client.graph_prepare()?;
+                encode(device, scratch, control, dispatches, parameters);
+                client.start_capture()?;
+                encode(device, scratch, control, dispatches, parameters);
+                let graph = client.stop_capture()?;
+                *self = Self::Recorded(RecordedSort {
+                    graph,
+                    plan,
+                    workgroup: device.workgroup,
                     thread: std::thread::current().id(),
-                    _scratch: scratch.clone(),
-                    _control: control.clone(),
-                    _dispatches: dispatches.clone(),
-                };
-                *self = Self::Recorded(recorded);
+                    stream: StreamId::current(),
+                    scratch: scratch.clone(),
+                    control: control.clone(),
+                    dispatches: dispatches.clone(),
+                });
             }
         }
-        Ok((count.max(1).ilog2() + 1).div_ceil(4) % 2 * 2 * count as u32)
+        Ok(plan.output())
     }
 }
 
@@ -63,10 +151,12 @@ fn encode(
     scratch: &CubeTensor,
     control: &CubeTensor,
     dispatches: &CubeTensor,
-    count: usize,
+    parameters: &EconomyParameters,
 ) {
-    let mut source = 0;
-    for shift in (0..count.max(1).ilog2() + 1).step_by(4) {
+    let mut parameters = *parameters;
+    let count = parameters.count as usize;
+    for shift in (0..parameters.count.max(1).ilog2() + 1).step_by(4) {
+        parameters.sort_width = shift;
         let launch = |stage| {
             RadixSort::launch(
                 device,
@@ -75,12 +165,7 @@ fn encode(
                 SortInputLaunch {
                     scratch: scratch.clone().into_buffer_arg(),
                     control: control.clone().into_buffer_arg(),
-                    parameters: RadixParametersLaunch {
-                        count: count as u32,
-                        source,
-                        shift,
-                        scan: parallel::ScanMode::new(device),
-                    },
+                    parameters: parameters.launch(),
                     stage,
                 },
             );
@@ -95,17 +180,8 @@ fn encode(
             dispatches,
         );
         launch(SortStage::Scatter);
-        source = 2 * count as u32 - source;
+        parameters.sort_source = 2 * parameters.count - parameters.sort_source;
     }
-}
-
-#[derive(CubeType, CubeLaunch)]
-pub(super) struct RadixParameters {
-    pub count: u32,
-    pub source: u32,
-    pub shift: u32,
-    #[cube(comptime)]
-    pub scan: parallel::ScanMode,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
@@ -118,7 +194,7 @@ enum SortStage {
 struct SortInput {
     scratch: Box<[u32]>,
     control: Box<[Atomic<u32>]>,
-    parameters: RadixParameters,
+    parameters: EconomyParameters,
     #[cube(comptime)]
     stage: SortStage,
 }

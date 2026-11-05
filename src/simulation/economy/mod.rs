@@ -37,6 +37,7 @@ mod household_production;
 pub(super) mod indexing;
 pub(super) mod opening;
 pub(super) mod search;
+pub(super) mod sorting;
 mod systems;
 use super::scheduler::Posting;
 use clearing::{PeerBalances, PeerOffer, actor_settlement};
