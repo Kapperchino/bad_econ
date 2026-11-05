@@ -1,5 +1,6 @@
 use super::*;
 use crate::simulation::markets::{LATCH_WORD, SEARCHES_WORD};
+mod index;
 
 #[cfg(test)]
 mod tests;
@@ -530,6 +531,7 @@ pub(super) fn candidate(
 
 #[derive(Clone, Copy, Debug, Hash, PartialEq, Eq)]
 pub(in crate::simulation) enum SearchStage {
+    Index,
     Prepare,
     Search,
     Compact,
@@ -566,6 +568,14 @@ impl GpuPass<SearchInput> for Search {
     fn execute(mut input: SearchInput) {
         if input.control[LATCH_WORD].load() == 0 {
             match comptime!(input.stage) {
+                SearchStage::Index => index::build(
+                    &mut input.state,
+                    &input.actors,
+                    &input.config,
+                    &input.spatial,
+                    &mut input.scratch,
+                    &input.parameters,
+                ),
                 SearchStage::Prepare => prepare(
                     &mut input.state,
                     &input.actors,
@@ -587,6 +597,7 @@ impl GpuPass<SearchInput> for Search {
                     &mut input.proposals,
                     &input.searches,
                     &input.successes,
+                    &input.scratch,
                     &input.control,
                     &input.parameters,
                 ),
@@ -613,6 +624,7 @@ fn search(
     proposals: &mut [u32],
     searches: &[u32],
     successes: &[Atomic<u32>],
+    scratch: &[u32],
     control: &[Atomic<u32>],
     parameters: &EconomyParameters,
 ) {
@@ -670,6 +682,25 @@ fn search(
                 while j < end && considered < DISCOVERY_CANDIDATES {
                     let previous = j;
                     let mut skipped = 0u32;
+                    if comptime!(matches!(parameters.market, MarketFlag::Consumer(_))) {
+                        let rotated = begin + cursor;
+                        let block = rotated / DISCOVERY_BLOCK;
+                        let unavailable = index::skip(
+                            scratch,
+                            config,
+                            block,
+                            px,
+                            py,
+                            purchasing_power,
+                            chosen,
+                            empty_score,
+                        );
+                        skipped = select(
+                            unavailable,
+                            min(min((block + 1) * DISCOVERY_BLOCK, end) - rotated, end - j),
+                            0,
+                        );
+                    }
                     if comptime!(parameters.market.good() == Some(Good::Bread)) && stride == 1 {
                         let rotated = begin + cursor;
                         let block = rotated / DISCOVERY_BLOCK;

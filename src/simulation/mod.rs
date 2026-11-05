@@ -1237,6 +1237,9 @@ impl Simulation {
         }
         let search = |stage| {
             let dispatch = match stage {
+                economy::search::SearchStage::Index => self.device.count(
+                    count.div_ceil(DISCOVERY_BLOCK as usize) * self.device.workgroup as usize,
+                ),
                 economy::search::SearchStage::Prepare => self.device.count(count),
                 economy::search::SearchStage::Search => {
                     markets::dispatch(&self.searches.dispatches, markets::SEARCH_DISPATCH)
@@ -1268,8 +1271,11 @@ impl Simulation {
                 },
             );
         };
+        if let Market::Consumer(_) = market {
+            search(economy::search::SearchStage::Index);
+        }
         match market {
-            Market::Labor | Market::Consumer(_) | Market::Payroll | Market::Distribution => {
+            Market::Labor | Market::Payroll | Market::Distribution => {
                 launch(EconomyStage::ProposeCompact, count, &parameters);
                 launch(EconomyStage::MarketBoundary, 1, &parameters);
                 parallel::scan(

@@ -110,6 +110,14 @@ fn grouped_markets_match_coordinate_scheduler_at_every_phase() -> Result<()> {
 }
 
 #[test]
+fn cooperative_consumer_markets_preserve_trades_and_accounting_at_every_phase() -> Result<()> {
+    for experiment in [Experiment::Baseline, Experiment::Concentrated] {
+        compare_market_execution(Scenario::industrial(97, 42, experiment)?, 12)?;
+    }
+    Ok(())
+}
+
+#[test]
 fn grouped_institutions_and_custom_packets_match_coordinate_scheduler() -> Result<()> {
     for scenario in [
         include_str!("../../scenarios/institutions.json"),

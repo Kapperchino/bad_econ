@@ -1,150 +1,43 @@
 # Spatial economy
 
-A spatial industrial economy with people, household enterprises, factories, grocery distributors, 16 goods, supply chains, and research-driven production methods. Generated scenarios support up to one million household accounts; births, deaths, migration, and business entry change the runtime population. Burn/CubeCL runs the Rust kernels on WGPU and CPU, with CubeK providing matrix multiplication, reductions, and random sampling; Bevy provides an optional viewer. The Rust toolchain and dependencies are pinned.
+A Rust simulation of households, farms, factories, trade, and research across 16 goods. Runs on the GPU with Burn/CubeCL and includes a Bevy viewer.
+
+Requires the [pinned Rust toolchain](rust-toolchain.toml) and a GPU supporting `SHADER_INT64`. The Linux viewer also needs ALSA development libraries.
 
 ## Run
 
 ```sh
-cargo run -- run --households 1000000 --days 30
-cargo run --features viewer -- view --households 1000000
-cargo run -- run --economy agrarian --households 10000 --days 30
-cargo run -- run --scenario scenarios/institutions.json --days 12
-cargo run -- analyze --analysis scenarios/analysis.json --output /tmp/accounts.json
+cargo run --release --features viewer -- view --households 1000000 --seed 42
+cargo run --release -- run --households 1000000 --days 30
+cargo run --release -- run --scenario scenarios/institutions.json --days 12
 ```
 
-GPU and the industrial economy are the defaults. The GPU device must support `SHADER_INT64` for exact integer reductions. `--economy agrarian` selects the original food economy; loaded scenarios retain their own economy setting. `--seed` controls generated populations and resource geography, `--output PATH` saves JSON, and `--checkpoint PATH` / `--restore PATH` save and resume audited state. See `cargo run -- --help` for all options.
+GPU and the industrial economy are the defaults. Use `--economy agrarian` for the simpler food economy, or load a [scenario](scenarios/) with its own population and settings.
 
-The generated industrial economy starts with subsistence farming households and wage-earning households. Subsistence households grow and prepare their own food. Wage earners start with jobs near capitalist-owned farms, factories, or distributors and buy their food; they do not grow grain or bake at home. Existing employers are considered before searching for another job. Starting food stocks, production capacity, prices, working capital, and research effort are calibrated for an established economy. Market reach, commuting speed, and shipment speed scale with the generated map so larger populations retain the same transport coverage and delivery times. Loaded scenarios retain their explicit transport settings. Individual deprivation and later crises remain possible.
+- `--seed N`: generation seed; defaults to 42.
+- `--output PATH`: save results as JSON.
+- `--trajectory PATH`: record daily accounts as JSONL.
+- `--checkpoint PATH` / `--restore PATH`: save or resume a simulation. Add `--checkpoint-every N` for periodic saves.
 
-GPU startup regressions run a full year at 10,000, 100,000, and 1,000,000 households, checking early famine, food deficits, population, worker savings, and cash conservation. [Measured trajectories and reproduction commands](reports/startup-stability.json) include a second seed and a two-year run at 100,000 households.
+See `cargo run -- --help` for all options.
 
-On Windows, Smart App Control can block locally compiled build scripts with error 4551. The development profile leaves `icu_normalizer_data` and `icu_segmenter_data` unoptimized, which resolved the blocked ICU build scripts on the audited Windows setup. Other dependencies retain their optimization settings. This workaround leaves Windows security settings unchanged; future unsigned outputs can still be blocked. See [Microsoft's Smart App Control guidance](https://support.microsoft.com/en-us/windows/security/threat-malware-protection/smart-app-control-frequently-asked-questions).
-
-State stores actor metadata, employment assignments, active recipes, per-good deliveries and consumption, bank and loan balances, and research records in field rows on the host and GPU. Checkpoints use format 8 with the `ResearchCubekV4` research layout and `bad-econ/state/CubekV2/v9` state hashes; earlier checkpoint formats are rejected. Scenario format 2 explicitly migrates version 1 and discards its obsolete health settings. Existing three-good scenario files still load, with additional inventories and research inputs initialized to zero, and omitted resource maps default to generated geography.
-
-The viewer starts paused: Space toggles running, N advances one day, R resets, G changes the display, and C compares the next seed. Simulation runs on a worker; the viewer renders aggregate snapshots rather than household entities. Selected inspections refresh each day; firm inspection includes lifecycle state, construction, equipment, and safety.
-
-A status banner confirms completed controls and reports failures, with short sound cues and a subtle 240 ms color pulse confined to the banner. Automatic days stay quiet. M toggles sound; V reduces flashes to a static tint. Feedback preferences survive reset. The generated WAV cues are embedded in the executable, so launching from another directory needs no asset setup. The Linux viewer additionally needs ALSA development libraries for audio.
-
-Presentation geometry and statistics refresh when the published display or selected chart changes. Worker publications wake the window immediately; between changes, it updates at most every 250 ms when focused or 500 ms when unfocused. Banner pulses temporarily use 60 Hz updates. The simulation worker and audit cadence are independent of rendering.
+The viewer starts paused. **Space** runs/pauses, **N** steps one day, **R** resets, **1/2/3** change speed, **G** changes the display, and **C** compares the next seed.
 
 ## Model
 
-Each day follows opening → observation → proposal → commitment → work/payment → provision/purchase → physical close → accounts/decisions → audit.
+- Subsistence farmers grow their own food. Wage workers start employed by capitalist-owned farms, factories, or distributors and buy food.
+- Firms produce goods using labor and inputs. Natural resources constrain production sites; deliveries take at least one day.
+- Births, deaths, migration, business entry, and closures change the economy over time.
+- Transactions use exact integer accounting. Daily audits check cash and goods conservation; faults restore the last audited state.
 
-- Households supply labor and consume bread daily. Industrial households also buy linen and cloth every 20 days, coats every 40 days, and furniture and glass every 60 days, on staggered schedules. Firms produce discrete packets; each firm has a household owner.
-- Labor and goods markets run four matching rounds. Discovery and settlement use deterministic seeded offsets that vary by day, phase, market, and round. Searches consider up to eight suitable nearby candidates. Wholesale searches spread across the supplier list so new firms with little stock do not funnel buyers toward the same few established producers. Wholesale buyers prefer suppliers that can cover a day of production and keep searching past smaller offers, retaining partial supply as a fallback. Input orders are bounded by production capacity.
-- Deliveries belong to the buyer and take at least one day. Pending goods cannot be consumed or used in production; new output reaches the next day's market.
-- Resources use exact unsigned 64-bit ticks. Transactions check all debits and authorization before posting. Daily audits enforce cash and goods identities; faults restore the last audited state.
-- Optional institutions include payroll taxes, wage bargaining, banks, support, research, equipment, natural stocks, and strikes. People age, are born, die, and form households; identities remain stable and are never reused.
-
-[Scenario examples](scenarios/) cover shortages, transport, concentrated markets, institutions, and custom populations. Export a starting configuration with:
-
-```sh
-cargo run -- scenario --households 1000000 --output /tmp/scenario.json
-```
-
-A loaded scenario supplies its own seed and population settings.
-
-The [industrial model and mortality profile](docs/industrial-economy.md) describe household production, population transitions, firm formation, ownership, and grocery operation, including assumptions and limits. The [validation report](docs/industrial-validation.md) records GPU checks, long-run trajectories, and remaining model limitations. `--trajectory /tmp/daily.jsonl` records daily population and food accounts; `--checkpoint-every 30` writes periodic checkpoints when `--checkpoint` is supplied.
-
-## Goods and production
-
-Inventory, research-input, consumption, and market arrays follow this order: grain, flour, bread, iron, coal, steel, flax, linen, cloth, coats, wood, tools, furniture, cotton, dye, glass. `FirmSeed.good` uses the corresponding Rust enum name, such as `"Steel"` or `"Coats"`. A firm's `Technique.input_ticks` is consumed for **each** ingredient per packet; both ingredients must be available before labor can be committed.
-
-Grain, iron, coal, flax, wood, cotton, and dye are **natural** goods. Their producers require the matching local resource as well as labor and any recipe inputs. All other goods are **manufactured** and can be produced anywhere with sufficient labor and inputs. Tools and fuel used by extraction upgrades do not change a good's category.
-
-The optional `resources` setting defaults to `"Generated"`. Generation creates four seeded square patches per natural good, each with side length `max(1, map_size / 4)`, using random draws independent of population generation. Generated natural producers are placed within matching patches; household and manufacturer placement follows the existing population rules. The concentrated preset puts one patch of each natural good around the shared center.
-
-An explicit resource map replaces all generated patches. For example:
-
-```json
-"resources": {
-  "Explicit": {
-    "regions": [
-      { "good": "Grain", "lower": { "x": 0, "y": 0 }, "upper": { "x": 250, "y": 250 } },
-      { "good": "Iron", "lower": { "x": 100, "y": 100 }, "upper": { "x": 500, "y": 500 } }
-    ]
-  }
-}
-```
-
-Regions must name natural goods and be nonempty rectangles within the map. Lower bounds are inclusive, upper bounds exclusive; overlaps make all listed resources available. `{"Explicit":{"regions":[]}}` describes a map with no natural resources. Automatic population generation rejects a missing region for any natural good it needs to produce. Explicit populations keep their supplied positions: a natural producer at an unsuitable site remains valid and may sell existing inventory, but plans no production, hires no production labor, and creates no output. Its nominal capacity is retained. Resource capacity is cached separately in GPU actor metadata at initialization and restoration; research, equipment, and optional natural-stock constraints can further limit production. Geography itself does not deplete or renew, and firms do not relocate.
-
-| Industry | Basic inputs | Research method | Required technology |
-| --- | --- | --- | --- |
-| Grain, flax, cotton, dye | None | MechanicalHarvesting; adds tools | Mechanization |
-| Flour | Grain | SteamMilling; adds coal | SteamPower |
-| Bread | Flour | MechanicalBaking | Mechanization |
-| Iron, coal | None | SteamMining; adds tools and coal | SteamPower |
-| Steel | Iron + coal | BessemerProcess | Steelmaking |
-| Linen | Flax | PowerLooms | PowerLooms |
-| Cloth | Cotton + dye | PowerLooms | PowerLooms |
-| Coats | Cloth + linen | SewingMachines | SewingMachines |
-| Wood | None | Sawmills; adds tools | Mechanization |
-| Tools | Iron + wood | MachineTools; replaces iron with steel | Steelmaking |
-| Furniture | Wood + tools | FurnitureWorkshops | Mechanization |
-| Glass | Coal | Glassworks | SteamPower |
-
-These initial upgrades double packet output (capped at 100), reduce labor to two-thirds (rounded down, at least one minute), and preserve the base input quantity, with a minimum of one tick for newly introduced inputs. Industrial firms retain basic methods and can revert when upgrade equipment or inputs are unavailable. Existing shipments keep their original good when a firm changes methods. The viewer's firm inspection shows its current method, output, and labor requirement.
-
-Industrial presets create firm-owned research labs. Mechanization unlocks SteamPower and PowerLooms; SteamPower unlocks Steelmaking; PowerLooms and Steelmaking together unlock SewingMachines. Their capability bits are 1, 2, 4, 8, and 16 respectively. Projects spend available household research time, use deterministic probabilistic discovery, and stop spending resources once their outcomes are discovered. Preset projects require labor; custom projects can also consume goods through `inputs`.
-
-To enable an upgrade in a custom scenario, add its enum name to the owning research lab's `methods` array and supply projects with the required outcome bits. Discovery, mastery, permission, and adoption must all be present. `"MasterAndAdoptPermitted"` automatically masters and adopts permitted discoveries; `"Manual"` uses the explicitly supplied access masks. Methods are considered in array order and the last eligible method becomes active at the next opening. The optional `production_requirements` mask still gates the firm's entire production separately. The compact [industrial scenario](scenarios/industrial.json) includes all goods and research labs for steel and coats.
-
-## Code
-
-- [Domain](src/domain.rs): scenario validation, populations, state, checkpoints, and observations.
-- [Simulation](src/simulation/): GPU/CPU kernels and phase orchestration. Markets keep phase counters on the GPU, stably sort seeded offers by counterparty, and search candidates in cooperative tiles. Capacity changes preserve spatial membership; migration and entry rebuild it. Tiled integer audits retain overflow checks and audited rollback copies.
-- [Ledger](src/ledger.rs) and [arithmetic](src/arithmetic.rs): canonical transactions and exact arithmetic contracts.
-- [Analytics](src/simulation/analytics/mod.rs): approximate f32 accounts from explicitly supplied analytical inputs, using CubeK batched matrix multiplication and reductions.
-- [Viewer](src/viewer.rs): Bevy controls, inspection, and visualization.
-
-Kernel interfaces use CubeCL `CubeType` and `CubeLaunch` records. Stages, markets, discovery strategies, economy modes, and optional policy modes use comptime enums; days, populations, rates, balances, and per-actor decisions remain runtime data. Tax brackets use a typed `Sequence` with an unrolled structural loop. Research and demography pass named launch parameters and table buffers. Burn tensor arguments and CubeCL dispatch sizing handle buffer metadata and device limits; CubeK supplies matrix multiplication, reductions, and random sampling.
-
-Opening deliveries and transit audits run across actors and goods. Tick buffers use two-word vector access in opening, audits, registry transfers, and fractional dividends; population growth copies four words per lane. Dividend payments are calculated per share, then gathered per account to avoid concurrent balance updates. Analytical addition and rescaling choose aligned vector widths supported by the device, and CubeK reductions vectorize adjacent outputs. GPU regression tests compare these paths with serial references, including rounding, overflow, partial workgroups, and empty analytical inputs.
-
-When finance institutions are disabled, firm liquidations and equity investments gather only affected accounts, settle them in actor order, and patch those accounts back onto the GPU. This also works when firms enter, migrate, or expand on the same day, avoiding full economy downloads and reconstruction as closures become common. Finance institutions and household inheritance retain the complete reconstruction path. [Performance measurements](reports/registry-performance.json) compare year-long GPU runs at 100,000 households and check sustained throughput at one million households.
-
-## Lean correspondence
-
-Compared against `../marx-lean-proof` at `1ad0e02`. The executable contracts correspond to the following proof modules; the Rust tests check finite arithmetic and execution, rather than extending the Lean proofs to the runtime.
-
-| Lean contracts | Implementation and regression coverage |
-| --- | --- |
-| `Basic`, `Productivity`, `Spectral`, `Conversion`, `Theorems`; simulator `Analytics`, `Solver` | Approximate goods and occupational equations, external and normalized weights, research plans, labeled comparators, residual estimates, and context caches in [analytics](src/simulation/analytics/mod.rs), checked in [analytics tests](tests/analytics.rs). Positive-vector contraction witnesses are checked numerically without computing eigenvalues. Empty systems have vacuous witnesses and empty solutions. These floating-point checks do not certify exact real-valued bounds. |
-| `Model.valuation`, `ValuationRecord` | [Valuation records](src/simulation/analytics/valuation.rs) attach context versions, raw occupational hours, and supporting capabilities to selected activities. [Valuation tests](tests/valuation.rs) cover orientation, declared graphs, independent diagnostics, and request serialization on GPU. |
-| `Capabilities`, `Support`, `BooleanBoundary`; simulator `Execution.Readiness` | [Capability closure](src/simulation/research/capabilities.rs), [boundary elimination](src/simulation/research/capabilities/boundary.rs), and separate discovery/mastery/permission/adoption gates; [research tests](tests/research.rs). |
-| `Accounting`, `Blocks`, `Units` | Signed inventory reconciliation and horizons, research input accounts, block inverses, boundary demand, lifetime conventions, unit conversion and rebasing; [retained account tests](tests/retained.rs). |
-| `Sensitivity`, `Truncation` | Signed derivatives, finite changes, coefficient responses, residual errors and weighted Neumann bounds in [sensitivity](src/simulation/analytics/sensitivity.rs); [sensitivity tests](tests/sensitivity.rs). |
-| Simulator `Ledger`, `Packets`, `Execution` | Grouped gross debits, authorization, atomic posting, packets, fractional claims, seeded CubeK research draws, dependency scheduling and audited checkpoints; [contracts](tests/contracts.rs), [execution](tests/execution.rs), and [GPU replay](tests/gpu.rs). Deserialized bundles and probabilities pass through their constructors. |
-| Simulator `Policies`, `Finance` | Household time, fatigue, quotes, forecasts, production starts, equipment, stocks, research hazards, payroll, bargaining, lending, dated funding, support and bank settlement; [household](tests/households.rs), [policy](tests/policies.rs), [payroll](tests/payroll.rs), [bargaining](tests/bargaining.rs), [finance](tests/finance.rs), and [institution](tests/institutions.rs) tests. |
-
-The optional `valuation` object in [the analysis example](scenarios/analysis.json) selects zero-based goods indices. Each record reports hours per unit of output using the request's scale; historical research spending and scalar labor weights do not change those hours. Capability labels are 32-bit masks. `"InputSupport"` follows strictly positive goods inputs; `{"Declared": [{"prerequisite": 0, "dependent": 1}]}` uses the supplied dependency graph. Omitting capability inputs reports `MissingData`; an explicitly empty label set reports `Available(0)`. Boolean support remains available when the numerical account is inadmissible or unresolved.
-
-The simulation ledger uses bounded integers and versioned nonlinear tables. Analytics uses the `CubekF32V2` profile: `DeviceVector::from_ticks` quantizes inputs to f32, and solvers return `ApproximateValues`. The existing `Interval` and signed tick report fields round the floating estimates down and up at readback; they are approximate ranges, not certified enclosures. Residual and truncation estimates omit floating-point roundoff bounds. Values beyond f32 precision lose integer detail, and estimates outside the finite nonnegative tick range are rejected. Positive fractional denominators remain usable even when their reported lower tick rounds to zero. It does not execute arbitrary real-valued inputs, unbounded catalogues, or every institutional scenario from the inherited PDFs. Runtime registries and the fixed 16-good catalogue define the concrete economy; the analytical APIs accept separate finite catalogues. Lean's conditional scheduling theorem, empirical calibration, and arbitrary scenario completeness are not runtime certification claims.
-
-CubeK random streams are keyed by scenario seed, day, and purpose (research, strikes, or demography). Demography combines two uniform f32 draws into 48 random bits for mortality and birth thresholds. Replay is checked on the same GPU across workgroup sizes and checkpoint restoration; bitwise random outcomes are not promised across different devices or CubeK versions. The new streams intentionally change outcomes from older profiles.
-
-## Verify and benchmark
+## Test and benchmark
 
 ```sh
 cargo gpu-fast
 cargo gpu-full
-cargo test --locked --features viewer --test integration demography:: --jobs 2 -- --test-threads=1
-cargo clippy --all-targets --features viewer -- -D warnings
-cargo run --release -- benchmark --sizes 1000000 --warmup 2 --days 60 --output /tmp/benchmark.json
-cargo run --release -- benchmark --restore /tmp/economy.checkpoint.json --warmup 1 --days 30 --output /tmp/continuation-benchmark.json
-cargo run --release --example gpu_throughput -- --sizes 10000,100000,1000000 --seed 42 --workgroup 64 --warmup 2 --days 60 --output /tmp/precompiled-benchmark.json
-cargo run --release --example analytics_throughput -- --sizes 16,128,512 --iterations 128 --repeats 10 --trials 3 --output /tmp/analytics-benchmark.json
+cargo run --release -- benchmark --sizes 100000,1000000 --seed 42 --warmup 0 --days 1000 --output /tmp/benchmark.json
 ```
 
-`cargo gpu-fast` runs 11 representative checks for ledger authorization, wide arithmetic, dependency ordering, checkpoint replay, rollback, population growth, phase ordering, industrial conservation and actor storage. Use it during the edit/test loop, then run the affected subsystem by module name, as in the demography example. `cargo gpu-full` runs every retained unit and integration test, including long horizons, workgroup comparisons, research/finance coverage and isolated allocation checks. Neither command runs a CPU simulation backend. The suite omits redundant demonstrations and some standalone constructor checks; financial faults, rollback and checkpoint replay retain focused coverage.
+Both test aliases use the GPU. Benchmarks report daily phase timings, memory use, and final state hashes. Add integration modules to `tests/integration.rs`; automatic test discovery is disabled.
 
-Integration cases share one executable and cache a GPU device per workgroup so shader compilation can be reused. Tests that inspect device-wide allocation budgets keep fresh devices, and the dedicated GPU allocation suite remains a separate executable. Both aliases use two build jobs to bound compiler memory use. The fast subset uses four test threads; the full suite uses one for predictable GPU scheduling. These settings do not change ordinary Cargo commands. The [test performance report](reports/gpu-test-performance.md) records measurements and coverage boundaries. Cargo's [integration-test guidance](https://doc.rust-lang.org/cargo/reference/cargo-targets.html#integration-tests) describes the single-executable module layout.
-
-Add new integration modules to `tests/integration.rs`; automatic top-level test-target discovery is disabled. Run an existing module with `--test integration module_name::` instead of the former `--test module_name` command. Memory-budget cases must construct a fresh device instead of using the shared test helper.
-
-Compute tests run exclusively on GPU and compare phase states across workgroups, the original transaction scheduler, and independent integer oracles. Analytics checks use independent f64 references and f32 tolerances, including one tick for report rounding. The test helper always selects the GPU. Benchmarks record daily timings, event counts, memory, readback volume, and state hashes. Startup and checkpoint restoration are reported separately. A restored benchmark measures that checkpoint's economy; its starting day follows the requested warmup. The final state download is outside the timed interval.
-
-The `gpu_throughput` example first runs the full industrial trajectory outside the timed interval to compile kernels used by later population and firm changes. It discards that state, releases unused GPU allocations, and restarts with the requested warmup days before measuring. It checks that the preflight and measured final hashes match. Use the same harness on each revision for comparisons that exclude compilation.
+Code: [domain](src/domain.rs), [simulation](src/simulation/), [viewer](src/viewer.rs), [tests](tests/).
