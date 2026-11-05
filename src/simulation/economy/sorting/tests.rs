@@ -20,7 +20,7 @@ impl SortBuffers {
             control: device.empty(CONTROL_WORDS + 3),
             dispatches: device
                 .client
-                .memory_dedicated_allocation(120, |_| device.empty(30)),
+                .memory_dedicated_allocation(132, |_| device.empty(33)),
         }
     }
 
