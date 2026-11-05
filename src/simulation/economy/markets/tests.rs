@@ -1,7 +1,11 @@
 use super::*;
 use crate::{
     domain::Phase,
-    simulation::{Device, parallel::ScanMode},
+    simulation::{
+        Device,
+        layout::{NO_ACTOR, ProposalLayout},
+        parallel::ScanMode,
+    },
 };
 use anyhow::Result;
 use burn_wgpu::CubeTensor;
@@ -68,7 +72,7 @@ impl SortBuffers {
             control: device.tensor(&control),
             dispatches: device
                 .client
-                .memory_dedicated_allocation(120, |_| device.empty(30)),
+                .memory_dedicated_allocation(132, |_| device.empty(33)),
         };
         prepare_dispatch(device, &buffers.control, &buffers.dispatches);
         buffers
@@ -239,6 +243,261 @@ fn radix_sort_preserves_stable_items_and_sparse_partial_blocks_on_gpu() -> Resul
                     scan,
                     KeyPattern::Constant(digit),
                 )?;
+            }
+        }
+    }
+    Ok(())
+}
+
+#[derive(Clone, Copy, Debug, Hash, PartialEq, Eq)]
+enum ProposalStage {
+    CountDirect,
+    FillDirect,
+    RecordSearch,
+    CompactSearch,
+}
+
+#[derive(CubeType, CubeLaunch)]
+struct ProposalInput {
+    proposals: Box<[u32]>,
+    searches: Box<[u32]>,
+    successes: Box<[Atomic<u32>]>,
+    scratch: Box<[u32]>,
+    control: Box<[Atomic<u32>]>,
+    parameters: EconomyParameters,
+    #[cube(comptime)]
+    stage: ProposalStage,
+}
+
+struct ProposalSystem;
+struct ProposalPass;
+
+impl System for ProposalSystem {
+    type Input = ProposalInput;
+    type Passes = gpu_passes![ProposalPass];
+}
+
+#[cube]
+impl GpuPass<ProposalInput> for ProposalPass {
+    type Output = ();
+
+    fn execute(mut input: ProposalInput) {
+        let id = ABSOLUTE_POS as u32;
+        let count = input.parameters.count;
+        match comptime!(input.stage) {
+            ProposalStage::CountDirect => {
+                let mut peer = u32::new(comptime!(i64::from(NO_ACTOR)));
+                if id < count {
+                    let actor = (id + input.parameters.settlement_rotation) % count;
+                    peer = input.proposals[actor as usize * ProposalLayout::WORDS];
+                }
+                compact_proposal(peer, &mut input.scratch, &input.parameters, id);
+            }
+            ProposalStage::FillDirect => compact_fill(
+                &mut input.proposals,
+                &mut input.scratch,
+                &input.control,
+                &input.parameters,
+                id,
+            ),
+            ProposalStage::RecordSearch => {
+                if id < input.control[SEARCHES_WORD].load() {
+                    let actor = input.searches[id as usize];
+                    let peer = input.proposals[actor as usize * ProposalLayout::WORDS];
+                    if peer != NO_ACTOR {
+                        super::super::search::record_success(
+                            &input.successes,
+                            &input.parameters,
+                            actor,
+                        );
+                    }
+                }
+            }
+            ProposalStage::CompactSearch => super::super::search::compact(
+                &input.proposals,
+                &input.searches,
+                &input.successes,
+                &mut input.scratch,
+                &input.control,
+                &input.parameters,
+                id,
+            ),
+        }
+    }
+}
+
+#[derive(Clone, Copy, Debug)]
+enum ProposalDensity {
+    Empty,
+    Sparse,
+    Dense,
+}
+
+struct ProposalCase {
+    count: usize,
+    rotation: usize,
+    scan: ScanMode,
+    density: ProposalDensity,
+}
+
+impl ProposalCase {
+    fn check(&self, device: &Device) -> Result<()> {
+        let count = self.count;
+        let queue = (0..count)
+            .rev()
+            .filter(|actor| match self.density {
+                ProposalDensity::Empty => false,
+                ProposalDensity::Sparse => actor % 13 == 0,
+                ProposalDensity::Dense => true,
+            })
+            .collect::<Vec<_>>();
+        let mut proposals = vec![NO_ACTOR; count * ProposalLayout::WORDS];
+        for &actor in &queue {
+            let present = match self.density {
+                ProposalDensity::Sparse => actor % 3 != 0,
+                _ => true,
+            };
+            if present {
+                proposals[actor * ProposalLayout::WORDS] = (actor % 7) as u32;
+            }
+        }
+        let expected = (0..count)
+            .map(|position| (position + self.rotation) % count)
+            .filter(|&actor| proposals[actor * ProposalLayout::WORDS] != NO_ACTOR)
+            .map(|actor| SortItem {
+                key: proposals[actor * ProposalLayout::WORDS],
+                item: actor as u32,
+            })
+            .collect::<Vec<_>>();
+        let mut searches = vec![0; count * 5];
+        for (job, &actor) in queue.iter().enumerate() {
+            searches[job] = actor as u32;
+        }
+        let searches = device.tensor(&searches);
+        let successes = device.tensor(&vec![
+            0;
+            search_counts_offset(count)
+                + 2 * search_blocks(count)
+                + 512
+        ]);
+        let proposals = device.tensor(&proposals);
+        let mut control = vec![0; CONTROL_WORDS + 3];
+        control[SEARCHES_WORD] = queue.len() as u32;
+        let buffers = SortBuffers {
+            scratch: device.tensor(&vec![NO_ACTOR; scratch_words(count)]),
+            control: device.tensor(&control),
+            dispatches: device
+                .client
+                .memory_dedicated_allocation(132, |_| device.empty(33)),
+        };
+        let parameters = EconomyParameters {
+            scan: self.scan,
+            day: 0,
+            settlement_rotation: self.rotation as u32,
+            phase: Phase::Opening,
+            market: MarketFlag::Labor,
+            discovery: Discovery::Indexed,
+            offset: 0,
+            count: count as u32,
+            status_start: 0,
+            sort_source: 0,
+            sort_width: 0,
+            sort_count: 0,
+        };
+        let launch = |stage| {
+            let dispatch = match stage {
+                ProposalStage::RecordSearch | ProposalStage::CompactSearch => {
+                    dispatch(&buffers.dispatches, SEARCH_COMPACT_DISPATCH)
+                }
+                _ => device.count(count),
+            };
+            ProposalSystem::launch(
+                device,
+                dispatch,
+                CubeDim::new_1d(device.workgroup),
+                ProposalInputLaunch {
+                    proposals: proposals.clone().into_buffer_arg(),
+                    searches: searches.clone().into_buffer_arg(),
+                    successes: successes.clone().into_buffer_arg(),
+                    scratch: buffers.scratch.clone().into_buffer_arg(),
+                    control: buffers.control.clone().into_buffer_arg(),
+                    parameters: parameters.launch(),
+                    stage,
+                },
+            );
+        };
+        prepare_dispatch(device, &buffers.control, &buffers.dispatches);
+        launch(ProposalStage::RecordSearch);
+        parallel::scan(
+            device,
+            &successes,
+            search_counts_offset(count),
+            search_blocks(count),
+        );
+        launch(ProposalStage::CompactSearch);
+        self.check_output(device, &buffers, &expected)?;
+        launch(ProposalStage::CountDirect);
+        parallel::scan(
+            device,
+            &buffers.scratch,
+            7 * count,
+            count.div_ceil(device.workgroup as usize),
+        );
+        launch(ProposalStage::FillDirect);
+        self.check_output(device, &buffers, &expected)?;
+        let statuses = device.read_range(&buffers.scratch, 4 * count, count)?;
+        assert_eq!(statuses, vec![EventStatus::Inactive as u32; count]);
+        Ok(())
+    }
+
+    fn check_output(
+        &self,
+        device: &Device,
+        buffers: &SortBuffers,
+        expected: &[SortItem],
+    ) -> Result<()> {
+        let control = device.read(&buffers.control)?;
+        assert_eq!(control[CONSTRUCTED_EVENTS_WORD] as usize, expected.len());
+        let scratch = device.read(&buffers.scratch)?;
+        let actual = (0..expected.len())
+            .map(|slot| SortItem {
+                key: scratch[slot],
+                item: scratch[self.count + slot],
+            })
+            .collect::<Vec<_>>();
+        assert_eq!(
+            actual, expected,
+            "count {}, rotation {}, {:?}, {:?}, workgroup {}",
+            self.count, self.rotation, self.scan, self.density, device.workgroup
+        );
+        Ok(())
+    }
+}
+
+#[test]
+fn proposal_compaction_preserves_rotated_order_and_sparse_partial_blocks_on_gpu() -> Result<()> {
+    for workgroup in [32, 64, 128, 256] {
+        let device = Device::headless(workgroup)?;
+        for scan in [ScanMode::Shared, ScanMode::new(&device)] {
+            for count in [1, 31, 32, 33, 255, 256, 257, 1025, 65537] {
+                let mut rotations = vec![0, 1 % count, count / 2, count - 1];
+                rotations.sort_unstable();
+                rotations.dedup();
+                for rotation in rotations {
+                    for density in [
+                        ProposalDensity::Empty,
+                        ProposalDensity::Sparse,
+                        ProposalDensity::Dense,
+                    ] {
+                        ProposalCase {
+                            count,
+                            rotation,
+                            scan,
+                            density,
+                        }
+                        .check(&device)?;
+                    }
+                }
             }
         }
     }

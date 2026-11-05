@@ -1114,10 +1114,6 @@ impl Simulation {
                 }
                 _ => self.device.count(invocations),
             };
-            let events = match stage {
-                EconomyStage::SearchPrepare => &self.searches.requests,
-                _ => &self.scratch,
-            };
             match stage {
                 EconomyStage::MarketBoundary => {
                     markets::prepare_dispatch(
@@ -1136,7 +1132,7 @@ impl Simulation {
                         config: self.config.launch(),
                         spatial: self.spatial.clone().into_buffer_arg(),
                         proposals: self.proposals.clone().into_buffer_arg(),
-                        bundles: events.clone().into_buffer_arg(),
+                        bundles: self.scratch.clone().into_buffer_arg(),
                         control: self.control.clone().into_buffer_arg(),
                         parameters: parameters.launch(),
                         stage,
@@ -1187,39 +1183,65 @@ impl Simulation {
                 );
             }
         }
+        let search = |stage| {
+            let dispatch = match stage {
+                economy::search::SearchStage::Prepare => self.device.count(count),
+                economy::search::SearchStage::Search => {
+                    markets::dispatch(&self.searches.dispatches, markets::SEARCH_DISPATCH)
+                }
+                economy::search::SearchStage::Compact => {
+                    markets::dispatch(&self.searches.dispatches, markets::SEARCH_COMPACT_DISPATCH)
+                }
+            };
+            let workgroup = match stage {
+                economy::search::SearchStage::Search => 32,
+                _ => self.device.workgroup,
+            };
+            economy::search::MarketSearch::launch(
+                &self.device,
+                dispatch,
+                cubecl::CubeDim::new_1d(workgroup),
+                economy::search::SearchInputLaunch {
+                    state: self.state.clone().into_buffer_arg(),
+                    actors: self.actors.clone().into_buffer_arg(),
+                    config: self.config.launch(),
+                    spatial: self.spatial.clone().into_buffer_arg(),
+                    proposals: self.proposals.clone().into_buffer_arg(),
+                    searches: self.searches.requests.clone().into_buffer_arg(),
+                    successes: self.searches.successes.clone().into_buffer_arg(),
+                    scratch: self.scratch.clone().into_buffer_arg(),
+                    control: self.control.clone().into_buffer_arg(),
+                    parameters: parameters.launch(),
+                    stage,
+                },
+            );
+        };
         match market {
             Market::Labor | Market::Consumer(_) | Market::Payroll | Market::Distribution => {
-                launch(EconomyStage::Propose, count, &parameters)
+                launch(EconomyStage::ProposeCompact, count, &parameters);
+                launch(EconomyStage::MarketBoundary, 1, &parameters);
+                parallel::scan(
+                    &self.device,
+                    &self.scratch,
+                    7 * count,
+                    count.div_ceil(self.device.workgroup as usize),
+                );
+                launch(EconomyStage::GroupCompactFill, count, &parameters);
             }
             _ => {
-                launch(EconomyStage::SearchPrepare, count, &parameters);
+                search(economy::search::SearchStage::Prepare);
                 launch(EconomyStage::MarketBoundary, 1, &parameters);
-                economy::search::MarketSearch::launch(
+                search(economy::search::SearchStage::Search);
+                launch(EconomyStage::MarketBoundary, 1, &parameters);
+                parallel::scan(
                     &self.device,
-                    markets::dispatch(&self.searches.dispatches, markets::SEARCH_DISPATCH),
-                    cubecl::CubeDim::new_1d(32),
-                    economy::search::SearchInputLaunch {
-                        state: self.state.clone().into_buffer_arg(),
-                        actors: self.actors.clone().into_buffer_arg(),
-                        config: self.config.launch(),
-                        spatial: self.spatial.clone().into_buffer_arg(),
-                        proposals: self.proposals.clone().into_buffer_arg(),
-                        searches: self.searches.requests.clone().into_buffer_arg(),
-                        control: self.control.clone().into_buffer_arg(),
-                        parameters: parameters.launch(),
-                    },
+                    &self.searches.successes,
+                    markets::search_counts_offset(count),
+                    markets::search_blocks(count),
                 );
+                search(economy::search::SearchStage::Compact);
             }
         }
-        launch(EconomyStage::MarketBoundary, 1, &parameters);
-        launch(EconomyStage::GroupCompactCount, count, &parameters);
-        parallel::scan(
-            &self.device,
-            &self.scratch,
-            7 * count,
-            count.div_ceil(self.device.workgroup as usize),
-        );
-        launch(EconomyStage::GroupCompactFill, count, &parameters);
         launch(EconomyStage::MarketBoundary, 1, &parameters);
         if let Market::Labor | Market::Input(_) | Market::Consumer(_) | Market::Household = market {
             launch(EconomyStage::GroupPrepare, count, &parameters);

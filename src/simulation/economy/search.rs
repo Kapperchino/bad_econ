@@ -13,12 +13,21 @@ pub(super) fn prepare(
     proposals: &mut [u32],
     control: &[Atomic<u32>],
     searches: &mut [u32],
+    successes: &[Atomic<u32>],
+    scratch: &mut [u32],
     parameters: &EconomyParameters,
     invocation: u32,
 ) {
     let mut id = invocation;
     let mut searching = false;
+    let masks = ceildiv(config.actors, 32);
+    if invocation < masks + ceildiv(config.actors, markets::COMPACTION_BLOCK) {
+        successes[invocation as usize].store(0);
+    }
     if invocation < config.actors {
+        KernelEventStatus::new(comptime!(EventStatus::Inactive))
+            .store(scratch, 4 * config.actors + invocation);
+        scratch[(5 * config.actors + invocation) as usize] = NO_ACTOR;
         let market = comptime!(parameters.market);
 
         if comptime!(market == MarketFlag::Household && parameters.discovery.indexed()) {
@@ -454,6 +463,13 @@ fn candidate(
     }
 }
 
+#[derive(Clone, Copy, Debug, Hash, PartialEq, Eq)]
+pub(in crate::simulation) enum SearchStage {
+    Prepare,
+    Search,
+    Compact,
+}
+
 #[derive(CubeType, CubeLaunch)]
 pub(in crate::simulation) struct SearchInput {
     pub state: Box<[u32]>,
@@ -462,8 +478,12 @@ pub(in crate::simulation) struct SearchInput {
     pub spatial: Box<[u32]>,
     pub proposals: Box<[u32]>,
     pub searches: Box<[u32]>,
+    pub successes: Box<[Atomic<u32>]>,
+    pub scratch: Box<[u32]>,
     pub control: Box<[Atomic<u32>]>,
     pub parameters: EconomyParameters,
+    #[cube(comptime)]
+    pub stage: SearchStage,
 }
 
 pub(in crate::simulation) struct MarketSearch;
@@ -479,16 +499,43 @@ impl GpuPass<SearchInput> for Search {
     type Output = ();
 
     fn execute(mut input: SearchInput) {
-        search(
-            &mut input.state,
-            &input.actors,
-            &input.config,
-            &mut input.spatial,
-            &mut input.proposals,
-            &mut input.searches,
-            &input.control,
-            &input.parameters,
-        );
+        if input.control[LATCH_WORD].load() == 0 {
+            match comptime!(input.stage) {
+                SearchStage::Prepare => prepare(
+                    &mut input.state,
+                    &input.actors,
+                    &input.config,
+                    &mut input.spatial,
+                    &mut input.proposals,
+                    &input.control,
+                    &mut input.searches,
+                    &input.successes,
+                    &mut input.scratch,
+                    &input.parameters,
+                    ABSOLUTE_POS as u32,
+                ),
+                SearchStage::Search => search(
+                    &mut input.state,
+                    &input.actors,
+                    &input.config,
+                    &mut input.spatial,
+                    &mut input.proposals,
+                    &input.searches,
+                    &input.successes,
+                    &input.control,
+                    &input.parameters,
+                ),
+                SearchStage::Compact => compact(
+                    &input.proposals,
+                    &input.searches,
+                    &input.successes,
+                    &mut input.scratch,
+                    &input.control,
+                    &input.parameters,
+                    ABSOLUTE_POS as u32,
+                ),
+            }
+        }
     }
 }
 
@@ -499,7 +546,8 @@ fn search(
     config: &EconomyConfig,
     spatial: &mut [u32],
     proposals: &mut [u32],
-    searches: &mut [u32],
+    searches: &[u32],
+    successes: &[Atomic<u32>],
     control: &[Atomic<u32>],
     parameters: &EconomyParameters,
 ) {
@@ -780,6 +828,59 @@ fn search(
             proposals[id as usize * ProposalLayout::WORDS + ProposalLayout::QUANTITY_HIGH] =
                 quantity.extract(HIGH_WORD);
             proposals[id as usize * ProposalLayout::WORDS + ProposalLayout::DISTANCE] = trip;
+            if chosen != NO_ACTOR {
+                record_success(successes, parameters, id);
+            }
+        }
+    }
+}
+
+#[cube]
+pub(super) fn record_success(
+    successes: &[Atomic<u32>],
+    parameters: &EconomyParameters,
+    actor: u32,
+) {
+    let position = (actor + parameters.count - parameters.settlement_rotation) % parameters.count;
+    let masks = ceildiv(parameters.count, 32);
+    successes[(position / 32) as usize].fetch_or(1u32 << (position % 32));
+    successes[(masks + position / markets::COMPACTION_BLOCK) as usize].fetch_add(1);
+}
+
+#[cube]
+pub(super) fn compact(
+    proposals: &[u32],
+    searches: &[u32],
+    successes: &[Atomic<u32>],
+    scratch: &mut [u32],
+    control: &[Atomic<u32>],
+    parameters: &EconomyParameters,
+    job: u32,
+) {
+    let count = parameters.count;
+    let masks = ceildiv(count, 32);
+    let blocks = ceildiv(count, markets::COMPACTION_BLOCK);
+    if job == 0 {
+        control[CONSTRUCTED_EVENTS_WORD].store(successes[(masks + blocks - 1) as usize].load());
+    }
+    if job < control[SEARCHES_WORD].load() {
+        let actor = searches[job as usize];
+        let peer = proposals[actor as usize * ProposalLayout::WORDS + ProposalLayout::ACTOR];
+        if peer != NO_ACTOR {
+            let position = (actor + count - parameters.settlement_rotation) % count;
+            let block = position / markets::COMPACTION_BLOCK;
+            let word = position / 32;
+            let mut slot = 0u32;
+            if block > 0 {
+                slot = successes[(masks + block - 1) as usize].load();
+            }
+            for preceding in block * (markets::COMPACTION_BLOCK / 32)..word {
+                slot += successes[preceding as usize].load().count_ones();
+            }
+            let mask = (1u32 << (position % 32)) - 1;
+            slot += (successes[word as usize].load() & mask).count_ones();
+            scratch[slot as usize] = peer;
+            scratch[(count + slot) as usize] = actor;
         }
     }
 }

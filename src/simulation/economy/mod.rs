@@ -551,7 +551,8 @@ fn propose(
     control: &[Atomic<u32>],
     parameters: &EconomyParameters,
     invocation: u32,
-) {
+) -> u32 {
+    let mut chosen = u32::new(comptime!(i64::from(NO_ACTOR)));
     if invocation < config.actors {
         let market = comptime!(parameters.market);
         let mut id = invocation;
@@ -562,7 +563,6 @@ fn propose(
             id = spatial[(base + invocation) as usize];
         }
         let k = kind(actors, id);
-        let mut chosen = u32::new(comptime!(i64::from(NO_ACTOR)));
         let mut quantity = ticks(0u32, 0u32);
         let mut trip = 0u32;
         let mut search = false;
@@ -1106,6 +1106,7 @@ fn propose(
             quantity.extract(HIGH_WORD);
         proposals[id as usize * ProposalLayout::WORDS + ProposalLayout::DISTANCE] = trip;
     }
+    chosen
 }
 
 #[derive(CubeType, Clone, Copy)]
@@ -1945,11 +1946,10 @@ pub enum EconomyStage {
     MarketStart,
     MarketBoundary,
     GroupRanges,
-    GroupCompactCount,
+    ProposeCompact,
     GroupCompactFill,
     GroupRadixLocal,
     GroupRadixScatter,
-    SearchPrepare,
 }
 
 #[cube]
@@ -1979,8 +1979,7 @@ pub fn economy(
                     | EconomyStage::GroupSort
                     | EconomyStage::GroupMerge
                     | EconomyStage::GroupRanges
-                    | EconomyStage::SearchPrepare
-                    | EconomyStage::GroupCompactCount
+                    | EconomyStage::ProposeCompact
                     | EconomyStage::GroupCompactFill
                     | EconomyStage::GroupRadixLocal
                     | EconomyStage::GroupRadixScatter
@@ -2000,11 +1999,19 @@ pub fn economy(
                     }
                 }
             }
-            EconomyStage::SearchPrepare => search::prepare(
-                state, actors, config, spatial, proposals, control, bundles, parameters, id,
-            ),
-            EconomyStage::GroupCompactCount => {
-                markets::compact_count(proposals, bundles, parameters, id)
+            EconomyStage::ProposeCompact => {
+                let actor = (id + parameters.settlement_rotation) % max(parameters.count, 1);
+                let peer = propose(
+                    state,
+                    actors,
+                    config,
+                    spatial,
+                    proposals,
+                    control,
+                    parameters,
+                    select(id < parameters.count, actor, config.actors),
+                );
+                markets::compact_proposal(peer, bundles, parameters, id);
             }
             EconomyStage::GroupCompactFill => {
                 markets::compact_fill(proposals, bundles, control, parameters, id)
@@ -2030,9 +2037,11 @@ pub fn economy(
             EconomyStage::IndexFill => index_fill(config, spatial, bundles, parameters, id),
             EconomyStage::IndexPrices => index_prices(state, config, spatial),
             EconomyStage::Local => local(state, actors, config, control, parameters, id),
-            EconomyStage::Propose => propose(
-                state, actors, config, spatial, proposals, control, parameters, id,
-            ),
+            EconomyStage::Propose => {
+                propose(
+                    state, actors, config, spatial, proposals, control, parameters, id,
+                );
+            }
             EconomyStage::MarketActivity => {
                 let mut active = 0u32;
                 if id < config.actors {

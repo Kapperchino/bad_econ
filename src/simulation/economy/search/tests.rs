@@ -172,6 +172,13 @@ impl SearchProbe {
             as u32;
         searches[3 * count] = self.state.get(Field::Cash, 0) as u32;
         device.write(&simulation.searches.requests, &searches);
+        device.write(
+            &simulation.searches.successes,
+            &vec![
+                0;
+                markets::search_counts_offset(count) + 2 * markets::search_blocks(count) + 512
+            ],
+        );
         match execution {
             SearchExecution::Serial => EconomySystem::launch(
                 device,
@@ -200,8 +207,11 @@ impl SearchProbe {
                     spatial: simulation.spatial.clone().into_buffer_arg(),
                     proposals: simulation.proposals.clone().into_buffer_arg(),
                     searches: simulation.searches.requests.clone().into_buffer_arg(),
+                    successes: simulation.searches.successes.clone().into_buffer_arg(),
+                    scratch: simulation.scratch.clone().into_buffer_arg(),
                     control: simulation.control.clone().into_buffer_arg(),
                     parameters: parameters.launch(),
+                    stage: SearchStage::Search,
                 },
             ),
         }

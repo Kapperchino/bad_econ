@@ -21,9 +21,12 @@ pub(in crate::simulation) const SORT_DISPATCH: usize = 3;
 pub(in crate::simulation) const RANGE_DISPATCH: usize = 6;
 pub(in crate::simulation) const HISTOGRAM_DISPATCH: usize = 9;
 pub(in crate::simulation) const QUEUE_DISPATCH: usize = 27;
+pub(in crate::simulation) const SEARCH_COMPACT_DISPATCH: usize = 30;
+pub(in crate::simulation) const COMPACTION_BLOCK: u32 = 256;
 
 pub(in crate::simulation) struct SearchBuffers {
     pub requests: burn_wgpu::CubeTensor,
+    pub successes: burn_wgpu::CubeTensor,
     pub dispatches: burn_wgpu::CubeTensor,
 }
 
@@ -31,11 +34,20 @@ impl SearchBuffers {
     pub fn new(device: &crate::simulation::Device, actors: usize) -> Self {
         Self {
             requests: device.empty(actors * 5),
+            successes: device.empty(search_counts_offset(actors) + 2 * search_blocks(actors) + 512),
             dispatches: device
                 .client
-                .memory_dedicated_allocation(120, |_| device.empty(30)),
+                .memory_dedicated_allocation(132, |_| device.empty(33)),
         }
     }
+}
+
+pub(in crate::simulation) fn search_counts_offset(actors: usize) -> usize {
+    actors.div_ceil(32)
+}
+
+pub(in crate::simulation) fn search_blocks(actors: usize) -> usize {
+    actors.div_ceil(COMPACTION_BLOCK as usize)
 }
 
 pub(in crate::simulation) fn dispatch(
@@ -96,7 +108,7 @@ impl GpuPass<DispatchInput> for PrepareCounts {
 #[cube]
 fn prepare_counts(control: &[Atomic<u32>], dispatches: &mut [u32], workgroup: u32) {
     control[LATCH_WORD].store(control[crate::simulation::flags::FAULT_WORD].load());
-    let mut counts = Array::<u32>::new(10usize);
+    let mut counts = Array::<u32>::new(11usize);
     counts[0usize] = control[SEARCHES_WORD].load();
     counts[1usize] = ceildiv(control[CONSTRUCTED_EVENTS_WORD].load(), workgroup);
     counts[2usize] = ceildiv(control[RANGE_SLOTS_WORD].load(), workgroup);
@@ -105,7 +117,8 @@ fn prepare_counts(control: &[Atomic<u32>], dispatches: &mut [u32], workgroup: u3
         counts[index] = ceildiv(counts[index - 1], workgroup);
     }
     counts[9usize] = control[RANGE_SLOTS_WORD].load();
-    for index in 0..10usize {
+    counts[10usize] = ceildiv(counts[0usize], workgroup);
+    for index in 0..11usize {
         let count = counts[index];
         dispatches[index * 3] = min(max(count, 1), 65535);
         dispatches[index * 3 + 1] = ceildiv(max(count, 1), 65535);
@@ -183,20 +196,16 @@ pub(in crate::simulation) fn ranges(
 }
 
 #[cube]
-pub(in crate::simulation) fn compact_count(
-    proposals: &mut [u32],
+pub(in crate::simulation) fn compact_proposal(
+    peer: u32,
     scratch: &mut [u32],
     parameters: &EconomyParameters,
     id: u32,
 ) {
     let count = parameters.count;
-    let actor = (id + parameters.settlement_rotation) % max(count, 1);
     let mut present = 0u32;
     if id < count {
-        present = u32::cast_from(
-            proposals[actor as usize * crate::simulation::layout::ProposalLayout::WORDS]
-                != u32::MAX,
-        );
+        present = u32::cast_from(peer != u32::MAX);
         KernelEventStatus::new(comptime!(EventStatus::Inactive)).store(scratch, 4 * count + id);
         scratch[(5 * count + id) as usize] = u32::MAX;
     }
