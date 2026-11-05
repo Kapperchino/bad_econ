@@ -17,7 +17,7 @@ mod tests;
 pub(in crate::simulation) enum MarketSort {
     #[default]
     Unrecorded,
-    Recorded(RecordedSort),
+    Recorded(Box<RecordedSort>),
 }
 
 pub(in crate::simulation) struct RecordedSort {
@@ -130,7 +130,7 @@ impl MarketSort {
                 client.start_capture()?;
                 encode(device, scratch, control, dispatches, parameters);
                 let graph = client.stop_capture()?;
-                *self = Self::Recorded(RecordedSort {
+                *self = Self::Recorded(Box::new(RecordedSort {
                     graph,
                     plan,
                     workgroup: device.workgroup,
@@ -139,7 +139,7 @@ impl MarketSort {
                     scratch: scratch.clone(),
                     control: control.clone(),
                     dispatches: dispatches.clone(),
-                });
+                }));
             }
         }
         Ok(plan.output())

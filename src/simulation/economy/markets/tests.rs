@@ -436,7 +436,7 @@ impl ProposalCase {
                 },
             );
         };
-        prepare_dispatch(device, &buffers.control, &buffers.dispatches);
+        prepare_dispatch(device, &buffers.control, &buffers.dispatches, count);
         launch(ProposalStage::RecordSearch);
         parallel::scan(
             device,

@@ -330,8 +330,8 @@ pub(in crate::simulation) fn migrate(
         removed.extend(inserted);
         let changes = device.tensor(bytemuck::cast_slice(&removed));
         let parameters = SpatialMigrationParametersLaunch {
-            source: cells as u32 + 1 + before as u32,
-            target: cells as u32 + 1 + count as u32,
+            source: cells + 1 + before as u32,
+            target: cells + 1 + count as u32,
             members: before as u32,
             border: cells + 1,
             before: before as u32,
