@@ -41,7 +41,7 @@ impl SortBuffers {
         };
         device.write(&self.scratch, &words);
         device.write(&self.control, &control);
-        markets::prepare_dispatch(device, &self.control, &self.dispatches);
+        markets::prepare_dispatch(device, &self.control, &self.dispatches, case.capacity);
         words
     }
 }

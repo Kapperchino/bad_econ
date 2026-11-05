@@ -198,6 +198,83 @@ mod tests {
         Ok(())
     }
 
+    #[derive(Clone, Copy, Debug)]
+    enum ActiveScanState {
+        Ready,
+        Faulted,
+    }
+
+    #[test]
+    fn active_histogram_prefix_sums_preserve_sparse_tiles_wrapping_and_faults_on_gpu() -> Result<()>
+    {
+        for workgroup in [32, 64, 128, 256] {
+            let device = Device::headless(workgroup)?;
+            let boundary =
+                workgroup as usize * workgroup as usize * ACTIVE_SCAN_ITEMS as usize / 16;
+            let scalar_capacity = (workgroup as usize).pow(3) / 16;
+            for capacity in [scalar_capacity, scalar_capacity + 1, 2_097_153] {
+                let bound = 16 * capacity.div_ceil(workgroup as usize);
+                for active in [0, 1, boundary - 1, boundary, boundary + 1, capacity] {
+                    let count = 16 * active.div_ceil(workgroup as usize);
+                    let input = (0..count)
+                        .map(|index| match index % 5 {
+                            0 => u32::MAX,
+                            _ => (index % 7) as u32,
+                        })
+                        .collect::<Vec<_>>();
+                    for state in [ActiveScanState::Ready, ActiveScanState::Faulted] {
+                        let offset = 7;
+                        let mut words = vec![u32::MAX; offset + bound * 2 + 256];
+                        words[offset..offset + count].copy_from_slice(&input);
+                        let mut control = vec![0; crate::simulation::flags::CONTROL_WORDS + 3];
+                        control[crate::simulation::flags::CONSTRUCTED_EVENTS_WORD] = active as u32;
+                        control[crate::simulation::flags::FAULT_WORD] = match state {
+                            ActiveScanState::Ready => 0,
+                            ActiveScanState::Faulted => 1,
+                        };
+                        let buffer = device.tensor(&words);
+                        let control = device.tensor(&control);
+                        let dispatches =
+                            crate::simulation::markets::SearchBuffers::new(&device, 1).dispatches;
+                        crate::simulation::markets::prepare_dispatch(
+                            &device,
+                            &control,
+                            &dispatches,
+                            capacity,
+                        );
+                        scan_active(&device, &buffer, offset, bound, &control, &dispatches);
+                        let actual = device.read(&buffer)?;
+                        let expected = match state {
+                            ActiveScanState::Ready => {
+                                let mut total = 0u32;
+                                input
+                                    .iter()
+                                    .map(|value| {
+                                        total = total.wrapping_add(*value);
+                                        total
+                                    })
+                                    .collect::<Vec<_>>()
+                            }
+                            ActiveScanState::Faulted => input.clone(),
+                        };
+                        assert_eq!(
+                            actual[offset..offset + count],
+                            expected,
+                            "workgroup {workgroup}, active {active}, {state:?}"
+                        );
+                        assert_eq!(actual[..offset], words[..offset]);
+                        assert_eq!(actual[actual.len() - 16..], [u32::MAX; 16]);
+                        match state {
+                            ActiveScanState::Ready => (),
+                            ActiveScanState::Faulted => assert_eq!(actual, words),
+                        }
+                    }
+                }
+            }
+        }
+        Ok(())
+    }
+
     #[test]
     fn hierarchical_prefix_sums_preserve_partial_blocks_on_gpu() -> Result<()> {
         for workgroup in [32, 64, 128, 256] {
@@ -233,6 +310,30 @@ mod tests {
     }
 }
 
+const ACTIVE_SCAN_ITEMS: u32 = 8;
+
+#[derive(Clone, Copy)]
+pub(super) enum ActiveScanTile {
+    Scalar,
+    Tiled,
+}
+
+impl ActiveScanTile {
+    pub fn new(device: &Device, bound: usize) -> Self {
+        match bound > (device.workgroup * device.workgroup) as usize {
+            true => Self::Tiled,
+            false => Self::Scalar,
+        }
+    }
+
+    pub fn items(self) -> u32 {
+        match self {
+            Self::Scalar => 1,
+            Self::Tiled => ACTIVE_SCAN_ITEMS,
+        }
+    }
+}
+
 pub(super) fn scan_active(
     device: &Device,
     buffer: &CubeTensor,
@@ -241,13 +342,15 @@ pub(super) fn scan_active(
     control: &CubeTensor,
     dispatches: &CubeTensor,
 ) {
+    let items = ActiveScanTile::new(device, count).items();
+    let span = device.workgroup * items;
     let mut levels = Vec::new();
     let mut offset = offset;
     let mut count = count;
     let mut divisor = 1u32;
     let mut level_index = 0usize;
     while count > 1 {
-        let blocks = count.div_ceil(device.workgroup as usize);
+        let blocks = count.div_ceil(span as usize);
         ActiveBlockScan::launch(
             device,
             crate::simulation::markets::dispatch(
@@ -261,6 +364,7 @@ pub(super) fn scan_active(
                 offset: offset as u32,
                 bound: count as u32,
                 divisor,
+                items,
                 mode: ScanMode::new(device),
             },
         );
@@ -272,7 +376,7 @@ pub(super) fn scan_active(
         });
         offset += count;
         count = blocks;
-        divisor *= device.workgroup;
+        divisor *= span;
         level_index += 1;
     }
     for (index, level) in levels
@@ -294,6 +398,7 @@ pub(super) fn scan_active(
                 offset: level.offset as u32,
                 bound: level.count as u32,
                 divisor: level.divisor,
+                items,
             },
         );
     }
@@ -306,6 +411,7 @@ fn scan_active_blocks(
     offset: u32,
     bound: u32,
     divisor: u32,
+    #[comptime] items: u32,
     #[comptime] mode: ScanMode,
 ) {
     let count = ceildiv(
@@ -316,15 +422,28 @@ fn scan_active_blocks(
         divisor,
     );
     let block = CUBE_POS as u32;
-    if block * CUBE_DIM < count && control[crate::simulation::markets::LATCH_WORD].load() == 0 {
-        let id = ABSOLUTE_POS as u32;
-        let mut value = 0u32;
-        if id < count {
-            value = buffer[(offset + id) as usize];
+    let start = block * CUBE_DIM * items + UNIT_POS * items;
+    if block * CUBE_DIM * items < count
+        && control[crate::simulation::markets::LATCH_WORD].load() == 0
+    {
+        let mut values = Array::<u32>::new(items as usize);
+        let mut total = 0u32;
+        #[unroll]
+        for item in 0..items {
+            let id = start + item;
+            if id < count {
+                total += buffer[(offset + id) as usize];
+            }
+            values[item as usize] = total;
         }
-        let prefix = scan_prefix(value, mode);
-        if id < count {
-            buffer[(offset + id) as usize] = prefix.inclusive;
+        let prefix = scan_prefix(total, mode);
+        let preceding = prefix.inclusive - total;
+        #[unroll]
+        for item in 0..items {
+            let id = start + item;
+            if id < count {
+                buffer[(offset + id) as usize] = preceding + values[item as usize];
+            }
         }
         if UNIT_POS == 0 {
             buffer[(offset + bound + block) as usize] = prefix.total;
@@ -339,6 +458,7 @@ fn add_active_offsets(
     offset: u32,
     bound: u32,
     divisor: u32,
+    #[comptime] items: u32,
 ) {
     let count = ceildiv(
         16 * ceildiv(
@@ -347,10 +467,17 @@ fn add_active_offsets(
         ),
         divisor,
     );
-    let id = ABSOLUTE_POS as u32;
     let block = CUBE_POS as u32;
-    if id < count && block > 0 && control[crate::simulation::markets::LATCH_WORD].load() == 0 {
-        buffer[(offset + id) as usize] += buffer[(offset + bound + block - 1) as usize];
+    let start = block * CUBE_DIM * items + UNIT_POS * items;
+    if start < count && block > 0 && control[crate::simulation::markets::LATCH_WORD].load() == 0 {
+        let preceding = buffer[(offset + bound + block - 1) as usize];
+        #[unroll]
+        for item in 0..items {
+            let id = start + item;
+            if id < count {
+                buffer[(offset + id) as usize] += preceding;
+            }
+        }
     }
 }
 

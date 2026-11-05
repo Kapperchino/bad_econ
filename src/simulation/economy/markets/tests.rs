@@ -64,9 +64,9 @@ struct SortBuffers {
 }
 
 impl SortBuffers {
-    fn new(device: &Device, words: &[u32], active: usize) -> Self {
+    fn new(device: &Device, words: &[u32], extent: SortExtent) -> Self {
         let mut control = vec![0; CONTROL_WORDS + 3];
-        control[CONSTRUCTED_EVENTS_WORD] = active as u32;
+        control[CONSTRUCTED_EVENTS_WORD] = extent.active as u32;
         let buffers = Self {
             scratch: device.tensor(words),
             control: device.tensor(&control),
@@ -74,7 +74,12 @@ impl SortBuffers {
                 .client
                 .memory_dedicated_allocation(132, |_| device.empty(33)),
         };
-        prepare_dispatch(device, &buffers.control, &buffers.dispatches);
+        prepare_dispatch(
+            device,
+            &buffers.control,
+            &buffers.dispatches,
+            extent.capacity,
+        );
         buffers
     }
 }
@@ -150,6 +155,7 @@ enum KeyPattern {
     Constant(u32),
 }
 
+#[derive(Clone, Copy)]
 struct SortExtent {
     capacity: usize,
     active: usize,
@@ -187,7 +193,7 @@ fn check_sort(
         })
         .collect::<Vec<_>>();
     expected.sort_by_key(|item| item.key);
-    let buffers = SortBuffers::new(device, &words, active);
+    let buffers = SortBuffers::new(device, &words, extent);
     let case = SortCase { capacity, scan };
     let source = case.encode(device, &buffers);
     let actual = device.read(&buffers.scratch)?;
@@ -227,6 +233,10 @@ fn radix_sort_preserves_stable_items_and_sparse_partial_blocks_on_gpu() -> Resul
                     },
                     SortExtent {
                         capacity: 65537,
+                        active: 257,
+                    },
+                    SortExtent {
+                        capacity: 1_000_003,
                         active: 257,
                     },
                 ]);

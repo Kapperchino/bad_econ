@@ -68,6 +68,7 @@ pub(in crate::simulation) fn prepare_dispatch(
     device: &crate::simulation::Device,
     control: &burn_wgpu::CubeTensor,
     dispatches: &burn_wgpu::CubeTensor,
+    capacity: usize,
 ) {
     DispatchPreparation::launch(
         device,
@@ -77,6 +78,12 @@ pub(in crate::simulation) fn prepare_dispatch(
             control: control.clone().into_buffer_arg(),
             dispatches: dispatches.clone().into_buffer_arg(),
             workgroup: device.workgroup,
+            histogram_span: device.workgroup
+                * parallel::ActiveScanTile::new(
+                    device,
+                    16 * capacity.div_ceil(device.workgroup as usize),
+                )
+                .items(),
         },
     );
 }
@@ -86,6 +93,7 @@ struct DispatchInput {
     control: Box<[Atomic<u32>]>,
     dispatches: Box<[u32]>,
     workgroup: u32,
+    histogram_span: u32,
 }
 
 struct DispatchPreparation;
@@ -101,20 +109,30 @@ impl GpuPass<DispatchInput> for PrepareCounts {
     type Output = ();
 
     fn execute(mut input: DispatchInput) {
-        prepare_counts(&input.control, &mut input.dispatches, input.workgroup);
+        prepare_counts(
+            &input.control,
+            &mut input.dispatches,
+            input.workgroup,
+            input.histogram_span,
+        );
     }
 }
 
 #[cube]
-fn prepare_counts(control: &[Atomic<u32>], dispatches: &mut [u32], workgroup: u32) {
+fn prepare_counts(
+    control: &[Atomic<u32>],
+    dispatches: &mut [u32],
+    workgroup: u32,
+    histogram_span: u32,
+) {
     control[LATCH_WORD].store(control[crate::simulation::flags::FAULT_WORD].load());
     let mut counts = Array::<u32>::new(11usize);
     counts[0usize] = control[SEARCHES_WORD].load();
     counts[1usize] = ceildiv(control[CONSTRUCTED_EVENTS_WORD].load(), workgroup);
     counts[2usize] = ceildiv(control[RANGE_SLOTS_WORD].load(), workgroup);
-    counts[3usize] = ceildiv(16 * counts[1usize], workgroup);
+    counts[3usize] = ceildiv(16 * counts[1usize], histogram_span);
     for index in 4..9usize {
-        counts[index] = ceildiv(counts[index - 1], workgroup);
+        counts[index] = ceildiv(counts[index - 1], histogram_span);
     }
     counts[9usize] = control[RANGE_SLOTS_WORD].load();
     counts[10usize] = ceildiv(counts[0usize], workgroup);

@@ -1120,6 +1120,7 @@ impl Simulation {
                         &self.device,
                         &self.control,
                         &self.searches.dispatches,
+                        count,
                     );
                 }
                 _ => economy::EconomySystem::launch(
