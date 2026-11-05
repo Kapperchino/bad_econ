@@ -2,6 +2,7 @@ use crate::simulation::configuration::{Configuration, EconomyConfig};
 pub(super) mod entries;
 pub(super) mod metadata;
 pub(super) mod records;
+pub(super) mod settlement;
 pub(super) mod spatial;
 mod systems;
 use super::{
@@ -78,6 +79,7 @@ impl RegistryPlan {
         let supported = requests.iter().all(|record| match record.request >> 24 {
             0 => record.request == 0,
             2 | 3 => true,
+            4 | 7 => scenario.config().finance.is_none(),
             5 => !heirs_possible,
             6 => record.request & 0x00ffffff > 0,
             _ => false,

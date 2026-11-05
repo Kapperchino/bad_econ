@@ -234,7 +234,7 @@ impl EntryBatch {
 }
 
 #[derive(Clone, Copy, Debug, Hash, PartialEq, Eq)]
-enum Transfer {
+pub(super) enum Transfer {
     Gather,
     Grow,
     Scatter,
@@ -313,7 +313,7 @@ fn transfer_rows(
     }
 }
 
-fn transfer(
+pub(super) fn transfer(
     device: &Device,
     source: &CubeTensor,
     target: &CubeTensor,

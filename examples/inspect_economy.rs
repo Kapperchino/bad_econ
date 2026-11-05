@@ -6,6 +6,7 @@ use bad_econ::{
 use clap::{Parser, ValueEnum};
 use serde::Serialize;
 use std::collections::{BTreeMap, BTreeSet};
+use std::path::PathBuf;
 
 #[derive(Clone, Copy, ValueEnum)]
 enum ResearchPolicy {
@@ -15,6 +16,10 @@ enum ResearchPolicy {
 
 #[derive(Parser)]
 struct Arguments {
+    #[arg(long)]
+    scenario: Option<PathBuf>,
+    #[arg(long)]
+    checkpoint: Option<PathBuf>,
     #[arg(long, default_value_t = 1000)]
     households: u32,
     #[arg(long, default_value_t = 365)]
@@ -229,10 +234,12 @@ struct Industry {
 
 fn main() -> Result<()> {
     let arguments = Arguments::parse();
-    let mut config =
-        Scenario::industrial(arguments.households, arguments.seed, Experiment::Baseline)?
+    let mut config = match arguments.scenario {
+        Some(path) => serde_json::from_slice(&std::fs::read(path)?)?,
+        None => Scenario::industrial(arguments.households, arguments.seed, Experiment::Baseline)?
             .config()
-            .clone();
+            .clone(),
+    };
     if let ResearchPolicy::Disabled = arguments.research {
         config.research = None;
     }
@@ -313,6 +320,9 @@ fn main() -> Result<()> {
                 )?
             );
         }
+    }
+    if let Some(path) = arguments.checkpoint {
+        std::fs::write(path, serde_json::to_vec(&simulation.checkpoint()?)?)?;
     }
     Ok(())
 }

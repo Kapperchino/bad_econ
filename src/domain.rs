@@ -8,6 +8,7 @@ use sha2::{Digest, Sha256};
 
 pub mod bargaining;
 pub mod demography;
+mod employment;
 pub mod enterprise;
 pub mod finance;
 mod households;
@@ -26,9 +27,9 @@ pub use population::{
 pub use resources::{ProductionSite, ResourceMap, ResourceRegion};
 
 pub const SCENARIO_VERSION: u32 = 2;
-const CHECKPOINT_VERSION: u32 = 7;
-pub const STATE_HASH_VERSION: &str = "bad-econ/state/CubekV2/v8";
-pub const USED_FIELDS: usize = Field::PendingCapacity as usize + 1;
+const CHECKPOINT_VERSION: u32 = 8;
+pub const STATE_HASH_VERSION: &str = "bad-econ/state/CubekV2/v9";
+pub const USED_FIELDS: usize = Field::Job as usize + 1;
 pub const TRANSIT_FIELDS: usize = USED_FIELDS + Good::COUNT;
 pub const CONSUMPTION_FIELDS: usize = TRANSIT_FIELDS + Good::COUNT;
 pub const PRODUCTION_FIELDS: usize = CONSUMPTION_FIELDS + Good::COUNT;
@@ -129,6 +130,7 @@ pub enum Field {
     PreviousX,
     PreviousY,
     PendingCapacity,
+    Job,
 }
 impl Field {
     pub fn inventory(good: Good) -> Self {
@@ -357,17 +359,32 @@ pub struct Scenario {
     retailers: std::collections::BTreeMap<u64, enterprise::Distributor>,
     retail_demand: [u64; Good::COUNT],
     initial_actors: std::sync::Arc<ActorRows>,
+    initial_employment: employment::InitialEmployment,
 }
 impl Scenario {
     pub fn industrial(households: u32, seed: u64, experiment: Experiment) -> Result<Self> {
         let mut config = Self::baseline(households, seed, experiment)?.config;
         config.economy = Economy::Industrial;
+        let transport_scale = config.map_size / 1000;
+        config.search_radius *= transport_scale;
+        config.commute_speed *= transport_scale;
+        config.shipment_speed *= transport_scale;
         config.demography.initial_household_members = 3;
         config.household_production = enterprise::HouseholdProduction::industrial();
         config.firms = config.firms.max(3 * Good::COUNT as u32);
+        config.capacity = 1000;
+        config.firm_cash = 1_000_000;
+        config.reserve = config.firm_cash;
+        config.coverage = 6;
+        config.buffer_days = match experiment {
+            Experiment::Shortage => 0,
+            _ => 6,
+        };
         config.packet_minutes = 240;
-        config.packet_output = 20;
-        config.prices = [15, 30, 45];
+        config.packet_output = 10;
+        config.prices = [24, 48, 72];
+        config.behavior.wage_increment = 0;
+        config.behavior.price_response = 100;
         config.distributors = (0..config.firms)
             .filter(|&firm| generated_good(&config, firm as usize) == Good::Bread && firm % 3 == 0)
             .map(|firm| enterprise::Distributor {
@@ -406,8 +423,8 @@ impl Scenario {
                         outcomes: technology as u32,
                         inputs: [0; Good::COUNT],
                         labor_minutes: 30,
-                        minimum_effort: 300,
-                        pioneer_effort: 600,
+                        minimum_effort: 30_000,
+                        pioneer_effort: 60_000,
                         capacity: 1000,
                         relatedness: 500,
                         shape: 1,
@@ -580,7 +597,10 @@ impl Scenario {
                             * u64::from(config.packet_output)
                             * u64::from(config.buffer_days)
                     }
-                    Economy::Industrial => daily[good] * u64::from(config.buffer_days),
+                    Economy::Industrial => {
+                        daily[good]
+                            * u64::from(config.buffer_days.min(config.coverage.saturating_sub(1)))
+                    }
                 });
                 let totals = match &config.population {
                     Some(population) => population.totals()?,
@@ -625,7 +645,13 @@ impl Scenario {
                                 .flatten()
                                 .filter(|_| retailer.is_none())
                             {
-                                goods[input as usize - 1] = add(goods[input as usize - 1], stock)?;
+                                let inputs = match config.economy {
+                                    Economy::Agrarian => stock,
+                                    Economy::Industrial => {
+                                        daily[good as usize - 1] * u64::from(config.buffer_days)
+                                    }
+                                };
+                                goods[input as usize - 1] = add(goods[input as usize - 1], inputs)?;
                             }
                         }
                         InitialTotals {
@@ -636,6 +662,8 @@ impl Scenario {
                     }
                 };
                 let resources = resources::ResourceGeography::new(&config)?;
+                let initial_employment =
+                    employment::InitialEmployment::new(&config, &capacities, &daily);
                 let mut scenario = Self {
                     config,
                     totals,
@@ -645,6 +673,7 @@ impl Scenario {
                     retailers,
                     retail_demand: daily,
                     initial_actors: std::sync::Arc::default(),
+                    initial_employment,
                 };
                 scenario.initial_actors = std::sync::Arc::new(
                     (0..scenario.actors())
@@ -759,6 +788,22 @@ impl Scenario {
     }
     pub fn config(&self) -> &ScenarioConfig {
         &self.config
+    }
+    fn initial_price(&self, good: Good) -> u32 {
+        match (self.config.economy, good) {
+            (_, Good::Grain | Good::Flour | Good::Bread) => self.config.prices[good as usize - 1],
+            (Economy::Agrarian, _) => good.initial_price(),
+            (Economy::Industrial, _) => {
+                (self.config.wage * self.config.packet_minutes).div_ceil(self.config.packet_output)
+                    + good
+                        .inputs()
+                        .into_iter()
+                        .flatten()
+                        .map(|input| self.initial_price(input))
+                        .sum::<u32>()
+            }
+        }
+        .clamp(self.config.minimum_price, self.config.maximum_price)
     }
     pub fn opening_totals(&self) -> &InitialTotals {
         &self.totals
@@ -1013,7 +1058,7 @@ impl Scenario {
                 if good > 0 {
                     let price = match good {
                         1..=3 => self.config.prices[good as usize - 1],
-                        _ => Good::from_index(good as u32)?.initial_price(),
+                        _ => self.initial_price(Good::from_index(good as u32)?),
                     };
                     state.set(field, actor, price.into());
                 }
@@ -1035,6 +1080,13 @@ impl Scenario {
         state.initial_population = state.people.len() as u64;
         for actor in 0..state.actors.len() {
             state.set(Field::EquipmentCondition, actor, 1000);
+            state.set(
+                Field::Job,
+                actor,
+                self.initial_employment
+                    .employer(actor)
+                    .map_or(0, |firm| firm as u64 + 1),
+            );
             if state.actors.at(actor).kind == 0 {
                 state.set(Field::Price, actor, self.config.prices[2].into());
             }
@@ -1109,7 +1161,16 @@ impl Scenario {
                         (enterprise::HouseholdProduction::Available { .. }, 0) => self
                             .resources
                             .place(Good::Grain, identity, config, position),
-                        _ => position,
+                        _ => match self.initial_employment.employer(index) {
+                            Some(employer) => {
+                                let workplace = self.actor(employer).position;
+                                Position {
+                                    x: (workplace.x + position.x % 16).min(config.map_size - 1),
+                                    y: (workplace.y + position.y % 16).min(config.map_size - 1),
+                                }
+                            }
+                            None => position,
+                        },
                     },
                     (_, Some(_)) => position,
                     _ => self.resources.place(
@@ -1217,9 +1278,15 @@ impl Scenario {
                 .flatten()
                 .filter(|_| kind != 0 && retailer.is_none())
             {
-                state.set(Field::inventory(input), actor, stock);
+                let inputs = match config.economy {
+                    Economy::Agrarian => stock,
+                    Economy::Industrial => {
+                        self.retail_demand[kind as usize - 1] * u64::from(config.buffer_days)
+                    }
+                };
+                state.set(Field::inventory(input), actor, inputs);
                 state.initial_goods[input as usize - 1] =
-                    add(state.initial_goods[input as usize - 1], stock)?;
+                    add(state.initial_goods[input as usize - 1], inputs)?;
             }
             match kind {
                 0 => (),
@@ -1229,9 +1296,7 @@ impl Scenario {
                         actor,
                         u64::from(match kind {
                             1..=3 => config.prices[kind as usize - 1],
-                            _ => output
-                                .initial_price()
-                                .clamp(config.minimum_price, config.maximum_price),
+                            _ => self.initial_price(output),
                         }),
                     );
                     state.set(
@@ -1698,12 +1763,14 @@ impl Inspection {
             inventory: Good::ALL.map(|good| state.get(Field::inventory(good), index)),
             transit: state.get(Field::Transit, index),
             fatigue: state.get(Field::Fatigue, index),
-            employer: state
-                .get(Field::Employer, index)
-                .checked_sub(1)
-                .and_then(|employer| state.actors.get(employer as usize))
-                .map(|actor| actor.identity)
-                .unwrap_or(0),
+            employer: match state.get(Field::Employer, index) {
+                0 => state.get(Field::Job, index),
+                employer => employer,
+            }
+            .checked_sub(1)
+            .and_then(|employer| state.actors.get(employer as usize))
+            .map(|actor| actor.identity)
+            .unwrap_or(0),
             owner_identity: state
                 .actors
                 .at(state.actors.at(index).owner as usize)
@@ -2056,6 +2123,16 @@ impl<'a> AuditedState<'a> {
             )),
         }?;
         let resources = (0..state.actors.len()).all(|i| {
+            let job = match state.get(Field::Job, i) {
+                0 => true,
+                employer => {
+                    state.actors.at(i).kind == 0
+                        && state
+                            .actors
+                            .get((employer - 1) as usize)
+                            .is_some_and(|actor| actor.kind > 0)
+                }
+            };
             let limits = state.get(Field::EquipmentCondition, i) <= 1000
                 && state.get(Field::SafetyProvision, i) <= 900
                 && state.get(Field::EnterpriseStatus, i)
@@ -2069,7 +2146,8 @@ impl<'a> AuditedState<'a> {
                 && state.get(Field::Hours, i) <= 1440
                 && state.get(Field::ResearchMinutes, i) <= 1440
                 && state.get(Field::Employed, i) <= 1
-                && state.get(Field::Employer, i) <= state.actors.len() as u64;
+                && state.get(Field::Employer, i) <= state.actors.len() as u64
+                && job;
             let closed = [Field::Escrow, Field::Due, Field::Pipeline]
                 .into_iter()
                 .all(|field| state.get(field, i) == 0);

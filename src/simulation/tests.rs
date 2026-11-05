@@ -326,7 +326,10 @@ fn gpu_firm_growth_matches_full_rebuild_with_births_and_migration() -> Result<()
         requests[0] = Good::Bread as u32;
         requests[1] = (8 << 24) + source as u32 + 1;
         requests[2] = (9 << 24) + source as u32 + 1;
-        requests[3] = (2 << 24) + 5;
+        let closing = scenario.config().households as usize + day;
+        requests[3] = (2 << 24) + closing as u32 + 1;
+        requests[10] = (7 << 24) + closing as u32 + 1;
+        requests[closing] = 4 << 24;
         let mut births = vec![0; requests.len()];
         births[0] = 1;
         births[299] = 2;
@@ -384,6 +387,108 @@ fn gpu_firm_growth_matches_full_rebuild_with_births_and_migration() -> Result<()
         assert_eq!(gpu.snapshot, reference.snapshot, "day {day}");
     }
     gpu.checkpoint()?.restore()?;
+    Ok(())
+}
+
+#[test]
+fn sparse_settlements_match_rebuilds_with_shared_assets_migration_and_investment() -> Result<()> {
+    use crate::domain::enterprise::{Ownership, OwnershipShare};
+    let mut config = Scenario::industrial(1000, 42, Experiment::Baseline)?
+        .config()
+        .clone();
+    config.research = None;
+    let scenario = Scenario::new(config)?;
+    for shareholders in [1, 2] {
+        let mut initial = scenario.initial()?;
+        initial.day = 31;
+        let firm = scenario.config().households as usize;
+        let identity = initial.actors.at(firm).identity;
+        let ownership = initial
+            .ownership
+            .iter_mut()
+            .find(|owned| owned.firm == identity)
+            .unwrap();
+        *ownership = Ownership::new(Ownership {
+            firm: identity,
+            shares: match shareholders {
+                1 => vec![OwnershipShare {
+                    household: 1,
+                    units: 1_000_000,
+                }],
+                _ => vec![
+                    OwnershipShare {
+                        household: 1,
+                        units: 333_333,
+                    },
+                    OwnershipShare {
+                        household: 3,
+                        units: 666_667,
+                    },
+                ],
+            },
+        })?;
+        initial.set(Field::MoveDue, 5, 31);
+        initial.set(Field::MoveX, 5, 123);
+        initial.set(Field::MoveY, 5, 321);
+        initial.set(Field::PendingCapacity, firm + 2, 3);
+        initial.set(Field::InstalledCapital, firm + 2, 1);
+        let shipment = initial
+            .shipment_coordinate(
+                Good::Grain,
+                initial.day as usize % scenario.ring(),
+                scenario.ring(),
+                firm,
+            )
+            .0 as usize;
+        initial.values[shipment] = 7;
+        initial.set(Field::Grain, firm, initial.get(Field::Grain, firm) - 7);
+        initial.values[TRANSIT_FIELDS * initial.actors.len() + firm] = 7;
+        initial.set(Field::Transit, firm, 7);
+        let mut gpu = Simulation::from_state(scenario.clone(), initial.clone(), device(64)?)?;
+        let mut requests = vec![0; initial.actors.len()];
+        requests[4] = (2 << 24) + 6;
+        requests[5] = 3 << 24;
+        requests[6] = (7 << 24) + firm as u32 + 1;
+        requests[8] = (7 << 24) + firm as u32 + 2;
+        requests[firm] = 4 << 24;
+        requests[firm + 2] = (6 << 24) + 3;
+        let pending =
+            registry::records::PendingRecords::from_dense(&requests, &vec![0; requests.len()])?;
+        gpu.device.write(&gpu.enterprise_requests, &requests);
+        let plan = registry::RegistryPlan::new(
+            &scenario,
+            &gpu.metadata,
+            &gpu.migrations,
+            &pending.records,
+        )?
+        .context("sparse settlements")?;
+        let budget = gpu.device.memory_budget;
+        gpu.device.memory_budget = MemoryBudget::Reported { available_bytes: 2 };
+        assert!(gpu.commit_registry(plan, &pending.records).is_err());
+        gpu.device.memory_budget = budget;
+        assert_eq!(gpu.download()?, initial);
+        let plan = registry::RegistryPlan::new(
+            &scenario,
+            &gpu.metadata,
+            &gpu.migrations,
+            &pending.records,
+        )?
+        .context("sparse settlements")?;
+        let readback = gpu.readback_bytes;
+        gpu.commit_registry(plan, &pending.records)?;
+        assert!(gpu.readback_bytes - readback < 20 * scenario.fields() as u64 * 8);
+        enterprise::transitions(&mut initial, &scenario, &requests)?;
+        let mut reference = Simulation::from_state(scenario.clone(), initial, device(128)?)?;
+        assert_eq!(gpu.download()?, reference.download()?);
+        assert_eq!(gpu.snapshot, reference.snapshot);
+        gpu.copy_audited(CopyDirection::Save)?;
+        for _ in 0..3 {
+            gpu.advance()?;
+            reference.advance()?;
+            assert_eq!(gpu.download()?, reference.download()?);
+            assert_eq!(gpu.snapshot, reference.snapshot);
+        }
+    }
     Ok(())
 }
 

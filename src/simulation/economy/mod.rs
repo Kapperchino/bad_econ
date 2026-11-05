@@ -130,6 +130,12 @@ fn local(
         let phase = comptime!(parameters.phase);
         match phase {
             Phase::Opening => {
+                let employer = value(state, config, comptime!(Field::Employer as u32), id);
+                if comptime!(config.economy == crate::domain::Economy::Industrial)
+                    && !equal(employer, zero())
+                {
+                    set(state, config, comptime!(Field::Job as u32), id, employer);
+                }
                 for good in 1u32..Good::COUNT as u32 + 1 {
                     let slot = BASE_FIELDS as u32
                         + (good - 1) * config.ring
@@ -302,7 +308,11 @@ fn local(
                 {
                     enterprises::expand(state, actors, config, control, id);
                     enterprises::construct_home(state, config, control, id);
-                    household_production::produce(state, config, control, id, parameters.day);
+                    if comptime!(config.economy == crate::domain::Economy::Agrarian)
+                        || number(state, config, comptime!(Field::LandPlots as u32), id) > 0
+                    {
+                        household_production::produce(state, config, control, id, parameters.day);
+                    }
                 }
             }
             Phase::PhysicalClose => match k.bits() {
@@ -581,7 +591,9 @@ fn propose(
         match market {
             MarketFlag::Labor => {
                 search = k.is(comptime!(ActorKind::Household))
-                    && number(state, config, comptime!(Field::Employed as u32), id) == 0u32;
+                    && number(state, config, comptime!(Field::Employed as u32), id) == 0u32
+                    && (comptime!(config.economy == crate::domain::Economy::Agrarian)
+                        || number(state, config, comptime!(Field::LandPlots as u32), id) == 0);
             }
             MarketFlag::Input(_) => {
                 good = comptime!(market.good().expect("input market") as u32);
@@ -631,15 +643,19 @@ fn propose(
                             1,
                         ),
                     );
+                    let capacity = actors
+                        [ActorLayout::CAPACITY * (actors.len() / ActorLayout::WORDS) + id as usize];
                     wanted = multiply(
                         control,
-                        packets,
+                        minimum(packets, times32(capacity, horizon)),
                         number(state, config, comptime!(Field::InputTicks as u32), id),
                     );
                 }
                 if k.is(comptime!(ActorKind::Household))
                     && comptime!(config.home_mode == Feature::Enabled)
                     && good == comptime!(Good::Grain as u32)
+                    && (comptime!(config.economy == crate::domain::Economy::Agrarian)
+                        || number(state, config, comptime!(Field::LandPlots as u32), id) > 0)
                     && number(state, config, comptime!(Field::LivingMembers as u32), id) > 0
                 {
                     search = true;
@@ -770,6 +786,24 @@ fn propose(
         if good > 0 {
             search = search && !equal(wanted, zero()) && !equal(purchasing_power, zero());
         }
+        let job = number(state, config, comptime!(Field::Job as u32), id);
+        if comptime!(market == MarketFlag::Labor) && search && job > 0 {
+            let offer = search::candidate(
+                state,
+                actors,
+                config,
+                control,
+                parameters,
+                id,
+                job - 1,
+                wanted,
+                purchasing_power,
+            );
+            chosen = select(offer.eligible, job - 1, chosen);
+            quantity = select(offer.eligible, offer.quantity, quantity);
+            trip = select(offer.eligible, offer.trip, trip);
+            search = !offer.eligible;
+        }
         if search {
             let px = actors[ActorLayout::X * (actors.len() / ActorLayout::WORDS) + id as usize];
             let py = actors[ActorLayout::Y * (actors.len() / ActorLayout::WORDS) + id as usize];
@@ -788,6 +822,10 @@ fn propose(
                 while x <= min(cx + 1u32, side - 1u32) && considered < DISCOVERY_CANDIDATES {
                     let cell = y * side + x;
                     let mut j = spatial[cell as usize];
+                    let begin = j;
+                    let length = spatial[(cell + 1) as usize] - begin;
+                    let stride = search::supplier_stride(actors, parameters, id, length);
+                    let mut cursor = (parameters.settlement_rotation + id) % max(length, 1);
                     let nearest = max(px, x * radius) - min(px, (x + 1) * radius - 1)
                         + max(py, y * radius)
                         - min(py, (y + 1) * radius - 1);
@@ -795,13 +833,13 @@ fn propose(
                         j = spatial[(cell + 1) as usize];
                     }
                     while j < spatial[(cell + 1) as usize] && considered < DISCOVERY_CANDIDATES {
-                        let begin = spatial[cell as usize];
-                        let length = spatial[(cell + 1) as usize] - begin;
-                        let rotated = begin + (j - begin + parameters.day + id) % max(length, 1);
+                        let previous = j;
+                        let rotated = begin + cursor;
                         let mut skipped = 0u32;
                         if comptime!(
                             market.good() == Some(Good::Bread) && parameters.discovery.indexed()
-                        ) {
+                        ) && stride == 1
+                        {
                             let block = rotated / DISCOVERY_BLOCK;
                             let base = 3 * (side * side + 1 + config.actors);
                             let quote = spatial[(base + block) as usize];
@@ -1055,13 +1093,21 @@ fn propose(
                                             )
                                             && quote > 0u32
                                             && !equal(amount, ticks(0u32, 0u32));
+                                        score = search::supply_score(
+                                            state, actors, config, parameters, id, wanted, amount,
+                                            score,
+                                        );
                                     }
                                     let mut improves = lt(score, best);
                                     if comptime!(market == MarketFlag::Labor) {
                                         improves = lt(best, score);
                                     }
                                     improves = improves || chosen == NO_ACTOR;
-                                    considered += u32::cast_from(eligible);
+                                    considered += u32::cast_from(
+                                        eligible
+                                            && (comptime!(!matches!(market, MarketFlag::Input(_)))
+                                                || score.extract(HIGH_WORD) == 0),
+                                    );
                                     if eligible && improves {
                                         chosen = firm;
                                         quantity = amount;
@@ -1073,6 +1119,7 @@ fn propose(
                             j += 1;
                         }
                         j += skipped;
+                        cursor = (cursor + (j - previous) * stride) % max(length, 1);
                     }
                     x += 1;
                 }

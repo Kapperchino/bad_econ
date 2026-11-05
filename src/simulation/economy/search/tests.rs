@@ -164,6 +164,7 @@ impl SearchProbe {
         let mut parameters =
             simulation.parameters(Phase::ProvisionPurchase, market, 0, state.actors.len())?;
         parameters.day = day;
+        parameters.settlement_rotation = day;
         let mut spatial = simulation.device.read(&simulation.spatial)?;
         spatial.fill(0);
         spatial[1] = 40;

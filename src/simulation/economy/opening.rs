@@ -85,6 +85,12 @@ fn opening(
     match stage {
         OpeningStage::Actors => {
             if index < config.actors {
+                let employer = state[coordinate(config, comptime!(Field::Employer as u32), index)];
+                if comptime!(config.economy == crate::domain::Economy::Industrial)
+                    && !equal(employer, zero())
+                {
+                    state[coordinate(config, comptime!(Field::Job as u32), index)] = employer;
+                }
                 let transit = coordinate(config, comptime!(Field::Transit as u32), index);
                 let mut total = state[transit];
                 for good in 0..Good::COUNT as u32 {

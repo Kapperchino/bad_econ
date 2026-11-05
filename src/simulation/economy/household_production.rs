@@ -131,9 +131,13 @@ pub(super) fn produce(
             put_harvest(state, config, actor, day / 365 + 1);
         }
     }
+    let surplus_days = comptime!(match config.economy {
+        crate::domain::Economy::Agrarian => 2u32,
+        crate::domain::Economy::Industrial => 0u32,
+    });
     let target = ticks(
         number(state, config, comptime!(Field::FoodNeed as u32), actor)
-            * (config.coverage + config.ring + 2),
+            * (config.coverage + config.ring + surplus_days),
         0,
     );
     let bread_needed = positive(

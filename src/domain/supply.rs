@@ -33,7 +33,18 @@ impl StartingDemand {
                         u64::from(config.households.div_ceil(2)) * u64::from(members.div_ceil(2))
                     }
                 };
-                plots * u64::from(annual_yield_per_plot) / 365
+                let farming_households = match &config.land_access {
+                    Some(land) => land
+                        .allocations
+                        .iter()
+                        .filter(|grant| grant.plots > 0)
+                        .count() as u64,
+                    None => u64::from(config.households.div_ceil(2)),
+                };
+                (plots * u64::from(annual_yield_per_plot) / 365).min(
+                    (farming_households * u64::from(config.household_need) * requirements)
+                        .div_ceil(1000),
+                )
             }
         };
         let mut demand = Self {

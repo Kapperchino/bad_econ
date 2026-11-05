@@ -52,7 +52,9 @@ pub(super) fn prepare(
         match market {
             MarketFlag::Labor => {
                 search = k.is(comptime!(ActorKind::Household))
-                    && number(state, config, comptime!(Field::Employed as u32), id) == 0u32;
+                    && number(state, config, comptime!(Field::Employed as u32), id) == 0u32
+                    && (comptime!(config.economy == crate::domain::Economy::Agrarian)
+                        || number(state, config, comptime!(Field::LandPlots as u32), id) == 0);
             }
             MarketFlag::Input(_) => {
                 good = comptime!(market.good().expect("input market") as u32);
@@ -102,15 +104,19 @@ pub(super) fn prepare(
                             1,
                         ),
                     );
+                    let capacity = actors
+                        [ActorLayout::CAPACITY * (actors.len() / ActorLayout::WORDS) + id as usize];
                     wanted = multiply(
                         control,
-                        packets,
+                        minimum(packets, times32(capacity, horizon)),
                         number(state, config, comptime!(Field::InputTicks as u32), id),
                     );
                 }
                 if k.is(comptime!(ActorKind::Household))
                     && comptime!(config.home_mode == Feature::Enabled)
                     && good == comptime!(Good::Grain as u32)
+                    && (comptime!(config.economy == crate::domain::Economy::Agrarian)
+                        || number(state, config, comptime!(Field::LandPlots as u32), id) > 0)
                     && number(state, config, comptime!(Field::LivingMembers as u32), id) > 0
                 {
                     search = true;
@@ -281,17 +287,75 @@ pub(super) fn prepare(
 }
 
 #[derive(CubeType, Clone, Copy)]
-struct Candidate {
-    eligible: bool,
-    seen_supply: bool,
-    empty: bool,
-    quantity: Ticks,
-    score: Ticks,
-    trip: u32,
+pub(super) struct Candidate {
+    pub eligible: bool,
+    pub seen_supply: bool,
+    pub empty: bool,
+    pub quantity: Ticks,
+    pub score: Ticks,
+    pub trip: u32,
 }
 
 #[cube]
-fn candidate(
+pub(super) fn supplier_stride(
+    actors: &[u32],
+    parameters: &EconomyParameters,
+    buyer: u32,
+    length: u32,
+) -> u32 {
+    let mut stride = 1u32;
+    if comptime!(matches!(parameters.market, MarketFlag::Input(_)))
+        && !kind(actors, buyer).is(comptime!(ActorKind::Household))
+        && length > 1
+    {
+        stride = max(
+            length / 2 + (buyer + parameters.settlement_rotation) % max(length / 2, 1),
+            1,
+        );
+        let mut divisor = 0u32;
+        while divisor != 1 {
+            let mut remaining = length;
+            divisor = stride;
+            while remaining > 0 {
+                let next = divisor % remaining;
+                divisor = remaining;
+                remaining = next;
+            }
+            stride += u32::cast_from(divisor != 1);
+        }
+    }
+    stride
+}
+
+#[cube]
+pub(super) fn supply_score(
+    state: &mut [u32],
+    actors: &[u32],
+    config: &EconomyConfig,
+    parameters: &EconomyParameters,
+    buyer: u32,
+    wanted: Ticks,
+    amount: Ticks,
+    price: Ticks,
+) -> Ticks {
+    let mut score = price;
+    if comptime!(matches!(parameters.market, MarketFlag::Input(_)))
+        && !kind(actors, buyer).is(comptime!(ActorKind::Household))
+    {
+        let capacity =
+            actors[ActorLayout::CAPACITY * (actors.len() / ActorLayout::WORDS) + buyer as usize];
+        let daily = times32(
+            capacity,
+            number(state, config, comptime!(Field::InputTicks as u32), buyer),
+        );
+        let missing = positive(minimum(wanted, daily), amount);
+        score = ticks(price.extract(LOW_WORD), missing.extract(LOW_WORD));
+    }
+    score
+}
+
+#[cube]
+pub(super) fn candidate(
     state: &mut [u32],
     actors: &[u32],
     config: &EconomyConfig,
@@ -449,6 +513,7 @@ fn candidate(
                     && household_production::offers(state, actors, config, firm, good)
                     && quote > 0u32
                     && !equal(amount, ticks(0u32, 0u32));
+                score = supply_score(state, actors, config, parameters, id, wanted, amount, score);
             }
         }
     }
@@ -593,6 +658,8 @@ fn search(
                 let begin = spatial[cell as usize];
                 let end = spatial[(cell + 1) as usize];
                 let length = end - begin;
+                let stride = supplier_stride(actors, parameters, id, length);
+                let mut cursor = (parameters.settlement_rotation + id) % max(length, 1);
                 let mut j = begin;
                 let nearest = max(px, x * radius) - min(px, (x + 1) * radius - 1)
                     + max(py, y * radius)
@@ -601,9 +668,10 @@ fn search(
                     j = end;
                 }
                 while j < end && considered < DISCOVERY_CANDIDATES {
+                    let previous = j;
                     let mut skipped = 0u32;
-                    if comptime!(parameters.market.good() == Some(Good::Bread)) {
-                        let rotated = begin + (j - begin + parameters.day + id) % max(length, 1);
+                    if comptime!(parameters.market.good() == Some(Good::Bread)) && stride == 1 {
+                        let rotated = begin + cursor;
                         let block = rotated / DISCOVERY_BLOCK;
                         let quote =
                             spatial[(3 * (side * side + 1 + config.actors) + block) as usize];
@@ -648,8 +716,7 @@ fn search(
                         candidates[lane * 9 + 1] = 0;
                         candidates[lane * 9 + 2] = 0;
                         if UNIT_POS < width && j + UNIT_POS < end {
-                            let rotated = begin
-                                + (j + UNIT_POS - begin + parameters.day + id) % max(length, 1);
+                            let rotated = begin + (cursor + UNIT_POS * stride) % max(length, 1);
                             let firm = spatial[(side * side + 1 + rotated) as usize];
                             let offer = candidate(
                                 state,
@@ -680,12 +747,19 @@ fn search(
                             cooperative = PLANE_DIM == 32;
                             if cooperative {
                                 let eligible = candidates[lane * 9];
-                                let preceding = plane_exclusive_sum(eligible);
+                                let counted = eligible
+                                    * u32::cast_from(
+                                        comptime!(!matches!(
+                                            parameters.market,
+                                            MarketFlag::Input(_)
+                                        )) || candidates[lane * 9 + 6] == 0,
+                                    );
+                                let preceding = plane_exclusive_sum(counted);
                                 let visited = UNIT_POS < width
                                     && j + UNIT_POS < end
                                     && preceding < DISCOVERY_CANDIDATES - considered;
                                 let included = u32::cast_from(visited);
-                                let total = plane_sum(eligible * included);
+                                let total = plane_sum(counted * included);
                                 seen_supply = seen_supply
                                     || plane_sum(candidates[lane * 9 + 1] * included) > 0;
                                 if comptime!(parameters.market == MarketFlag::Labor) {
@@ -786,7 +860,13 @@ fn search(
                                         trip = distance;
                                         best = score;
                                     }
-                                    considered += u32::cast_from(eligible);
+                                    considered += u32::cast_from(
+                                        eligible
+                                            && (comptime!(!matches!(
+                                                parameters.market,
+                                                MarketFlag::Input(_)
+                                            )) || score.extract(HIGH_WORD) == 0),
+                                    );
                                     slot += 1;
                                 }
                                 *visited = considered;
@@ -800,6 +880,7 @@ fn search(
                         j += width;
                     }
                     j += skipped;
+                    cursor = (cursor + (j - previous) * stride) % max(length, 1);
                 }
                 x += 1;
             }

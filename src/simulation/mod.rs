@@ -740,10 +740,24 @@ impl Simulation {
             self.metadata.actors.len(),
             self.scenario.fields(),
         );
+        let settlement = registry::settlement::SettlementBatch::new(
+            &self.device,
+            &self.scenario,
+            &batch.metadata,
+            &state,
+            &entries.transitions,
+            self.day,
+        )?;
         let mut metadata = batch.metadata;
         if let Some(mut actors) = plan.actors {
             actors.extend(metadata.actors.iter().skip(actors.len()));
             metadata.actors = actors;
+        }
+        if let Some(ownership) = settlement
+            .as_ref()
+            .and_then(|batch| batch.ownership.as_ref())
+        {
+            metadata.ownership = ownership.clone();
         }
         let config = configuration::Configuration::new(&self.device, &self.scenario, &metadata);
         let additions = metadata
@@ -812,11 +826,14 @@ impl Simulation {
         let event_words = event_words
             .max(batch_size * EVENT_WORDS)
             .max(count.div_ceil(SummaryLayout::ACTORS_PER_GROUP as usize) * SummaryLayout::WORDS);
-        let ownership = self
+        let ownership = match metadata
             .ownership
-            .as_ref()
-            .map(|_| ownership::OwnershipRuntime::new(&self.device, &metadata))
-            .transpose()?;
+            .iter()
+            .any(|ownership| ownership.shares.len() > 1)
+        {
+            true => Some(ownership::OwnershipRuntime::new(&self.device, &metadata)?),
+            false => None,
+        };
         let management = management::EnterpriseManagement::new(&self.device, &metadata);
         let audit = economy::audit::AuditBuffers::new(&self.device, &metadata.actors);
         let mut next = Self {
@@ -825,7 +842,9 @@ impl Simulation {
             status: self.status.clone(),
             snapshot: self.snapshot.clone(),
             timings: self.timings.clone(),
-            readback_bytes: self.readback_bytes + batch.readback_bytes,
+            readback_bytes: self.readback_bytes
+                + batch.readback_bytes
+                + settlement.as_ref().map_or(0, |batch| batch.readback_bytes),
             metadata,
             day: self.day,
             audited_day: self.audited_day,
@@ -865,15 +884,18 @@ impl Simulation {
             registry_execution: self.registry_execution,
             matching_round: self.matching_round,
         };
-        registry::apply(
-            &next.device,
-            &next.state,
-            &previous_actors,
-            &next.config,
-            &next.enterprise_requests,
-            &next.scratch,
-            next.day as u32,
-        );
+        match settlement {
+            Some(batch) => batch.apply(&next.device, &next.state, count),
+            None => registry::apply(
+                &next.device,
+                &next.state,
+                &previous_actors,
+                &next.config,
+                &next.enterprise_requests,
+                &next.scratch,
+                next.day as u32,
+            ),
+        }
         next.snapshot = next.observe()?;
         next.device.reclaim_memory(0)?;
         match next.memory_usage().bytes_reserved <= next.device.memory_budget.bytes() {
@@ -889,6 +911,23 @@ impl Simulation {
         plan: registry::RegistryPlan,
         births: &[PendingRecord],
     ) -> Result<()> {
+        let settlement = registry::settlement::SettlementBatch::new(
+            &self.device,
+            &self.scenario,
+            &self.metadata,
+            &self.state,
+            births,
+            self.day,
+        )?;
+        let ownership = settlement
+            .as_ref()
+            .and_then(|batch| batch.ownership.as_ref())
+            .map(|ownership| {
+                let mut metadata = self.metadata.clone();
+                metadata.ownership = ownership.clone();
+                ownership::OwnershipRuntime::new(&self.device, &metadata)
+            })
+            .transpose()?;
         let newborns = births.iter().filter(|record| record.birth > 0).count();
         let next_identity = self
             .metadata
@@ -953,15 +992,21 @@ impl Simulation {
                 "registry capacity exhausted while preparing GPU transitions"
             ))?,
         }
-        registry::apply(
-            &self.device,
-            &self.state,
-            &self.actors,
-            &self.config,
-            &self.enterprise_requests,
-            &self.scratch,
-            self.day as u32,
-        );
+        match &settlement {
+            Some(batch) => {
+                batch.apply(&self.device, &self.state, self.metadata.actors.len());
+                self.readback_bytes += batch.readback_bytes;
+            }
+            None => registry::apply(
+                &self.device,
+                &self.state,
+                &self.actors,
+                &self.config,
+                &self.enterprise_requests,
+                &self.scratch,
+                self.day as u32,
+            ),
+        }
         let previous_actors = plan
             .actors
             .map(|actors| std::mem::replace(&mut self.metadata.actors, actors));
@@ -980,6 +1025,12 @@ impl Simulation {
         });
         match observation {
             Ok(mut snapshot) => {
+                if let Some(ownership) = ownership {
+                    self.ownership = Some(ownership);
+                }
+                if let Some(ownership) = settlement.and_then(|batch| batch.ownership) {
+                    self.metadata.ownership = ownership;
+                }
                 if let Some(grown) = grown {
                     self.demography = grown;
                 }
@@ -1857,15 +1908,18 @@ impl Simulation {
             inventory: values[Field::Grain as usize..Field::Escrow as usize].try_into()?,
             transit: values[Field::Transit as usize],
             fatigue: values[Field::Fatigue as usize],
-            employer: values[Field::Employer as usize]
-                .checked_sub(1)
-                .and_then(|index| {
-                    self.metadata
-                        .actors
-                        .get(index as usize)
-                        .map(|actor| actor.identity)
-                })
-                .unwrap_or(0),
+            employer: match values[Field::Employer as usize] {
+                0 => values[Field::Job as usize],
+                employer => employer,
+            }
+            .checked_sub(1)
+            .and_then(|index| {
+                self.metadata
+                    .actors
+                    .get(index as usize)
+                    .map(|actor| actor.identity)
+            })
+            .unwrap_or(0),
             owner_identity: self
                 .metadata
                 .actors
