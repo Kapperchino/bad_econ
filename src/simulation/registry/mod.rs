@@ -1,5 +1,6 @@
 use crate::simulation::configuration::{Configuration, EconomyConfig};
 pub(super) mod entries;
+pub(super) mod metadata;
 pub(super) mod records;
 pub(super) mod spatial;
 mod systems;
@@ -62,6 +63,7 @@ pub(super) struct RegistryBuffers {
 pub(super) struct RegistryPlan {
     pub transition: RegistryTransition,
     pub actors: Option<ActorRows>,
+    pub changes: Vec<PendingRecord>,
     pub migrations: MigrationRegistry,
 }
 impl RegistryPlan {
@@ -142,6 +144,11 @@ impl RegistryPlan {
                 Ok(Some(Self {
                     transition,
                     actors,
+                    changes: requests
+                        .iter()
+                        .copied()
+                        .filter(|record| matches!(record.request >> 24, 3 | 6))
+                        .collect(),
                     migrations: next,
                 }))
             }

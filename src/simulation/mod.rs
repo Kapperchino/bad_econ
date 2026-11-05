@@ -764,19 +764,26 @@ impl Simulation {
                 registry::patch_capacity(&self.device, &previous_actors, &enterprise_requests)
             }
             registry::RegistryTransition::Capacity(registry::CapacityUpdate::Rebuild)
-            | registry::RegistryTransition::Migration => {
-                let rows = metadata
-                    .actors
-                    .iter()
-                    .map(|actor| ActorLayout::new(&actor, &self.scenario))
-                    .collect::<ActorMetadataRows>();
-                self.device.tensor(&rows.words())
-            }
+            | registry::RegistryTransition::Migration => registry::metadata::patch(
+                &self.device,
+                &self.scenario,
+                &previous_actors,
+                &metadata.actors,
+                &plan.changes,
+            ),
         };
         let spatial = match plan.transition {
-            registry::RegistryTransition::Migration => self
-                .device
-                .tensor(&SpatialIndex::new(&self.scenario, &metadata).words),
+            registry::RegistryTransition::Migration => registry::spatial::migrate(
+                &self.device,
+                &self.scenario,
+                registry::spatial::SpatialMigration {
+                    spatial: &self.spatial,
+                    actors: &self.actors,
+                    previous: &self.metadata.actors,
+                    current: &metadata.actors,
+                    requests: &plan.changes,
+                },
+            ),
             _ => registry::spatial::extend(
                 &self.device,
                 &self.scenario,
@@ -913,18 +920,28 @@ impl Simulation {
             registry::RegistryTransition::Capacity(registry::CapacityUpdate::Rebuild)
             | registry::RegistryTransition::Migration => {
                 let actors = plan.actors.as_ref().context("missing changed actor rows")?;
-                let rows = actors
-                    .iter()
-                    .map(|actor| ActorLayout::new(&actor, &self.scenario))
-                    .collect::<ActorMetadataRows>();
                 let spatial = match plan.transition {
-                    registry::RegistryTransition::Migration => self
-                        .device
-                        .tensor(&SpatialIndex::from_actors(&self.scenario, actors).words),
+                    registry::RegistryTransition::Migration => registry::spatial::migrate(
+                        &self.device,
+                        &self.scenario,
+                        registry::spatial::SpatialMigration {
+                            spatial: &self.spatial,
+                            actors: &self.actors,
+                            previous: &self.metadata.actors,
+                            current: actors,
+                            requests: &plan.changes,
+                        },
+                    ),
                     _ => self.spatial.clone(),
                 };
                 Some(registry::RegistryBuffers {
-                    actors: self.device.tensor(&rows.words()),
+                    actors: registry::metadata::patch(
+                        &self.device,
+                        &self.scenario,
+                        &self.actors,
+                        actors,
+                        &plan.changes,
+                    ),
                     spatial,
                 })
             }

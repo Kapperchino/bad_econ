@@ -1,3 +1,4 @@
+use super::records::PendingRecord;
 use crate::domain::{ActorRows, Scenario};
 use crate::simulation::{
     Device,
@@ -26,15 +27,14 @@ pub(in crate::simulation) fn patch(
     scenario: &Scenario,
     source: &CubeTensor,
     actors: &ActorRows,
-    requests: &[u32],
+    requests: &[PendingRecord],
 ) -> CubeTensor {
     let patches = requests
         .iter()
-        .enumerate()
-        .filter(|(_, action)| matches!(*action >> 24, 3 | 6))
-        .map(|(index, _)| ActorPatch {
-            index: index as u32,
-            metadata: ActorLayout::new(&actors.at(index), scenario),
+        .filter(|record| matches!(record.request >> 24, 3 | 6))
+        .map(|record| ActorPatch {
+            index: record.actor,
+            metadata: ActorLayout::new(&actors.at(record.actor as usize), scenario),
         })
         .collect::<Vec<_>>();
     let output = device.empty(source.meta.num_elements());
