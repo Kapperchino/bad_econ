@@ -15,6 +15,10 @@ enum SupplyCase {
     Empty,
     Unaffordable,
     MixedAffordability,
+    Retail,
+    RetailSold,
+    Free,
+    HighCash,
     LaborPrefix(u32),
 }
 
@@ -39,17 +43,25 @@ struct SearchProbe {
 }
 
 impl SearchProbe {
-    fn new(case: SupplyCase, day: u32) -> Result<Self> {
+    fn new(case: SupplyCase, day: u32, good: Good) -> Result<Self> {
         let mut config = Scenario::baseline(1, 42, Experiment::Concentrated)?
             .config()
             .clone();
         config.firms = 40;
         config.search_radius = config.map_size;
         config.household_production = HouseholdProduction::industrial();
+        let position = Position {
+            x: config.map_size / 2,
+            y: config.map_size / 2,
+        };
+        let input_ticks = match good.inputs()[0] {
+            Some(_) => 1,
+            None => 0,
+        };
         config.population = Some(Population {
             households: vec![HouseholdSeed {
                 identity: 1,
-                position: Position { x: 500, y: 500 },
+                position,
                 cash: 5000,
                 inventories: Good::food([0, 0, 100]),
                 fatigue: 0,
@@ -57,13 +69,13 @@ impl SearchProbe {
             firms: (2..=41)
                 .map(|identity| FirmSeed {
                     identity,
-                    position: Position { x: 500, y: 500 },
+                    position,
                     owner: 1,
-                    good: Good::Bread,
+                    good,
                     cash: 5000,
                     inventories: [0; Good::COUNT],
                     capacity: 1,
-                    technique: Technique::new(1, 1, 1).expect("one-minute packet"),
+                    technique: Technique::new(1, input_ticks, 1).expect("one-minute packet"),
                     wage: 1,
                     price: 1,
                 })
@@ -90,9 +102,17 @@ impl SearchProbe {
         let mut state = scenario.initial()?;
         state.set(Field::Bread, 0, 0);
         state.set(Field::Time, 0, u64::from(u32::MAX));
+        if let SupplyCase::HighCash = case {
+            state.set(Field::Cash, 0, u64::from(u32::MAX) + 5000);
+        }
         for firm in 1..=40 {
             let supply = match case {
-                SupplyCase::Capped | SupplyCase::Unaffordable => 100,
+                SupplyCase::Capped
+                | SupplyCase::Unaffordable
+                | SupplyCase::Retail
+                | SupplyCase::RetailSold
+                | SupplyCase::Free
+                | SupplyCase::HighCash => 100,
                 SupplyCase::MixedAffordability => u64::from(firm > 1) * 100,
                 SupplyCase::Sparse => u64::from(firm % 5 == 0) * 100,
                 _ => 0,
@@ -102,13 +122,25 @@ impl SearchProbe {
                 SupplyCase::Sparse | SupplyCase::Empty => 1 + (firm % 3) as u64,
                 SupplyCase::Unaffordable => 5001,
                 SupplyCase::MixedAffordability => u64::from(firm > 1) * 5001,
+                SupplyCase::Retail | SupplyCase::RetailSold => 1 + (firm % 3) as u64,
+                SupplyCase::Free => 0,
+                SupplyCase::HighCash => 5001,
                 SupplyCase::LaborPrefix(_) => 1,
             };
-            state.set(Field::Bread, firm, supply);
+            state.set(Field::inventory(good), firm, supply);
             state.set(Field::Price, firm, price);
             state.set(Field::LaborMinutes, firm, 1);
             state.set(Field::InputTicks, firm, 0);
             state.set(Field::EquipmentCondition, firm, 1000);
+            if let SupplyCase::Retail | SupplyCase::RetailSold = case {
+                state.set(Field::EnterpriseModel, firm, 1);
+                state.set(Field::RetailOpen, firm, u64::from(u32::MAX) + 10);
+                let sales = match case {
+                    SupplyCase::Retail => u64::from(u32::MAX) + firm as u64 % 10,
+                    _ => u64::from(u32::MAX) + 11,
+                };
+                state.set(Field::Sales, firm, sales);
+            }
             if let SupplyCase::LaborPrefix(available) = case {
                 state.set(
                     Field::Slots,
@@ -123,7 +155,10 @@ impl SearchProbe {
         }
         let market = match case {
             SupplyCase::LaborPrefix(_) => Market::Labor,
-            _ => Market::Household,
+            _ => match good {
+                Good::Bread => Market::Household,
+                _ => Market::Input(good),
+            },
         };
         let simulation = Simulation::new(scenario, device(64)?)?;
         let mut parameters =
@@ -167,10 +202,13 @@ impl SearchProbe {
             &vec![NO_ACTOR; count * ProposalLayout::WORDS],
         );
         let mut searches = vec![0; count * 5];
-        searches[count] = (self.state.get(Field::FoodNeed, 0)
-            * u64::from(simulation.config.coverage + simulation.config.ring - 1))
-            as u32;
+        let coverage = match parameters.market {
+            MarketFlag::Input(Good::Grain) => simulation.config.coverage + simulation.config.ring,
+            _ => simulation.config.coverage + simulation.config.ring - 1,
+        };
+        searches[count] = (self.state.get(Field::FoodNeed, 0) * u64::from(coverage)) as u32;
         searches[3 * count] = self.state.get(Field::Cash, 0) as u32;
+        searches[4 * count] = (self.state.get(Field::Cash, 0) >> u32::BITS) as u32;
         device.write(&simulation.searches.requests, &searches);
         device.write(
             &simulation.searches.successes,
@@ -225,22 +263,29 @@ impl SearchProbe {
 
 #[test]
 fn cooperative_market_search_preserves_serial_search_and_shared_fallback_on_gpu() -> Result<()> {
-    for case in [
+    let cases = [
         SupplyCase::Capped,
         SupplyCase::Sparse,
         SupplyCase::Empty,
         SupplyCase::Unaffordable,
         SupplyCase::MixedAffordability,
-    ] {
-        for day in [0, 7, 31, 39] {
-            let probe = SearchProbe::new(case, day)?;
-            let expected = probe.outcome(SearchExecution::Serial)?;
-            for execution in [SearchExecution::Shared, SearchExecution::Plane] {
-                assert_eq!(
-                    probe.outcome(execution)?,
-                    expected,
-                    "{case:?}, day {day}, {execution:?}"
-                );
+        SupplyCase::Retail,
+        SupplyCase::RetailSold,
+        SupplyCase::Free,
+        SupplyCase::HighCash,
+    ];
+    for good in [Good::Bread, Good::Grain] {
+        for case in cases {
+            for day in [0, 7, 31, 39] {
+                let probe = SearchProbe::new(case, day, good)?;
+                let expected = probe.outcome(SearchExecution::Serial)?;
+                for execution in [SearchExecution::Shared, SearchExecution::Plane] {
+                    assert_eq!(
+                        probe.outcome(execution)?,
+                        expected,
+                        "{case:?}, {good:?}, day {day}, {execution:?}"
+                    );
+                }
             }
         }
     }
@@ -250,7 +295,7 @@ fn cooperative_market_search_preserves_serial_search_and_shared_fallback_on_gpu(
 #[test]
 fn cooperative_market_search_only_reports_faults_from_the_visited_prefix_on_gpu() -> Result<()> {
     for available in [7, 6] {
-        let probe = SearchProbe::new(SupplyCase::LaborPrefix(available), 0)?;
+        let probe = SearchProbe::new(SupplyCase::LaborPrefix(available), 0, Good::Bread)?;
         let expected = probe.outcome(SearchExecution::Serial)?;
         assert_eq!(expected.faults == 0, available == 7);
         for execution in [SearchExecution::Shared, SearchExecution::Plane] {

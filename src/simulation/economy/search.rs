@@ -633,7 +633,11 @@ fn search(
                         }
                     }
                     if skipped == 0 {
-                        let width = select(j == begin, 8u32, 32u32);
+                        let initial_width = comptime!(match parameters.market {
+                            MarketFlag::Input(Good::Grain) => 32u32,
+                            _ => 8u32,
+                        });
+                        let width = select(j == begin, initial_width, 32u32);
                         let lane = UNIT_POS as usize;
                         let fault_start = lane * CONTROL_WORDS;
                         if comptime!(parameters.market == MarketFlag::Labor) {
