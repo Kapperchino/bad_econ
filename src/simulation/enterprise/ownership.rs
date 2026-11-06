@@ -10,7 +10,40 @@ use crate::simulation::{
 use anyhow::{Context, Result};
 use burn_wgpu::CubeTensor;
 use cubecl::{CubeDim, prelude::*};
-use std::collections::BTreeMap;
+use std::collections::HashMap;
+
+enum IdentityIndex<'a> {
+    Ordered(&'a [u64]),
+    Unordered(HashMap<u64, usize>),
+}
+
+impl<'a> IdentityIndex<'a> {
+    fn new(identities: &'a [u64]) -> Self {
+        match identities.is_sorted() {
+            true => Self::Ordered(identities),
+            false => Self::Unordered(
+                identities
+                    .iter()
+                    .enumerate()
+                    .map(|(index, &identity)| (identity, index))
+                    .collect(),
+            ),
+        }
+    }
+
+    fn actor(&self, identity: u64) -> Option<usize> {
+        match self {
+            Self::Ordered(identities) => identities.binary_search(&identity).ok(),
+            Self::Unordered(identities) => identities.get(&identity).copied(),
+        }
+    }
+}
+
+struct ShareAccount {
+    firm: usize,
+    household: usize,
+    units: u32,
+}
 
 #[repr(C)]
 #[derive(Clone, Copy, bytemuck::Pod, bytemuck::Zeroable)]
@@ -28,38 +61,55 @@ pub(in crate::simulation) struct OwnershipRuntime {
 }
 impl OwnershipRuntime {
     pub fn new(device: &Device, state: &State) -> Result<Self> {
-        let actors = state
-            .actors
-            .iter()
-            .enumerate()
-            .map(|(index, actor)| (actor.identity, index as u32))
-            .collect::<std::collections::HashMap<_, _>>();
-        let mut shares = Vec::new();
-        let mut accounts = BTreeMap::<u32, Vec<u32>>::new();
+        let actors = IdentityIndex::new(state.actors.identities());
+        let mut accounts = Vec::new();
         for ownership in &state.ownership {
-            let firm = *actors
-                .get(&ownership.firm)
+            let firm = actors
+                .actor(ownership.firm)
                 .context("missing ownership firm")?;
             for share in &ownership.shares {
-                let owner = *actors
-                    .get(&share.household)
+                let household = actors
+                    .actor(share.household)
                     .context("missing shareholder")?;
-                let index = u32::try_from(shares.len())?;
-                shares.push(DistributionShare {
+                accounts.push(ShareAccount {
                     firm,
+                    household,
                     units: share.units,
                 });
-                accounts.entry(firm).or_default().push(index);
-                accounts.entry(owner).or_default().push(index);
             }
         }
-        let mut entries = Vec::with_capacity(shares.len() * 2);
-        let mut offsets = Vec::with_capacity(state.actors.len() + 1);
-        offsets.push(0);
-        for actor in 0..state.actors.len() as u32 {
-            entries.extend(accounts.remove(&actor).unwrap_or_default());
-            offsets.push(u32::try_from(entries.len())?);
+        let count = u32::try_from(
+            accounts
+                .len()
+                .checked_mul(2)
+                .context("too many share accounts")?,
+        )?;
+        let mut offsets = vec![0u32; state.actors.len() + 1];
+        for account in &accounts {
+            offsets[account.firm + 1] += 1;
+            offsets[account.household + 1] += 1;
         }
+        for actor in 0..state.actors.len() {
+            offsets[actor + 1] += offsets[actor];
+        }
+        let mut entries = vec![0; count as usize];
+        for (index, account) in accounts.iter().enumerate() {
+            for actor in [account.firm, account.household] {
+                entries[offsets[actor] as usize] = index as u32;
+                offsets[actor] += 1;
+            }
+        }
+        offsets.rotate_right(1);
+        offsets[0] = 0;
+        let shares = accounts
+            .iter()
+            .map(|account| {
+                Ok(DistributionShare {
+                    firm: u32::try_from(account.firm)?,
+                    units: account.units,
+                })
+            })
+            .collect::<Result<Vec<_>>>()?;
         Ok(Self {
             payments: device.empty(shares.len().max(1) * 2),
             shares: device.tensor(bytemuck::cast_slice(&shares)),
@@ -325,9 +375,11 @@ mod tests {
         enterprise::{Ownership, OwnershipShare},
     };
     use crate::simulation::encode;
+    use std::collections::BTreeMap;
 
     #[test]
-    fn parallel_dividends_match_serial_rounding_shared_owners_and_overflow_on_gpu() -> Result<()> {
+    fn parallel_dividends_match_serial_with_ordered_and_unordered_identities_on_gpu() -> Result<()>
+    {
         let mut scenario_config = Scenario::baseline(193, 42, Experiment::Baseline)?
             .config()
             .clone();
@@ -376,6 +428,21 @@ mod tests {
             initial.set(Field::OperatingReserve, actor, (actor as u64 % 3) << 40);
         }
         for workgroup in [32, 64, 128, 256] {
+            let mut initial = initial.clone();
+            if workgroup >= 128 {
+                let reverse = |identity| u64::MAX - identity;
+                for index in 0..initial.actors.len() {
+                    let mut actor = initial.actors.at(index);
+                    actor.identity = reverse(actor.identity);
+                    initial.actors.set(index, actor);
+                }
+                for ownership in &mut initial.ownership {
+                    ownership.firm = reverse(ownership.firm);
+                    for share in &mut ownership.shares {
+                        share.household = reverse(share.household);
+                    }
+                }
+            }
             let device = Device::headless(workgroup)?;
             let original = device.tensor(&original);
             let runtime = OwnershipRuntime::new(&device, &initial)?;

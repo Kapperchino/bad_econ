@@ -131,6 +131,7 @@ pub(super) fn prepare(
                     number(state, config, comptime!(Field::InvestmentGood as u32), id) > 0;
                 if k.is(comptime!(ActorKind::Household))
                     && investment
+                    && comptime!(config.property_mode == Feature::Disabled)
                     && number(state, config, comptime!(Field::LivingMembers as u32), id) > 0
                     && comptime!(config.home_mode == Feature::Enabled)
                     && (good == comptime!(Good::Tools as u32)
@@ -140,7 +141,10 @@ pub(super) fn prepare(
                     wanted = ticks(select(good == comptime!(Good::Tools as u32), 2u32, 5u32), 0);
                 }
                 if !k.is(comptime!(ActorKind::Household))
-                    && comptime!(config.home_mode == Feature::Enabled)
+                    && comptime!(
+                        config.home_mode == Feature::Enabled
+                            && config.property_mode == Feature::Disabled
+                    )
                     && good == comptime!(Good::Wood as u32)
                     && number(state, config, comptime!(Field::Slots as u32), id) == 0
                     && number(state, config, comptime!(Field::Plan as u32), id) > 0
@@ -158,6 +162,25 @@ pub(super) fn prepare(
                 {
                     wanted = select(search, maximum(wanted, ticks(2, 0)), ticks(2, 0));
                     search = true;
+                }
+                if comptime!(config.property_mode == Feature::Enabled)
+                    && good == comptime!(Good::Construction as u32)
+                {
+                    let building =
+                        number(state, config, comptime!(Field::ProjectStatus as u32), id)
+                            == comptime!(crate::domain::property::ProjectStatus::Building as u32);
+                    let work = value(
+                        state,
+                        config,
+                        comptime!(Field::ConstructionRemaining as u32),
+                        id,
+                    );
+                    wanted = select(
+                        building,
+                        select(search, maximum(wanted, work), work),
+                        wanted,
+                    );
+                    search = search || building;
                 }
             }
             MarketFlag::Consumer(_) => {

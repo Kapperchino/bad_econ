@@ -146,6 +146,40 @@ impl GpuPass<BirthRangeInput> for AssignBirthRanges {
 }
 
 #[derive(CubeType, CubeLaunch)]
+pub(super) struct FirmExtensionInput {
+    pub previous: Box<[Vector<u32, Const<2>>]>,
+    pub ranges: Box<[Vector<u32, Const<2>>]>,
+    pub births: Box<[u32]>,
+    pub people: u32,
+}
+
+pub(super) struct FirmRegistryExtension;
+pub(super) struct ExtendFirmRanges;
+
+impl System for FirmRegistryExtension {
+    type Input = FirmExtensionInput;
+    type Passes = gpu_passes![ExtendFirmRanges];
+}
+
+#[cube]
+impl GpuPass<FirmExtensionInput> for ExtendFirmRanges {
+    type Output = ();
+
+    fn execute(mut input: FirmExtensionInput) {
+        let actor = ABSOLUTE_POS;
+        if actor < input.ranges.len() {
+            let mut range = Vector::<u32, Const<2>>::new(0);
+            range.insert(0usize, input.people);
+            if actor < input.previous.len() {
+                range = input.previous[actor];
+            }
+            input.ranges[actor] = range;
+            input.births[actor] = 0;
+        }
+    }
+}
+
+#[derive(CubeType, CubeLaunch)]
 pub(super) struct PopulationGrowthInput {
     pub source: Box<[Vector<u32, Const<4>>]>,
     pub target: Box<[Vector<u32, Const<4>>]>,

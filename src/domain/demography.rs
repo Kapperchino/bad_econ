@@ -59,6 +59,7 @@ pub struct MortalityProfile {
     pub name: String,
     pub sources: Vec<String>,
     pub background_annual_ppm: [u32; 5],
+    #[serde(deserialize_with = "super::industry::goods_array")]
     pub occupational_annual_ppm: [u32; Good::COUNT],
     pub reference_work_minutes_per_year: u32,
     pub famine_daily_ppm_at_thirty_days: u32,
@@ -76,7 +77,7 @@ impl Default for MortalityProfile {
                 "https://www.populationspast.org/about/".into(),
             ],
             background_annual_ppm: [150_000, 15_000, 6_000, 15_000, 80_000],
-            occupational_annual_ppm: [300, 200, 200, 960, 1280, 200, 300, 100, 100, 100, 500, 200, 200, 300, 300, 200],
+            occupational_annual_ppm: [300, 200, 200, 960, 1280, 200, 300, 100, 100, 100, 500, 200, 200, 300, 300, 200, 600],
             reference_work_minutes_per_year: 300 * 480,
             famine_daily_ppm_at_thirty_days: 20_000,
             famine_vulnerability_per_mille: [2000, 1500, 1000, 1200, 2000],

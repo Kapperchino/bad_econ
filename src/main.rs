@@ -1,10 +1,10 @@
 use anyhow::{Result, anyhow};
 use bad_econ::domain::*;
 use clap::{Parser, ValueEnum};
+use mimalloc::MiMalloc;
 use std::path::PathBuf;
 #[cfg(feature = "compute")]
 use std::time::Instant;
-use mimalloc::MiMalloc;
 
 #[global_allocator]
 static GLOBAL: MiMalloc = MiMalloc;
@@ -182,9 +182,10 @@ fn run(scenario: Scenario, args: &Cli) -> Result<()> {
         }
         Ok(())
     })?;
+    let property = simulation.property_snapshot()?;
     output(
         &args.output,
-        &serde_json::json!({"backend":simulation.device.name,"startup_seconds":startup_seconds,"seconds":start.elapsed().as_secs_f64(),"snapshot":simulation.snapshot,"opening":simulation.scenario.opening_totals(),"last_day_phases":simulation.timings,"readback_bytes":simulation.readback_bytes,"memory":simulation.memory_usage(),"memory_budget_bytes":simulation.device.memory_budget.bytes(),"memory_budget":simulation.device.memory_budget}),
+        &serde_json::json!({"property":property,"backend":simulation.device.name,"startup_seconds":startup_seconds,"seconds":start.elapsed().as_secs_f64(),"snapshot":simulation.snapshot,"opening":simulation.scenario.opening_totals(),"last_day_phases":simulation.timings,"readback_bytes":simulation.readback_bytes,"memory":simulation.memory_usage(),"memory_budget_bytes":simulation.device.memory_budget.bytes(),"memory_budget":simulation.device.memory_budget}),
     )?;
     if let Some(path) = &args.checkpoint {
         std::fs::write(path, serde_json::to_vec(&simulation.checkpoint()?)?)?;

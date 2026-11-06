@@ -2,6 +2,9 @@ use super::*;
 use crate::simulation::configuration::{EconomyConfig, Feature};
 use crate::simulation::scheduler::settle;
 
+#[cfg(test)]
+mod tests;
+
 #[cube]
 pub(super) fn actor_settlement(
     state: &mut [u32],
@@ -74,6 +77,10 @@ pub(super) struct PeerBalances {
 
 #[cube]
 impl PeerBalances {
+    pub fn has_supply(&self) -> bool {
+        lt(self.reserve, self.stock)
+    }
+
     pub fn new(
         state: &mut [u32],
         actors: &[u32],

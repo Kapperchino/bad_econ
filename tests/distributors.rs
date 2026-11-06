@@ -272,8 +272,9 @@ fn producer_input_orders_keep_a_production_shift_funded() -> Result<()> {
 }
 
 #[test]
-fn household_savings_open_a_grocery_that_connects_distant_food_supply_to_customers() -> Result<()> {
+fn entrepreneurial_household_can_open_a_grocery_without_guaranteed_customers() -> Result<()> {
     let mut config = economy()?.config().clone();
+    config.entrepreneurship.interested_per_mille = 1000;
     config.households = 30;
     config.distributors.clear();
     config.household_production = bad_econ::domain::enterprise::HouseholdProduction::industrial();
@@ -285,10 +286,13 @@ fn household_savings_open_a_grocery_that_connects_distant_food_supply_to_custome
                     x: if identity == 1 { 500 } else { 999 },
                     y: 0,
                 },
-                cash: 12_000,
+                cash: match identity {
+                    1 => 12_000,
+                    _ => 5000,
+                },
                 inventories: match identity {
                     1 => Good::food([1000, 0, 20]),
-                    _ => [0; Good::COUNT],
+                    _ => Good::food([0, 0, 20]),
                 },
                 fatigue: 0,
             })
@@ -307,7 +311,7 @@ fn household_savings_open_a_grocery_that_connects_distant_food_supply_to_custome
                     },
                     owner: 2,
                     good,
-                    cash: 0,
+                    cash: 10_000,
                     inventories,
                     capacity: 1,
                     technique: Technique::new(60, u32::from(good.inputs()[0].is_some()), 10)
@@ -319,21 +323,38 @@ fn household_savings_open_a_grocery_that_connects_distant_food_supply_to_custome
             .collect(),
     });
     let scenario = Scenario::new(config)?;
-    let mut simulation = Simulation::new(scenario.clone(), support::device(64)?)?;
+    let mut initial = scenario.initial()?;
+    initial.set(Field::InvestmentGood, 0, Good::Bread as u64);
+    let mut simulation =
+        Simulation::from_checkpoint(Checkpoint::new(&scenario, &initial)?, support::device(64)?)?;
+    let mut staffed = 0;
     for _ in 0..20 {
         simulation.advance()?;
+        let day = simulation.download()?;
+        staffed += (scenario.actors()..day.actors.len())
+            .filter(|&index| day.actors.at(index).owner == 0)
+            .map(|index| day.get(Field::RetailOpen, index))
+            .sum::<u64>();
     }
     let state = simulation.download()?;
     let store = (scenario.actors()..state.actors.len())
-        .find(|&index| state.get(Field::EnterpriseModel, index) == 1)
+        .find(|&index| {
+            state.get(Field::EnterpriseModel, index) == 1 && state.actors.at(index).owner == 0
+        })
         .expect("household financed a grocery");
     assert_eq!(state.actors.at(store).owner, 0);
     assert_eq!(state.actors.at(store).position.x, 500);
     assert_eq!(state.get(Field::ConstructionRemaining, store), 0);
     assert_eq!(state.get(Field::InstalledCapital, store), 7);
     assert_eq!(state.get(Field::Produced, store), 0);
-    assert!(state.get(Field::RetailOpen, store) > 0);
-    assert!(state.get(Field::Sales, store) > 0);
+    assert!(staffed > 0);
+    assert!(state.get(Field::Bread, store) > 0);
+    assert_eq!(state.get(Field::Sales, store), 0);
+    assert_eq!(
+        state.get(Field::EnterpriseStatus, store),
+        enterprise::EnterpriseState::Dormant as u64
+    );
+    assert_eq!(simulation.snapshot.cash, initial.initial_cash);
     assert!(state.get(Field::Cash, 30) > 0);
     assert_eq!(
         simulation.snapshot,

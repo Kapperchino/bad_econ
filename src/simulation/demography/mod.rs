@@ -555,18 +555,21 @@ impl DemographyRuntime {
     }
     pub fn extend_firms(&mut self, device: &Device, count: usize) {
         self.range_counts.resize(count, 0);
-        let mut offset = 0u32;
-        let ranges = self
-            .range_counts
-            .iter()
-            .flat_map(|&count| {
-                let range = [offset, count];
-                offset += count;
-                range
-            })
-            .collect::<Vec<_>>();
-        self.ranges = device.tensor(&ranges);
-        self.births = device.tensor(&vec![0; count]);
+        let ranges = device.empty(count * 2);
+        let births = device.empty(count);
+        FirmRegistryExtension::launch(
+            device,
+            device.count(count),
+            CubeDim::new_1d(device.workgroup),
+            FirmExtensionInputLaunch {
+                previous: self.ranges.clone().into_buffer_arg(),
+                ranges: ranges.clone().into_buffer_arg(),
+                births: births.clone().into_buffer_arg(),
+                people: self.count as u32,
+            },
+        );
+        self.ranges = ranges;
+        self.births = births;
     }
     pub fn birth_buffer(&self) -> &CubeTensor {
         &self.births

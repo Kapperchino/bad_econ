@@ -51,6 +51,7 @@ pub enum ProductionMethod {
     MachineTools,
     FurnitureWorkshops,
     Glassworks,
+    MechanizedConstruction,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -60,7 +61,7 @@ pub struct Recipe {
 }
 
 impl ProductionMethod {
-    pub const ALL: [Self; 11] = [
+    pub const ALL: [Self; 12] = [
         Self::MechanicalHarvesting,
         Self::SteamMilling,
         Self::MechanicalBaking,
@@ -72,6 +73,7 @@ impl ProductionMethod {
         Self::MachineTools,
         Self::FurnitureWorkshops,
         Self::Glassworks,
+        Self::MechanizedConstruction,
     ];
 
     pub fn from_index(index: u64) -> anyhow::Result<Option<Self>> {
@@ -90,7 +92,8 @@ impl ProductionMethod {
             Self::MechanicalHarvesting
             | Self::MechanicalBaking
             | Self::Sawmills
-            | Self::FurnitureWorkshops => Technology::Mechanization,
+            | Self::FurnitureWorkshops
+            | Self::MechanizedConstruction => Technology::Mechanization,
             Self::SteamMilling | Self::SteamMining | Self::Glassworks => Technology::SteamPower,
             Self::BessemerProcess | Self::MachineTools => Technology::Steelmaking,
             Self::PowerLooms => Technology::PowerLooms,
@@ -115,6 +118,7 @@ impl ProductionMethod {
             Good::Tools => vec![Self::MachineTools],
             Good::Furniture => vec![Self::FurnitureWorkshops],
             Good::Glass => vec![Self::Glassworks],
+            Good::Construction => vec![Self::MechanizedConstruction],
         }
     }
 
@@ -144,7 +148,7 @@ where
 {
     let values = Vec::<T>::deserialize(deserializer)?;
     match values.len() {
-        3 | Good::COUNT => {
+        3 | 16 | Good::COUNT => {
             let mut result = [T::default(); Good::COUNT];
             result[..values.len()].copy_from_slice(&values);
             Ok(result)

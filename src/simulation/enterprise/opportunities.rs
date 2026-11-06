@@ -111,8 +111,13 @@ impl EntryPlan {
         match state.actors.at(owner).kind == 0
             && state.get(Field::Cash, owner) >= 10_000
             && state.get(Field::RentArrears, owner) == 0
-            && state.get(Field::Tools, owner) >= 2
-            && state.get(Field::Wood, owner) >= 5
+            && (config.property.is_some()
+                || (state.get(Field::Tools, owner) >= 2 && state.get(Field::Wood, owner) >= 5))
+            && config.property.as_ref().is_none_or(|property| {
+                property.region(plan.position).is_ok_and(|region| {
+                    property.regions[region].landowner == state.actors.at(owner).identity
+                })
+            })
             && (u64::from(config.minimum_price)..=u64::from(config.maximum_price))
                 .contains(&plan.price)
         {
@@ -233,12 +238,7 @@ pub(in crate::simulation) fn discover(
         if kind > 0 && active && producer && distance(actors, owner, source) <= config.search_radius
         {
             let price = number(state, config, source, comptime!(Field::Price as u32));
-            let unfilled = load(state, comptime!(Field::Unfilled as u32) * count + source);
-            let sales = load(state, comptime!(Field::Sales as u32) * count + source);
-            if !equal(unfilled, zero())
-                && !equal(sales, zero())
-                && actors[A::GEOGRAPHIC_CAPACITY * (actors.len() / A::WORDS) + source as usize] > 0
-            {
+            if actors[A::GEOGRAPHIC_CAPACITY * (actors.len() / A::WORDS) + source as usize] > 0 {
                 let inputs = number(
                     state,
                     config,
@@ -316,30 +316,9 @@ pub(in crate::simulation) fn discover(
                     && config.consumption_intervals[kind as usize - 1] > 1);
             if consumer && !lt(stock, ticks(24, 0)) {
                 let quote = price * 1250 / 1000 + ceildiv(60 * wage + config.firm_rent, 24);
-                let mut buyers = 0;
-                for buyer_sample in 0..min(32u32, count) {
-                    let buyer = (owner + day * 23 + buyer_sample) % count;
-                    let household =
-                        actors[A::KIND * (actors.len() / A::WORDS) + buyer as usize] == 0;
-                    let buyer_cash = load(state, comptime!(Field::Cash as u32) * count + buyer);
-                    let need = select(
-                        kind == comptime!(Good::Bread as u32),
-                        number(state, config, buyer, comptime!(Field::FoodNeed as u32)),
-                        1,
-                    );
-                    if household
-                        && number(state, config, buyer, comptime!(Field::LivingMembers as u32)) > 0
-                        && distance(actors, owner, buyer) <= config.search_radius
-                        && distance(actors, source, buyer) > config.search_radius
-                        && !lt(buyer_cash, times32(need, quote))
-                    {
-                        buyers += need;
-                    }
-                }
-                let units = min(buyers, 24);
-                let revenue = times32(units, quote);
+                let revenue = times32(24, quote);
                 let cost = plus(
-                    plus(times32(units, price), times32(60, wage)).value,
+                    plus(times32(24, price), times32(60, wage)).value,
                     ticks(config.firm_rent, 0),
                 )
                 .value;

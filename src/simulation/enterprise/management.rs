@@ -49,10 +49,9 @@ impl GpuPass<AssignmentInput> for AssignOwners {
 impl EnterpriseManagement {
     pub fn new(device: &Device, state: &State) -> Self {
         let mut owners = BTreeMap::<u32, Vec<u32>>::new();
-        for (index, actor) in state.actors.iter().enumerate() {
-            if actor.kind > 0 {
-                owners.entry(actor.owner).or_default().push(index as u32);
-            }
+        for index in state.actors.firm_indices() {
+            let actor = state.actors.at(index);
+            owners.entry(actor.owner).or_default().push(index as u32);
         }
         let groups = owners.len() as u32;
         let mut words = vec![0; owners.len() * 3];

@@ -74,9 +74,10 @@ fn draw(
                             i.gross_income, i.income_tax, i.employee_charges, i.payroll_reserve
                         ),
                         _ => format!(
-                            "{} {:?} | building {} min\nCondition {} | safety {}\nOwner {} | wage {} | price {}\nCapacity {} (+{}) | planned {} | open {}\nMethod {:?} | {} output / {} min",
+                            "{} {:?} | building {} {}\nCondition {} | safety {}\nOwner {} | wage {} | price {}\nCapacity {} (+{}) | planned {} | open {}\nMethod {:?} | {} output / {} min",
                             i.enterprise_state.map(|state| format!("{state:?}")).unwrap_or_default(),
                             i.enterprise_model, i.construction_minutes_remaining,
+                            match i.property_region { 0 => "min", _ => "work" },
                             i.equipment_condition, i.safety_provision,
                             i.owner_identity,
                             i.wage,
@@ -87,8 +88,12 @@ fn draw(
                             i.open_slots, i.production_method, i.output_ticks, i.labor_minutes
                         ),
                     };
+                    let property = match i.property_region {
+                        0 => String::new(),
+                        _ => format!("\nRegion {} | space {} (+{} reserved)\nSubsistence {} | displaced {}\nConstruction {:?} | {} work remaining", i.property_region, i.property_space, i.reserved_space, i.subsistence_plots, i.displaced_plots, i.project_status, i.construction_minutes_remaining),
+                    };
                     format!(
-                        "Actor {} | day {} | kind {}\nCash {} | transit {}\nRent paid {} | owed {}\nFood {:?} | other stock {}\n{}",
+                        "Actor {} | day {} | kind {}\nCash {} | transit {}\nRent paid {} | owed {}\nFood {:?} | other stock {}\n{}{}",
                         i.actor.identity,
                         i.day,
                         i.actor.kind,
@@ -98,7 +103,8 @@ fn draw(
                         i.rent_arrears,
                         &i.inventory[..3],
                         i.inventory[3..].iter().map(|&stock| u128::from(stock)).sum::<u128>(),
-                        detail
+                        detail,
+                        property
                     )
                 })
                 .unwrap_or_else(|| "H / F to inspect a household or firm".into());

@@ -150,37 +150,6 @@ pub(super) fn construct_home(
 }
 
 #[cube]
-pub(super) fn investment(state: &mut [u32], config: &EconomyConfig, owner: u32) {
-    let cash = value(state, config, comptime!(Field::Cash as u32), owner);
-    let sales = value(state, config, comptime!(Field::Sales as u32), owner);
-    let earned = value(state, config, comptime!(Field::GrossIncome as u32), owner);
-    let active = number(state, config, comptime!(Field::LivingMembers as u32), owner) > 0;
-    let owns = number(
-        state,
-        config,
-        comptime!(Field::InvestmentFirm as u32),
-        owner,
-    ) > 0;
-    let opportunity = active
-        && !owns
-        && equal(
-            value(state, config, comptime!(Field::RentArrears as u32), owner),
-            zero(),
-        )
-        && (!equal(sales, zero()) || !equal(earned, zero()))
-        && !lt(cash, ticks(10_000, 0));
-    if opportunity {
-        set32(
-            state,
-            config,
-            comptime!(Field::InvestmentGood as u32),
-            owner,
-            comptime!(Good::Bread as u32),
-        );
-    }
-}
-
-#[cube]
 pub(super) fn maintain(
     state: &mut [u32],
     config: &EconomyConfig,
@@ -802,8 +771,17 @@ pub(super) fn expand(
                     firm,
                 ),
                 times32(
-                    720,
-                    number(state, config, comptime!(Field::Wage as u32), firm),
+                    comptime!(match config.property_mode {
+                        Feature::Disabled => 720u32,
+                        Feature::Enabled =>
+                            crate::domain::property::CONSTRUCTION_WORK_PER_SPACE
+                                * Good::Construction.initial_price(),
+                    }),
+                    select(
+                        comptime!(config.property_mode == Feature::Enabled),
+                        1,
+                        number(state, config, comptime!(Field::Wage as u32), firm),
+                    ),
                 ),
             ),
         );
@@ -812,8 +790,15 @@ pub(super) fn expand(
             && lt(target, demand)
             && funded
             && capacity < 10_000
-            && !lt(tools, ticks(2, 0))
-            && !lt(wood, ticks(5, 0))
+            && (comptime!(config.property_mode == Feature::Enabled)
+                || (!lt(tools, ticks(2, 0)) && !lt(wood, ticks(5, 0))))
+            && property::authorized(state, config, firm, owner)
+            && number(
+                state,
+                config,
+                comptime!(Field::ConstructionRemaining as u32),
+                firm,
+            ) == 0
             && number(
                 state,
                 config,
@@ -821,65 +806,89 @@ pub(super) fn expand(
                 firm,
             ) == 0
         {
-            set(
-                state,
-                config,
-                comptime!(Field::Tools as u32),
-                firm,
-                minus(tools, ticks(2, 0)),
-            );
-            set(
-                state,
-                config,
-                comptime!(Field::Wood as u32),
-                firm,
-                minus(wood, ticks(5, 0)),
-            );
-            increase(
-                state,
-                config,
-                control,
-                USED_FIELDS as u32 + comptime!(Good::Tools as u32) - 1,
-                firm,
-                ticks(2, 0),
-            );
-            increase(
-                state,
-                config,
-                control,
-                USED_FIELDS as u32 + comptime!(Good::Wood as u32) - 1,
-                firm,
-                ticks(5, 0),
-            );
-            increase(
-                state,
-                config,
-                control,
-                comptime!(Field::Used as u32),
-                firm,
-                ticks(7, 0),
-            );
-            increase(
-                state,
-                config,
-                control,
-                comptime!(Field::InstalledCapital as u32),
-                firm,
-                ticks(7, 0),
-            );
+            if comptime!(config.property_mode == Feature::Disabled) {
+                set(
+                    state,
+                    config,
+                    comptime!(Field::Tools as u32),
+                    firm,
+                    minus(tools, ticks(2, 0)),
+                );
+                set(
+                    state,
+                    config,
+                    comptime!(Field::Wood as u32),
+                    firm,
+                    minus(wood, ticks(5, 0)),
+                );
+                increase(
+                    state,
+                    config,
+                    control,
+                    USED_FIELDS as u32 + comptime!(Good::Tools as u32) - 1,
+                    firm,
+                    ticks(2, 0),
+                );
+                increase(
+                    state,
+                    config,
+                    control,
+                    USED_FIELDS as u32 + comptime!(Good::Wood as u32) - 1,
+                    firm,
+                    ticks(5, 0),
+                );
+                increase(
+                    state,
+                    config,
+                    control,
+                    comptime!(Field::Used as u32),
+                    firm,
+                    ticks(7, 0),
+                );
+                increase(
+                    state,
+                    config,
+                    control,
+                    comptime!(Field::InstalledCapital as u32),
+                    firm,
+                    ticks(7, 0),
+                );
+            }
+            if comptime!(config.property_mode == Feature::Enabled) {
+                set32(
+                    state,
+                    config,
+                    comptime!(Field::RequestedSpace as u32),
+                    firm,
+                    1,
+                );
+                set32(
+                    state,
+                    config,
+                    comptime!(Field::ProjectStatus as u32),
+                    firm,
+                    comptime!(crate::domain::property::ProjectStatus::Requested as u32),
+                );
+            }
             set32(
                 state,
                 config,
                 comptime!(Field::ConstructionRemaining as u32),
                 firm,
-                720,
+                comptime!(match config.property_mode {
+                    Feature::Disabled => 720u32,
+                    Feature::Enabled => crate::domain::property::CONSTRUCTION_WORK_PER_SPACE,
+                }),
             );
             set32(
                 state,
                 config,
                 comptime!(Field::PendingCapacity as u32),
                 firm,
-                1,
+                comptime!(match config.property_mode {
+                    Feature::Disabled => 1u32,
+                    Feature::Enabled => 0u32,
+                }),
             );
         }
     }

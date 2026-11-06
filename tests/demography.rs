@@ -97,10 +97,11 @@ fn version_one_scenarios_migrate_and_old_checkpoints_fail_before_decoding_state(
     let mut simulation = Simulation::new(Scenario::new(config)?, device)?;
     simulation.advance()?;
     let mut checkpoint = serde_json::to_value(simulation.checkpoint()?)?;
+    let format = checkpoint["version"].as_u64().unwrap();
     checkpoint["version"] = 6.into();
     checkpoint["state"] = serde_json::Value::Null;
     let error = serde_json::from_value::<Checkpoint>(checkpoint).unwrap_err();
-    assert!(error.to_string().contains("format 7"));
+    assert!(error.to_string().contains(&format!("format {format}")));
     Ok(())
 }
 

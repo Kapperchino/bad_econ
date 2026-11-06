@@ -260,6 +260,22 @@ fn transition(
                     zero(),
                 );
             }
+            if kind == 3
+                && comptime!(
+                    config.property_mode == crate::simulation::configuration::Feature::Enabled
+                )
+            {
+                store(
+                    state,
+                    comptime!(Field::LandPlots as u32) * count + actor,
+                    zero(),
+                );
+                store(
+                    state,
+                    comptime!(Field::CropWork as u32) * count + actor,
+                    zero(),
+                );
+            }
             if kind == 6 {
                 store(
                     state,

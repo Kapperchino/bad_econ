@@ -104,6 +104,7 @@ row_layout!(ActorMetadataRows, ActorLayout {
     owner: u32 => OWNER,
     capacity: u32 => CAPACITY,
     geographic_capacity: u32 => GEOGRAPHIC_CAPACITY,
+    entrepreneurial_interest: u32 => ENTREPRENEURIAL_INTEREST,
 });
 impl ActorLayout {
     pub fn new(actor: &Actor, scenario: &Scenario) -> Self {
@@ -114,6 +115,11 @@ impl ActorLayout {
             owner: actor.owner,
             capacity: actor.capacity,
             geographic_capacity: scenario.geographic_capacity(actor),
+            entrepreneurial_interest: scenario
+                .config()
+                .entrepreneurship
+                .interest(scenario.config().seed, actor.identity)
+                as u32,
         }
     }
 }

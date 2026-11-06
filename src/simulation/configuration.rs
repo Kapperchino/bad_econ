@@ -122,6 +122,9 @@ pub struct EconomyConfig {
     #[cube(comptime)]
     pub home_mode: Feature,
     pub tax_brackets: Sequence<TaxBracket>,
+    #[cube(comptime)]
+    pub property_mode: Feature,
+    pub property_regions: Box<[u32]>,
 }
 pub struct Configuration {
     pub actors: u32,
@@ -163,6 +166,8 @@ pub struct Configuration {
     pub price_table: burn_wgpu::CubeTensor,
     pub home_mode: Feature,
     pub tax_brackets: Vec<TaxBracket>,
+    pub property_mode: Feature,
+    pub property_regions: burn_wgpu::CubeTensor,
 }
 impl Configuration {
     pub fn new(device: &super::Device, scenario: &Scenario, state: &State) -> Self {
@@ -178,6 +183,31 @@ impl Configuration {
             household_need: config.household_need,
             economy: config.economy,
             home: HomeProduction::new(config.household_production),
+            property_mode: Feature::from(config.property.as_ref()),
+            property_regions: device.tensor(&config.property.as_ref().map_or_else(
+                || vec![0; 6],
+                |property| {
+                    property
+                        .regions
+                        .iter()
+                        .flat_map(|region| {
+                            [
+                                region.lower.x,
+                                region.lower.y,
+                                region.upper.x,
+                                region.upper.y,
+                                region.space,
+                                state
+                                    .actors
+                                    .iter()
+                                    .position(|actor| actor.identity == region.landowner)
+                                    .expect("validated landowner")
+                                    as u32,
+                            ]
+                        })
+                        .collect()
+                },
+            )),
             home_mode: match config.household_production {
                 crate::domain::enterprise::HouseholdProduction::Unavailable => Feature::Disabled,
                 crate::domain::enterprise::HouseholdProduction::Available { .. } => {
@@ -239,6 +269,8 @@ impl Configuration {
     }
     pub fn launch(&self) -> EconomyConfigLaunch {
         EconomyConfigLaunch {
+            property_mode: self.property_mode,
+            property_regions: self.property_regions.clone().into_buffer_arg(),
             actors: self.actors,
             fields: self.fields,
             ring: self.ring,

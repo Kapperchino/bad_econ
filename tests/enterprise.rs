@@ -3,11 +3,103 @@ use crate::support;
 use anyhow::Result;
 use bad_econ::{
     domain::{
-        enterprise::{HouseholdProduction, Ownership, OwnershipShare},
+        enterprise::{EntrepreneurialInterest, HouseholdProduction, Ownership, OwnershipShare},
         *,
     },
     simulation::Simulation,
 };
+
+#[test]
+fn entrepreneurial_interest_limits_entry_even_with_abundant_savings_on_gpu() -> Result<()> {
+    let mut config = Scenario::baseline(1000, 42, Experiment::Concentrated)?
+        .config()
+        .clone();
+    config.household_production = HouseholdProduction::industrial();
+    config.firms = 3;
+    config.distribution_rate = 0;
+    config.behavior.price_response = 0;
+    config.demography.annual_births_per_million_fertile_women = 0;
+    config.demography.mortality.background_annual_ppm = [0; 5];
+    config.demography.mortality.occupational_annual_ppm = [0; Good::COUNT];
+    config.population = Some(Population {
+        households: (1..=1000)
+            .map(|identity| {
+                let mut inventories = Good::food([0, 0, 1000]);
+                inventories[Good::Tools as usize - 1] = 2;
+                inventories[Good::Wood as usize - 1] = 5;
+                HouseholdSeed {
+                    identity,
+                    position: Position { x: 500, y: 500 },
+                    cash: 50_000,
+                    inventories,
+                    fatigue: 0,
+                }
+            })
+            .collect(),
+        firms: [Good::Grain, Good::Flour, Good::Bread]
+            .into_iter()
+            .enumerate()
+            .map(|(index, good)| FirmSeed {
+                identity: 1001 + index as u64,
+                position: Position { x: 500, y: 500 },
+                owner: 1,
+                good,
+                cash: 100_000,
+                inventories: Good::food([10_000, 10_000, 10_000]),
+                capacity: 1,
+                technique: Technique {
+                    labor_minutes: 60,
+                    input_ticks: 20 * u32::from(good.inputs()[0].is_some()),
+                    output_ticks: 20,
+                },
+                wage: 1,
+                price: [10, 15, 60][index],
+            })
+            .collect(),
+    });
+    let scenario = Scenario::new(config)?;
+    let interested = (1..=1000)
+        .filter(|&identity| {
+            scenario.config().entrepreneurship.interest(42, identity)
+                == EntrepreneurialInterest::Interested
+        })
+        .count();
+    assert!((60..=100).contains(&interested));
+    let initial = scenario.initial()?;
+    let mut simulation = Simulation::new(scenario.clone(), support::device(64)?)?;
+    for _ in 0..60 {
+        simulation.advance()?;
+        assert!(simulation.snapshot.firm_entries <= interested as u64);
+        assert_eq!(simulation.snapshot.cash, initial.initial_cash);
+    }
+    assert!(simulation.snapshot.firm_entries > 0);
+    let state = simulation.download()?;
+    for firm in state.actors.iter().skip(initial.actors.len()) {
+        let owner = state.actors.at(firm.owner as usize);
+        assert_eq!(
+            scenario
+                .config()
+                .entrepreneurship
+                .interest(42, owner.identity),
+            EntrepreneurialInterest::Interested
+        );
+    }
+    for household in 0..1000 {
+        if scenario
+            .config()
+            .entrepreneurship
+            .interest(42, household as u64 + 1)
+            == EntrepreneurialInterest::Uninterested
+        {
+            assert_eq!(state.get(Field::InvestmentGood, household), 0);
+        }
+    }
+    let mut replay = Simulation::from_checkpoint(simulation.checkpoint()?, support::device(128)?)?;
+    simulation.advance()?;
+    replay.advance()?;
+    assert_eq!(simulation.download()?, replay.download()?);
+    Ok(())
+}
 
 #[test]
 fn household_surplus_finances_construction_and_subsequent_paid_work() -> Result<()> {
@@ -15,6 +107,7 @@ fn household_surplus_finances_construction_and_subsequent_paid_work() -> Result<
         .config()
         .clone();
     config.firms = 4;
+    config.entrepreneurship.interested_per_mille = 1000;
     config.household_production = HouseholdProduction::industrial();
     config.demography.annual_births_per_million_fertile_women = 0;
     config.demography.mortality.background_annual_ppm = [0; 5];
@@ -515,8 +608,9 @@ fn purchased_tools_fund_maintenance_and_safety_without_creating_equipment() -> R
 }
 
 #[test]
-fn observed_tool_demand_and_input_access_fund_a_nonfood_enterprise() -> Result<()> {
+fn local_tool_quotes_and_input_access_fund_a_nonfood_enterprise() -> Result<()> {
     let mut config = capital_economy()?.config().clone();
+    config.entrepreneurship.interested_per_mille = 1000;
     config.behavior.price_response = 0;
     let population = config.population.as_mut().unwrap();
     for household in &mut population.households {
@@ -547,7 +641,7 @@ fn observed_tool_demand_and_input_access_fund_a_nonfood_enterprise() -> Result<(
     let state = simulation.download()?;
     let firm = (scenario.actors()..state.actors.len())
         .find(|&index| state.actors.at(index).kind == Good::Tools as u32)
-        .expect("observed tool demand funded a tool workshop");
+        .expect("an interested household funded a tool workshop");
     assert_eq!(state.get(Field::FirstInput, firm), Good::Iron as u64);
     assert_eq!(state.get(Field::SecondInput, firm), Good::Wood as u64);
     assert_eq!(state.get(Field::ConstructionRemaining, firm), 0);

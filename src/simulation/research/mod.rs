@@ -22,6 +22,7 @@ use cubecl::CubeDim;
 pub use kernels::{AttemptOutcome, Participation};
 use sha2::{Digest, Sha256};
 use std::cell::Cell;
+use std::sync::Arc;
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct EquipmentObservation {
@@ -424,6 +425,12 @@ pub struct ResearchRuntime {
     state_words: usize,
     readback_bytes: Cell<u64>,
     configuration_hash: String,
+    capacity_limits: Arc<[CapacityLimit]>,
+}
+
+struct CapacityLimit {
+    actor: usize,
+    maximum: u32,
 }
 
 impl ResearchRuntime {
@@ -434,6 +441,21 @@ impl ResearchRuntime {
         initial: &State,
     ) -> Result<Self> {
         let encoded = EncodedResearch::new(config, scenario, initial)?;
+        let capacity_limits = config
+            .equipment
+            .iter()
+            .map(|machine| machine.firm)
+            .chain(config.natural_stocks.iter().map(|stock| stock.firm))
+            .map(|identity| {
+                let actor = scenario
+                    .index_of(identity)
+                    .context("unknown research actor")?;
+                Ok(CapacityLimit {
+                    actor,
+                    maximum: initial.actors.at(actor).capacity,
+                })
+            })
+            .collect::<Result<Arc<[_]>>>()?;
         let runtime = Self {
             header: encoded.header,
             configuration: device.tensor(&encoded.configuration[Header::WORDS..]),
@@ -450,6 +472,7 @@ impl ResearchRuntime {
             state_words: encoded.state.len(),
             readback_bytes: Cell::new(0),
             configuration_hash: encoded.configuration_hash,
+            capacity_limits,
         };
         runtime.save_audited(device)?;
         Ok(runtime)
@@ -586,41 +609,24 @@ impl ResearchRuntime {
         Ok(())
     }
 
-    pub(super) fn with_actors(
-        &self,
-        device: &Device,
-        actors: &crate::domain::ActorRows,
-    ) -> Result<Self> {
-        let words = device.read(&self.configuration)?;
-        let machines = self.header.machine_count as usize;
-        let stocks = self.header.stock_count as usize;
-        let unchanged_machines = (0..machines).all(|index| {
-            let base = self.header.machines as usize - Header::WORDS;
-            let actor = words[base + MachineLayout::FIRM * machines + index] as usize;
-            actors.at(actor).capacity
-                == words[base + MachineLayout::MAXIMUM_PACKETS * machines + index]
-        });
-        let unchanged_stocks = (0..stocks).all(|index| {
-            let base = self.header.stocks as usize - Header::WORDS;
-            let actor = words[base + StockLayout::FIRM * stocks + index] as usize;
-            actors.at(actor).capacity == words[base + StockLayout::MAXIMUM_PACKETS * stocks + index]
-        });
-        match (unchanged_machines, unchanged_stocks) {
-            (true, true) => (),
-            _ => Err(anyhow!(
+    pub(super) fn with_actors(&self, actors: &crate::domain::ActorRows) -> Result<Self> {
+        let unchanged = self
+            .capacity_limits
+            .iter()
+            .all(|limit| actors.at(limit.actor).capacity == limit.maximum);
+        match unchanged {
+            true => (),
+            false => Err(anyhow!(
                 "research checkpoint profile, table, configuration or shape mismatch"
             ))?,
         }
-        let next = Self {
+        Ok(Self {
             header: Header {
                 actors: u32::try_from(actors.len())?,
                 ..self.header
             },
             ..self.clone()
-        };
-        next.readback_bytes
-            .set(next.readback_bytes.get() + words.len() as u64 * 4);
-        Ok(next)
+        })
     }
 
     pub fn before_phase(
@@ -742,6 +748,62 @@ impl ResearchRuntime {
     pub fn restore_audited(&self, device: &Device) -> Result<()> {
         super::tensor::copy(device, &self.audited, &self.state);
         device.write(&self.control, &[0; CONTROL_WORDS]);
+        Ok(())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::domain::Experiment;
+
+    #[test]
+    fn research_growth_preserves_capacity_constraints_without_gpu_readback() -> Result<()> {
+        let scenario = Scenario::baseline(48, 42, Experiment::Baseline)?;
+        let initial = scenario.initial()?;
+        let firms = initial.actors.firm_indices().take(2).collect::<Vec<_>>();
+        let config = ResearchConfig {
+            equipment: vec![Equipment {
+                firm: initial.actors.at(firms[0]).identity,
+                remaining_service: 20,
+                condition: 500,
+                nameplate: 10,
+                downtime: 0,
+                wear_per_packet: 100,
+                maintenance_good: Good::Bread,
+                maintenance_ticks: 1,
+                restoration_per_tick: 100,
+            }],
+            natural_stocks: vec![NaturalStock {
+                firm: initial.actors.at(firms[1]).identity,
+                stock: 8,
+                capacity: 10,
+                renewal_rate: 1000,
+                extraction_per_packet: 2,
+            }],
+            ..ResearchConfig::default()
+        };
+        let device = crate::simulation::tests::device(64)?;
+        let runtime = ResearchRuntime::new(&device, &config, &scenario, &initial)?;
+        let expected = runtime.snapshot(&device)?;
+        let readback = runtime.readback_bytes();
+        let mut actors = initial.actors.clone();
+        let mut addition = actors.at(firms[0]);
+        addition.identity = actors.identities().iter().max().copied().unwrap_or(0) + 1;
+        actors.extend([addition]);
+        let grown = runtime.with_actors(&actors)?;
+        assert_eq!(grown.header.actors as usize, actors.len());
+        assert_eq!(grown.readback_bytes(), readback);
+        assert_eq!(runtime.readback_bytes(), readback);
+        assert_eq!(grown.snapshot(&device)?, expected);
+        assert_eq!(grown.audited_snapshot(&device)?, expected);
+        for firm in firms {
+            let mut changed = actors.clone();
+            let mut actor = changed.at(firm);
+            actor.capacity += 1;
+            changed.set(firm, actor);
+            assert!(grown.with_actors(&changed).is_err());
+        }
         Ok(())
     }
 }

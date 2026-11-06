@@ -3,6 +3,93 @@ use crate::support;
 use anyhow::Result;
 use bad_econ::domain::*;
 
+#[cfg(feature = "compute")]
+#[test]
+fn industrial_household_liquidity_is_unequal_and_replays_on_gpu() -> Result<()> {
+    use bad_econ::simulation::Simulation;
+
+    let scenario = Scenario::industrial(1000, 42, Experiment::Baseline)?;
+    let config = scenario.config();
+    let initial = scenario.initial()?;
+    let mut balances = (0..config.households as usize)
+        .map(|household| initial.get(Field::Cash, household))
+        .collect::<Vec<_>>();
+    balances.sort_unstable();
+    let daily_expenses = u64::from(config.household_need)
+        * u64::from(config.demography.initial_household_members)
+        * u64::from(config.prices[2])
+        + u64::from(config.rent.map_or(0, |rent| rent.household_daily));
+    let weekly = balances
+        .iter()
+        .filter(|&&cash| cash <= 7 * daily_expenses)
+        .count();
+    assert!((550..=650).contains(&weekly));
+    assert!(balances[500] < 7 * daily_expenses);
+    assert!(balances[950] > 28 * daily_expenses);
+    assert_eq!(
+        initial.initial_cash,
+        balances.iter().sum::<u64>() + u64::from(config.firms) * config.firm_cash
+    );
+    let decoded = Scenario::new(serde_json::from_slice(&serde_json::to_vec(config)?)?)?;
+    assert_eq!(decoded.initial()?, initial);
+    let mut first = Simulation::new(scenario.clone(), support::device(64)?)?;
+    let uploaded = first.download()?;
+    for household in 0..config.households as usize {
+        assert_eq!(
+            uploaded.get(Field::Cash, household),
+            initial.get(Field::Cash, household)
+        );
+    }
+    for _ in 0..8 {
+        first.advance()?;
+        assert_eq!(first.snapshot.cash, initial.initial_cash);
+    }
+    let mut replay = Simulation::from_checkpoint(first.checkpoint()?, support::device(128)?)?;
+    first.advance()?;
+    replay.advance()?;
+    assert_eq!(first.download()?, replay.download()?);
+    let different = Scenario::industrial(1000, 43, Experiment::Baseline)?.initial()?;
+    assert!(
+        (0..1000).any(|index| initial.get(Field::Cash, index) != different.get(Field::Cash, index))
+    );
+    Ok(())
+}
+
+#[cfg(feature = "compute")]
+#[test]
+fn legacy_and_explicit_household_cash_remain_exact_on_gpu() -> Result<()> {
+    use bad_econ::simulation::Simulation;
+
+    let mut legacy =
+        serde_json::to_value(Scenario::baseline(12, 42, Experiment::Baseline)?.config())?;
+    legacy
+        .as_object_mut()
+        .unwrap()
+        .remove("household_liquidity");
+    let uniform = Scenario::new(serde_json::from_value(legacy)?)?;
+    let mut explicit = scenario()?.config().clone();
+    explicit.household_liquidity = HouseholdLiquidity::PaycheckToPaycheck;
+    for scenario in [uniform, Scenario::new(explicit)?] {
+        let expected = scenario.initial()?;
+        let mut simulation = Simulation::new(scenario.clone(), support::device(64)?)?;
+        let state = simulation.download()?;
+        for household in 0..scenario.config().households as usize {
+            let cash = scenario
+                .config()
+                .population
+                .as_ref()
+                .map_or(scenario.config().household_cash, |population| {
+                    population.households[household].cash
+                });
+            assert_eq!(state.get(Field::Cash, household), cash);
+        }
+        simulation.advance()?;
+        assert_eq!(simulation.snapshot.cash, expected.initial_cash);
+        simulation.checkpoint()?.restore()?;
+    }
+    Ok(())
+}
+
 fn scenario() -> Result<Scenario> {
     let mut config = Scenario::baseline(3, 19, Experiment::Baseline)?
         .config()

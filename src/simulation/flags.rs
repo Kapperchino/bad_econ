@@ -101,6 +101,7 @@ bitflags::bitflags! {
         const DEMAND_OVERFLOW = 1 << 5;
         const PAYROLL_MISMATCH = 1 << 6;
         const RESEARCH_MISMATCH = 1 << 7;
+        const PROPERTY_CAPACITY = 1 << 8;
     }
 }
 impl FaultFlags {
@@ -298,7 +299,7 @@ mod tests {
     #[cube(launch)]
     fn concurrent_flags(control: &[Atomic<u32>]) {
         let id = ABSOLUTE_POS as u32;
-        match id % 8 {
+        match id % 9 {
             0 => KernelFaults::new(comptime!(FaultFlags::ARITHMETIC_OVERFLOW)).record(control),
             1 => KernelFaults::new(comptime!(FaultFlags::INVALID_COORDINATE)).record(control),
             2 => KernelFaults::new(comptime!(FaultFlags::TRANSIT_UNDERFLOW)).record(control),
@@ -306,7 +307,8 @@ mod tests {
             4 => KernelFaults::new(comptime!(FaultFlags::UNSETTLED_COMMITMENTS)).record(control),
             5 => KernelFaults::new(comptime!(FaultFlags::DEMAND_OVERFLOW)).record(control),
             6 => KernelFaults::new(comptime!(FaultFlags::PAYROLL_MISMATCH)).record(control),
-            _ => KernelFaults::new(comptime!(FaultFlags::RESEARCH_MISMATCH)).record(control),
+            7 => KernelFaults::new(comptime!(FaultFlags::RESEARCH_MISMATCH)).record(control),
+            _ => KernelFaults::new(comptime!(FaultFlags::PROPERTY_CAPACITY)).record(control),
         }
         match id % 2 {
             0 => {

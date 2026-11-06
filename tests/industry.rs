@@ -190,7 +190,13 @@ fn discovered_methods_require_mastery_permission_and_adoption_on_gpu() -> Result
 
 #[test]
 fn industrial_markets_ship_consume_and_replay_all_goods_on_gpu() -> Result<()> {
-    let scenario = Scenario::industrial(64, 42, Experiment::Concentrated)?;
+    let mut config = Scenario::industrial(64, 42, Experiment::Concentrated)?
+        .config()
+        .clone();
+    config.household_cash = 5000;
+    config.household_liquidity = HouseholdLiquidity::Uniform;
+    config.producer_buffer_days = None;
+    let scenario = Scenario::new(config)?;
     let mut first = Simulation::new(scenario.clone(), support::device(32)?)?;
     let mut second = Simulation::new(scenario.clone(), support::device(64)?)?;
     for _ in 0..12 {

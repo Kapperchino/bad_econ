@@ -405,6 +405,8 @@ fn sparse_settlements_match_rebuilds_with_shared_assets_migration_and_investment
         .config()
         .clone();
     config.research = None;
+    config.household_cash = 5000;
+    config.household_liquidity = crate::domain::HouseholdLiquidity::Uniform;
     let scenario = Scenario::new(config)?;
     for shareholders in [1, 2] {
         let mut initial = scenario.initial()?;
@@ -985,5 +987,19 @@ fn parallel_transit_audits_match_serial_mismatch_and_overflow_faults_on_gpu() ->
             FaultFlags::ARITHMETIC_OVERFLOW | FaultFlags::TRANSIT_MISMATCH
         );
     }
+    Ok(())
+}
+
+#[test]
+fn property_allocation_fault_restores_the_audited_gpu_state() -> Result<()> {
+    let config = serde_json::from_str(include_str!("../../scenarios/property.json"))?;
+    let scenario = Scenario::new(config)?;
+    let mut initial = scenario.initial()?;
+    initial.set(Field::DisplacedPlots, 1, u64::MAX);
+    let mut simulation = Simulation::from_state(scenario, initial, device(64)?)?;
+    let before = simulation.download()?;
+    assert!(simulation.phase(Phase::Opening, Trace::Discard).is_err());
+    assert!(matches!(simulation.status, RuntimeState::Fault { .. }));
+    assert_eq!(simulation.download()?, before);
     Ok(())
 }

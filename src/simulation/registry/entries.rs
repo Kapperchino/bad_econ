@@ -158,7 +158,7 @@ impl EntryBatch {
         let before = metadata.actors.len();
         grown
             .actors
-            .extend(compact.actors.iter().skip(selected.len()).map(|mut actor| {
+            .extend(compact.actors.iter_from(selected.len()).map(|mut actor| {
                 actor.owner = selected[actor.owner as usize] as u32;
                 actor
             }));

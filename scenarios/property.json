@@ -1,0 +1,532 @@
+{
+  "batch_size": 65536,
+  "buffer_days": 4,
+  "capacity": 100,
+  "commute_speed": 50,
+  "coverage": 2,
+  "delivery_penalty": 5,
+  "distribution_rate": 0,
+  "experiment": "Concentrated",
+  "firm_cash": 200000,
+  "firms": 4,
+  "forecast_weight": 0,
+  "household_cash": 5000,
+  "household_need": 1,
+  "households": 8,
+  "map_size": 1000,
+  "maximum_price": 10000,
+  "minimum_price": 1,
+  "packet_minutes": 360,
+  "packet_output": 3,
+  "prices": [
+    150,
+    300,
+    450
+  ],
+  "reserve": 100000,
+  "reserved_minutes": 960,
+  "search_radius": 1000,
+  "seed": 42,
+  "shipment_speed": 1000,
+  "version": 2,
+  "wage": 1,
+  "work_cap": 480,
+  "economy": "Industrial",
+  "entrepreneurship": {
+    "interested_per_mille": 0
+  },
+  "behavior": {
+    "work_fatigue": 0,
+    "rest_recovery": 0,
+    "wage_increment": 0,
+    "price_response": 0
+  },
+  "household_production": {
+    "Available": {
+      "milling_minutes": 30,
+      "baking_minutes": 30,
+      "cultivation_minutes": 10,
+      "harvest_start": 270,
+      "harvest_days": 30,
+      "annual_yield_per_plot": 730
+    }
+  },
+  "resources": {
+    "Explicit": {
+      "regions": [
+        {
+          "good": "Grain",
+          "lower": {
+            "x": 0,
+            "y": 0
+          },
+          "upper": {
+            "x": 1000,
+            "y": 1000
+          }
+        },
+        {
+          "good": "Wood",
+          "lower": {
+            "x": 0,
+            "y": 0
+          },
+          "upper": {
+            "x": 1000,
+            "y": 1000
+          }
+        }
+      ]
+    }
+  },
+  "population": {
+    "households": [
+      {
+        "identity": 1,
+        "position": {
+          "x": 250,
+          "y": 250
+        },
+        "cash": 100000,
+        "inventories": [
+          100,
+          0,
+          100,
+          0,
+          0,
+          0,
+          0,
+          0,
+          0,
+          0,
+          0,
+          0,
+          0,
+          0,
+          0,
+          0,
+          0
+        ],
+        "fatigue": 0
+      },
+      {
+        "identity": 2,
+        "position": {
+          "x": 250,
+          "y": 250
+        },
+        "cash": 100000,
+        "inventories": [
+          100,
+          0,
+          100,
+          0,
+          0,
+          0,
+          0,
+          0,
+          0,
+          0,
+          0,
+          0,
+          0,
+          0,
+          0,
+          0,
+          0
+        ],
+        "fatigue": 0
+      },
+      {
+        "identity": 3,
+        "position": {
+          "x": 250,
+          "y": 250
+        },
+        "cash": 100000,
+        "inventories": [
+          100,
+          0,
+          100,
+          0,
+          0,
+          0,
+          0,
+          0,
+          0,
+          0,
+          0,
+          0,
+          0,
+          0,
+          0,
+          0,
+          0
+        ],
+        "fatigue": 0
+      },
+      {
+        "identity": 4,
+        "position": {
+          "x": 250,
+          "y": 250
+        },
+        "cash": 100000,
+        "inventories": [
+          100,
+          0,
+          100,
+          0,
+          0,
+          0,
+          0,
+          0,
+          0,
+          0,
+          0,
+          0,
+          0,
+          0,
+          0,
+          0,
+          0
+        ],
+        "fatigue": 0
+      },
+      {
+        "identity": 5,
+        "position": {
+          "x": 250,
+          "y": 250
+        },
+        "cash": 100000,
+        "inventories": [
+          100,
+          0,
+          100,
+          0,
+          0,
+          0,
+          0,
+          0,
+          0,
+          0,
+          0,
+          0,
+          0,
+          0,
+          0,
+          0,
+          0
+        ],
+        "fatigue": 0
+      },
+      {
+        "identity": 6,
+        "position": {
+          "x": 250,
+          "y": 250
+        },
+        "cash": 100000,
+        "inventories": [
+          100,
+          0,
+          100,
+          0,
+          0,
+          0,
+          0,
+          0,
+          0,
+          0,
+          0,
+          0,
+          0,
+          0,
+          0,
+          0,
+          0
+        ],
+        "fatigue": 0
+      },
+      {
+        "identity": 7,
+        "position": {
+          "x": 750,
+          "y": 250
+        },
+        "cash": 100000,
+        "inventories": [
+          100,
+          0,
+          100,
+          0,
+          0,
+          0,
+          0,
+          0,
+          0,
+          0,
+          0,
+          0,
+          0,
+          0,
+          0,
+          0,
+          0
+        ],
+        "fatigue": 0
+      },
+      {
+        "identity": 8,
+        "position": {
+          "x": 750,
+          "y": 250
+        },
+        "cash": 100000,
+        "inventories": [
+          100,
+          0,
+          100,
+          0,
+          0,
+          0,
+          0,
+          0,
+          0,
+          0,
+          0,
+          0,
+          0,
+          0,
+          0,
+          0,
+          0
+        ],
+        "fatigue": 0
+      }
+    ],
+    "firms": [
+      {
+        "identity": 101,
+        "position": {
+          "x": 250,
+          "y": 250
+        },
+        "owner": 5,
+        "good": "Construction",
+        "cash": 100000,
+        "inventories": [
+          0,
+          0,
+          0,
+          0,
+          0,
+          0,
+          0,
+          0,
+          0,
+          0,
+          40,
+          40,
+          0,
+          0,
+          0,
+          0,
+          0
+        ],
+        "capacity": 2,
+        "technique": {
+          "labor_minutes": 60,
+          "input_ticks": 1,
+          "output_ticks": 2
+        },
+        "wage": 1,
+        "price": 100
+      },
+      {
+        "identity": 102,
+        "position": {
+          "x": 250,
+          "y": 250
+        },
+        "owner": 1,
+        "good": "Grain",
+        "cash": 100000,
+        "inventories": [
+          0,
+          0,
+          0,
+          0,
+          0,
+          0,
+          0,
+          0,
+          0,
+          0,
+          40,
+          40,
+          0,
+          0,
+          0,
+          0,
+          0
+        ],
+        "capacity": 2,
+        "technique": {
+          "labor_minutes": 60,
+          "input_ticks": 0,
+          "output_ticks": 2
+        },
+        "wage": 1,
+        "price": 100
+      },
+      {
+        "identity": 103,
+        "position": {
+          "x": 250,
+          "y": 250
+        },
+        "owner": 1,
+        "good": "Furniture",
+        "cash": 100000,
+        "inventories": [
+          0,
+          0,
+          0,
+          0,
+          0,
+          0,
+          0,
+          0,
+          0,
+          0,
+          40,
+          40,
+          0,
+          0,
+          0,
+          0,
+          0
+        ],
+        "capacity": 2,
+        "technique": {
+          "labor_minutes": 60,
+          "input_ticks": 1,
+          "output_ticks": 2
+        },
+        "wage": 1,
+        "price": 100
+      },
+      {
+        "identity": 104,
+        "position": {
+          "x": 250,
+          "y": 250
+        },
+        "owner": 1,
+        "good": "Wood",
+        "cash": 100000,
+        "inventories": [
+          0,
+          0,
+          0,
+          0,
+          0,
+          0,
+          0,
+          0,
+          0,
+          0,
+          40,
+          40,
+          0,
+          0,
+          0,
+          0,
+          0
+        ],
+        "capacity": 2,
+        "technique": {
+          "labor_minutes": 60,
+          "input_ticks": 0,
+          "output_ticks": 2
+        },
+        "wage": 1,
+        "price": 100
+      }
+    ]
+  },
+  "land_access": {
+    "total_plots": 9,
+    "allocations": [
+      {
+        "household": 2,
+        "plots": 2
+      },
+      {
+        "household": 3,
+        "plots": 2
+      },
+      {
+        "household": 4,
+        "plots": 2
+      },
+      {
+        "household": 7,
+        "plots": 3
+      }
+    ]
+  },
+  "property": {
+    "regions": [
+      {
+        "lower": {
+          "x": 0,
+          "y": 0
+        },
+        "upper": {
+          "x": 500,
+          "y": 1000
+        },
+        "space": 14,
+        "landowner": 1
+      },
+      {
+        "lower": {
+          "x": 500,
+          "y": 0
+        },
+        "upper": {
+          "x": 1000,
+          "y": 1000
+        },
+        "space": 5,
+        "landowner": 7
+      }
+    ],
+    "orders": [
+      {
+        "landowner": 1,
+        "site": 1,
+        "space": 1,
+        "work": 6,
+        "development": "Extension"
+      },
+      {
+        "landowner": 1,
+        "site": 102,
+        "space": 2,
+        "work": 6,
+        "development": "NewBuilding"
+      },
+      {
+        "landowner": 1,
+        "site": 103,
+        "space": 2,
+        "work": 6,
+        "development": "NewBuilding"
+      }
+    ]
+  }
+}

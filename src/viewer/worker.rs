@@ -206,8 +206,8 @@ fn publish(
         }
         display.firms = simulation
             .actors()
-            .iter()
-            .filter(|actor| actor.kind > 0)
+            .firm_indices()
+            .map(|index| simulation.actors().at(index))
             .collect();
         match publication {
             Publication::Restart => {

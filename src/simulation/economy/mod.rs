@@ -36,6 +36,7 @@ pub(super) mod enterprises;
 mod household_production;
 pub(super) mod indexing;
 pub(super) mod opening;
+pub(in crate::simulation) mod property;
 mod rent;
 pub(super) mod search;
 pub(super) mod sorting;
@@ -281,7 +282,10 @@ fn local(
                         );
                         planned = minimum(minimum(shifts, funded), capacity);
                     }
-                    if comptime!(config.home_mode == Feature::Enabled) {
+                    if comptime!(
+                        config.home_mode == Feature::Enabled
+                            || config.property_mode == Feature::Enabled
+                    ) {
                         let status =
                             number(state, config, comptime!(Field::EnterpriseStatus as u32), id);
                         planned = select(
@@ -314,7 +318,9 @@ fn local(
                     && number(state, config, comptime!(Field::LivingMembers as u32), id) > 0
                 {
                     enterprises::expand(state, actors, config, control, id);
-                    enterprises::construct_home(state, config, control, id);
+                    if comptime!(config.property_mode == Feature::Disabled) {
+                        enterprises::construct_home(state, config, control, id);
+                    }
                     if comptime!(config.economy == crate::domain::Economy::Agrarian)
                         || number(state, config, comptime!(Field::LandPlots as u32), id) > 0
                     {
@@ -428,7 +434,6 @@ fn local(
                     && comptime!(config.home_mode == Feature::Enabled)
                 {
                     enterprises::household_quote(state, config, id);
-                    enterprises::investment(state, config, id);
                 }
                 if !k.is(comptime!(ActorKind::Household)) {
                     if comptime!(config.home_mode == Feature::Enabled) {
@@ -680,6 +685,7 @@ fn propose(
                     number(state, config, comptime!(Field::InvestmentGood as u32), id) > 0;
                 if k.is(comptime!(ActorKind::Household))
                     && investment
+                    && comptime!(config.property_mode == Feature::Disabled)
                     && number(state, config, comptime!(Field::LivingMembers as u32), id) > 0
                     && comptime!(config.home_mode == Feature::Enabled)
                     && (good == comptime!(Good::Tools as u32)
@@ -689,7 +695,10 @@ fn propose(
                     wanted = ticks(select(good == comptime!(Good::Tools as u32), 2u32, 5u32), 0);
                 }
                 if !k.is(comptime!(ActorKind::Household))
-                    && comptime!(config.home_mode == Feature::Enabled)
+                    && comptime!(
+                        config.home_mode == Feature::Enabled
+                            && config.property_mode == Feature::Disabled
+                    )
                     && good == comptime!(Good::Wood as u32)
                     && number(state, config, comptime!(Field::Slots as u32), id) == 0
                     && number(state, config, comptime!(Field::Plan as u32), id) > 0
@@ -707,6 +716,25 @@ fn propose(
                 {
                     wanted = select(search, maximum(wanted, ticks(2, 0)), ticks(2, 0));
                     search = true;
+                }
+                if comptime!(config.property_mode == Feature::Enabled)
+                    && good == comptime!(Good::Construction as u32)
+                {
+                    let building =
+                        number(state, config, comptime!(Field::ProjectStatus as u32), id)
+                            == comptime!(crate::domain::property::ProjectStatus::Building as u32);
+                    let work = value(
+                        state,
+                        config,
+                        comptime!(Field::ConstructionRemaining as u32),
+                        id,
+                    );
+                    wanted = select(
+                        building,
+                        select(search, maximum(wanted, work), work),
+                        wanted,
+                    );
+                    search = search || building;
                 }
             }
             MarketFlag::Consumer(_) => {
@@ -2014,6 +2042,7 @@ pub enum EconomyStage {
     GroupSort,
     GroupMerge,
     GroupExecute,
+    GroupRemainder,
     GroupPrepare,
     GroupFinalize,
     MarketStart,
@@ -2057,6 +2086,7 @@ pub fn economy(
                     | EconomyStage::GroupRadixLocal
                     | EconomyStage::GroupRadixScatter
                     | EconomyStage::GroupExecute
+                    | EconomyStage::GroupRemainder
                     | EconomyStage::GroupFinalize
             )
     );
@@ -2156,6 +2186,9 @@ pub fn economy(
             EconomyStage::GroupSort => group_sort(bundles, control, parameters, id),
             EconomyStage::GroupMerge => group_merge(bundles, control, parameters, id),
             EconomyStage::GroupExecute => group_execute(
+                state, actors, config, proposals, bundles, control, parameters, id,
+            ),
+            EconomyStage::GroupRemainder => group_remainder(
                 state, actors, config, proposals, bundles, control, parameters, id,
             ),
             EconomyStage::GroupPrepare => actor_settlement(
@@ -2357,6 +2390,7 @@ fn group_execute(
     parameters: &EconomyParameters,
     id: u32,
 ) {
+    let range = id;
     let count = parameters.count;
     let active_count = markets::active(control, parameters);
     let mut invocation = id;
@@ -2380,6 +2414,13 @@ fn group_execute(
             let mut active = true;
             let mut event = Array::<u32>::new(EVENT_WORDS);
             let mut peer = PeerBalances::new(state, actors, config, parameters, key);
+            let deferred = comptime!(
+                parameters.market == MarketFlag::Household
+                    && parameters.discovery == Discovery::Indexed
+            );
+            if deferred {
+                active = peer.has_supply();
+            }
             while cursor < active_count && active {
                 active = scratch[(source + cursor) as usize] == key;
                 if active {
@@ -2417,11 +2458,53 @@ fn group_execute(
                         .store(scratch, 4 * count + actor);
                     }
                     cursor += 1;
+                    if deferred {
+                        active = peer.has_supply();
+                    }
                 }
+            }
+            if deferred {
+                scratch[(7 * count + key) as usize] = cursor;
+                cursor = low + scratch[(6 * count + range) as usize];
             }
             control[PROGRESS_WORD].fetch_max(cursor - low);
             control[COMPLETED_WORD].fetch_add(cursor - low);
             peer.store(state, actors, config, parameters, key);
+        }
+    }
+}
+
+#[cube]
+fn group_remainder(
+    state: &mut [u32],
+    actors: &[u32],
+    config: &EconomyConfig,
+    proposals: &mut [u32],
+    scratch: &mut [u32],
+    control: &[Atomic<u32>],
+    parameters: &EconomyParameters,
+    id: u32,
+) {
+    let count = parameters.count;
+    if id < markets::active(control, parameters) {
+        let key = scratch[(parameters.sort_source + id) as usize];
+        if id >= scratch[(7 * count + key) as usize] {
+            let actor = scratch[(parameters.sort_source + count + id) as usize];
+            let prior = KernelEventStatus::load(scratch, 4 * count + actor);
+            let mut peer = PeerBalances::new(state, actors, config, parameters, key);
+            peer.offer(
+                state,
+                config,
+                proposals,
+                control,
+                parameters,
+                PeerOffer {
+                    actor,
+                    peer: key,
+                    status: prior,
+                },
+            )
+            .store(scratch, 4 * count + actor);
         }
     }
 }

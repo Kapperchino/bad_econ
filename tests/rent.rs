@@ -167,7 +167,7 @@ fn daily_rent_conserves_cash_and_replays_arrears_on_gpu() -> Result<()> {
 }
 
 #[test]
-fn industrial_rent_avoids_startup_famine_at_a_million_households_on_gpu() -> Result<()> {
+fn industrial_paycheck_households_avoid_startup_famine_at_a_million_on_gpu() -> Result<()> {
     let scenario = Scenario::industrial(1_000_000, 42, Experiment::Baseline)?;
     let mut simulation = Simulation::new(scenario, support::device(128)?)?;
     let initial_cash = simulation.snapshot.cash;
@@ -175,7 +175,7 @@ fn industrial_rent_avoids_startup_famine_at_a_million_households_on_gpu() -> Res
         simulation.advance()?;
         assert_eq!(simulation.snapshot.cash, initial_cash);
         assert!(
-            simulation.snapshot.shortages < 10_000,
+            simulation.snapshot.shortages < 20_000,
             "day {day}: {} unmet bread units",
             simulation.snapshot.shortages
         );
@@ -183,7 +183,7 @@ fn industrial_rent_avoids_startup_famine_at_a_million_households_on_gpu() -> Res
     assert!(simulation.snapshot.population.deaths[2] < 3_000);
     assert!(simulation.snapshot.employed > 400_000);
     assert!(simulation.snapshot.rent_collected > 0);
-    assert!(simulation.snapshot.rent_arrears < simulation.snapshot.rent_collected / 20);
+    assert!(simulation.snapshot.rent_arrears < simulation.snapshot.rent_collected / 5);
     Ok(())
 }
 

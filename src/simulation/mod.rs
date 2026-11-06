@@ -763,7 +763,7 @@ impl Simulation {
         )?;
         let mut metadata = batch.metadata;
         if let Some(mut actors) = plan.actors {
-            actors.extend(metadata.actors.iter().skip(actors.len()));
+            actors.extend(metadata.actors.iter_from(actors.len()));
             metadata.actors = actors;
         }
         if let Some(ownership) = settlement
@@ -775,8 +775,7 @@ impl Simulation {
         let config = configuration::Configuration::new(&self.device, &self.scenario, &metadata);
         let additions = metadata
             .actors
-            .iter()
-            .skip(self.metadata.actors.len())
+            .iter_from(self.metadata.actors.len())
             .collect::<ActorRows>();
         let rows = additions
             .iter()
@@ -827,7 +826,7 @@ impl Simulation {
         let research = self
             .research
             .as_ref()
-            .map(|research| research.with_actors(&self.device, &metadata.actors))
+            .map(|research| research.with_actors(&metadata.actors))
             .transpose()?;
         let scratch_words = markets::scratch_words(count);
         let event_words = count.div_ceil(economy::audit::TILE_ACTORS) * SummaryLayout::WORDS;
@@ -1133,6 +1132,14 @@ impl Simulation {
                 &self.proposals,
             );
         }
+        economy::property::launch(
+            &self.device,
+            &self.state,
+            &self.actors,
+            &self.config,
+            &self.control,
+            phase,
+        );
         self.fault_check()
     }
     fn market_result(&mut self, evidence: &mut PhaseEvidence) -> Result<()> {
@@ -1181,6 +1188,7 @@ impl Simulation {
                 | EconomyStage::GroupFinalize
                 | EconomyStage::GroupRadixLocal
                 | EconomyStage::GroupRadixScatter
+                | EconomyStage::GroupRemainder
                 | EconomyStage::GroupRanges => {
                     markets::dispatch(&self.searches.dispatches, markets::SORT_DISPATCH)
                 }
@@ -1364,6 +1372,9 @@ impl Simulation {
                 },
             ),
             _ => launch(EconomyStage::GroupExecute, count, &parameters),
+        }
+        if let Market::Household = market {
+            launch(EconomyStage::GroupRemainder, count, &parameters);
         }
         launch(EconomyStage::MarketBoundary, 1, &parameters);
         if let Market::Labor | Market::Input(_) | Market::Consumer(_) | Market::Household = market {
@@ -1726,8 +1737,7 @@ impl Simulation {
             firm_entries: self
                 .metadata
                 .actors
-                .iter()
-                .skip(self.scenario.actors())
+                .iter_from(self.scenario.actors())
                 .filter(|actor| actor.kind > 0)
                 .count() as u64,
             firm_closures: totals.closures.into(),
@@ -1772,6 +1782,17 @@ impl Simulation {
         snapshot.audit(self.metadata.initial_cash, self.metadata.initial_goods)?;
         self.account_research_readbacks();
         Ok(snapshot)
+    }
+    pub fn property_snapshot(
+        &mut self,
+    ) -> Result<Option<crate::domain::property::PropertySnapshot>> {
+        match self.scenario.config().property.is_some() {
+            false => Ok(None),
+            true => {
+                let state = self.download()?;
+                crate::domain::property::PropertySnapshot::from_state(&self.scenario, &state)
+            }
+        }
     }
     pub fn download(&mut self) -> Result<State> {
         let values = decode(&self.device.read(&self.state)?);
@@ -1971,6 +1992,14 @@ impl Simulation {
                 )?),
             },
             construction_minutes_remaining: values[Field::ConstructionRemaining as usize],
+            property_region: values[Field::PropertyRegion as usize],
+            property_space: values[Field::PropertySpace as usize],
+            reserved_space: values[Field::ReservedSpace as usize],
+            subsistence_plots: values[Field::LandPlots as usize],
+            displaced_plots: values[Field::DisplacedPlots as usize],
+            project_status: crate::domain::property::ProjectStatus::from_index(
+                values[Field::ProjectStatus as usize],
+            )?,
             pending_capacity: values[Field::PendingCapacity as usize],
             wage: values[Field::Wage as usize],
             price: values[Field::Price as usize],

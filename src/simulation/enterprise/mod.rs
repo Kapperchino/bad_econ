@@ -12,7 +12,10 @@ use super::{
     system::{System, gpu_passes},
     words::*,
 };
-use crate::domain::{Field, Good, enterprise::EnterpriseState};
+use crate::domain::{
+    Field, Good,
+    enterprise::{EnterpriseState, EntrepreneurialInterest},
+};
 use crate::simulation::configuration::{Configuration, EconomyConfig, Feature};
 use burn_wgpu::CubeTensor;
 use cubecl::{CubeDim, prelude::*};
@@ -81,86 +84,49 @@ fn requests(
         let target = load(
             state,
             comptime!(Field::InvestmentGood as u32) * count + actor,
-        )
-        .extract(0usize);
+        );
         let tools = load(state, comptime!(Field::Tools as u32) * count + actor);
         let wood = load(state, comptime!(Field::Wood as u32) * count + actor);
         let cash = load(state, comptime!(Field::Cash as u32) * count + actor);
         let arrears = load(state, comptime!(Field::RentArrears as u32) * count + actor);
         let funded = !lt(cash, ticks(10_000, 0))
-            && !lt(tools, ticks(2, 0))
-            && !lt(wood, ticks(5, 0))
+            && (comptime!(config.property_mode == Feature::Enabled)
+                || (!lt(tools, ticks(2, 0)) && !lt(wood, ticks(5, 0))))
             && equal(arrears, zero());
-        let mut viable = false;
-        if funded && target == comptime!(Good::Bread as u32) {
-            let quote = load(state, comptime!(Field::Price as u32) * count + actor).extract(0usize);
-            let wage = config.starting_wage;
-            let mut replacement = u32::new(comptime!(i64::from(u32::MAX)));
-            let ax = actors[ActorLayout::X * (actors.len() / ActorLayout::WORDS) + actor as usize];
-            let ay = actors[ActorLayout::Y * (actors.len() / ActorLayout::WORDS) + actor as usize];
-            for sample in 0..32u32 {
-                let candidate = (actor + day * 17 + sample * 31) % count;
-                let supplier = actors
-                    [ActorLayout::KIND * (actors.len() / ActorLayout::WORDS) + candidate as usize];
-                let flour = load(state, comptime!(Field::Flour as u32) * count + candidate);
-                let input_price =
-                    load(state, comptime!(Field::Price as u32) * count + candidate).extract(0usize);
-                let bx = actors
-                    [ActorLayout::X * (actors.len() / ActorLayout::WORDS) + candidate as usize];
-                let by = actors
-                    [ActorLayout::Y * (actors.len() / ActorLayout::WORDS) + candidate as usize];
-                let nearby =
-                    max(ax, bx) - min(ax, bx) + max(ay, by) - min(ay, by) <= config.search_radius;
-                let cost = plus(
-                    plus(times32(240, wage), times32(20, input_price)).value,
-                    ticks(config.firm_rent, 0),
-                )
-                .value;
-                let funded_operations = !lt(
-                    divide(cash, 2),
-                    times(cost, config.coverage + config.ring).value,
-                );
-                let opportunity = supplier == comptime!(Good::Flour as u32)
-                    && !equal(flour, zero())
-                    && nearby
-                    && lt(cost, times32(20, quote))
-                    && funded_operations;
-                viable = viable || opportunity;
-                if opportunity {
-                    replacement = min(replacement, input_price);
-                }
-            }
-            if viable {
-                store(
-                    state,
-                    comptime!(Field::ReplacementCost as u32) * count + actor,
-                    ticks(replacement, 0),
-                );
-            }
-        }
-        action = select(funded && viable, target, 0);
         let household =
             actors[ActorLayout::KIND * (actors.len() / ActorLayout::WORDS) + actor as usize] == 0;
         let invested = load(
             state,
             comptime!(Field::InvestmentFirm as u32) * count + actor,
         );
-        if household
-            && target > 0
+        let living = load(
+            state,
+            comptime!(Field::LivingMembers as u32) * count + actor,
+        );
+        let eligible = comptime!(config.home_mode == Feature::Enabled)
+            && household
+            && actors[ActorLayout::ENTREPRENEURIAL_INTEREST * (actors.len() / ActorLayout::WORDS)
+                + actor as usize]
+                == comptime!(EntrepreneurialInterest::Interested as u32)
+            && !equal(living, zero())
             && equal(invested, zero())
-            && !viable
-            && !lt(cash, ticks(10_000, 0))
-        {
-            let proposal = opportunities::discover(state, actors, config, spatial, actor, day);
-            if proposal > 0 {
-                store(
-                    state,
-                    comptime!(Field::InvestmentGood as u32) * count + actor,
-                    ticks(proposal, 0),
-                );
-                action = select(funded, proposal, 0);
+            && equal(arrears, zero())
+            && !lt(cash, ticks(10_000, 0));
+        let mut proposal = 0;
+        let review = !equal(target, zero()) || (day + actor) % 30 == 0;
+        if eligible && review {
+            proposal = opportunities::discover(state, actors, config, spatial, actor, day);
+            let source = select(proposal >> 24 == 8, (proposal & 0x00ffffff) - 1, actor);
+            if !crate::simulation::economy::property::authorized(state, config, source, actor) {
+                proposal = 0;
             }
+            action = select(funded, proposal, 0);
         }
+        store(
+            state,
+            comptime!(Field::InvestmentGood as u32) * count + actor,
+            ticks(proposal, 0),
+        );
         let split = load(state, comptime!(Field::SplitPerson as u32) * count + actor);
         if !equal(split, zero()) && !lt(cash, ticks(5000, 0)) {
             action = 0x01000001u32;
@@ -388,18 +354,48 @@ pub(super) fn enter(
         let invested = cash / 2;
         state.set(Field::Cash, owner, cash - invested);
         state.set(Field::Cash, firm, invested);
-        for (material, quantity) in [(Good::Tools, 2), (Good::Wood, 5)] {
-            state.set(
-                Field::inventory(material),
-                owner,
-                state.get(Field::inventory(material), owner) - quantity,
-            );
-            state.values[(crate::domain::USED_FIELDS + material as usize - 1) * after + firm] =
-                quantity;
+        match &scenario.config().property {
+            Some(property) => {
+                state.set(
+                    Field::PropertyRegion,
+                    firm,
+                    property.region(entry.position)? as u64 + 1,
+                );
+                state.set(
+                    Field::PropertyUse,
+                    firm,
+                    crate::domain::property::PropertyUse::for_actor(&state.actors.at(firm))? as u64,
+                );
+                state.set(Field::RequestedSpace, firm, 1);
+                state.set(
+                    Field::ProjectStatus,
+                    firm,
+                    crate::domain::property::ProjectStatus::Requested as u64,
+                );
+            }
+            None => {
+                for (material, quantity) in [(Good::Tools, 2), (Good::Wood, 5)] {
+                    state.set(
+                        Field::inventory(material),
+                        owner,
+                        state.get(Field::inventory(material), owner) - quantity,
+                    );
+                    state.values
+                        [(crate::domain::USED_FIELDS + material as usize - 1) * after + firm] =
+                        quantity;
+                }
+                state.set(Field::Used, firm, 7);
+                state.set(Field::InstalledCapital, firm, 7);
+            }
         }
-        state.set(Field::Used, firm, 7);
-        state.set(Field::InstalledCapital, firm, 7);
-        state.set(Field::ConstructionRemaining, firm, 720);
+        state.set(
+            Field::ConstructionRemaining,
+            firm,
+            match scenario.config().property {
+                Some(_) => u64::from(crate::domain::property::CONSTRUCTION_WORK_PER_SPACE),
+                None => 720,
+            },
+        );
         state.set(
             Field::EnterpriseStatus,
             firm,
@@ -510,6 +506,18 @@ pub(super) fn transitions(
             state.set(Field::Price, household, state.get(Field::Price, parent));
             state.set(Field::EquipmentCondition, household, 1000);
             state.set(Field::SplitPerson, parent, 0);
+            if let Some(property) = &scenario.config().property {
+                state.set(
+                    Field::PropertyRegion,
+                    household,
+                    property.region(state.actors.at(household).position)? as u64 + 1,
+                );
+                state.set(
+                    Field::PropertyUse,
+                    household,
+                    crate::domain::property::PropertyUse::Housing as u64,
+                );
+            }
         }
     }
     let mut heirs = std::collections::HashMap::new();
@@ -567,6 +575,10 @@ pub(super) fn transitions(
                 state.actors.set(actor, household);
                 state.set(Field::MoveDue, actor, 0);
                 state.set(Field::MoveTarget, actor, 0);
+                if scenario.config().property.is_some() {
+                    state.set(Field::LandPlots, actor, 0);
+                    state.set(Field::CropWork, actor, 0);
+                }
             }
             6 => {
                 let mut firm = state.actors.at(actor);
@@ -673,6 +685,13 @@ fn transfer_estate(
     from: usize,
     to: usize,
 ) -> anyhow::Result<()> {
+    let shared_region = match &scenario.config().property {
+        None => true,
+        Some(property) => {
+            property.region(state.actors.at(from).position)?
+                == property.region(state.actors.at(to).position)?
+        }
+    };
     let fields = std::iter::once(Field::Cash as usize)
         .chain(Good::ALL.map(|good| Field::inventory(good) as usize))
         .chain([
@@ -682,13 +701,20 @@ fn transfer_estate(
             Field::InstalledCapital as usize,
         ])
         .chain(crate::domain::TRANSIT_FIELDS..crate::domain::TRANSIT_FIELDS + Good::COUNT)
-        .chain(crate::domain::BASE_FIELDS..scenario.fields());
+        .chain(crate::domain::BASE_FIELDS..scenario.fields())
+        .filter(|&field| {
+            shared_region || ![Field::LandPlots as usize, Field::CropWork as usize].contains(&field)
+        });
     let count = state.actors.len();
     for field in fields {
         let amount = state.values[field * count + from];
         state.values[field * count + to] =
             crate::arithmetic::add(state.values[field * count + to], amount)?;
         state.values[field * count + from] = 0;
+    }
+    if !shared_region {
+        state.set(Field::LandPlots, from, 0);
+        state.set(Field::CropWork, from, 0);
     }
     Ok(())
 }

@@ -72,10 +72,11 @@ fn scenario(minutes: u32) -> Result<Scenario> {
 
 #[cfg(feature = "compute")]
 #[test]
-fn untaxed_wages_remain_observed_income_for_household_investment() -> Result<()> {
+fn untaxed_wages_remain_observed_without_implying_entrepreneurial_interest() -> Result<()> {
     use bad_econ::{domain::enterprise::HouseholdProduction, simulation::Simulation};
     let mut config = scenario(80)?.config().clone();
     config.payroll = None;
+    config.entrepreneurship.interested_per_mille = 0;
     config.household_production = HouseholdProduction::industrial();
     for household in &mut config.population.as_mut().unwrap().households {
         household.cash = 20_000;
@@ -90,7 +91,7 @@ fn untaxed_wages_remain_observed_income_for_household_investment() -> Result<()>
     for household in 1..3 {
         assert_eq!(state.get(Field::GrossIncome, household), 80);
         assert_eq!(state.get(Field::Sales, household), 0);
-        assert!(state.get(Field::InvestmentGood, household) > 0);
+        assert_eq!(state.get(Field::InvestmentGood, household), 0);
     }
     for _ in 0..3 {
         untaxed.advance()?;
@@ -270,20 +271,23 @@ fn changing_employers_does_not_restart_tax_allowances() -> Result<()> {
     firms[2].technique.labor_minutes = 31;
     let mut simulation = Simulation::new(Scenario::new(config)?, support::device(64)?)?;
     simulation.advance()?;
-    assert_eq!(simulation.download()?.get(Field::Employer, 0), 4);
+    let first = simulation.download()?;
+    let worker = (0..3)
+        .find(|&household| first.get(Field::Employer, household) == 4)
+        .expect("the first firm paid a worker");
     simulation.advance()?;
     for _ in 0..6 {
-        if simulation.download()?.get(Field::Employer, 0) == 0 {
+        if simulation.download()?.get(Field::Employer, worker) == 0 {
             simulation.advance()?;
         }
     }
     let state = simulation.download()?;
-    assert!((5..=6).contains(&state.get(Field::Employer, 0)));
-    assert_eq!(state.get(Field::GrossIncome, 0), 111);
-    assert_eq!(state.get(Field::Cash, 0), 92);
-    assert_eq!(state.get(Field::TaxTreasury, 0), 13);
-    assert_eq!(state.get(Field::ChargeTreasury, 0), 5);
-    assert_eq!(state.get(Field::PayrollReserve, 0), 1);
+    assert!((5..=6).contains(&state.get(Field::Employer, worker)));
+    assert_eq!(state.get(Field::GrossIncome, worker), 111);
+    assert_eq!(state.get(Field::Cash, worker), 92);
+    assert_eq!(state.get(Field::TaxTreasury, worker), 13);
+    assert_eq!(state.get(Field::ChargeTreasury, worker), 5);
+    assert_eq!(state.get(Field::PayrollReserve, worker), 1);
     Ok(())
 }
 

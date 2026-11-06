@@ -3,6 +3,56 @@ use anyhow::{Result, anyhow};
 use serde::{Deserialize, Serialize};
 
 #[repr(u32)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum EntrepreneurialInterest {
+    Uninterested,
+    Interested,
+}
+
+#[derive(Clone, Copy, Debug, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+pub struct EntrepreneurshipPolicy {
+    pub interested_per_mille: u32,
+}
+
+impl Default for EntrepreneurshipPolicy {
+    fn default() -> Self {
+        Self {
+            interested_per_mille: 80,
+        }
+    }
+}
+
+impl EntrepreneurshipPolicy {
+    pub(super) fn is_default(&self) -> bool {
+        *self == Self::default()
+    }
+
+    pub fn new(policy: Self) -> Result<Self> {
+        match policy.interested_per_mille <= 1000 {
+            true => Ok(policy),
+            false => Err(anyhow!("entrepreneurial interest must lie in 0..=1000")),
+        }
+    }
+
+    pub fn interest(self, seed: u64, household: u64) -> EntrepreneurialInterest {
+        let draw = crate::arithmetic::DrawKey {
+            seed,
+            day: 0,
+            phase: 0,
+            actor: household,
+            purpose: 2,
+            index: 0,
+        }
+        .draw();
+        match draw % 1000 < u64::from(self.interested_per_mille) {
+            true => EntrepreneurialInterest::Interested,
+            false => EntrepreneurialInterest::Uninterested,
+        }
+    }
+}
+
+#[repr(u32)]
 #[derive(Clone, Copy, Debug, Serialize, Deserialize, PartialEq, Eq)]
 pub enum EnterpriseState {
     Forming,
