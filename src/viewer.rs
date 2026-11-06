@@ -20,12 +20,13 @@ use bevy::{
     sprite::Anchor,
     winit::{EventLoopProxyWrapper, WinitUserEvent},
 };
+use crossbeam_channel::{Sender, unbounded};
 use feedback::Cue;
 use model::{Chart, ComparisonRun, DisplayState, RunTarget};
 use std::{
     collections::VecDeque,
     io::Write,
-    sync::{Arc, Mutex, mpsc},
+    sync::{Arc, Mutex},
     time::{Duration, Instant},
 };
 
@@ -74,7 +75,7 @@ enum VerificationState {
 }
 #[derive(Resource)]
 struct Dashboard {
-    sender: mpsc::Sender<Control>,
+    sender: Sender<Control>,
     data: Arc<Mutex<Display>>,
     selected: u64,
     chart: Chart,
@@ -228,7 +229,7 @@ fn setup(
         revision: 0,
         cues: VecDeque::new(),
     }));
-    let (sender, receiver) = mpsc::channel();
+    let (sender, receiver) = unbounded();
     commands.insert_resource(Dashboard {
         sender,
         data: data.clone(),

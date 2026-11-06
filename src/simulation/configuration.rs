@@ -111,6 +111,8 @@ pub struct EconomyConfig {
     pub payroll: Feature,
     pub tax_base_rate: u32,
     pub employee_charge: u32,
+    pub household_rent: u32,
+    pub firm_rent: u32,
     #[cube(comptime)]
     pub household_policy: Feature,
     pub fatigue_response: u32,
@@ -152,6 +154,8 @@ pub struct Configuration {
     pub payroll: Feature,
     pub tax_base_rate: u32,
     pub employee_charge: u32,
+    pub household_rent: u32,
+    pub firm_rent: u32,
     pub household_policy: Feature,
     pub fatigue_response: u32,
     pub rest_minutes: u32,
@@ -209,6 +213,8 @@ impl Configuration {
             bargaining: BargainingConfig::new(config.bargaining.as_ref()),
             payroll: Feature::from(config.payroll.as_ref()),
             tax_base_rate: config.payroll.as_ref().map_or(0, |policy| policy.base_rate),
+            household_rent: config.rent.map_or(0, |policy| policy.household_daily),
+            firm_rent: config.rent.map_or(0, |policy| policy.firm_daily),
             employee_charge: config
                 .payroll
                 .as_ref()
@@ -263,6 +269,8 @@ impl Configuration {
             payroll: self.payroll,
             tax_base_rate: self.tax_base_rate,
             employee_charge: self.employee_charge,
+            household_rent: self.household_rent,
+            firm_rent: self.firm_rent,
             household_policy: self.household_policy,
             fatigue_response: self.fatigue_response,
             rest_minutes: self.rest_minutes,

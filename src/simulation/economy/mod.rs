@@ -36,6 +36,7 @@ pub(super) mod enterprises;
 mod household_production;
 pub(super) mod indexing;
 pub(super) mod opening;
+mod rent;
 pub(super) mod search;
 pub(super) mod sorting;
 mod systems;
@@ -241,7 +242,10 @@ fn local(
                     planned = minimum(
                         planned,
                         divide(
-                            value(state, config, comptime!(Field::Cash as u32), id),
+                            positive(
+                                value(state, config, comptime!(Field::Cash as u32), id),
+                                rent::obligation(state, config, control, id),
+                            ),
                             planning_wage
                                 * number(state, config, comptime!(Field::LaborMinutes as u32), id),
                         ),
@@ -263,7 +267,10 @@ fn local(
                             units,
                         );
                         let funded = divide(
-                            value(state, config, comptime!(Field::Cash as u32), id),
+                            positive(
+                                value(state, config, comptime!(Field::Cash as u32), id),
+                                rent::obligation(state, config, control, id),
+                            ),
                             planning_wage
                                 * number(state, config, comptime!(Field::LaborMinutes as u32), id),
                         );
@@ -503,9 +510,13 @@ fn local(
                             number(state, config, comptime!(Field::RetailMargin as u32), id);
                         let labor = number(state, config, comptime!(Field::Wage as u32), id)
                             * number(state, config, comptime!(Field::LaborMinutes as u32), id);
+                        let overhead = ceildiv(
+                            config.firm_rent,
+                            max(number(state, config, comptime!(Field::Plan as u32), id), 1),
+                        );
                         let quote = replacement * (1000 + margin) / 1000
                             + ceildiv(
-                                labor,
+                                labor + overhead,
                                 max(
                                     number(state, config, comptime!(Field::OutputTicks as u32), id),
                                     1,
@@ -1680,6 +1691,19 @@ fn summarize(
                     value(state, config, comptime!(Field::Escrow as u32), actor),
                 ),
             );
+            let rent = value(state, config, comptime!(Field::RentTreasury as u32), actor);
+            totals[SummaryLayout::RENT_COLLECTED as usize] = add_checked(
+                control,
+                totals[SummaryLayout::RENT_COLLECTED as usize],
+                rent,
+            );
+            totals[SummaryLayout::RENT_ARREARS as usize] = add_checked(
+                control,
+                totals[SummaryLayout::RENT_ARREARS as usize],
+                value(state, config, comptime!(Field::RentArrears as u32), actor),
+            );
+            totals[SummaryLayout::CASH as usize] =
+                add_checked(control, totals[SummaryLayout::CASH as usize], rent);
             let payroll_reserve = value(
                 state,
                 config,
@@ -1979,6 +2003,8 @@ pub enum EconomyStage {
     IndexFill,
     IndexPrices,
     Local,
+    FirmRent,
+    HouseholdRent,
     Propose,
     MarketActivity,
     Construct,
@@ -2083,6 +2109,17 @@ pub fn economy(
             EconomyStage::IndexOffsets => index_offsets(config, spatial, bundles, parameters, id),
             EconomyStage::IndexFill => index_fill(config, spatial, bundles, parameters, id),
             EconomyStage::IndexPrices => index_prices(state, config, spatial),
+            EconomyStage::FirmRent => {
+                rent::collect(state, actors, config, control, id, rent::Tenants::Firms)
+            }
+            EconomyStage::HouseholdRent => rent::collect(
+                state,
+                actors,
+                config,
+                control,
+                id,
+                rent::Tenants::Households,
+            ),
             EconomyStage::Local => local(state, actors, config, control, parameters, id),
             EconomyStage::Propose => {
                 propose(

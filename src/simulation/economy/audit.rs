@@ -108,6 +108,8 @@ impl AuditBuffers {
                     S::PAYROLL_RESERVES => definition.field = Field::PayrollReserve as u32,
                     S::INCOME_TAX => definition.field = Field::TaxTreasury as u32,
                     S::EMPLOYEE_CHARGES => definition.field = Field::ChargeTreasury as u32,
+                    S::RENT_COLLECTED => definition.field = Field::RentTreasury as u32,
+                    S::RENT_ARREARS => definition.field = Field::RentArrears as u32,
                     S::EMPLOYED => {
                         definition.field = Field::Employed as u32;
                         definition.kind = 0;
@@ -365,6 +367,7 @@ fn summarize_metrics(input: &mut SummaryInput) {
                             Field::PayrollReserve as u32,
                             Field::TaxTreasury as u32,
                             Field::ChargeTreasury as u32,
+                            Field::RentTreasury as u32,
                         ] {
                             amount = checked_sum(
                                 amount,

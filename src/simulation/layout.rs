@@ -168,6 +168,8 @@ pub struct SummaryLayout {
     pub payroll_reserves: TickLayout,
     pub income_tax: TickLayout,
     pub employee_charges: TickLayout,
+    pub rent_collected: TickLayout,
+    pub rent_arrears: TickLayout,
     pub employed: TickLayout,
     pub shortages: TickLayout,
     pub inventories: [TickLayout; Good::COUNT],
@@ -198,6 +200,8 @@ impl SummaryLayout {
     pub const PAYROLL_RESERVES: u32 = (offset_of!(Self, payroll_reserves) / TICK_BYTES) as u32;
     pub const INCOME_TAX: u32 = (offset_of!(Self, income_tax) / TICK_BYTES) as u32;
     pub const EMPLOYEE_CHARGES: u32 = (offset_of!(Self, employee_charges) / TICK_BYTES) as u32;
+    pub const RENT_COLLECTED: u32 = (offset_of!(Self, rent_collected) / TICK_BYTES) as u32;
+    pub const RENT_ARREARS: u32 = (offset_of!(Self, rent_arrears) / TICK_BYTES) as u32;
     pub const EMPLOYED: u32 = (offset_of!(Self, employed) / TICK_BYTES) as u32;
     pub const SHORTAGES: u32 = (offset_of!(Self, shortages) / TICK_BYTES) as u32;
     pub const INVENTORIES: u32 = (offset_of!(Self, inventories) / TICK_BYTES) as u32;

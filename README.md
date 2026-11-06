@@ -28,6 +28,8 @@ The viewer starts paused. **Space** runs/pauses, **N** steps one day, **R** rese
 - Subsistence farmers grow their own food. Wage workers start employed by capitalist-owned farms, factories, or distributors and buy food.
 - Firms produce goods using labor and inputs. Natural resources constrain production sites; deliveries take at least one day.
 - Births, deaths, migration, business entry, and closures change the economy over time.
+- Generated industrial economies charge 5 cash ticks daily per living landless household and per firm until closure. Subsistence households with land are exempt. Firms pay after wages. Households pay after buying bread, before discretionary purchases, and keep their cash when their food buffer (including deliveries) is short. Unpaid balances carry forward. A separate landlord account holds payments and is included in cash conservation; it does not yet spend or redistribute them.
+- Scenario files can set `"rent": { "household_daily": 5, "firm_daily": 5 }`; omitting it disables rent. Existing scenario files and checkpoints retain their explicit rates. The defaults were checked over 365 GPU days with one million households; long-term stability still depends on cash circulation. The viewer shows total collected rent and arrears. Checkpoints use format 9 and require regeneration from older formats.
 - Transactions use exact integer accounting. Daily audits check cash and goods conservation; faults restore the last audited state.
 
 ## Test and benchmark

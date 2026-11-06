@@ -4,6 +4,10 @@ use clap::{Parser, ValueEnum};
 use std::path::PathBuf;
 #[cfg(feature = "compute")]
 use std::time::Instant;
+use mimalloc::MiMalloc;
+
+#[global_allocator]
+static GLOBAL: MiMalloc = MiMalloc;
 
 #[derive(Parser)]
 #[command(about = "An exact spatial industrial economy", version)]

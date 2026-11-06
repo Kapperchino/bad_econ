@@ -15,6 +15,7 @@ mod institutions;
 mod payroll;
 mod policies;
 mod population;
+mod rent;
 mod research;
 mod resources;
 mod retained;

@@ -14,6 +14,8 @@ pub mod finance;
 mod households;
 pub mod industry;
 mod payroll;
+mod rent;
+pub use rent::RentPolicy;
 pub mod research;
 pub use households::HouseholdPolicy;
 pub use industry::{Economy, ProductionMethod, Technology};
@@ -27,9 +29,9 @@ pub use population::{
 pub use resources::{ProductionSite, ResourceMap, ResourceRegion};
 
 pub const SCENARIO_VERSION: u32 = 2;
-const CHECKPOINT_VERSION: u32 = 8;
-pub const STATE_HASH_VERSION: &str = "bad-econ/state/CubekV2/v9";
-pub const USED_FIELDS: usize = Field::Job as usize + 1;
+const CHECKPOINT_VERSION: u32 = 9;
+pub const STATE_HASH_VERSION: &str = "bad-econ/state/CubekV2/v10";
+pub const USED_FIELDS: usize = Field::RentArrears as usize + 1;
 pub const TRANSIT_FIELDS: usize = USED_FIELDS + Good::COUNT;
 pub const CONSUMPTION_FIELDS: usize = TRANSIT_FIELDS + Good::COUNT;
 pub const PRODUCTION_FIELDS: usize = CONSUMPTION_FIELDS + Good::COUNT;
@@ -131,6 +133,8 @@ pub enum Field {
     PreviousY,
     PendingCapacity,
     Job,
+    RentTreasury,
+    RentArrears,
 }
 impl Field {
     pub fn inventory(good: Good) -> Self {
@@ -328,6 +332,8 @@ pub struct ScenarioConfig {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub payroll: Option<PayrollPolicy>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub rent: Option<RentPolicy>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub household_policy: Option<HouseholdPolicy>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub finance: Option<finance::FinanceConfig>,
@@ -365,6 +371,7 @@ impl Scenario {
     pub fn industrial(households: u32, seed: u64, experiment: Experiment) -> Result<Self> {
         let mut config = Self::baseline(households, seed, experiment)?.config;
         config.economy = Economy::Industrial;
+        config.rent = Some(RentPolicy::default());
         let transport_scale = config.map_size / 1000;
         config.search_radius *= transport_scale;
         config.commute_speed *= transport_scale;
@@ -522,6 +529,7 @@ impl Scenario {
             .map(|policy| HouseholdPolicy::new(policy, config.reserved_minutes))
             .transpose()?;
         config.payroll = config.payroll.take().map(PayrollPolicy::new).transpose()?;
+        config.rent = config.rent.map(RentPolicy::new).transpose()?;
         config.behavior = BehaviorPolicy::new(config.behavior)?;
         config.population = config
             .population
@@ -768,6 +776,7 @@ impl Scenario {
             population: None,
             behavior: BehaviorPolicy::default(),
             payroll: None,
+            rent: None,
             household_policy: None,
             finance: None,
             research: None,
@@ -1724,6 +1733,8 @@ pub struct Inspection {
     pub payroll_reserve: u64,
     pub income_tax: u64,
     pub employee_charges: u64,
+    pub rent_collected: u64,
+    pub rent_arrears: u64,
     pub inventory: [u64; Good::COUNT],
     pub transit: u64,
     pub fatigue: u64,
@@ -1760,6 +1771,8 @@ impl Inspection {
             payroll_reserve: state.get(Field::PayrollReserve, index),
             income_tax: state.get(Field::TaxTreasury, index),
             employee_charges: state.get(Field::ChargeTreasury, index),
+            rent_collected: state.get(Field::RentTreasury, index),
+            rent_arrears: state.get(Field::RentArrears, index),
             inventory: Good::ALL.map(|good| state.get(Field::inventory(good), index)),
             transit: state.get(Field::Transit, index),
             fatigue: state.get(Field::Fatigue, index),
@@ -1844,6 +1857,8 @@ pub struct ObservationSnapshot {
     pub payroll_reserves: u64,
     pub income_tax: u64,
     pub employee_charges: u64,
+    pub rent_collected: u64,
+    pub rent_arrears: u64,
     pub financial_cash: u64,
     pub loan_principal: u64,
     pub loan_interest: u64,
@@ -1904,6 +1919,11 @@ impl ObservationSnapshot {
                     snapshot.cash,
                     add(state.get(Field::Cash, i), state.get(Field::Escrow, i))?,
                 )?;
+                let rent = state.get(Field::RentTreasury, i);
+                snapshot.rent_collected = add(snapshot.rent_collected, rent)?;
+                snapshot.rent_arrears =
+                    add(snapshot.rent_arrears, state.get(Field::RentArrears, i))?;
+                snapshot.cash = add(snapshot.cash, rent)?;
                 let reserve = state.get(Field::PayrollReserve, i);
                 let tax = state.get(Field::TaxTreasury, i);
                 let charge = state.get(Field::ChargeTreasury, i);
@@ -2453,6 +2473,7 @@ impl TryFrom<ScenarioDocument> for ScenarioConfig {
             population: current.population,
             behavior: current.behavior,
             payroll: current.payroll,
+            rent: current.rent,
             household_policy: current.household_policy,
             finance: current.finance,
             research: current.research,
@@ -2507,6 +2528,8 @@ struct CurrentScenario {
     pub behavior: BehaviorPolicy,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub payroll: Option<PayrollPolicy>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub rent: Option<RentPolicy>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub household_policy: Option<HouseholdPolicy>,
     #[serde(default, skip_serializing_if = "Option::is_none")]

@@ -38,11 +38,13 @@ pub(super) fn construct_home(
             comptime!(Field::OperatingReserve as u32),
             firm,
         );
-        let funds = select(
+        let rent = rent::obligation(state, config, control, firm);
+        let protected = select(
             status == comptime!(EnterpriseState::Operating as u32),
-            positive(cash, reserve),
-            cash,
+            maximum(reserve, rent),
+            rent,
         );
+        let funds = positive(cash, protected);
         let rate = number(state, config, comptime!(Field::Wage as u32), firm);
         let available = min(
             number(state, config, comptime!(Field::Time as u32), owner),
@@ -161,6 +163,10 @@ pub(super) fn investment(state: &mut [u32], config: &EconomyConfig, owner: u32) 
     ) > 0;
     let opportunity = active
         && !owns
+        && equal(
+            value(state, config, comptime!(Field::RentArrears as u32), owner),
+            zero(),
+        )
         && (!equal(sales, zero()) || !equal(earned, zero()))
         && !lt(cash, ticks(10_000, 0));
     if opportunity {
@@ -351,13 +357,15 @@ pub(super) fn lifecycle(state: &mut [u32], config: &EconomyConfig, firm: u32) {
         number(state, config, comptime!(Field::Wage as u32), firm),
         number(state, config, comptime!(Field::LaborMinutes as u32), firm),
     );
-    let funded = !lt(cash, payroll);
+    let arrears = value(state, config, comptime!(Field::RentArrears as u32), firm);
+    let current = equal(arrears, zero());
+    let funded = current && !lt(cash, plus(payroll, ticks(config.firm_rent, 0)).value);
     let sales = !equal(
         value(state, config, comptime!(Field::Sales as u32), firm),
         zero(),
     );
     let inactive = number(state, config, comptime!(Field::IdleDays as u32), firm);
-    let days = select(sales || funded, 0, min(inactive + 1, 365));
+    let days = select((sales || funded) && current, 0, min(inactive + 1, 365));
     let mut next = status;
     if status == comptime!(EnterpriseState::Operating as u32) && !funded {
         next = comptime!(EnterpriseState::Dormant as u32);
@@ -524,7 +532,7 @@ pub(super) fn operating_plan(
         comptime!(Field::EnterpriseModel as u32),
         firm,
     ) == 1;
-    if comptime!(config.home_mode == Feature::Enabled) || distributor {
+    if comptime!(config.home_mode == Feature::Enabled) || distributor || config.firm_rent > 0 {
         let labor = number(state, config, comptime!(Field::Wage as u32), firm)
             * number(state, config, comptime!(Field::LaborMinutes as u32), firm);
         let inputs = number(state, config, comptime!(Field::InputTicks as u32), firm);
@@ -567,7 +575,14 @@ pub(super) fn operating_plan(
                 ),
             );
         }
-        let packet_cost = add_checked(control, ticks(labor, 0), input_cost);
+        let overhead = ceildiv(
+            config.firm_rent,
+            max(
+                number(state, config, comptime!(Field::Plan as u32), firm),
+                1,
+            ),
+        );
+        let packet_cost = add_checked(control, ticks(labor + overhead, 0), input_cost);
         let unit_cost = divide(
             add_checked(control, packet_cost, ticks(output - 1, 0)),
             output,
@@ -601,6 +616,11 @@ pub(super) fn operating_plan(
             control,
             add_checked(control, ticks(labor, 0), replacement),
             packets.extract(LOW_WORD),
+        );
+        let reserve = add_checked(
+            control,
+            reserve,
+            rent::obligation(state, config, control, firm),
         );
         set(
             state,
@@ -694,6 +714,9 @@ pub(super) fn purchasing_power(
         );
         let packets = minimum(minimum(forecast, funded), capacity);
         available = positive(cash, multiply(control, labor, packets.extract(LOW_WORD)));
+    }
+    if !kind(actors, actor).is(comptime!(ActorKind::Household)) {
+        available = positive(available, rent::obligation(state, config, control, actor));
     }
     available
 }

@@ -86,8 +86,11 @@ fn requests(
         let tools = load(state, comptime!(Field::Tools as u32) * count + actor);
         let wood = load(state, comptime!(Field::Wood as u32) * count + actor);
         let cash = load(state, comptime!(Field::Cash as u32) * count + actor);
-        let funded =
-            !lt(cash, ticks(10_000, 0)) && !lt(tools, ticks(2, 0)) && !lt(wood, ticks(5, 0));
+        let arrears = load(state, comptime!(Field::RentArrears as u32) * count + actor);
+        let funded = !lt(cash, ticks(10_000, 0))
+            && !lt(tools, ticks(2, 0))
+            && !lt(wood, ticks(5, 0))
+            && equal(arrears, zero());
         let mut viable = false;
         if funded && target == comptime!(Good::Bread as u32) {
             let quote = load(state, comptime!(Field::Price as u32) * count + actor).extract(0usize);
@@ -108,7 +111,11 @@ fn requests(
                     [ActorLayout::Y * (actors.len() / ActorLayout::WORDS) + candidate as usize];
                 let nearby =
                     max(ax, bx) - min(ax, bx) + max(ay, by) - min(ay, by) <= config.search_radius;
-                let cost = plus(times32(240, wage), times32(20, input_price)).value;
+                let cost = plus(
+                    plus(times32(240, wage), times32(20, input_price)).value,
+                    ticks(config.firm_rent, 0),
+                )
+                .value;
                 let funded_operations = !lt(
                     divide(cash, 2),
                     times(cost, config.coverage + config.ring).value,

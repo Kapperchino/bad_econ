@@ -7,6 +7,7 @@
   "delivery_penalty": 5,
   "distribution_rate": 100,
   "economy": "Industrial",
+  "rent": { "household_daily": 5, "firm_daily": 5 },
   "experiment": "Concentrated",
   "firm_cash": 200000,
   "firms": 16,

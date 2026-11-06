@@ -8,8 +8,9 @@ use crate::{
     simulation::Simulation,
 };
 use anyhow::Result;
+use crossbeam_channel::{Receiver, RecvTimeoutError};
 use std::{
-    sync::{Arc, Mutex, mpsc},
+    sync::{Arc, Mutex},
     time::{Duration, Instant},
 };
 
@@ -38,7 +39,7 @@ impl<F: Fn()> Publisher<F> {
 
 pub(super) fn run(
     mut simulation: Simulation,
-    receiver: mpsc::Receiver<Control>,
+    receiver: Receiver<Control>,
     data: Arc<Mutex<Display>>,
     wake: impl Fn(),
 ) -> Result<()> {
@@ -95,11 +96,11 @@ pub(super) fn run(
                 target = next;
                 next_day = Instant::now();
             }),
-            Err(mpsc::RecvTimeoutError::Disconnected) => {
+            Err(RecvTimeoutError::Disconnected) => {
                 workflow = WorkerState::Stopped;
                 Ok(())
             }
-            Err(mpsc::RecvTimeoutError::Timeout) => Ok(()),
+            Err(RecvTimeoutError::Timeout) => Ok(()),
         };
         if let Err(error) = result {
             publisher.error(&simulation, error);

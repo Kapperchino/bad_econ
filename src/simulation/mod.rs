@@ -509,7 +509,20 @@ impl Simulation {
                         (0..MATCHING_ROUNDS).try_for_each(|round| {
                             self.matching_round = round;
                             self.market(market, phase, trace, &mut evidence)
-                        })
+                        })?;
+                        if let (Market::Household, Some(_)) = (market, self.scenario.config().rent)
+                        {
+                            let parameters =
+                                self.parameters(phase, market, 0, self.metadata.actors.len())?;
+                            self.economy(
+                                EconomyStage::HouseholdRent,
+                                self.metadata.actors.len(),
+                                &parameters,
+                                &self.proposals,
+                            );
+                            self.fault_check()?;
+                        }
+                        Ok::<(), anyhow::Error>(())
                     })?;
                 self.market_result(&mut evidence)?;
                 self.apply_feedback()
@@ -1112,6 +1125,14 @@ impl Simulation {
             &parameters,
             &self.proposals,
         );
+        if let (Phase::WorkPayment, Some(_)) = (phase, self.scenario.config().rent) {
+            self.economy(
+                EconomyStage::FirmRent,
+                self.metadata.actors.len(),
+                &parameters,
+                &self.proposals,
+            );
+        }
         self.fault_check()
     }
     fn market_result(&mut self, evidence: &mut PhaseEvidence) -> Result<()> {
@@ -1685,6 +1706,8 @@ impl Simulation {
             payroll_reserves: totals.payroll_reserves.into(),
             income_tax: totals.income_tax.into(),
             employee_charges: totals.employee_charges.into(),
+            rent_collected: totals.rent_collected.into(),
+            rent_arrears: totals.rent_arrears.into(),
             financial_cash: financial.cash()?,
             loan_principal: financial.principal,
             loan_interest: financial.interest_due,
@@ -1911,6 +1934,8 @@ impl Simulation {
             payroll_reserve: values[Field::PayrollReserve as usize],
             income_tax: values[Field::TaxTreasury as usize],
             employee_charges: values[Field::ChargeTreasury as usize],
+            rent_collected: values[Field::RentTreasury as usize],
+            rent_arrears: values[Field::RentArrears as usize],
             inventory: values[Field::Grain as usize..Field::Escrow as usize].try_into()?,
             transit: values[Field::Transit as usize],
             fatigue: values[Field::Fatigue as usize],

@@ -94,7 +94,12 @@ impl EntryPlan {
                     price: match model {
                         EnterpriseModel::Producer => state.get(Field::Price, source),
                         EnterpriseModel::Distributor => {
-                            first_cost * 1250 / 1000 + u64::from(60 * config.wage).div_ceil(24)
+                            first_cost * 1250 / 1000
+                                + u64::from(
+                                    60 * config.wage
+                                        + config.rent.map_or(0, |rent| rent.firm_daily),
+                                )
+                                .div_ceil(24)
                         }
                     },
                     first_cost,
@@ -105,6 +110,7 @@ impl EntryPlan {
         };
         match state.actors.at(owner).kind == 0
             && state.get(Field::Cash, owner) >= 10_000
+            && state.get(Field::RentArrears, owner) == 0
             && state.get(Field::Tools, owner) >= 2
             && state.get(Field::Wood, owner) >= 5
             && (u64::from(config.minimum_price)..=u64::from(config.maximum_price))
@@ -284,7 +290,11 @@ pub(in crate::simulation) fn discover(
                         source,
                         comptime!(Field::BasicOutputTicks as u32),
                     );
-                    let cost = plus(times32(labor, wage), times32(inputs, first + second)).value;
+                    let cost = plus(
+                        plus(times32(labor, wage), times32(inputs, first + second)).value,
+                        ticks(config.firm_rent, 0),
+                    )
+                    .value;
                     let revenue = times32(output, price);
                     let margin = minus(revenue, minimum(revenue, cost));
                     let needed = plus(
@@ -305,7 +315,7 @@ pub(in crate::simulation) fn discover(
                 || (comptime!(config.economy == crate::domain::Economy::Industrial)
                     && config.consumption_intervals[kind as usize - 1] > 1);
             if consumer && !lt(stock, ticks(24, 0)) {
-                let quote = price * 1250 / 1000 + ceildiv(60 * wage, 24);
+                let quote = price * 1250 / 1000 + ceildiv(60 * wage + config.firm_rent, 24);
                 let mut buyers = 0;
                 for buyer_sample in 0..min(32u32, count) {
                     let buyer = (owner + day * 23 + buyer_sample) % count;
@@ -328,9 +338,17 @@ pub(in crate::simulation) fn discover(
                 }
                 let units = min(buyers, 24);
                 let revenue = times32(units, quote);
-                let cost = plus(times32(units, price), times32(60, wage)).value;
+                let cost = plus(
+                    plus(times32(units, price), times32(60, wage)).value,
+                    ticks(config.firm_rent, 0),
+                )
+                .value;
                 let margin = minus(revenue, minimum(revenue, cost));
-                let required = plus(times32(24 * price, 3 + config.ring), times32(780, wage)).value;
+                let required = plus(
+                    plus(times32(24 * price, 3 + config.ring), times32(780, wage)).value,
+                    times32(config.firm_rent, 3 + config.ring),
+                )
+                .value;
                 if lt(best, margin) && !lt(investment, required) && quote <= config.maximum_price {
                     selected = comptime!(DISTRIBUTOR_ENTRY) + source + 1;
                     best = margin;

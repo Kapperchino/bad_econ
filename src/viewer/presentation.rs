@@ -88,12 +88,14 @@ fn draw(
                         ),
                     };
                     format!(
-                        "Actor {} | day {} | kind {}\nCash {} | transit {}\nFood {:?} | other stock {}\n{}",
+                        "Actor {} | day {} | kind {}\nCash {} | transit {}\nRent paid {} | owed {}\nFood {:?} | other stock {}\n{}",
                         i.actor.identity,
                         i.day,
                         i.actor.kind,
                         i.cash,
                         i.transit,
+                        i.rent_collected,
+                        i.rent_arrears,
                         &i.inventory[..3],
                         i.inventory[3..].iter().map(|&stock| u128::from(stock)).sum::<u128>(),
                         detail
@@ -134,7 +136,7 @@ fn draw(
                 .collect::<Vec<_>>()
                 .join("\n");
             let text = format!(
-                "{} | seed {}\nDay {} | target {}\nPaid households {} | unmet bread {}\nPopulation {} | births {}\nDeaths background/work/famine {:?}\nFirms {} | entries {} | closed {} | stores {}\nHousehold food output {:?}\nCash {}\nFood stocks {:?} | other stocks {}\nIn transit {}\nTax {} | charges {} | payroll reserve {}\nBank/support cash {} | loan principal {}\nLoans {} active / {} overdue | interest {}\nResearch {} attempts / {} successes | strikes {}\n\nPrice / wage | means\n{}\n\n{}\n\n{}\n{}",
+                "{} | seed {}\nDay {} | target {}\nPaid households {} | unmet bread {}\nPopulation {} | births {}\nDeaths background/work/famine {:?}\nFirms {} | entries {} | closed {} | stores {}\nHousehold food output {:?}\nCash {}\nFood stocks {:?} | other stocks {}\nIn transit {}\nTax {} | charges {} | payroll reserve {}\nRent collected {} | owed {}\nBank/support cash {} | loan principal {}\nLoans {} active / {} overdue | interest {}\nResearch {} attempts / {} successes | strikes {}\n\nPrice / wage | means\n{}\n\n{}\n\n{}\n{}",
                 display.status.label(),
                 display.seed,
                 s.day,
@@ -162,6 +164,8 @@ fn draw(
                 s.income_tax,
                 s.employee_charges,
                 s.payroll_reserves,
+                s.rent_collected,
+                s.rent_arrears,
                 s.financial_cash,
                 s.loan_principal,
                 s.active_loans,

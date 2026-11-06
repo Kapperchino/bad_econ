@@ -16,7 +16,7 @@ path = "tests/gpu.rs"
 [features]
 default = ["compute"]
 compute = ["dep:burn", "dep:burn-wgpu", "dep:cubecl", "dep:cubek", "dep:pollster", "dep:ash", "dep:objc2-metal", "dep:sysinfo", "dep:windows"]
-viewer = ["compute", "dep:bevy"]
+viewer = ["compute", "dep:bevy", "dep:crossbeam-channel"]
 
 [dependencies]
 anyhow = "1"
@@ -26,6 +26,7 @@ sha2 = "0.11"
 clap = { version = "4", features = ["derive"] }
 bitflags = "2.13.2"
 enumflags2 = { version = "0.7.12", features = ["std"] }
+crossbeam-channel = { version = "0.5.17", optional = true }
 burn = { version = "=0.22.1", default-features = false, features = ["std", "wgpu", "cpu", "extension"], optional = true }
 burn-wgpu = { version = "=0.22.1", default-features = false, features = ["std"], optional = true }
 bytemuck = { version = "1", features = ["derive", "min_const_generics"] }
@@ -33,6 +34,7 @@ cubecl = { version = "=0.11.1", default-features = false, features = ["std", "wg
 cubek = { version = "=0.3.1", default-features = false, features = ["std", "stdlib", "reduce", "matmul", "random"], optional = true }
 pollster = { version = "1.0.1", optional = true }
 bevy = { version = "=0.20.1", default-features = false, features = ["std", "async_executor", "multi_threaded", "bevy_asset", "bevy_audio", "wav", "bevy_log", "bevy_winit", "bevy_render", "bevy_core_pipeline", "bevy_sprite", "bevy_sprite_render", "bevy_gizmos", "bevy_gizmos_render", "bevy_text", "bevy_ui", "bevy_ui_render", "default_font", "debug", "x11", "wayland"], optional = true }
+mimalloc = "0.1.52"
 
 [target.'cfg(any(windows, target_os = "linux", target_os = "android", target_os = "freebsd", target_os = "macos"))'.dependencies]
 ash = { version = "=0.38.0", default-features = false, optional = true }
