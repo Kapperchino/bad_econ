@@ -35,6 +35,7 @@ mod clearing;
 pub(super) mod enterprises;
 mod household_production;
 pub(super) mod indexing;
+pub(in crate::simulation) mod landlords;
 pub(super) mod opening;
 pub(in crate::simulation) mod property;
 mod rent;
@@ -184,7 +185,9 @@ fn local(
             }
             Phase::Observation => {}
             Phase::Proposal => {
-                if !k.is(comptime!(ActorKind::Household)) {
+                if !k.is(comptime!(ActorKind::Household))
+                    && k.bits() != comptime!(Good::Housing as u32)
+                {
                     if comptime!(config.home_mode == Feature::Enabled) {
                         enterprises::available_method(state, actors, config, control, id);
                     }
@@ -440,7 +443,9 @@ fn local(
                 {
                     enterprises::household_quote(state, config, id);
                 }
-                if !k.is(comptime!(ActorKind::Household)) {
+                if !k.is(comptime!(ActorKind::Household))
+                    && k.bits() != comptime!(Good::Housing as u32)
+                {
                     if comptime!(config.home_mode == Feature::Enabled) {
                         let packets = number(state, config, comptime!(Field::Plan as u32), id)
                             - number(state, config, comptime!(Field::Slots as u32), id);
@@ -718,9 +723,7 @@ fn propose(
                     wanted = select(search, maximum(wanted, ticks(2, 0)), ticks(2, 0));
                     search = true;
                 }
-                if comptime!(config.property_mode == Feature::Enabled)
-                    && good == comptime!(Good::Construction as u32)
-                {
+                if good == comptime!(Good::Construction as u32) {
                     let building =
                         number(state, config, comptime!(Field::ProjectStatus as u32), id)
                             == comptime!(crate::domain::property::ProjectStatus::Building as u32);
@@ -736,6 +739,11 @@ fn propose(
                         wanted,
                     );
                     search = search || building;
+                    if k.bits() == comptime!(Good::Housing as u32) {
+                        wanted =
+                            add_checked(control, wanted, landlords::maintenance(state, config, id));
+                        search = true;
+                    }
                 }
             }
             MarketFlag::Consumer(_) => {
@@ -796,7 +804,11 @@ fn propose(
                         positive(
                             value(state, config, comptime!(Field::Cash as u32), id),
                             maximum(
-                                ticks(config.reserve_low, config.reserve_high),
+                                select(
+                                    k.bits() == comptime!(Good::Housing as u32),
+                                    zero(),
+                                    ticks(config.reserve_low, config.reserve_high),
+                                ),
                                 value(state, config, comptime!(Field::OperatingReserve as u32), id),
                             ),
                         ),
@@ -1731,8 +1743,11 @@ fn summarize(
                 totals[SummaryLayout::RENT_ARREARS as usize],
                 value(state, config, comptime!(Field::RentArrears as u32), actor),
             );
-            totals[SummaryLayout::CASH as usize] =
-                add_checked(control, totals[SummaryLayout::CASH as usize], rent);
+            totals[SummaryLayout::CASH as usize] = add_checked(
+                control,
+                totals[SummaryLayout::CASH as usize],
+                value(state, config, comptime!(Field::RentPending as u32), actor),
+            );
             let payroll_reserve = value(
                 state,
                 config,

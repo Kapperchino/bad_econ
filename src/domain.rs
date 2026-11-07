@@ -14,6 +14,7 @@ pub mod enterprise;
 pub mod finance;
 mod households;
 pub mod industry;
+pub mod landlords;
 mod payroll;
 pub mod property;
 mod rent;
@@ -31,9 +32,9 @@ pub use population::{
 pub use resources::{ProductionSite, ResourceMap, ResourceRegion};
 
 pub const SCENARIO_VERSION: u32 = 2;
-const CHECKPOINT_VERSION: u32 = 12;
-pub const STATE_HASH_VERSION: &str = "bad-econ/state/CubekV2/v13";
-pub const USED_FIELDS: usize = Field::ScaleRemainder as usize + 1;
+const CHECKPOINT_VERSION: u32 = 13;
+pub const STATE_HASH_VERSION: &str = "bad-econ/state/CubekV2/v14";
+pub const USED_FIELDS: usize = Field::MaintenanceDays as usize + 1;
 pub const TRANSIT_FIELDS: usize = USED_FIELDS + Good::COUNT;
 pub const CONSUMPTION_FIELDS: usize = TRANSIT_FIELDS + Good::COUNT;
 pub const PRODUCTION_FIELDS: usize = CONSUMPTION_FIELDS + Good::COUNT;
@@ -60,6 +61,7 @@ pub enum Field {
     Dye,
     Glass,
     Construction,
+    Housing,
     Escrow,
     Slots,
     Wage,
@@ -150,6 +152,11 @@ pub enum Field {
     WorkersPerPlot,
     UnscaledProduced,
     ScaleRemainder,
+    RentPending,
+    Landlord,
+    RentalIncome,
+    HousingAvailable,
+    MaintenanceDays,
 }
 impl Field {
     pub fn inventory(good: Good) -> Self {
@@ -171,6 +178,7 @@ impl Field {
             Good::Dye => Self::Dye,
             Good::Glass => Self::Glass,
             Good::Construction => Self::Construction,
+            Good::Housing => Self::Housing,
         }
     }
 }
@@ -201,9 +209,10 @@ pub enum Good {
     Dye = 15,
     Glass = 16,
     Construction = 17,
+    Housing = 18,
 }
 impl Good {
-    pub const COUNT: usize = 17;
+    pub const COUNT: usize = 18;
     pub const ALL: [Self; Self::COUNT] = [
         Self::Grain,
         Self::Flour,
@@ -222,6 +231,7 @@ impl Good {
         Self::Dye,
         Self::Glass,
         Self::Construction,
+        Self::Housing,
     ];
     pub fn kind(self) -> GoodKind {
         match self {
@@ -241,7 +251,8 @@ impl Good {
             | Self::Tools
             | Self::Furniture
             | Self::Glass
-            | Self::Construction => GoodKind::Manufactured,
+            | Self::Construction
+            | Self::Housing => GoodKind::Manufactured,
         }
     }
     pub fn inputs(self) -> [Option<Self>; 2] {
@@ -255,6 +266,7 @@ impl Good {
             Self::Tools => [Some(Self::Iron), Some(Self::Wood)],
             Self::Furniture | Self::Construction => [Some(Self::Wood), Some(Self::Tools)],
             Self::Glass => [Some(Self::Coal), None],
+            Self::Housing => [Some(Self::Construction), None],
             _ => [None, None],
         }
     }
@@ -269,7 +281,7 @@ impl Good {
     }
     pub fn initial_price(self) -> u32 {
         [
-            150, 300, 450, 160, 100, 350, 100, 220, 260, 600, 100, 320, 500, 100, 120, 250, 120,
+            150, 300, 450, 160, 100, 350, 100, 220, 260, 600, 100, 320, 500, 100, 120, 250, 120, 10,
         ][self as usize - 1]
     }
     pub fn food<T: Default + Copy>(values: [T; 3]) -> [T; Self::COUNT] {
@@ -296,6 +308,7 @@ impl Good {
             15 => Ok(Self::Dye),
             16 => Ok(Self::Glass),
             17 => Ok(Self::Construction),
+            18 => Ok(Self::Housing),
 
             _ => Err(anyhow!("invalid good")),
         }
@@ -333,6 +346,8 @@ pub struct ScenarioConfig {
         skip_serializing_if = "enterprise::EntrepreneurshipPolicy::is_default"
     )]
     pub entrepreneurship: enterprise::EntrepreneurshipPolicy,
+    #[serde(default)]
+    pub expansion: enterprise::ExpansionPolicy,
     pub firm_cash: u64,
     pub buffer_days: u32,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -445,10 +460,11 @@ impl Scenario {
             .collect();
         let labs = (0..config.firms.min(households))
             .filter(|&firm| {
-                !config
-                    .distributors
-                    .iter()
-                    .any(|store| store.firm == u64::from(households + firm + 1))
+                generated_good(&config, firm as usize) != Good::Housing
+                    && !config
+                        .distributors
+                        .iter()
+                        .any(|store| store.firm == u64::from(households + firm + 1))
             })
             .map(|firm| research::ResearchLab {
                 owner: u64::from(households + firm + 1),
@@ -519,7 +535,7 @@ impl Scenario {
         inputs.insert(Good::Bread as u32);
         inputs.insert(Good::Tools as u32);
         inputs.insert(Good::Wood as u32);
-        if self.config.property.is_some() {
+        if self.config.property.is_some() || self.config.rent.is_some() {
             inputs.insert(Good::Construction as u32);
         }
         if self.config.economy == Economy::Industrial {
@@ -547,6 +563,7 @@ impl Scenario {
             .map(|property| property::PropertyConfig::new(property, config.map_size))
             .transpose()?;
         config.entrepreneurship = enterprise::EntrepreneurshipPolicy::new(config.entrepreneurship)?;
+        config.expansion = enterprise::ExpansionPolicy::new(config.expansion)?;
         config.companies = config
             .companies
             .into_iter()
@@ -647,13 +664,16 @@ impl Scenario {
                         .div_ceil(u64::from(firm_counts[good].max(1)))
                         .max(1)
                 });
-                let capacities = std::array::from_fn(|good| match config.economy {
-                    Economy::Agrarian => config.capacity,
-                    Economy::Industrial => (daily[good].div_ceil(config.packet_output.into())
-                        as u32)
-                        .max(1)
-                        .min(config.capacity),
-                });
+                let capacities =
+                    std::array::from_fn(|good| match (Good::ALL[good], config.economy) {
+                        (Good::Housing, _) => 0,
+                        (_, Economy::Agrarian) => config.capacity,
+                        (_, Economy::Industrial) => {
+                            (daily[good].div_ceil(config.packet_output.into()) as u32)
+                                .max(1)
+                                .min(config.capacity)
+                        }
+                    });
                 let starting_stocks = std::array::from_fn(|good| match config.economy {
                     Economy::Agrarian => {
                         u64::from(config.capacity)
@@ -826,6 +846,7 @@ impl Scenario {
             household_cash: 5000,
             household_liquidity: HouseholdLiquidity::Uniform,
             entrepreneurship: enterprise::EntrepreneurshipPolicy::default(),
+            expansion: enterprise::ExpansionPolicy::default(),
             firm_cash: 200_000,
             buffer_days: 4,
             producer_buffer_days: None,
@@ -876,6 +897,7 @@ impl Scenario {
     fn initial_price(&self, good: Good) -> u32 {
         match (self.config.economy, good) {
             (_, Good::Grain | Good::Flour | Good::Bread) => self.config.prices[good as usize - 1],
+            (_, Good::Housing) => self.config.rent.map_or(1, |rent| rent.household_daily),
             (Economy::Agrarian, _) => good.initial_price(),
             (Economy::Industrial, _) => {
                 (self.config.wage * self.config.packet_minutes).div_ceil(self.config.packet_output)
@@ -997,6 +1019,9 @@ impl Scenario {
             index.checked_sub(self.config.households as usize),
         ) {
             (Some(population), Some(firm)) => population.firms[firm].technique,
+            _ if self.actor(index).kind == Good::Housing as u32 => {
+                Technique::housing(landlords::DEFAULT_HOUSING_UNITS).expect("housing recipe")
+            }
             _ => Technique {
                 labor_minutes: self.config.packet_minutes,
                 input_ticks: match index.checked_sub(self.config.households as usize) {
@@ -1208,6 +1233,7 @@ impl Scenario {
         if let Some(property) = &self.config.property {
             property.initialize(&mut state)?;
         }
+        landlords::initialize(self, &mut state)?;
         Ok(state)
     }
     fn actor(&self, index: usize) -> Actor {
@@ -1839,6 +1865,8 @@ pub struct Inspection {
     pub employee_charges: u64,
     pub rent_collected: u64,
     pub rent_arrears: u64,
+    pub landlord_identity: Option<u64>,
+    pub rental_business: Option<landlords::RentalBusiness>,
     pub housing_state: Option<HousingState>,
     pub rent_overdue_days: u64,
     pub inventory: [u64; Good::COUNT],
@@ -1855,6 +1883,7 @@ pub struct Inspection {
     pub equipment_condition: u64,
     pub safety_provision: u64,
     pub enterprise_model: enterprise::EnterpriseModel,
+    pub business_scale: Option<enterprise::BusinessScale>,
     pub enterprise_state: Option<enterprise::EnterpriseState>,
     pub construction_minutes_remaining: u64,
     pub property_region: u64,
@@ -1889,6 +1918,18 @@ impl Inspection {
             employee_charges: state.get(Field::ChargeTreasury, index),
             rent_collected: state.get(Field::RentTreasury, index),
             rent_arrears: state.get(Field::RentArrears, index),
+            landlord_identity: state
+                .get(Field::Landlord, index)
+                .checked_sub(1)
+                .and_then(|landlord| state.actors.get(landlord as usize))
+                .map(|actor| actor.identity),
+            rental_business: (state.actors.at(index).kind == Good::Housing as u32).then(|| {
+                landlords::RentalBusiness {
+                    homes: state.get(Field::OccupiedPlots, index)
+                        * state.get(Field::OutputTicks, index),
+                    income: state.get(Field::RentalIncome, index),
+                }
+            }),
             housing_state: match state.actors.at(index).kind {
                 0 => Some(HousingState::from_index(
                     state.get(Field::HousingStatus, index),
@@ -1915,6 +1956,8 @@ impl Inspection {
             living_members: state.get(Field::LivingMembers, index),
             equipment_condition: state.get(Field::EquipmentCondition, index),
             safety_provision: state.get(Field::SafetyProvision, index),
+            business_scale: (state.actors.at(index).kind > 0)
+                .then(|| enterprise::BusinessScale::from_workers(state.actors.at(index).capacity)),
             enterprise_model: match state.get(Field::EnterpriseModel, index) {
                 1 => enterprise::EnterpriseModel::Distributor,
                 _ => enterprise::EnterpriseModel::Producer,
@@ -2071,7 +2114,7 @@ impl ObservationSnapshot {
                 snapshot.rent_collected = add(snapshot.rent_collected, rent)?;
                 snapshot.rent_arrears =
                     add(snapshot.rent_arrears, state.get(Field::RentArrears, i))?;
-                snapshot.cash = add(snapshot.cash, rent)?;
+                snapshot.cash = add(snapshot.cash, state.get(Field::RentPending, i))?;
                 let reserve = state.get(Field::PayrollReserve, i);
                 let tax = state.get(Field::TaxTreasury, i);
                 let charge = state.get(Field::ChargeTreasury, i);
@@ -2313,6 +2356,10 @@ impl<'a> AuditedState<'a> {
                 }
             };
             let limits = state.get(Field::HousingStatus, i) <= HousingState::Homeless as u64
+                && state.get(Field::Landlord, i) <= state.actors.len() as u64
+                && state.get(Field::RentPending, i) <= state.get(Field::RentTreasury, i)
+                && state.get(Field::HousingAvailable, i) <= 1
+                && state.get(Field::MaintenanceDays, i) <= u64::from(landlords::MAINTENANCE_DAYS)
                 && state.get(Field::RentOverdueDays, i) <= u64::from(FIRM_RENT_GRACE_DAYS)
                 && state.get(Field::EquipmentCondition, i) <= 1000
                 && state.get(Field::SafetyProvision, i) <= 900
@@ -2343,6 +2390,14 @@ impl<'a> AuditedState<'a> {
                             state.get(Field::OutputTicks, i) as u32,
                         )
                         .is_ok()
+                }
+                (kind, _) if kind == Good::Housing as u32 => {
+                    actor.capacity == 0
+                        && state.get(Field::LaborMinutes, i) == 0
+                        && state.get(Field::FirstInput, i) == Good::Construction as u64
+                        && state.get(Field::SecondInput, i) == 0
+                        && (1..=100).contains(&state.get(Field::OutputTicks, i))
+                        && (1..=100).contains(&state.get(Field::InputTicks, i))
                 }
                 (0, _) => [
                     Field::LaborMinutes,
@@ -2427,8 +2482,9 @@ impl<'a> AuditedState<'a> {
             let capacity = scenario.geographic_capacity(actor);
             let planning = state.get(Field::Slots, i) <= state.get(Field::Plan, i)
                 && state.get(Field::Plan, i) <= u64::from(capacity);
-            let production = match capacity {
-                0 => state.get(Field::Produced, i) == 0,
+            let production = match (actor.kind, capacity) {
+                (kind, _) if kind == Good::Housing as u32 => true,
+                (_, 0) => state.get(Field::Produced, i) == 0,
                 _ => true,
             };
             let role = match actor.kind {
@@ -2616,6 +2672,7 @@ impl TryFrom<ScenarioDocument> for ScenarioConfig {
             household_cash: current.household_cash,
             household_liquidity: current.household_liquidity,
             entrepreneurship: current.entrepreneurship,
+            expansion: current.expansion,
             firm_cash: current.firm_cash,
             buffer_days: current.buffer_days,
             producer_buffer_days: current.producer_buffer_days,
@@ -2675,6 +2732,8 @@ struct CurrentScenario {
     pub household_liquidity: HouseholdLiquidity,
     #[serde(default)]
     pub entrepreneurship: enterprise::EntrepreneurshipPolicy,
+    #[serde(default)]
+    pub expansion: enterprise::ExpansionPolicy,
     pub firm_cash: u64,
     pub buffer_days: u32,
     #[serde(default)]

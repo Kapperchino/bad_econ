@@ -1,5 +1,6 @@
 use super::Dashboard;
-use bevy::{audio::Volume, prelude::*, sprite::Anchor};
+use super::ui::UiAction;
+use bevy::{audio::Volume, prelude::*};
 use std::time::Duration;
 
 pub(super) struct FeedbackPlugin;
@@ -157,10 +158,10 @@ struct Sounds {
 }
 
 #[derive(Component)]
-struct Banner;
+pub(super) struct Banner;
 
 #[derive(Component)]
-struct Label;
+pub(super) struct Label;
 
 fn setup(mut commands: Commands, mut audio: ResMut<Assets<AudioSource>>) {
     let source = |bytes: &'static [u8]| AudioSource {
@@ -171,26 +172,11 @@ fn setup(mut commands: Commands, mut audio: ResMut<Assets<AudioSource>>) {
         pause: audio.add(source(include_bytes!("../../assets/cues/pause.wav"))),
         error: audio.add(source(include_bytes!("../../assets/cues/error.wav"))),
     });
-    commands.spawn((
-        Banner,
-        Sprite::from_color(Color::srgb(0.055, 0.08, 0.09), Vec2::new(1190.0, 28.0)),
-        Transform::from_xyz(-5.0, -397.0, 3.0),
-    ));
-    commands.spawn((
-        Label,
-        Text2d::default(),
-        TextFont {
-            font_size: FontSize::Px(14.0),
-            ..Default::default()
-        },
-        TextColor(Color::srgb(0.85, 0.92, 0.95)),
-        Anchor::TOP_LEFT,
-        Transform::from_xyz(-588.0, -386.0, 4.0),
-    ));
 }
 
 fn receive(
     keys: Res<ButtonInput<KeyCode>>,
+    mut actions: MessageReader<UiAction>,
     time: Res<Time<Real>>,
     dashboard: Option<Res<Dashboard>>,
     sounds: Res<Sounds>,
@@ -198,14 +184,15 @@ fn receive(
     mut commands: Commands,
 ) {
     feedback.tick(time.delta());
-    let preference = match keys.just_pressed(KeyCode::KeyM) {
+    let pending = actions.read().copied().collect::<Vec<_>>();
+    let preference = match keys.just_pressed(KeyCode::KeyM) || pending.contains(&UiAction::Sound) {
         true => {
             feedback.sound.toggle();
             Some(Cue::Preferences)
         }
         false => None,
     };
-    let preference = match keys.just_pressed(KeyCode::KeyV) {
+    let preference = match keys.just_pressed(KeyCode::KeyV) || pending.contains(&UiAction::Motion) {
         true => {
             feedback.flashes.toggle();
             Some(Cue::Preferences)
@@ -244,8 +231,8 @@ fn receive(
 fn animate(
     feedback: Res<Feedback>,
     mut cadence: ResMut<super::pacing::Cadence>,
-    mut labels: Query<&mut Text2d, With<Label>>,
-    mut banners: Query<&mut Sprite, With<Banner>>,
+    mut labels: Query<&mut Text, With<Label>>,
+    mut banners: Query<&mut BackgroundColor, With<Banner>>,
 ) {
     let cue = feedback.current().unwrap_or(Cue::Ready);
     let text = format!(
@@ -264,9 +251,9 @@ fn animate(
     let color = Color::srgb(0.055, 0.08, 0.09).mix(&cue.color(), 0.08 + flash * 0.20);
     banners
         .iter_mut()
-        .for_each(|mut banner| match banner.color == color {
+        .for_each(|mut banner| match banner.0 == color {
             true => (),
-            false => banner.color = color,
+            false => banner.0 = color,
         });
     cadence.set_if_neq(match flash > 0.0 {
         true => super::pacing::Cadence::Animating,

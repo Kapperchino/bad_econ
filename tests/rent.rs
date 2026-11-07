@@ -59,6 +59,9 @@ fn households_buy_food_before_paying_rent_on_gpu() -> Result<()> {
     assert_eq!(state.get(Field::Purchased, 0), 2);
     assert_eq!(state.get(Field::Transit, 0), 2);
     assert_eq!(state.get(Field::Cash, 0), 0);
+    let landlord = state.get(Field::Landlord, 0) as usize - 1;
+    assert_eq!(state.get(Field::RentalIncome, landlord), 10);
+    assert_eq!(state.get(Field::Cash, landlord), 10);
     assert_eq!(state.get(Field::RentTreasury, 0), 10);
     assert_eq!(state.get(Field::RentArrears, 0), 50);
     assert_eq!(simulation.snapshot.shortages, 0);
@@ -109,7 +112,9 @@ fn daily_rent_conserves_cash_and_replays_arrears_on_gpu() -> Result<()> {
         assert_eq!(paid.get(Field::RentTreasury, household), 0);
         assert_eq!(paid.get(Field::RentArrears, household), 0);
     }
-    for firm in 6..paid.actors.len() {
+    for firm in
+        (6..paid.actors.len()).filter(|&firm| paid.actors.at(firm).kind != Good::Housing as u32)
+    {
         assert_eq!(
             paid.get(Field::Cash, firm),
             before.get(Field::Cash, firm) - 60
@@ -159,7 +164,7 @@ fn daily_rent_conserves_cash_and_replays_arrears_on_gpu() -> Result<()> {
         assert_eq!(simulation.snapshot, resumed.snapshot);
         assert_eq!(
             simulation.snapshot.rent_collected + simulation.snapshot.rent_arrears,
-            360 * day
+            360 + 180 * (day - 1)
         );
         assert_eq!(simulation.snapshot.cash, initial.initial_cash);
     }
@@ -207,7 +212,11 @@ fn industrial_rent_defaults_and_custom_rates_run_on_gpu() -> Result<()> {
             metadata.kind == 0 && initial.get(Field::LandPlots, *actor) == 0
         })
         .count() as u64;
-    let firms = initial.actors.iter().filter(|actor| actor.kind > 0).count() as u64;
+    let firms = initial
+        .actors
+        .iter()
+        .filter(|actor| actor.kind > 0 && actor.kind != Good::Housing as u32)
+        .count() as u64;
     let mut simulation = Simulation::new(scenario.clone(), support::device(64)?)?;
     simulation.advance()?;
     assert_eq!(
@@ -266,7 +275,9 @@ fn firms_reserve_rent_before_hiring_on_gpu() -> Result<()> {
         simulation.phase(Phase::Commitment, Trace::Record)?;
         simulation.phase(Phase::WorkPayment, Trace::Record)?;
         let paid = simulation.download()?;
-        for firm in 1..paid.actors.len() {
+        for firm in
+            (1..paid.actors.len()).filter(|&firm| paid.actors.at(firm).kind != Good::Housing as u32)
+        {
             assert_eq!(paid.get(Field::RentTreasury, firm), 60);
             assert_eq!(paid.get(Field::RentArrears, firm), 0);
         }

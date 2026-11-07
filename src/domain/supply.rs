@@ -51,6 +51,15 @@ impl StartingDemand {
             daily: [0; Good::COUNT],
         };
         demand.include(Good::Bread, food.saturating_sub(harvest));
+        if config.rent.is_some() {
+            demand.daily[Good::Housing as usize - 1] = households;
+            demand.include(
+                Good::Construction,
+                households
+                    .div_ceil(u64::from(super::landlords::DEFAULT_HOUSING_UNITS))
+                    .div_ceil(u64::from(super::landlords::MAINTENANCE_DAYS)),
+            );
+        }
         for good in Good::ALL {
             if good.consumption_interval() > 1 {
                 demand.include(

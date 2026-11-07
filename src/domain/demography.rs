@@ -77,7 +77,7 @@ impl Default for MortalityProfile {
                 "https://www.populationspast.org/about/".into(),
             ],
             background_annual_ppm: [150_000, 15_000, 6_000, 15_000, 80_000],
-            occupational_annual_ppm: [300, 200, 200, 960, 1280, 200, 300, 100, 100, 100, 500, 200, 200, 300, 300, 200, 600],
+            occupational_annual_ppm: [300, 200, 200, 960, 1280, 200, 300, 100, 100, 100, 500, 200, 200, 300, 300, 200, 600, 0],
             reference_work_minutes_per_year: 300 * 480,
             famine_daily_ppm_at_thirty_days: 20_000,
             famine_vulnerability_per_mille: [2000, 1500, 1000, 1200, 2000],

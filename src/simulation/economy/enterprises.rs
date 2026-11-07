@@ -792,7 +792,10 @@ pub(super) fn expand(
                 ),
             ),
         );
+        let interested = expands(actors, config, firm);
         if operating
+            && interested
+            && kind(actors, firm).bits() != comptime!(Good::Housing as u32)
             && busy
             && lt(target, demand)
             && funded
@@ -899,4 +902,16 @@ pub(super) fn expand(
             );
         }
     }
+}
+
+#[cube]
+pub(super) fn expands(actors: &[u32], config: &EconomyConfig, firm: u32) -> bool {
+    let count = actors.len() / ActorLayout::WORDS;
+    let workers = actors[ActorLayout::CAPACITY * count + firm as usize];
+    let draw = actors[ActorLayout::EXPANSION_DRAW * count + firm as usize];
+    draw < select(
+        workers >= 20,
+        config.industrial_expansion,
+        config.small_business_expansion,
+    )
 }

@@ -382,6 +382,10 @@ fn capital_economy() -> Result<Scenario> {
         .config()
         .clone();
     config.household_production = HouseholdProduction::industrial();
+    config.expansion = enterprise::ExpansionPolicy {
+        small_business_per_mille: 1000,
+        industrial_per_mille: 1000,
+    };
     config.distribution_rate = 0;
     config.forecast_weight = 0;
     config.demography.annual_births_per_million_fertile_women = 0;
@@ -707,5 +711,32 @@ fn unfunded_food_firms_enter_liquidation_without_erasing_accounts() -> Result<()
         ObservationSnapshot::from_state(&scenario, &state)?
     );
     simulation.checkpoint()?.restore()?;
+    Ok(())
+}
+
+#[test]
+fn industrial_owners_expand_more_readily_than_small_proprietors_on_gpu() -> Result<()> {
+    for capacity in [1, 20] {
+        let mut config = capital_economy()?.config().clone();
+        config.expansion = enterprise::ExpansionPolicy {
+            small_business_per_mille: 0,
+            industrial_per_mille: 1000,
+        };
+        config.population.as_mut().unwrap().firms[0].capacity = capacity;
+        let scenario = Scenario::new(config)?;
+        let mut initial = scenario.initial()?;
+        initial.set(Field::Demand, 30, 100);
+        let mut simulation = Simulation::from_checkpoint(
+            Checkpoint::new(&scenario, &initial)?,
+            support::device(64)?,
+        )?;
+        simulation.advance()?;
+        let state = simulation.download()?;
+        assert_eq!(
+            state.get(Field::PendingCapacity, 30),
+            u64::from(capacity == 20)
+        );
+        assert_eq!(simulation.snapshot.cash, initial.initial_cash);
+    }
     Ok(())
 }

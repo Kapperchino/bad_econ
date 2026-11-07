@@ -1,4 +1,7 @@
-use crate::{domain::ObservationSnapshot, runtime::RuntimeState};
+use crate::{
+    domain::{Good, ObservationSnapshot},
+    runtime::RuntimeState,
+};
 use std::collections::VecDeque;
 
 pub enum DisplayState {
@@ -54,8 +57,121 @@ pub enum Chart {
     Wages,
     Inventories,
     Cash,
+    Population,
+    Businesses,
+    Housing,
+    Credit,
+    Research,
 }
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum Menu {
+    #[default]
+    Overview,
+    Market,
+    Industry,
+    Population,
+    Finance,
+}
+impl Menu {
+    pub const ALL: [Self; 5] = [
+        Self::Overview,
+        Self::Market,
+        Self::Industry,
+        Self::Population,
+        Self::Finance,
+    ];
+
+    pub fn label(self) -> &'static str {
+        match self {
+            Self::Overview => "Overview",
+            Self::Market => "Market",
+            Self::Industry => "Industry",
+            Self::Population => "Population",
+            Self::Finance => "Finance",
+        }
+    }
+
+    pub fn description(self) -> &'static str {
+        match self {
+            Self::Overview => "The state of the economy",
+            Self::Market => "Goods, prices & supply",
+            Self::Industry => "Production & enterprise",
+            Self::Population => "People & living conditions",
+            Self::Finance => "Credit & obligations",
+        }
+    }
+
+    pub fn charts(self) -> &'static [Chart] {
+        match self {
+            Self::Overview => &[Chart::Employment, Chart::Cash],
+            Self::Market => &[Chart::Prices, Chart::Inventories],
+            Self::Industry => &[Chart::Wages, Chart::Businesses, Chart::Research],
+            Self::Population => &[Chart::Population, Chart::Housing],
+            Self::Finance => &[Chart::Credit],
+        }
+    }
+}
+
 impl Chart {
+    pub const ALL: [Self; 10] = [
+        Self::Employment,
+        Self::Prices,
+        Self::Wages,
+        Self::Inventories,
+        Self::Cash,
+        Self::Population,
+        Self::Businesses,
+        Self::Housing,
+        Self::Credit,
+        Self::Research,
+    ];
+
+    pub fn menu(self) -> Menu {
+        match self {
+            Self::Employment | Self::Cash => Menu::Overview,
+            Self::Prices | Self::Inventories => Menu::Market,
+            Self::Wages | Self::Businesses | Self::Research => Menu::Industry,
+            Self::Population | Self::Housing => Menu::Population,
+            Self::Credit => Menu::Finance,
+        }
+    }
+
+    pub fn tab(self) -> &'static str {
+        match self {
+            Self::Employment => "Employment",
+            Self::Prices => "Prices",
+            Self::Wages => "Wages",
+            Self::Inventories => "Stocks",
+            Self::Cash => "Wealth",
+            Self::Population => "Demography",
+            Self::Businesses => "Businesses",
+            Self::Housing => "Housing",
+            Self::Credit => "Loans",
+            Self::Research => "Research",
+        }
+    }
+
+    pub fn series(self) -> Vec<String> {
+        match self {
+            Self::Employment => vec!["Paid households".into(), "Unmet bread".into()],
+            Self::Prices | Self::Wages | Self::Inventories => Good::ALL
+                .into_iter()
+                .map(|good| format!("{good:?}"))
+                .collect(),
+            Self::Cash => vec!["Households in cash bracket".into()],
+            Self::Population => ["Living", "Dependents", "Births", "Deaths"]
+                .map(String::from)
+                .into(),
+            Self::Businesses => ["Firms", "Entries", "Closures", "Distributors"]
+                .map(String::from)
+                .into(),
+            Self::Housing => ["Homeless households"].map(String::from).into(),
+            Self::Credit => ["Active loans", "Overdue loans"].map(String::from).into(),
+            Self::Research => ["Attempts", "Discoveries", "Striking"]
+                .map(String::from)
+                .into(),
+        }
+    }
     pub fn file_label(self) -> &'static str {
         match self {
             Self::Employment => "employment",
@@ -63,6 +179,11 @@ impl Chart {
             Self::Wages => "wages",
             Self::Inventories => "inventories",
             Self::Cash => "cash",
+            Self::Population => "population",
+            Self::Businesses => "businesses",
+            Self::Housing => "housing",
+            Self::Credit => "credit",
+            Self::Research => "research",
         }
     }
     pub fn next(self) -> Self {
@@ -71,7 +192,12 @@ impl Chart {
             Self::Prices => Self::Wages,
             Self::Wages => Self::Inventories,
             Self::Inventories => Self::Cash,
-            Self::Cash => Self::Employment,
+            Self::Cash => Self::Population,
+            Self::Population => Self::Businesses,
+            Self::Businesses => Self::Housing,
+            Self::Housing => Self::Credit,
+            Self::Credit => Self::Research,
+            Self::Research => Self::Employment,
         }
     }
     pub fn label(self) -> &'static str {
@@ -80,7 +206,12 @@ impl Chart {
             Self::Prices => "Mean prices | all goods",
             Self::Wages => "Mean wages | all industries",
             Self::Inventories => "Available stocks | all goods",
-            Self::Cash => "Household cash | bins 0, 1, 2-3, 4-7, ...",
+            Self::Cash => "Household cash distribution",
+            Self::Population => "Population & demographic change",
+            Self::Businesses => "Business activity",
+            Self::Housing => "Households without housing",
+            Self::Credit => "Active & overdue loans",
+            Self::Research => "Research & industrial action",
         }
     }
     pub fn values(self, snapshot: &ObservationSnapshot) -> Vec<f64> {
@@ -101,6 +232,25 @@ impl Chart {
                 .iter()
                 .map(|value| *value as f64)
                 .collect(),
+            Self::Population => vec![
+                snapshot.population.living as f64,
+                snapshot.population.dependents as f64,
+                snapshot.population.births as f64,
+                snapshot.population.deaths.iter().sum::<u64>() as f64,
+            ],
+            Self::Businesses => vec![
+                snapshot.firms as f64,
+                snapshot.firm_entries as f64,
+                snapshot.firm_closures as f64,
+                snapshot.distributors as f64,
+            ],
+            Self::Housing => vec![snapshot.homeless_households as f64],
+            Self::Credit => vec![snapshot.active_loans as f64, snapshot.overdue_loans as f64],
+            Self::Research => vec![
+                snapshot.research.attempts as f64,
+                snapshot.research.discoveries as f64,
+                snapshot.research.striking as f64,
+            ],
             Self::Cash => snapshot
                 .wealth_bins
                 .iter()
@@ -179,6 +329,14 @@ impl ChartRange {
             ),
             Chart::Wages => format!(
                 "0-{:.1} cash / working minute | days {}-{}",
+                self.maximum, self.first_day, self.last_day
+            ),
+            Chart::Population
+            | Chart::Businesses
+            | Chart::Housing
+            | Chart::Credit
+            | Chart::Research => format!(
+                "0-{:.0} count | days {}-{}",
                 self.maximum, self.first_day, self.last_day
             ),
             Chart::Inventories => format!(

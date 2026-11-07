@@ -72,6 +72,9 @@ pub(in crate::simulation) fn launch(
     let stages: &[PropertyStage] = match (config.property_mode, phase) {
         (Feature::Enabled, Phase::Opening) => &[PropertyStage::Initialize, PropertyStage::Allocate],
         (Feature::Enabled, Phase::PhysicalClose) => &[PropertyStage::Construct],
+        (Feature::Disabled, Phase::PhysicalClose) if config.rental_businesses > 0 => {
+            &[PropertyStage::Construct]
+        }
         _ => &[],
     };
     for &stage in stages {
@@ -188,7 +191,11 @@ fn initialize(state: &mut [u32], actors: &[u32], config: &EconomyConfig, actor: 
             comptime!(PropertyUse::Farm as u32),
             usage,
         );
-        usage = select(kind == 0, comptime!(PropertyUse::Housing as u32), usage);
+        usage = select(
+            kind == 0 || kind == comptime!(Good::Housing as u32),
+            comptime!(PropertyUse::Housing as u32),
+            usage,
+        );
         usage = select(
             kind > 0
                 && number(

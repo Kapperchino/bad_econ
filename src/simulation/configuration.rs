@@ -125,6 +125,10 @@ pub struct EconomyConfig {
     #[cube(comptime)]
     pub property_mode: Feature,
     pub property_regions: Box<[u32]>,
+    pub rental_accounts: Box<[u32]>,
+    pub rental_businesses: u32,
+    pub small_business_expansion: u32,
+    pub industrial_expansion: u32,
 }
 pub struct Configuration {
     pub actors: u32,
@@ -168,11 +172,20 @@ pub struct Configuration {
     pub tax_brackets: Vec<TaxBracket>,
     pub property_mode: Feature,
     pub property_regions: burn_wgpu::CubeTensor,
+    pub rental_accounts: burn_wgpu::CubeTensor,
+    pub rental_businesses: u32,
+    pub small_business_expansion: u32,
+    pub industrial_expansion: u32,
 }
 impl Configuration {
     pub fn new(device: &super::Device, scenario: &Scenario, state: &State) -> Self {
         let config = scenario.config();
+        let rentals = crate::domain::landlords::RentalRegistry::new(scenario, state);
         Self {
+            small_business_expansion: config.expansion.small_business_per_mille,
+            industrial_expansion: config.expansion.industrial_per_mille,
+            rental_accounts: device.tensor(&rentals.words()),
+            rental_businesses: rentals.accounts.len() as u32,
             actors: state.actors.len() as u32,
             fields: scenario.fields() as u32,
             ring: scenario.ring() as u32,
@@ -269,6 +282,10 @@ impl Configuration {
     }
     pub fn launch(&self) -> EconomyConfigLaunch {
         EconomyConfigLaunch {
+            small_business_expansion: self.small_business_expansion,
+            industrial_expansion: self.industrial_expansion,
+            rental_accounts: self.rental_accounts.clone().into_buffer_arg(),
+            rental_businesses: self.rental_businesses,
             property_mode: self.property_mode,
             property_regions: self.property_regions.clone().into_buffer_arg(),
             actors: self.actors,

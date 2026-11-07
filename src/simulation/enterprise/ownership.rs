@@ -248,7 +248,11 @@ fn payments(
                 payroll,
                 state[(comptime!(Field::OperatingReserve as u32) * actors + firm) as usize],
             ),
-            ticks(config.reserve_low, config.reserve_high),
+            select(
+                labor == 0,
+                zero(),
+                ticks(config.reserve_low, config.reserve_high),
+            ),
         );
         let amount = ratio(positive(cash, reserve), config.distribution_rate, 1000);
         amount.faults.record(control);
@@ -335,7 +339,11 @@ fn original_distribute(
                         comptime!(Field::OperatingReserve as u32) * actors + firm,
                     ),
                 ),
-                ticks(config.reserve_low, config.reserve_high),
+                select(
+                    labor == 0,
+                    zero(),
+                    ticks(config.reserve_low, config.reserve_high),
+                ),
             );
             let amount = ratio(positive(cash, reserve), config.distribution_rate, 1000);
             amount.faults.record(control);

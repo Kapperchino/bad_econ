@@ -9,6 +9,81 @@ pub enum EntrepreneurialInterest {
     Interested,
 }
 
+#[repr(u32)]
+#[derive(Clone, Copy, Debug, Serialize, Deserialize, PartialEq, Eq)]
+pub enum ExpansionDisposition {
+    Maintain,
+    Expand,
+}
+
+#[derive(Clone, Copy, Debug, Serialize, Deserialize, PartialEq, Eq)]
+pub enum BusinessScale {
+    SmallBusiness,
+    Industrial,
+}
+
+impl BusinessScale {
+    pub fn from_workers(workers: u32) -> Self {
+        match workers {
+            0..20 => Self::SmallBusiness,
+            _ => Self::Industrial,
+        }
+    }
+}
+
+#[derive(Clone, Copy, Debug, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+pub struct ExpansionPolicy {
+    pub small_business_per_mille: u32,
+    pub industrial_per_mille: u32,
+}
+
+impl Default for ExpansionPolicy {
+    fn default() -> Self {
+        Self {
+            small_business_per_mille: 80,
+            industrial_per_mille: 600,
+        }
+    }
+}
+
+impl ExpansionPolicy {
+    pub fn new(policy: Self) -> Result<Self> {
+        match policy.small_business_per_mille <= policy.industrial_per_mille
+            && policy.industrial_per_mille <= 1000
+        {
+            true => Ok(policy),
+            false => Err(anyhow!(
+                "expansion probabilities require 0 <= small business <= industrial <= 1000"
+            )),
+        }
+    }
+
+    pub fn disposition(self, seed: u64, owner: u64, scale: BusinessScale) -> ExpansionDisposition {
+        let threshold = match scale {
+            BusinessScale::SmallBusiness => self.small_business_per_mille,
+            BusinessScale::Industrial => self.industrial_per_mille,
+        };
+        match Self::draw(seed, owner) < threshold {
+            true => ExpansionDisposition::Expand,
+            false => ExpansionDisposition::Maintain,
+        }
+    }
+
+    pub fn draw(seed: u64, owner: u64) -> u32 {
+        (crate::arithmetic::DrawKey {
+            seed,
+            day: 0,
+            phase: 0,
+            actor: owner,
+            purpose: 3,
+            index: 0,
+        }
+        .draw()
+            % 1000) as u32
+    }
+}
+
 #[derive(Clone, Copy, Debug, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(deny_unknown_fields)]
 pub struct EntrepreneurshipPolicy {

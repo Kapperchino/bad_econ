@@ -12,6 +12,7 @@ mod finance;
 mod households;
 mod industry;
 mod institutions;
+mod landlords;
 mod payroll;
 mod policies;
 mod population;

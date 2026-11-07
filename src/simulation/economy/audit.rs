@@ -372,7 +372,7 @@ fn summarize_metrics(input: &mut SummaryInput) {
                             Field::PayrollReserve as u32,
                             Field::TaxTreasury as u32,
                             Field::ChargeTreasury as u32,
-                            Field::RentTreasury as u32,
+                            Field::RentPending as u32,
                         ] {
                             amount = checked_sum(
                                 amount,

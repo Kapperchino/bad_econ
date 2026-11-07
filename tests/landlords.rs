@@ -1,0 +1,363 @@
+#![cfg(feature = "compute")]
+use crate::support;
+use anyhow::Result;
+use bad_econ::{
+    domain::{
+        property::{ProjectStatus, PropertyConfig, PropertyRegion, PropertySnapshot},
+        *,
+    },
+    simulation::Simulation,
+};
+
+fn rentals() -> Result<ScenarioConfig> {
+    let mut config = Scenario::baseline(8, 42, Experiment::Concentrated)?
+        .config()
+        .clone();
+    config.economy = Economy::Industrial;
+    config.firms = 3;
+    config.expansion = enterprise::ExpansionPolicy {
+        small_business_per_mille: 1000,
+        industrial_per_mille: 1000,
+    };
+    config.prices = [1; 3];
+    config.coverage = 2;
+    config.forecast_weight = 0;
+    config.distribution_rate = 0;
+    config.behavior.price_response = 0;
+    config.entrepreneurship.interested_per_mille = 0;
+    config.rent = Some(RentPolicy {
+        household_daily: 10,
+        firm_daily: 10,
+    });
+    config.demography.annual_births_per_million_fertile_women = 0;
+    config.demography.mortality.background_annual_ppm = [0; 5];
+    config.demography.mortality.occupational_annual_ppm = [0; Good::COUNT];
+    let mut materials = [0; Good::COUNT];
+    materials[Good::Construction as usize - 1] = 100;
+    config.population = Some(Population {
+        households: (1..=8)
+            .map(|identity| HouseholdSeed {
+                identity,
+                position: Position { x: 250, y: 250 },
+                cash: match identity {
+                    1 => 3000,
+                    _ => 1000,
+                },
+                inventories: Good::food([0, 0, 100]),
+                fatigue: 0,
+            })
+            .collect(),
+        firms: vec![
+            FirmSeed {
+                identity: 101,
+                position: Position { x: 250, y: 250 },
+                owner: 2,
+                good: Good::Construction,
+                cash: 1000,
+                inventories: materials,
+                capacity: 1,
+                technique: Technique::new(60, 1, 1)?,
+                wage: 1,
+                price: Good::Construction.initial_price(),
+            },
+            FirmSeed {
+                identity: 102,
+                position: Position { x: 250, y: 250 },
+                owner: 2,
+                good: Good::Grain,
+                cash: 1000,
+                inventories: [0; Good::COUNT],
+                capacity: 1,
+                technique: Technique::new(60, 0, 1)?,
+                wage: 1,
+                price: 1,
+            },
+            FirmSeed {
+                identity: 103,
+                position: Position { x: 250, y: 250 },
+                owner: 1,
+                good: Good::Housing,
+                cash: 20_000,
+                inventories: [0; Good::COUNT],
+                capacity: 0,
+                technique: Technique::housing(8)?,
+                wage: 1,
+                price: 10,
+            },
+        ],
+    });
+    Ok(config)
+}
+
+fn region(plots: u32) -> PropertyConfig {
+    PropertyConfig {
+        regions: vec![PropertyRegion {
+            lower: Position { x: 0, y: 0 },
+            upper: Position { x: 1000, y: 1000 },
+            plots,
+            landowner: 1,
+        }],
+        buildings: vec![],
+        orders: vec![],
+    }
+}
+
+#[test]
+fn rental_income_funds_paid_housing_and_replays_on_gpu() -> Result<()> {
+    for property in [None, Some(region(14))] {
+        let mut config = rentals()?;
+        config.property = property;
+        let scenario = Scenario::new(config)?;
+        let initial = scenario.initial()?;
+        let mut simulation = Simulation::new(scenario.clone(), support::device(64)?)?;
+        simulation.advance()?;
+        let ordered = simulation.download()?;
+        assert_eq!(
+            ordered.get(Field::RentalIncome, 10),
+            100,
+            "property {:?}, housing {}, plots {}, supply {}, household cash {}, bread {}, need {}, rent paid {}, arrears {}",
+            scenario.config().property.is_some(),
+            ordered.get(Field::Housing, 10),
+            ordered.get(Field::OccupiedPlots, 10),
+            ordered.get(Field::HousingAvailable, 0),
+            ordered.get(Field::Cash, 0),
+            ordered.get(Field::Bread, 0),
+            ordered.get(Field::FoodNeed, 0),
+            ordered.get(Field::RentTreasury, 0),
+            ordered.get(Field::RentArrears, 0)
+        );
+        assert_eq!(
+            ordered.get(Field::Cash, 10),
+            initial.get(Field::Cash, 10) + 100 - 120
+        );
+        assert_eq!(ordered.get(Field::ConstructionRemaining, 10), 20);
+        assert_eq!(ordered.get(Field::OutputTicks, 10), 8);
+        assert_eq!(ordered.get(Field::RentalIncome, 1), 0);
+        for actor in 0..ordered.actors.len() {
+            assert_eq!(ordered.get(Field::RentPending, actor), 0);
+            assert_eq!(
+                ordered.get(Field::Landlord, actor),
+                match actor {
+                    10 => 0,
+                    _ => 11,
+                }
+            );
+        }
+        let encoded = serde_json::to_string(&simulation.checkpoint()?)?;
+        let mut resumed =
+            Simulation::from_checkpoint(serde_json::from_str(&encoded)?, support::device(32)?)?;
+        for _ in 0..3 {
+            simulation.advance()?;
+            resumed.advance()?;
+            assert_eq!(simulation.download()?, resumed.download()?);
+            assert_eq!(simulation.snapshot.cash, initial.initial_cash);
+        }
+        let completed = simulation.download()?;
+        assert_eq!(
+            completed.get(Field::ProjectStatus, 10),
+            ProjectStatus::Completed as u64,
+            "property {:?}, project {:?}, builder {:?}",
+            scenario.config().property.is_some(),
+            [
+                Field::ConstructionRemaining,
+                Field::Construction,
+                Field::Transit,
+                Field::Cash,
+                Field::Purchased
+            ]
+            .map(|field| completed.get(field, 10)),
+            [Field::Construction, Field::Price, Field::Sales].map(|field| completed.get(field, 8))
+        );
+        assert_eq!(completed.get(Field::ConstructionRemaining, 10), 0);
+        assert_eq!(completed.get(Field::OccupiedPlots, 10), 2);
+        assert_eq!(
+            simulation.snapshot.used[Good::Construction as usize - 1],
+            20
+        );
+        assert!(completed.get(Field::Cash, 8) > initial.get(Field::Cash, 8));
+        assert_eq!(
+            simulation.snapshot,
+            ObservationSnapshot::from_state(&scenario, &completed)?
+        );
+        let inspection = InspectionRequest::new(103, &scenario)?;
+        let inspected = simulation.inspect(inspection.clone())?;
+        assert_eq!(inspected, Inspection::from_state(&completed, &inspection)?);
+        assert_eq!(inspected.rental_business.unwrap().homes, 16);
+        if let Some(property) = PropertySnapshot::from_state(&scenario, &completed)? {
+            assert_eq!(property.regions[0].housing, 2);
+            assert_eq!(property.regions[0].reserved, 0);
+        }
+    }
+    Ok(())
+}
+
+#[derive(Clone, Copy)]
+enum Constraint {
+    Savings,
+    Supply,
+    Land,
+}
+
+#[test]
+fn rental_development_requires_savings_construction_supply_and_land_on_gpu() -> Result<()> {
+    for constraint in [Constraint::Savings, Constraint::Supply, Constraint::Land] {
+        let mut config = rentals()?;
+        let expected = match constraint {
+            Constraint::Savings => {
+                config.population.as_mut().unwrap().firms[2].cash = 0;
+                ProjectStatus::None
+            }
+            Constraint::Supply => {
+                config.population.as_mut().unwrap().firms[0].inventories
+                    [Good::Construction as usize - 1] = 0;
+                ProjectStatus::Building
+            }
+            Constraint::Land => {
+                config.property = Some(region(3));
+                ProjectStatus::Requested
+            }
+        };
+        let scenario = Scenario::new(config)?;
+        let mut simulation = Simulation::new(scenario, support::device(64)?)?;
+        let cash = simulation.snapshot.cash;
+        for _ in 0..4 {
+            simulation.advance()?;
+        }
+        let state = simulation.download()?;
+        assert_eq!(state.get(Field::ProjectStatus, 10), expected as u64);
+        assert_eq!(state.get(Field::OccupiedPlots, 10), 1);
+        assert_eq!(simulation.snapshot.used[Good::Construction as usize - 1], 0);
+        assert_eq!(simulation.snapshot.cash, cash);
+    }
+    Ok(())
+}
+
+#[test]
+fn small_owners_can_take_income_without_expanding_on_gpu() -> Result<()> {
+    let mut config = rentals()?;
+    config.expansion = enterprise::ExpansionPolicy {
+        small_business_per_mille: 0,
+        industrial_per_mille: 1000,
+    };
+    config.distribution_rate = 1000;
+    config.reserve = 0;
+    let scenario = Scenario::new(config)?;
+    let mut simulation = Simulation::new(scenario.clone(), support::device(64)?)?;
+    let initial = simulation.download()?;
+    for _ in 0..3 {
+        simulation.advance()?;
+    }
+    let state = simulation.download()?;
+    assert_eq!(state.actors.at(10).capacity, 0);
+    assert_eq!(state.get(Field::Plan, 10), 0);
+    assert_eq!(state.get(Field::Slots, 10), 0);
+    assert_eq!(state.get(Field::Hours, 10), 0);
+    assert_eq!(
+        state.get(Field::ProjectStatus, 10),
+        ProjectStatus::None as u64
+    );
+    assert!(state.get(Field::Cash, 0) > initial.get(Field::Cash, 0));
+    assert_eq!(simulation.snapshot.cash, initial.initial_cash);
+    let policy = scenario.config().expansion;
+    assert_eq!(
+        policy.disposition(42, 1, enterprise::BusinessScale::SmallBusiness),
+        enterprise::ExpansionDisposition::Maintain
+    );
+    assert_eq!(
+        policy.disposition(42, 1, enterprise::BusinessScale::Industrial),
+        enterprise::ExpansionDisposition::Expand
+    );
+    Ok(())
+}
+
+#[test]
+fn housing_needs_maintenance_and_never_hires_workers_on_gpu() -> Result<()> {
+    let mut config = rentals()?;
+    config.expansion = enterprise::ExpansionPolicy {
+        small_business_per_mille: 0,
+        industrial_per_mille: 0,
+    };
+    config.population.as_mut().unwrap().firms[0].inventories[Good::Construction as usize - 1] = 0;
+    let scenario = Scenario::new(config)?;
+    let mut initial = scenario.initial()?;
+    initial.set(Field::MaintenanceDays, 10, 1);
+    let mut simulation =
+        Simulation::from_checkpoint(Checkpoint::new(&scenario, &initial)?, support::device(64)?)?;
+    simulation.advance()?;
+    assert_eq!(simulation.snapshot.produced[Good::Housing as usize - 1], 8);
+    simulation.advance()?;
+    let state = simulation.download()?;
+    assert_eq!(simulation.snapshot.produced[Good::Housing as usize - 1], 8);
+    assert_eq!(state.get(Field::MaintenanceDays, 10), 0);
+    assert_eq!(state.get(Field::Slots, 10), 0);
+    assert_eq!(state.get(Field::Plan, 10), 0);
+    assert_eq!(
+        state.get(Field::HousingStatus, 0),
+        HousingState::Homeless as u64
+    );
+    assert_eq!(simulation.snapshot.cash, initial.initial_cash);
+    Ok(())
+}
+
+#[test]
+fn rental_capacity_and_regional_payments_are_separate_on_gpu() -> Result<()> {
+    let mut config = rentals()?;
+    config.expansion = enterprise::ExpansionPolicy {
+        small_business_per_mille: 0,
+        industrial_per_mille: 0,
+    };
+    config.firms = 4;
+    let population = config.population.as_mut().unwrap();
+    population.households[4..]
+        .iter_mut()
+        .for_each(|household| household.position.x = 750);
+    population.firms[2].technique = Technique::housing(1)?;
+    let mut second = population.firms[2].clone();
+    second.identity = 104;
+    second.owner = 5;
+    second.position.x = 750;
+    second.technique = Technique::housing(4)?;
+    population.firms.push(second);
+    config.property = Some(PropertyConfig {
+        regions: vec![
+            PropertyRegion {
+                lower: Position { x: 0, y: 0 },
+                upper: Position { x: 500, y: 1000 },
+                plots: 7,
+                landowner: 1,
+            },
+            PropertyRegion {
+                lower: Position { x: 500, y: 0 },
+                upper: Position { x: 1000, y: 1000 },
+                plots: 5,
+                landowner: 5,
+            },
+        ],
+        buildings: vec![],
+        orders: vec![],
+    });
+    let scenario = Scenario::new(config)?;
+    let mut simulation = Simulation::new(scenario.clone(), support::device(64)?)?;
+    let cash = simulation.snapshot.cash;
+    simulation.advance()?;
+    let state = simulation.download()?;
+    assert_eq!(state.get(Field::RentalIncome, 10), 30);
+    assert_eq!(state.get(Field::RentalIncome, 11), 40);
+    assert_eq!(state.get(Field::Landlord, 3), 11);
+    assert_eq!(state.get(Field::Landlord, 7), 12);
+    assert_eq!(
+        state.get(Field::HousingStatus, 0),
+        HousingState::Housed as u64
+    );
+    assert_eq!(
+        state.get(Field::HousingStatus, 1),
+        HousingState::Homeless as u64
+    );
+    assert_eq!(simulation.snapshot.cash, cash);
+    assert_eq!(
+        simulation.snapshot,
+        ObservationSnapshot::from_state(&scenario, &state)?
+    );
+    simulation.checkpoint()?.restore()?;
+    Ok(())
+}

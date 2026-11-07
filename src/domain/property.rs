@@ -24,6 +24,7 @@ impl PropertyUse {
             state.get(Field::EnterpriseModel, site),
         ) {
             (0, _) => Ok(Self::Housing),
+            (kind, _) if kind == Good::Housing as u32 => Ok(Self::Housing),
             (_, model) if model == EnterpriseModel::Distributor as u64 => Ok(Self::Store),
             (kind, _) => match Good::from_index(kind)?.kind() {
                 GoodKind::Natural => Ok(Self::Farm),
@@ -171,6 +172,12 @@ impl PropertyConfig {
     }
 
     pub fn initialize(&self, state: &mut State) -> Result<()> {
+        let rental_regions = state
+            .actors
+            .iter()
+            .filter(|actor| actor.kind == Good::Housing as u32)
+            .map(|actor| self.region(actor.position))
+            .collect::<Result<BTreeSet<_>>>()?;
         for region in &self.regions {
             match state
                 .actors
@@ -195,7 +202,15 @@ impl PropertyConfig {
                 index,
                 PropertyUse::for_site(state, index)? as u64,
             );
-            state.set(Field::OccupiedPlots, index, 1);
+            let plots = match (
+                actor.kind,
+                rental_regions.contains(&self.region(actor.position)?),
+                state.get(Field::LandPlots, index),
+            ) {
+                (0, true, 0) => 0,
+                _ => 1,
+            };
+            state.set(Field::OccupiedPlots, index, plots);
             state.set(
                 Field::WorkersPerPlot,
                 index,
@@ -270,7 +285,7 @@ impl PropertyConfig {
                         * state.get(Field::OccupiedPlots, site).max(1)
                 }
             };
-            match (1..=10_000).contains(&capacity) {
+            match capacity <= 10_000 && (capacity > 0 || actor.kind == Good::Housing as u32) {
                 true => actor.capacity = capacity as u32,
                 false => Err(anyhow!("building plots exceed staffing capacity"))?,
             }
@@ -380,6 +395,7 @@ impl PropertySnapshot {
             let capacity = u64::from(actor.capacity) + state.get(Field::PendingCapacity, index);
             let staffing = match actor.kind {
                 0 => workers == 0,
+                kind if kind == Good::Housing as u32 => workers == 0 && capacity == 0,
                 _ => workers > 0 && expected <= 10_000 && u128::from(capacity) == expected,
             };
             match staffing {

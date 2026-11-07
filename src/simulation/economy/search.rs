@@ -163,9 +163,7 @@ pub(super) fn prepare(
                     wanted = select(search, maximum(wanted, ticks(2, 0)), ticks(2, 0));
                     search = true;
                 }
-                if comptime!(config.property_mode == Feature::Enabled)
-                    && good == comptime!(Good::Construction as u32)
-                {
+                if good == comptime!(Good::Construction as u32) {
                     let building =
                         number(state, config, comptime!(Field::ProjectStatus as u32), id)
                             == comptime!(crate::domain::property::ProjectStatus::Building as u32);
@@ -181,6 +179,11 @@ pub(super) fn prepare(
                         wanted,
                     );
                     search = search || building;
+                    if k.bits() == comptime!(Good::Housing as u32) {
+                        wanted =
+                            add_checked(control, wanted, landlords::maintenance(state, config, id));
+                        search = true;
+                    }
                 }
             }
             MarketFlag::Consumer(_) => {
@@ -241,7 +244,11 @@ pub(super) fn prepare(
                         positive(
                             value(state, config, comptime!(Field::Cash as u32), id),
                             maximum(
-                                ticks(config.reserve_low, config.reserve_high),
+                                select(
+                                    k.bits() == comptime!(Good::Housing as u32),
+                                    zero(),
+                                    ticks(config.reserve_low, config.reserve_high),
+                                ),
                                 value(state, config, comptime!(Field::OperatingReserve as u32), id),
                             ),
                         ),

@@ -12,6 +12,34 @@ pub struct Technique {
     pub output_ticks: u32,
 }
 impl Technique {
+    pub fn housing(units: u32) -> Result<Self> {
+        match (1..=100).contains(&units) {
+            true => Ok(Self {
+                labor_minutes: 0,
+                input_ticks: 1,
+                output_ticks: units,
+            }),
+            false => Err(anyhow!(
+                "housing requires one to one hundred units per plot"
+            )),
+        }
+    }
+
+    pub fn for_good(self, good: Good) -> Result<Self> {
+        match good {
+            Good::Housing => match self.labor_minutes == 0
+                && (1..=100).contains(&self.input_ticks)
+                && (1..=100).contains(&self.output_ticks)
+            {
+                true => Ok(self),
+                false => Err(anyhow!(
+                    "housing requires maintenance inputs and zero workers"
+                )),
+            },
+            _ => Self::new(self.labor_minutes, self.input_ticks, self.output_ticks),
+        }
+    }
+
     pub fn new(labor_minutes: u32, input_ticks: u32, output_ticks: u32) -> Result<Self> {
         match (1..=1440).contains(&labor_minutes)
             && input_ticks <= 100
@@ -120,16 +148,14 @@ impl Population {
                     .households
                     .binary_search_by_key(&actor.owner, |owner| owner.identity)
                     .is_ok()
-                && (1..=10_000).contains(&actor.capacity)
+                && match actor.good {
+                    Good::Housing => actor.capacity == 0,
+                    _ => (1..=10_000).contains(&actor.capacity),
+                }
                 && (1..=10_000).contains(&actor.wage)
                 && (config.minimum_price..=config.maximum_price).contains(&actor.price)
                 && actor.technique.labor_minutes <= config.work_cap
-                && Technique::new(
-                    actor.technique.labor_minutes,
-                    actor.technique.input_ticks,
-                    actor.technique.output_ticks,
-                )
-                .is_ok()
+                && actor.technique.for_good(actor.good).is_ok()
                 && input
         });
         let bounds = [

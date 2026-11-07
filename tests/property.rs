@@ -109,13 +109,13 @@ fn development() -> Result<ScenarioConfig> {
             PropertyRegion {
                 lower: Position { x: 0, y: 0 },
                 upper: Position { x: 500, y: 1000 },
-                space: 14,
+                plots: 14,
                 landowner: 1,
             },
             PropertyRegion {
                 lower: Position { x: 500, y: 0 },
                 upper: Position { x: 1000, y: 1000 },
-                space: 5,
+                plots: 5,
                 landowner: 7,
             },
         ],
@@ -125,7 +125,7 @@ fn development() -> Result<ScenarioConfig> {
             .map(|site| ConstructionOrder {
                 landowner: 1,
                 site,
-                space: match site {
+                plots: match site {
                     1 => 1,
                     _ => 2,
                 },
@@ -158,7 +158,7 @@ fn contractors_build_housing_farms_and_factories_and_displace_only_local_farmers
     assert!(simulation.snapshot.used[Good::Tools as usize - 1] > 0);
     assert_eq!(first.get(Field::Produced, 9), 0);
     assert_eq!(first.get(Field::Produced, 10), 0);
-    assert_eq!(first.get(Field::PropertySpace, 9), 0);
+    assert_eq!(first.get(Field::OccupiedPlots, 9), 0);
     let mut replay = Simulation::from_checkpoint(simulation.checkpoint()?, support::device(32)?)?;
     for _ in 0..12 {
         simulation.advance()?;
@@ -172,7 +172,7 @@ fn contractors_build_housing_farms_and_factories_and_displace_only_local_farmers
             ProjectStatus::Completed as u64
         );
         assert_eq!(completed.get(Field::ConstructionRemaining, site), 0);
-        assert_eq!(completed.get(Field::PropertySpace, site), 2);
+        assert_eq!(completed.get(Field::OccupiedPlots, site), 2);
     }
     assert_eq!(
         completed.get(Field::EnterpriseStatus, 9),
@@ -199,7 +199,7 @@ fn contractors_build_housing_farms_and_factories_and_displace_only_local_farmers
 #[test]
 fn scarce_space_reserves_projects_in_order_without_overallocating_the_region() -> Result<()> {
     let mut config = development()?;
-    config.property.as_mut().unwrap().regions[0].space = 11;
+    config.property.as_mut().unwrap().regions[0].plots = 11;
     let scenario = Scenario::new(config)?;
     let mut simulation = Simulation::new(scenario.clone(), support::device(64)?)?;
     simulation.phase(Phase::Opening, Trace::Discard)?;
@@ -216,7 +216,7 @@ fn scarce_space_reserves_projects_in_order_without_overallocating_the_region() -
         state.get(Field::ProjectStatus, 10),
         ProjectStatus::Requested as u64
     );
-    assert_eq!(state.get(Field::ReservedSpace, 10), 0);
+    assert_eq!(state.get(Field::ReservedPlots, 10), 0);
     let allocation = PropertySnapshot::from_state(&scenario, &state)?.unwrap();
     assert_eq!(allocation.regions[0].reserved, 3);
     assert_eq!(allocation.regions[0].free, 0);
@@ -263,7 +263,7 @@ fn invalid_regions_ownership_and_initial_overallocation_are_rejected_before_gpu_
     config.property.as_mut().unwrap().orders[0].landowner = 2;
     assert!(Simulation::new(Scenario::new(config)?, support::device(64)?).is_err());
     let mut config = development()?;
-    config.property.as_mut().unwrap().regions[0].space = 7;
+    config.property.as_mut().unwrap().regions[0].plots = 7;
     assert!(Simulation::new(Scenario::new(config)?, support::device(64)?).is_err());
     Ok(())
 }
@@ -274,7 +274,7 @@ fn completed_extensions_add_capacity_and_keep_existing_production_operating() ->
     config.property.as_mut().unwrap().orders = vec![ConstructionOrder {
         landowner: 1,
         site: 102,
-        space: 2,
+        plots: 2,
         work: 6,
         development: Development::Extension,
     }];
@@ -289,13 +289,13 @@ fn completed_extensions_add_capacity_and_keep_existing_production_operating() ->
     let state = simulation.download()?;
     assert_eq!(
         state.actors.at(9).capacity,
-        4,
+        6,
         "project {:?}; builder {:?}",
         [
             Field::ConstructionRemaining,
             Field::Construction,
             Field::ProjectStatus,
-            Field::ReservedSpace,
+            Field::ReservedPlots,
             Field::PendingCapacity
         ]
         .map(|field| state.get(field, 9)),
@@ -308,7 +308,7 @@ fn completed_extensions_add_capacity_and_keep_existing_production_operating() ->
         ]
         .map(|field| state.get(field, 8))
     );
-    assert_eq!(state.get(Field::PropertySpace, 9), 3);
+    assert_eq!(state.get(Field::OccupiedPlots, 9), 3);
     assert_eq!(state.get(Field::PendingCapacity, 9), 0);
     PropertySnapshot::from_state(&scenario, &state)?;
     simulation.checkpoint()?.restore()?;

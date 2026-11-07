@@ -1044,6 +1044,13 @@ impl Simulation {
         });
         match observation {
             Ok(mut snapshot) => {
+                if previous_actors.is_some() {
+                    self.config = configuration::Configuration::new(
+                        &self.device,
+                        &self.scenario,
+                        &self.metadata,
+                    );
+                }
                 if let Some(ownership) = ownership {
                     self.ownership = Some(ownership);
                 }
@@ -1140,6 +1147,14 @@ impl Simulation {
             );
         }
         economy::property::launch(
+            &self.device,
+            &self.state,
+            &self.actors,
+            &self.config,
+            &self.control,
+            phase,
+        );
+        economy::landlords::launch(
             &self.device,
             &self.state,
             &self.actors,
@@ -1965,6 +1980,17 @@ impl Simulation {
             employee_charges: values[Field::ChargeTreasury as usize],
             rent_collected: values[Field::RentTreasury as usize],
             rent_arrears: values[Field::RentArrears as usize],
+            landlord_identity: values[Field::Landlord as usize]
+                .checked_sub(1)
+                .and_then(|landlord| self.metadata.actors.get(landlord as usize))
+                .map(|actor| actor.identity),
+            rental_business: (self.metadata.actors.at(actor).kind == Good::Housing as u32).then(
+                || crate::domain::landlords::RentalBusiness {
+                    homes: values[Field::OccupiedPlots as usize]
+                        * values[Field::OutputTicks as usize],
+                    income: values[Field::RentalIncome as usize],
+                },
+            ),
             housing_state: match self.metadata.actors.at(actor).kind {
                 0 => Some(crate::domain::HousingState::from_index(
                     values[Field::HousingStatus as usize],
@@ -1996,6 +2022,11 @@ impl Simulation {
             living_members: values[Field::LivingMembers as usize],
             equipment_condition: values[Field::EquipmentCondition as usize],
             safety_provision: values[Field::SafetyProvision as usize],
+            business_scale: (self.metadata.actors.at(actor).kind > 0).then(|| {
+                crate::domain::enterprise::BusinessScale::from_workers(
+                    self.metadata.actors.at(actor).capacity,
+                )
+            }),
             enterprise_model: match values[Field::EnterpriseModel as usize] {
                 1 => crate::domain::enterprise::EnterpriseModel::Distributor,
                 _ => crate::domain::enterprise::EnterpriseModel::Producer,

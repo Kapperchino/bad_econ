@@ -105,6 +105,7 @@ row_layout!(ActorMetadataRows, ActorLayout {
     capacity: u32 => CAPACITY,
     geographic_capacity: u32 => GEOGRAPHIC_CAPACITY,
     entrepreneurial_interest: u32 => ENTREPRENEURIAL_INTEREST,
+    expansion_draw: u32 => EXPANSION_DRAW,
 });
 impl ActorLayout {
     pub fn new(actor: &Actor, scenario: &Scenario) -> Self {
@@ -115,6 +116,10 @@ impl ActorLayout {
             owner: actor.owner,
             capacity: actor.capacity,
             geographic_capacity: scenario.geographic_capacity(actor),
+            expansion_draw: crate::domain::enterprise::ExpansionPolicy::draw(
+                scenario.config().seed,
+                u64::from(actor.owner),
+            ),
             entrepreneurial_interest: scenario
                 .config()
                 .entrepreneurship

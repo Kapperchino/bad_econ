@@ -25,7 +25,14 @@ pub(super) fn obligation(
     add_checked(
         control,
         value(state, config, comptime!(Field::RentArrears as u32), firm),
-        ticks(config.firm_rent, 0),
+        ticks(
+            select(
+                number(state, config, comptime!(Field::LaborMinutes as u32), firm) == 0,
+                0,
+                config.firm_rent,
+            ),
+            0,
+        ),
     )
 }
 
@@ -45,6 +52,8 @@ pub(super) fn collect(
             Tenants::Firms => !household,
         };
         if selected {
+            let assigned = config.rental_businesses == 0
+                || number(state, config, comptime!(Field::Landlord as u32), actor) > 0;
             let mut daily = match kind(actors, actor).bits() {
                 ActorKind::HOUSEHOLD_BITS => select(
                     number(state, config, comptime!(Field::LivingMembers as u32), actor) > 0
@@ -59,10 +68,15 @@ pub(super) fn collect(
                         comptime!(Field::EnterpriseStatus as u32),
                         actor,
                     ) < comptime!(EnterpriseState::Liquidating as u32),
-                    config.firm_rent,
+                    select(
+                        kind(actors, actor).bits() == comptime!(Good::Housing as u32),
+                        0,
+                        config.firm_rent,
+                    ),
                     0,
                 ),
             };
+            daily = select(assigned, daily, 0);
             let arrears = value(state, config, comptime!(Field::RentArrears as u32), actor);
             let obligation = add_checked(control, arrears, ticks(daily, 0));
             let cash = value(state, config, comptime!(Field::Cash as u32), actor);
@@ -84,12 +98,25 @@ pub(super) fn collect(
                 );
                 available = select(lt(food, reserve), zero(), cash);
             }
+            available = select(assigned, available, zero());
             let mut housing = 0u32;
             if comptime!(tenants == Tenants::Households) {
                 let previous = number(state, config, comptime!(Field::HousingStatus as u32), actor);
-                let sheltered = daily == 0
-                    || previous == comptime!(HousingState::Housed as u32)
-                    || !lt(available, obligation);
+                let supplied = config.rental_businesses == 0
+                    || number(
+                        state,
+                        config,
+                        comptime!(Field::HousingAvailable as u32),
+                        actor,
+                    ) > 0;
+                let exempt = config.household_rent == 0
+                    || number(state, config, comptime!(Field::LandPlots as u32), actor) > 0
+                    || number(state, config, comptime!(Field::LivingMembers as u32), actor) == 0;
+                let sheltered = exempt
+                    || (assigned
+                        && supplied
+                        && (previous == comptime!(HousingState::Housed as u32)
+                            || !lt(available, obligation)));
                 daily = select(sheltered, daily, 0);
                 housing = select(
                     sheltered,
@@ -153,6 +180,14 @@ pub(super) fn collect(
             let treasury = add_checked(
                 control,
                 value(state, config, comptime!(Field::RentTreasury as u32), actor),
+                paid,
+            );
+            increase(
+                state,
+                config,
+                control,
+                comptime!(Field::RentPending as u32),
+                actor,
                 paid,
             );
             set(
@@ -338,6 +373,7 @@ mod tests {
         let scenario = Scenario::new(config)?;
         let mut initial = scenario.initial()?;
         for case in &cases {
+            initial.set(Field::HousingAvailable, case.actor, 1);
             initial.set(Field::LivingMembers, case.actor, case.living);
             initial.set(Field::FoodNeed, case.actor, case.living);
             initial.set(Field::LandPlots, case.actor, case.land);
@@ -583,6 +619,7 @@ mod tests {
         let mut initial = scenario.initial()?;
         for (actor, case) in cases.iter().enumerate() {
             let living = u64::from(initial.actors.at(actor).kind == 0);
+            initial.set(Field::HousingAvailable, actor, 1);
             initial.set(Field::LivingMembers, actor, living);
             initial.set(Field::FoodNeed, actor, living);
             initial.set(Field::LandPlots, actor, 0);

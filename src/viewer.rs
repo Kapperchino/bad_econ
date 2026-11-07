@@ -2,6 +2,7 @@ mod feedback;
 mod model;
 mod pacing;
 mod presentation;
+mod ui;
 mod worker;
 use crate::{
     domain::*,
@@ -10,6 +11,7 @@ use crate::{
 };
 use anyhow::{Context, Result};
 use bevy::{
+    input::{ButtonState, mouse::MouseButtonInput},
     prelude::*,
     render::{
         RenderApp, RenderPlugin,
@@ -17,7 +19,7 @@ use bevy::{
         settings::{RenderCreation, WgpuSettings},
         view::screenshot::{Screenshot, ScreenshotCaptured},
     },
-    sprite::Anchor,
+    window::{CursorMoved, PrimaryWindow, WindowEvent},
     winit::{EventLoopProxyWrapper, WinitUserEvent},
 };
 use crossbeam_channel::{Sender, unbounded};
@@ -29,6 +31,7 @@ use std::{
     sync::{Arc, Mutex},
     time::{Duration, Instant},
 };
+use ui::{ActorSelection, UiAction};
 
 struct SharedGpu;
 impl Plugin for SharedGpu {
@@ -57,8 +60,17 @@ pub enum ViewMode {
 struct Verification {
     state: VerificationState,
     deadline: Instant,
+    click: VerificationClick,
+    capture_error: Option<String>,
 }
-#[derive(Clone, Copy)]
+#[derive(Clone, Copy, Debug)]
+enum VerificationClick {
+    Idle,
+    Move(UiAction),
+    Press(Entity),
+    Release(Entity),
+}
+#[derive(Clone, Copy, Debug)]
 enum VerificationState {
     Start,
     AwaitReset,
@@ -69,8 +81,15 @@ enum VerificationState {
     AwaitInspectionRefresh,
     AwaitComparison,
     AwaitFirmInspection,
+    AwaitMapInspection(u64),
+    AwaitMenu(Chart),
+    AwaitChart(Chart),
     Frames(u32),
     AwaitCapture,
+    AwaitPreferences,
+    Resize,
+    CompactFrames(u32),
+    AwaitCompactCapture,
     Complete,
 }
 #[derive(Resource)]
@@ -106,7 +125,7 @@ impl Control {
         Self::Simulation(Box::new(command))
     }
 }
-#[derive(Clone, Copy)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum Speed {
     Slow,
     Normal,
@@ -132,19 +151,11 @@ enum WorkerState {
     Active,
     Stopped,
 }
-#[derive(Component)]
-enum PanelLabel {
-    Statistics,
-    ChartTitle,
-    ChartScale,
-}
 #[derive(Clone, Copy)]
 enum Publication {
     Snapshot,
     Restart,
 }
-#[derive(Component)]
-struct Region(usize);
 
 pub fn run(scenario: Scenario, workgroup: u32, mode: ViewMode) -> Result<()> {
     let settings = WgpuSettings {
@@ -166,7 +177,12 @@ pub fn run(scenario: Scenario, workgroup: u32, mode: ViewMode) -> Result<()> {
             .set(WindowPlugin {
                 primary_window: Some(Window {
                     title: "Spatial industrial economy".into(),
-                    resolution: (1280, 840).into(),
+                    resolution: (1600, 960).into(),
+                    resize_constraints: bevy::window::WindowResizeConstraints {
+                        min_width: 1280.0,
+                        min_height: 800.0,
+                        ..Default::default()
+                    },
                     ..Default::default()
                 }),
                 ..Default::default()
@@ -178,6 +194,7 @@ pub fn run(scenario: Scenario, workgroup: u32, mode: ViewMode) -> Result<()> {
     )
     .add_plugins((
         SharedGpu,
+        ui::UiPlugin,
         presentation::PresentationPlugin,
         pacing::PacingPlugin,
         feedback::FeedbackPlugin,
@@ -187,9 +204,16 @@ pub fn run(scenario: Scenario, workgroup: u32, mode: ViewMode) -> Result<()> {
     if let ViewMode::Verify = mode {
         app.insert_resource(Verification {
             state: VerificationState::Start,
-            deadline: Instant::now() + Duration::from_secs(60),
+            deadline: Instant::now() + Duration::from_secs(120),
+            click: VerificationClick::Idle,
+            capture_error: None,
         })
-        .add_systems(Update, verify.after(feedback::FeedbackSystems));
+        .add_systems(
+            Update,
+            (verify, verify_clicks)
+                .chain()
+                .after(feedback::FeedbackSystems),
+        );
     }
     match app.run() {
         AppExit::Success => Ok(()),
@@ -259,67 +283,6 @@ fn setup(
             }
         }
     });
-    (0..256).for_each(|i| {
-        commands.spawn((
-            Region(i),
-            Sprite::from_color(Color::srgb(0.08, 0.16, 0.19), Vec2::splat(37.0)),
-            Transform::from_xyz(
-                -580.0 + (i % 16) as f32 * 39.0,
-                305.0 - (i / 16) as f32 * 39.0,
-                0.0,
-            ),
-        ));
-    });
-    commands.spawn((
-        Text2d::new("SPATIAL ECONOMY"),
-        TextFont {
-            font_size: FontSize::Px(30.0),
-            ..Default::default()
-        },
-        TextColor(Color::srgb(0.85, 0.92, 0.95)),
-        Anchor::TOP_LEFT,
-        Transform::from_xyz(-600.0, 390.0, 2.0),
-    ));
-    commands.spawn((
-        Text2d::new("Regional bread shortages | colored industry locations"),
-        TextFont {
-            font_size: FontSize::Px(15.0),
-            ..Default::default()
-        },
-        Anchor::TOP_LEFT,
-        Transform::from_xyz(-600.0, 345.0, 2.0),
-    ));
-    commands.spawn((
-        PanelLabel::Statistics,
-        Text2d::new("Initializing..."),
-        TextFont {
-            font_size: FontSize::Px(12.0),
-            ..Default::default()
-        },
-        Anchor::TOP_LEFT,
-        Transform::from_xyz(75.0, 375.0, 2.0),
-    ));
-    commands.spawn((
-        PanelLabel::ChartTitle,
-        Text2d::default(),
-        TextFont {
-            font_size: FontSize::Px(14.0),
-            ..Default::default()
-        },
-        Anchor::TOP_LEFT,
-        Transform::from_xyz(75.0, -170.0, 2.0),
-    ));
-    commands.spawn((
-        PanelLabel::ChartScale,
-        Text2d::default(),
-        TextFont {
-            font_size: FontSize::Px(13.0),
-            ..Default::default()
-        },
-        Anchor::TOP_LEFT,
-        Transform::from_xyz(75.0, -325.0, 2.0),
-    ));
-    commands.spawn((Text2d::new("SPACE pause/resume    N step    R reset    1/2/3 speed    H household    F firm    TAB next    C compare    G chart"), TextFont { font_size: FontSize::Px(15.0), ..Default::default() }, Anchor::TOP_LEFT, Transform::from_xyz(-600.0, -360.0, 2.0)));
 }
 
 fn verify(
@@ -327,6 +290,7 @@ fn verify(
     dashboard: Option<Res<Dashboard>>,
     launch: Res<Launch>,
     feedback: Res<feedback::Feedback>,
+    mut windows: Query<&mut Window, With<PrimaryWindow>>,
     mut commands: Commands,
     mut exit: MessageWriter<AppExit>,
 ) {
@@ -338,7 +302,9 @@ fn verify(
         ) {
             (true, _) | (_, true) => {
                 eprintln!(
-                    "viewer verification failed: {} {}",
+                    "viewer verification failed in {:?} / {:?}: {} {}",
+                    verification.state,
+                    verification.click,
                     display.status.label(),
                     display.error.as_deref().unwrap_or("")
                 );
@@ -348,17 +314,11 @@ fn verify(
             _ => {
                 verification.state = match verification.state {
                     VerificationState::Start => {
-                        let _ = dashboard
-                            .sender
-                            .send(Control::command(SimulationCommand::Reset(
-                                launch.scenario.clone().into(),
-                            )));
+                        verification.click = VerificationClick::Move(UiAction::Reset);
                         VerificationState::AwaitReset
                     }
                     VerificationState::AwaitReset if feedback.current() == Some(Cue::Reset) => {
-                        let _ = dashboard
-                            .sender
-                            .send(Control::command(SimulationCommand::AdvanceDay));
+                        verification.click = VerificationClick::Move(UiAction::Step);
                         VerificationState::AwaitDay
                     }
                     VerificationState::AwaitDay if feedback.current() == Some(Cue::Stepped) => {
@@ -369,18 +329,12 @@ fn verify(
                         VerificationState::AwaitFeedbackCapture
                     }
                     VerificationState::InspectHousehold => {
-                        let request = InspectionRequest::new(
-                            launch.scenario.identity(0).expect("first household"),
-                            &launch.scenario,
-                        )
-                        .expect("first household");
-                        let _ = dashboard.sender.send(Control::Inspect(request));
+                        verification.click =
+                            VerificationClick::Move(UiAction::Inspect(ActorSelection::Household));
                         VerificationState::AwaitInspection
                     }
                     VerificationState::AwaitInspection if display.inspection.is_some() => {
-                        let _ = dashboard
-                            .sender
-                            .send(Control::command(SimulationCommand::AdvanceDay));
+                        verification.click = VerificationClick::Move(UiAction::Step);
                         VerificationState::AwaitInspectionRefresh
                     }
                     VerificationState::AwaitInspectionRefresh
@@ -390,7 +344,7 @@ fn verify(
                                 .as_ref()
                                 .is_some_and(|record| record.day == 2) =>
                     {
-                        let _ = dashboard.sender.send(Control::Compare);
+                        verification.click = VerificationClick::Move(UiAction::Compare);
                         VerificationState::AwaitComparison
                     }
                     VerificationState::AwaitComparison
@@ -402,13 +356,8 @@ fn verify(
                             )
                             && feedback.current() == Some(Cue::Compared) =>
                     {
-                        let identity = launch
-                            .scenario
-                            .identity(launch.scenario.config().households as usize)
-                            .expect("first firm");
-                        let request =
-                            InspectionRequest::new(identity, &launch.scenario).expect("first firm");
-                        let _ = dashboard.sender.send(Control::Inspect(request));
+                        verification.click =
+                            VerificationClick::Move(UiAction::Inspect(ActorSelection::Firm));
                         VerificationState::AwaitFirmInspection
                     }
                     VerificationState::AwaitFirmInspection
@@ -416,6 +365,31 @@ fn verify(
                             .inspection
                             .as_ref()
                             .is_some_and(|record| record.actor.kind > 0) =>
+                    {
+                        let identity = display.firms.last().expect("map firm").identity;
+                        verification.click = VerificationClick::Move(UiAction::Inspect(
+                            ActorSelection::Identity(identity),
+                        ));
+                        VerificationState::AwaitMapInspection(identity)
+                    }
+                    VerificationState::AwaitMapInspection(identity)
+                        if display
+                            .inspection
+                            .as_ref()
+                            .is_some_and(|record| record.actor.identity == identity) =>
+                    {
+                        VerificationState::Frames(3)
+                    }
+                    VerificationState::AwaitMenu(chart)
+                        if dashboard.chart.menu() == chart.menu()
+                            && matches!(verification.click, VerificationClick::Idle) =>
+                    {
+                        verification.click = VerificationClick::Move(UiAction::Chart(chart));
+                        VerificationState::AwaitChart(chart)
+                    }
+                    VerificationState::AwaitChart(chart)
+                        if dashboard.chart == chart
+                            && matches!(verification.click, VerificationClick::Idle) =>
                     {
                         VerificationState::Frames(3)
                     }
@@ -426,6 +400,28 @@ fn verify(
                         VerificationState::AwaitCapture
                     }
                     VerificationState::Frames(frames) => VerificationState::Frames(frames - 1),
+                    VerificationState::AwaitPreferences
+                        if feedback.current() == Some(Cue::Preferences) =>
+                    {
+                        VerificationState::Resize
+                    }
+                    VerificationState::Resize => {
+                        windows
+                            .single_mut()
+                            .expect("primary window")
+                            .resolution
+                            .set(1280.0, 800.0);
+                        VerificationState::CompactFrames(8)
+                    }
+                    VerificationState::CompactFrames(0) => {
+                        commands
+                            .spawn(Screenshot::primary_window())
+                            .observe(capture_compact_frame);
+                        VerificationState::AwaitCompactCapture
+                    }
+                    VerificationState::CompactFrames(frames) => {
+                        VerificationState::CompactFrames(frames - 1)
+                    }
                     state => state,
                 };
             }
@@ -433,148 +429,234 @@ fn verify(
     }
 }
 
+fn verify_clicks(
+    mut verification: ResMut<Verification>,
+    buttons: Query<(&UiAction, &ComputedNode, &UiGlobalTransform)>,
+    windows: Query<(Entity, &Window), With<PrimaryWindow>>,
+    mut input: MessageWriter<WindowEvent>,
+) {
+    verification.click = match verification.click {
+        VerificationClick::Move(action) => match windows.single() {
+            Ok((window, properties)) => match buttons.iter().find(|(candidate, node, _)| {
+                **candidate == action && node.size().min_element() > 0.0
+            }) {
+                Some((_, _, transform)) => {
+                    let position = transform.translation / properties.scale_factor();
+                    assert!(
+                        Rect::from_corners(Vec2::ZERO, properties.size()).contains(position),
+                        "{action:?} lies outside the window at {position:?}"
+                    );
+                    input.write(WindowEvent::CursorMoved(CursorMoved {
+                        window,
+                        position,
+                        delta: None,
+                    }));
+                    VerificationClick::Press(window)
+                }
+                None => VerificationClick::Move(action),
+            },
+            Err(_) => VerificationClick::Move(action),
+        },
+        VerificationClick::Press(window) => {
+            input.write(WindowEvent::MouseButtonInput(MouseButtonInput {
+                window,
+                button: MouseButton::Left,
+                state: ButtonState::Pressed,
+            }));
+            VerificationClick::Release(window)
+        }
+        VerificationClick::Release(window) => {
+            input.write(WindowEvent::MouseButtonInput(MouseButtonInput {
+                window,
+                button: MouseButton::Left,
+                state: ButtonState::Released,
+            }));
+            VerificationClick::Idle
+        }
+        VerificationClick::Idle => VerificationClick::Idle,
+    };
+}
+
 fn controls(
     keys: Res<ButtonInput<KeyCode>>,
     launch: Res<Launch>,
     dashboard: Option<ResMut<Dashboard>>,
+    mut actions: MessageReader<UiAction>,
 ) {
-    match dashboard {
-        None => (),
-        Some(mut dashboard) => {
-            let running = matches!(
-                dashboard.data.lock().expect("dashboard lock").status,
-                DisplayState::Active(RuntimeState::Running)
-            );
-            if keys.just_pressed(KeyCode::KeyG) {
-                dashboard.chart = dashboard.chart.next();
-            }
-            let mut controls = Vec::new();
-            if keys.just_pressed(KeyCode::Space) {
-                controls.push(Control::command(match running {
-                    true => SimulationCommand::Pause,
-                    false => SimulationCommand::Resume,
-                }));
-            }
-            if keys.just_pressed(KeyCode::KeyN) {
-                controls.push(Control::command(SimulationCommand::AdvanceDay));
-            }
-            if keys.just_pressed(KeyCode::KeyR) {
-                controls.push(Control::command(SimulationCommand::Reset(
-                    launch.scenario.clone().into(),
-                )));
-            }
-            if keys.just_pressed(KeyCode::KeyC) {
-                controls.push(Control::Compare);
-            }
-            [
-                (KeyCode::Digit1, Speed::Slow),
-                (KeyCode::Digit2, Speed::Normal),
-                (KeyCode::Digit3, Speed::Fast),
-            ]
-            .into_iter()
-            .filter(|(key, _)| keys.just_pressed(*key))
-            .for_each(|(_, speed)| controls.push(Control::Speed(speed)));
-            if keys.just_pressed(KeyCode::KeyH) {
-                dashboard.selected = launch.scenario.identity(0).expect("first household");
-            }
-            if keys.just_pressed(KeyCode::KeyF) {
-                dashboard.selected = launch
-                    .scenario
-                    .identity(launch.scenario.config().households as usize)
-                    .expect("first firm");
-            }
-            if keys.just_pressed(KeyCode::Tab) {
-                let selected = {
-                    let display = dashboard.data.lock().expect("dashboard lock");
-                    let index = display
-                        .identities
-                        .iter()
-                        .position(|&identity| identity == dashboard.selected)
-                        .unwrap_or(0);
-                    display
-                        .identities
-                        .get((index + 1) % display.identities.len().max(1))
-                        .copied()
-                        .unwrap_or(dashboard.selected)
-                };
-                dashboard.selected = selected;
-            }
-            let inspection = [KeyCode::KeyH, KeyCode::KeyF, KeyCode::Tab]
+    let shortcuts = [
+        (KeyCode::Space, UiAction::ToggleRun),
+        (KeyCode::KeyN, UiAction::Step),
+        (KeyCode::KeyR, UiAction::Reset),
+        (KeyCode::KeyC, UiAction::Compare),
+        (KeyCode::Digit1, UiAction::Speed(Speed::Slow)),
+        (KeyCode::Digit2, UiAction::Speed(Speed::Normal)),
+        (KeyCode::Digit3, UiAction::Speed(Speed::Fast)),
+        (KeyCode::KeyH, UiAction::Inspect(ActorSelection::Household)),
+        (KeyCode::KeyF, UiAction::Inspect(ActorSelection::Firm)),
+        (KeyCode::Tab, UiAction::Inspect(ActorSelection::Next)),
+        (KeyCode::KeyG, UiAction::NextChart),
+    ];
+    let pending = actions
+        .read()
+        .copied()
+        .chain(
+            shortcuts
                 .into_iter()
-                .any(|key| keys.just_pressed(key))
-                .then(|| {
-                    InspectionRequest::from_registry(
-                        dashboard.selected,
-                        &dashboard.data.lock().expect("dashboard lock").identities,
-                    )
-                });
-            if let Some(Ok(request)) = inspection {
-                controls.push(Control::Inspect(request));
-            }
-            controls.into_iter().for_each(|control| {
+                .filter(|(key, _)| keys.just_pressed(*key))
+                .map(|(_, action)| action),
+        )
+        .collect::<Vec<_>>();
+    if let Some(mut dashboard) = dashboard {
+        pending.into_iter().for_each(|action| {
+            let control = match action {
+                UiAction::Menu(menu) => {
+                    dashboard.chart = menu.charts()[0];
+                    None
+                }
+                UiAction::Chart(chart) => {
+                    dashboard.chart = chart;
+                    None
+                }
+                UiAction::NextChart => {
+                    dashboard.chart = dashboard.chart.next();
+                    None
+                }
+                UiAction::ToggleRun => Some(Control::command(
+                    match dashboard.data.lock().expect("dashboard lock").status {
+                        DisplayState::Active(RuntimeState::Running) => SimulationCommand::Pause,
+                        _ => SimulationCommand::Resume,
+                    },
+                )),
+                UiAction::Step => Some(Control::command(SimulationCommand::AdvanceDay)),
+                UiAction::Reset => Some(Control::command(SimulationCommand::Reset(
+                    launch.scenario.clone().into(),
+                ))),
+                UiAction::Compare => Some(Control::Compare),
+                UiAction::Speed(speed) => Some(Control::Speed(speed)),
+                UiAction::Inspect(selection) => {
+                    let selected = {
+                        let display = dashboard.data.lock().expect("dashboard lock");
+                        match selection {
+                            ActorSelection::Household => display.identities.first().copied(),
+                            ActorSelection::Firm => {
+                                display.firms.first().map(|actor| actor.identity)
+                            }
+                            ActorSelection::Identity(identity) => Some(identity),
+                            ActorSelection::Next => {
+                                let index = display
+                                    .identities
+                                    .iter()
+                                    .position(|&identity| identity == dashboard.selected)
+                                    .unwrap_or(0);
+                                display
+                                    .identities
+                                    .get((index + 1) % display.identities.len().max(1))
+                                    .copied()
+                            }
+                        }
+                    };
+                    selected.and_then(|identity| {
+                        dashboard.selected = identity;
+                        InspectionRequest::from_registry(
+                            identity,
+                            &dashboard.data.lock().expect("dashboard lock").identities,
+                        )
+                        .ok()
+                        .map(Control::Inspect)
+                    })
+                }
+                UiAction::Sound | UiAction::Motion => None,
+            };
+            if let Some(control) = control {
                 let _ = dashboard.sender.send(control);
-            });
+            }
+        });
+    }
+}
+
+impl Verification {
+    fn capture(&mut self, image: &Image, label: &str) {
+        match save_verified_frame(image, label) {
+            Ok(path) => eprintln!("viewer captured {}", path.display()),
+            Err(error) => {
+                eprintln!("viewer {label} capture failed: {error}");
+                self.capture_error.get_or_insert_with(|| error.to_string());
+            }
         }
     }
 }
 
-fn capture_step_feedback(
-    captured: On<ScreenshotCaptured>,
-    mut verification: ResMut<Verification>,
-    mut exit: MessageWriter<AppExit>,
-) {
-    match save_verified_frame(&captured.image, "step-feedback") {
-        Ok(path) => {
-            eprintln!("viewer feedback captured {}", path.display());
-            verification.state = VerificationState::InspectHousehold;
-        }
-        Err(error) => {
-            eprintln!("viewer feedback capture failed: {error}");
-            verification.state = VerificationState::Complete;
-            exit.write(AppExit::error());
-        }
-    }
+fn capture_step_feedback(captured: On<ScreenshotCaptured>, mut verification: ResMut<Verification>) {
+    verification.capture(&captured.image, "step-feedback");
+    verification.state = VerificationState::InspectHousehold;
 }
 
 fn capture_verified_frame(
     captured: On<ScreenshotCaptured>,
-    mut dashboard: ResMut<Dashboard>,
+    dashboard: Res<Dashboard>,
     mut verification: ResMut<Verification>,
-    mut exit: MessageWriter<AppExit>,
 ) {
     let chart = dashboard.chart;
-    let result = save_verified_frame(&captured.image, chart.file_label());
-    match result {
-        Ok(path) => {
-            eprintln!("viewer captured {}", path.display());
-            match chart {
-                Chart::Cash => {
-                    eprintln!(
-                        "viewer verification passed: shared device, reset/step/comparison feedback, audited day, household and firm inspection, inspection refresh after stepping, same-day seed comparison, all charts captured"
-                    );
-                    verification.state = VerificationState::Complete;
-                    exit.write(AppExit::Success);
-                }
-                _ => {
-                    dashboard.chart = chart.next();
-                    verification.state = VerificationState::Frames(3);
-                }
-            }
+    verification.capture(&captured.image, chart.file_label());
+    match chart {
+        Chart::Research => {
+            verification.click = VerificationClick::Move(UiAction::Sound);
+            verification.state = VerificationState::AwaitPreferences;
         }
-        Err(error) => {
-            eprintln!("viewer capture failed: {error}");
-            verification.state = VerificationState::Complete;
-            exit.write(AppExit::error());
+        _ => {
+            let next = chart.next();
+            verification.click = VerificationClick::Move(UiAction::Menu(next.menu()));
+            verification.state = VerificationState::AwaitMenu(next);
         }
     }
 }
+
+fn capture_compact_frame(
+    captured: On<ScreenshotCaptured>,
+    buttons: Query<(&UiAction, &ComputedNode, &UiGlobalTransform)>,
+    mut verification: ResMut<Verification>,
+    mut exit: MessageWriter<AppExit>,
+) {
+    let viewport = Rect::from_corners(Vec2::ZERO, captured.image.size_f32());
+    buttons
+        .iter()
+        .filter(|(_, node, _)| node.size().min_element() > 0.0)
+        .for_each(|(action, node, transform)| {
+            assert!(
+                viewport.contains(transform.translation - node.size() / 2.0),
+                "{action:?} begins outside the compact window"
+            );
+            assert!(
+                viewport.contains(transform.translation + node.size() / 2.0),
+                "{action:?} ends outside the compact window"
+            );
+        });
+    verification.capture(&captured.image, "compact");
+    eprintln!(
+        "viewer interaction and layout verification passed: shared GPU, native mouse clicks, reset/step/comparison feedback, audited days, household and firm inspection, refreshed inspection, all five menus and ten charts, footer controls, compact window"
+    );
+    match &verification.capture_error {
+        None => {
+            eprintln!("viewer screenshot verification passed");
+            exit.write(AppExit::Success);
+        }
+        Some(error) => {
+            eprintln!("viewer screenshot verification failed: {error}");
+            exit.write(AppExit::error());
+        }
+    }
+    verification.state = VerificationState::Complete;
+}
+
 fn save_verified_frame(image: &Image, label: &str) -> Result<std::path::PathBuf> {
     let pixels =
         Context::context(image.clone().try_into_dynamic(), "read rendered frame")?.into_rgb8();
     let first = Context::context(pixels.pixels().next(), "empty rendered frame")?;
     match pixels.pixels().any(|pixel| pixel != first) {
         true => Ok(()),
-        false => Err(anyhow::anyhow!("rendered frame contains only a flat color")),
+        false => Err(anyhow::anyhow!(
+            "rendered frame contains only a flat color: {first:?}"
+        )),
     }?;
     let path = std::env::temp_dir().join(format!("bad-econ-viewer-{label}.ppm"));
     let mut file = std::fs::File::create(&path)?;
