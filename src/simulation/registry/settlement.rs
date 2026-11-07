@@ -1,8 +1,9 @@
 use super::{
+    MigrationRegistry,
     entries::{Transfer, transfer},
     records::PendingRecord,
 };
-use crate::domain::{Scenario, State, enterprise::Ownership};
+use crate::domain::{ActorRows, Scenario, State, enterprise::Ownership};
 use crate::simulation::{Device, decode, encode, enterprise, layout::TICK_WORDS};
 use anyhow::{Context, Result, anyhow};
 use burn_wgpu::CubeTensor;
@@ -10,9 +11,15 @@ use std::collections::{BTreeMap, BTreeSet};
 
 pub(in crate::simulation) struct SettlementBatch {
     pub ownership: Option<Vec<Ownership>>,
+    pub owners: Vec<OwnerChange>,
     pub readback_bytes: u64,
     indices: CubeTensor,
     values: CubeTensor,
+}
+
+pub(in crate::simulation) struct OwnerChange {
+    pub firm: usize,
+    owner: u32,
 }
 
 impl SettlementBatch {
@@ -23,13 +30,19 @@ impl SettlementBatch {
         state: &CubeTensor,
         requests: &[PendingRecord],
         day: u64,
+        migrations: &MigrationRegistry,
     ) -> Result<Option<Self>> {
-        match requests
-            .iter()
-            .any(|record| matches!(record.request >> 24, 4 | 7))
-        {
+        match requests.iter().any(|record| match record.request >> 24 {
+            4 | 7 => true,
+            5 => migrations
+                .children(metadata.actors.at(record.actor as usize).identity)
+                .next()
+                .is_some(),
+            _ => false,
+        }) {
             false => Ok(None),
-            true => Self::prepare(device, scenario, metadata, state, requests, day).map(Some),
+            true => Self::prepare(device, scenario, metadata, state, requests, day, migrations)
+                .map(Some),
         }
     }
 
@@ -40,9 +53,11 @@ impl SettlementBatch {
         state: &CubeTensor,
         requests: &[PendingRecord],
         day: u64,
+        migrations: &MigrationRegistry,
     ) -> Result<Self> {
         let mut selected = BTreeSet::new();
         let mut firms = BTreeSet::new();
+        let mut estates = BTreeSet::new();
         for record in requests.iter().filter(|record| record.request > 0) {
             selected.insert(record.actor as usize);
             match record.request >> 24 {
@@ -56,9 +71,38 @@ impl SettlementBatch {
                 4 => {
                     firms.insert(record.actor as usize);
                 }
+                5 => {
+                    let identity = metadata.actors.at(record.actor as usize).identity;
+                    estates.insert(identity);
+                    selected.extend(migrations.children(identity));
+                }
                 _ => (),
             }
         }
+        let inherited = metadata
+            .ownership
+            .iter()
+            .filter(|ownership| {
+                ownership
+                    .shares
+                    .iter()
+                    .any(|share| estates.contains(&share.household))
+            })
+            .map(|ownership| ownership.firm)
+            .collect::<BTreeSet<_>>();
+        for index in metadata.actors.firm_indices() {
+            let actor = metadata.actors.at(index);
+            if inherited.contains(&actor.identity) {
+                firms.insert(index);
+                selected.insert(index);
+            }
+        }
+        firms.extend(
+            selected
+                .iter()
+                .copied()
+                .filter(|&index| metadata.actors.at(index).kind > 0),
+        );
         let company_sites = firms
             .iter()
             .flat_map(|&firm| metadata.company_sites(metadata.actors.at(firm).identity))
@@ -174,8 +218,26 @@ impl SettlementBatch {
                 _ => record.request,
             };
         }
+        let previous_owners = compact
+            .actors
+            .iter()
+            .map(|actor| actor.owner)
+            .collect::<Vec<_>>();
         enterprise::transitions(&mut compact, scenario, &actions)?;
-        let ownership = match requests.iter().any(|record| record.request >> 24 == 7) {
+        let owners = compact
+            .actors
+            .iter()
+            .enumerate()
+            .filter(|(index, actor)| actor.owner != previous_owners[*index])
+            .map(|(index, actor)| OwnerChange {
+                firm: selected[index],
+                owner: selected[actor.owner as usize] as u32,
+            })
+            .collect();
+        let ownership = match requests
+            .iter()
+            .any(|record| matches!(record.request >> 24, 5 | 7))
+        {
             false => None,
             true => {
                 let changed = compact
@@ -194,10 +256,19 @@ impl SettlementBatch {
         };
         Ok(Self {
             ownership,
+            owners,
             readback_bytes,
             indices,
             values: device.tensor(bytemuck::cast_slice(&encode(&compact.values))),
         })
+    }
+
+    pub fn update_owners(&self, actors: &mut ActorRows) {
+        for change in &self.owners {
+            let mut actor = actors.at(change.firm);
+            actor.owner = change.owner;
+            actors.set(change.firm, actor);
+        }
     }
 
     pub fn apply(&self, device: &Device, state: &CubeTensor, actors: usize) {
