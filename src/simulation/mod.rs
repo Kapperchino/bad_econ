@@ -129,6 +129,24 @@ impl Simulation {
     pub fn actors(&self) -> &ActorRows {
         &self.metadata.actors
     }
+    #[cfg(feature = "viewer")]
+    pub(crate) fn open_firms(&mut self) -> Result<Vec<Actor>> {
+        let actors = &self.metadata.actors;
+        let start = actors.firm_indices().next().unwrap_or(actors.len());
+        let statuses = decode(&self.device.read_range(
+            &self.state,
+            (Field::EnterpriseStatus as usize * actors.len() + start) * TICK_WORDS,
+            (actors.len() - start) * TICK_WORDS,
+        )?);
+        self.readback_bytes += (statuses.len() * TICK_BYTES) as u64;
+        Ok(actors
+            .firm_indices()
+            .filter(|&index| {
+                statuses[index - start] != crate::domain::enterprise::EnterpriseState::Closed as u64
+            })
+            .map(|index| actors.at(index))
+            .collect())
+    }
     pub fn memory_usage(&self) -> cubecl::MemoryUsage {
         self.device
             .client

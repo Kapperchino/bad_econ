@@ -3,16 +3,20 @@ use super::{
     ComparisonRun, Control, Display, DisplayState, Publication, RunTarget, Speed, WorkerState,
 };
 use crate::{
-    domain::{InspectionRequest, Scenario},
+    domain::{InspectionRequest, Scenario, enterprise::EnterpriseState},
     runtime::{RuntimeState, SimulationCommand},
     simulation::Simulation,
 };
 use anyhow::Result;
 use crossbeam_channel::{Receiver, RecvTimeoutError};
 use std::{
+    collections::BTreeSet,
     sync::{Arc, Mutex},
     time::{Duration, Instant},
 };
+
+#[cfg(test)]
+mod tests;
 
 struct Publisher<F> {
     data: Arc<Mutex<Display>>,
@@ -83,9 +87,7 @@ pub(super) fn run(
                     publish(&mut simulation, &publisher, publication, Some(cue))
                 })
             }
-            Ok(Control::Inspect(request)) => simulation.inspect(request).map(|inspection| {
-                publisher.update(|display| display.inspection = Some(inspection))
-            }),
+            Ok(Control::Inspect(request)) => inspect(&mut simulation, &publisher, request),
             Ok(Control::Speed(value)) => {
                 speed = value;
                 publisher.update(|display| display.speed = speed);
@@ -138,6 +140,19 @@ pub(super) fn run(
     Ok(())
 }
 
+fn inspect(
+    simulation: &mut Simulation,
+    publisher: &Publisher<impl Fn()>,
+    request: InspectionRequest,
+) -> Result<()> {
+    let inspection = simulation.inspect(request)?;
+    publisher.update(|display| {
+        display.inspection = Some(inspection)
+            .filter(|inspection| inspection.enterprise_state != Some(EnterpriseState::Closed));
+    });
+    Ok(())
+}
+
 fn compare(simulation: &mut Simulation, publisher: &Publisher<impl Fn()>) -> Result<RunTarget> {
     let mut config = simulation.scenario.config().clone();
     config.seed = config
@@ -183,6 +198,24 @@ fn publish(
     publication: Publication,
     cue: Option<Cue>,
 ) -> Result<()> {
+    let firms = simulation.open_firms()?;
+    let snapshot = crate::domain::ObservationSnapshot {
+        firms: firms.len() as u64,
+        ..simulation.snapshot.clone()
+    };
+    let firm_identities = firms
+        .iter()
+        .map(|firm| firm.identity)
+        .collect::<BTreeSet<_>>();
+    let identities = simulation
+        .actors()
+        .iter()
+        .filter(|actor| match actor.kind {
+            0 => true,
+            _ => firm_identities.contains(&actor.identity),
+        })
+        .map(|actor| actor.identity)
+        .collect::<Vec<_>>();
     let request = match publication {
         Publication::Restart => None,
         Publication::Snapshot => {
@@ -190,9 +223,10 @@ fn publish(
             display
                 .inspection
                 .as_ref()
+                .filter(|inspection| identities.contains(&inspection.actor.identity))
                 .filter(|inspection| inspection.day != simulation.snapshot.day)
                 .map(|inspection| {
-                    InspectionRequest::from_registry(inspection.actor.identity, &display.identities)
+                    InspectionRequest::from_registry(inspection.actor.identity, &identities)
                 })
                 .transpose()?
         }
@@ -204,42 +238,30 @@ fn publish(
         if let Some(inspection) = refreshed {
             display.inspection = Some(inspection);
         }
-        display.firms = simulation
-            .actors()
-            .firm_indices()
-            .map(|index| simulation.actors().at(index))
-            .collect();
+        display.inspection = display
+            .inspection
+            .take()
+            .filter(|inspection| identities.contains(&inspection.actor.identity));
+        display.firms = firms;
+        display.identities = identities;
         match publication {
             Publication::Restart => {
                 display.map_size = simulation.scenario.config().map_size;
                 display.history.clear();
                 display.inspection = None;
-                display.identities = simulation
-                    .actors()
-                    .iter()
-                    .map(|actor| actor.identity)
-                    .collect();
             }
-            Publication::Snapshot => {
-                if display.identities.len() != simulation.actors().len() {
-                    display.identities = simulation
-                        .actors()
-                        .iter()
-                        .map(|actor| actor.identity)
-                        .collect();
-                }
-            }
+            Publication::Snapshot => (),
         }
         match display.history.back().map(|s| s.day) {
             Some(day) if day == simulation.snapshot.day => (),
             _ => {
-                display.history.push_back(simulation.snapshot.clone());
+                display.history.push_back(snapshot.clone());
                 if display.history.len() > 160 {
                     display.history.pop_front();
                 }
             }
         }
-        display.snapshot = simulation.snapshot.clone();
+        display.snapshot = snapshot;
         display.status = DisplayState::Active(simulation.status.clone());
         display.seed = simulation.scenario.config().seed;
         display.error = None;
