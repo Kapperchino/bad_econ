@@ -1044,7 +1044,9 @@ impl Simulation {
         });
         match observation {
             Ok(mut snapshot) => {
-                if previous_actors.is_some() {
+                if let (registry::RegistryTransition::Migration, Some(_)) =
+                    (plan.transition, self.scenario.config().property.as_ref())
+                {
                     self.config = configuration::Configuration::new(
                         &self.device,
                         &self.scenario,

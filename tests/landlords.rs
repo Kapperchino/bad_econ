@@ -359,5 +359,21 @@ fn rental_capacity_and_regional_payments_are_separate_on_gpu() -> Result<()> {
         ObservationSnapshot::from_state(&scenario, &state)?
     );
     simulation.checkpoint()?.restore()?;
+    let mut moving = state;
+    moving.set(Field::MoveDue, 3, 2);
+    moving.set(Field::MoveX, 3, 750);
+    moving.set(Field::MoveY, 3, 250);
+    let mut simulation =
+        Simulation::from_checkpoint(Checkpoint::new(&scenario, &moving)?, support::device(64)?)?;
+    simulation.advance()?;
+    assert_eq!(simulation.actors().at(3).position.x, 750);
+    let mut rebuilt = Simulation::from_checkpoint(simulation.checkpoint()?, support::device(32)?)?;
+    simulation.advance()?;
+    rebuilt.advance()?;
+    let moved = simulation.download()?;
+    assert_eq!(moved, rebuilt.download()?);
+    assert_eq!(moved.get(Field::Landlord, 3), 12);
+    assert_eq!(moved.get(Field::HousingAvailable, 3), 1);
+    assert_eq!(moved.get(Field::HousingAvailable, 7), 0);
     Ok(())
 }
