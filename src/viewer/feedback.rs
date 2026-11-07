@@ -231,16 +231,28 @@ fn receive(
 fn animate(
     feedback: Res<Feedback>,
     mut cadence: ResMut<super::pacing::Cadence>,
+    actions: Query<(&UiAction, &bevy::picking::hover::Hovered)>,
     mut labels: Query<&mut Text, With<Label>>,
     mut banners: Query<&mut BackgroundColor, With<Banner>>,
 ) {
     let cue = feedback.current().unwrap_or(Cue::Ready);
-    let text = format!(
+    let status = format!(
         "{}  |  M sound: {}  |  V flashes: {}",
         cue.label(),
         feedback.sound.label(),
         feedback.flashes.label(),
     );
+    let text = match &feedback.notice {
+        Notice::Showing {
+            cue: Cue::Error, ..
+        } => status,
+        Notice::Showing { elapsed, .. } if *elapsed < Duration::from_secs(1) => status,
+        _ => actions
+            .iter()
+            .find(|(_, hovered)| hovered.get())
+            .map(|(action, _)| action.hint())
+            .unwrap_or(status),
+    };
     labels
         .iter_mut()
         .for_each(|mut label| match label.0 == text {

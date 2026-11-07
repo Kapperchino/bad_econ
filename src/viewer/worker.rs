@@ -3,7 +3,7 @@ use super::{
     ComparisonRun, Control, Display, DisplayState, Publication, RunTarget, Speed, WorkerState,
 };
 use crate::{
-    domain::{InspectionRequest, Scenario},
+    domain::{Actor, InspectionRequest, Scenario},
     runtime::{RuntimeState, SimulationCommand},
     simulation::Simulation,
 };
@@ -11,7 +11,7 @@ use anyhow::Result;
 use crossbeam_channel::{Receiver, RecvTimeoutError};
 use std::{
     sync::{Arc, Mutex},
-    time::{Duration, Instant},
+    time::Instant,
 };
 
 struct Publisher<F> {
@@ -55,13 +55,13 @@ pub(super) fn run(
         Some(Cue::Ready),
     )?;
     while matches!(workflow, WorkerState::Active) {
-        let timeout = match simulation.status {
-            RuntimeState::Running => next_day
-                .saturating_duration_since(Instant::now())
-                .min(Duration::from_millis(50)),
-            _ => Duration::from_millis(50),
+        let control = match simulation.status {
+            RuntimeState::Running => {
+                receiver.recv_timeout(next_day.saturating_duration_since(Instant::now()))
+            }
+            _ => receiver.recv().map_err(|_| RecvTimeoutError::Disconnected),
         };
-        let result = match receiver.recv_timeout(timeout) {
+        let result = match control {
             Ok(Control::Simulation(command)) => {
                 let cue = match &*command {
                     SimulationCommand::Pause => Cue::Paused,
@@ -200,35 +200,46 @@ fn publish(
     let refreshed = request
         .map(|request| simulation.inspect(request))
         .transpose()?;
+    let observation = {
+        let display = publisher.data.lock().expect("dashboard lock");
+        match (
+            publication,
+            display.history.back().map(|snapshot| snapshot.day),
+        ) {
+            (Publication::Snapshot, Some(day)) if day == simulation.snapshot.day => None,
+            _ => Some(display.identities.len()),
+        }
+    }
+    .map(|identity_count| ObservationUpdate {
+        firms: simulation
+            .actors()
+            .firm_indices()
+            .map(|index| simulation.actors().at(index))
+            .collect(),
+        identities: match (publication, identity_count == simulation.actors().len()) {
+            (Publication::Snapshot, true) => None,
+            _ => Some(simulation.actors().identities().to_vec()),
+        },
+    });
     publisher.update(|display| {
         if let Some(inspection) = refreshed {
             display.inspection = Some(inspection);
         }
-        display.firms = simulation
-            .actors()
-            .firm_indices()
-            .map(|index| simulation.actors().at(index))
-            .collect();
-        match publication {
-            Publication::Restart => {
-                display.map_size = simulation.scenario.config().map_size;
-                display.history.clear();
-                display.inspection = None;
-                display.identities = simulation
-                    .actors()
-                    .iter()
-                    .map(|actor| actor.identity)
-                    .collect();
+        if let Publication::Restart = publication {
+            display.map_size = simulation.scenario.config().map_size;
+            display.history.clear();
+            display.inspection = None;
+            display.map_revision = display.map_revision.wrapping_add(1);
+        }
+        if let Some(observation) = observation {
+            if display.firms != observation.firms {
+                display.firms = observation.firms;
+                display.map_revision = display.map_revision.wrapping_add(1);
             }
-            Publication::Snapshot => {
-                if display.identities.len() != simulation.actors().len() {
-                    display.identities = simulation
-                        .actors()
-                        .iter()
-                        .map(|actor| actor.identity)
-                        .collect();
-                }
+            if let Some(identities) = observation.identities {
+                display.identities = identities;
             }
+            display.observation_revision = display.observation_revision.wrapping_add(1);
         }
         match display.history.back().map(|s| s.day) {
             Some(day) if day == simulation.snapshot.day => (),
@@ -246,4 +257,9 @@ fn publish(
         display.cues.extend(cue);
     });
     Ok(())
+}
+
+struct ObservationUpdate {
+    firms: Vec<Actor>,
+    identities: Option<Vec<u64>>,
 }

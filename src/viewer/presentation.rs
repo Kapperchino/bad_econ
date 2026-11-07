@@ -1,5 +1,6 @@
 use super::{
     Chart, Dashboard, Display,
+    graph::{self, GraphRenderer},
     model::{ChartRange, Menu},
     ui::{
         self, ActorSelection, ChartTab, FirmMarker, Label, Legend, MapMarkers, Plot, Region,
@@ -12,39 +13,49 @@ use bevy::{
     prelude::*,
     ui_widgets::Button,
 };
-use std::collections::{BTreeMap, VecDeque};
+use std::collections::BTreeMap;
 
 pub(super) struct PresentationPlugin;
 impl Plugin for PresentationPlugin {
     fn build(&self, app: &mut App) {
-        app.add_systems(
+        app.add_systems(Startup, graph::setup).add_systems(
             Update,
-            (draw, draw_markers)
+            (
+                draw.run_if(needs_refresh),
+                draw_plot.run_if(plot_changed),
+                draw_legend.run_if(chart_changed),
+                draw_markers.run_if(map_changed),
+            )
                 .after(super::controls)
-                .run_if(needs_refresh),
+                .in_set(PresentationSystems),
         );
     }
 }
+
+#[derive(SystemSet, Debug, Hash, PartialEq, Eq, Clone)]
+pub(super) struct PresentationSystems;
 
 #[derive(Clone, Copy, PartialEq)]
 struct PresentationVersion {
     revision: u64,
     chart: Chart,
     plot_size: Vec2,
+    scale: f32,
+}
+
+#[derive(Clone, Copy, PartialEq)]
+struct LabelVersion {
+    revision: u64,
+    chart: Chart,
 }
 
 fn needs_refresh(
     dashboard: Option<Res<Dashboard>>,
-    plots: Query<&ComputedNode, With<Plot>>,
-    mut previous: Local<Option<PresentationVersion>>,
+    mut previous: Local<Option<LabelVersion>>,
 ) -> bool {
-    let current = dashboard.map(|dashboard| PresentationVersion {
+    let current = dashboard.map(|dashboard| LabelVersion {
         revision: dashboard.data.lock().expect("dashboard lock").revision,
         chart: dashboard.chart,
-        plot_size: plots
-            .single()
-            .map(|node| node.size() * node.inverse_scale_factor())
-            .unwrap_or_default(),
     });
     let changed = current != *previous;
     *previous = current;
@@ -56,15 +67,11 @@ fn draw(
     mut labels: Query<(&Label, &mut Text)>,
     mut regions: Query<(&Region, &mut BackgroundColor)>,
     mut tabs: Query<(&ChartTab, &mut Node)>,
-    plots: Query<(Entity, &ComputedNode), With<Plot>>,
-    legends: Query<Entity, With<Legend>>,
-    mut commands: Commands,
 ) {
     if let Some(dashboard) = dashboard {
         let display = dashboard.data.lock().expect("dashboard lock");
         let s = &display.snapshot;
         let chart = dashboard.chart;
-        let range = ChartRange::new(chart, s, &display.history, display.comparison.as_ref());
         labels.iter_mut().for_each(|(kind, mut label)| {
             let value = match kind {
                 Label::Resources => format!("Population {}     Paid households {}     Cash {}     Firms {}", number(s.population.living), number(s.employed), number(s.cash), number(s.firms)),
@@ -73,7 +80,6 @@ fn draw(
                 Label::Subtitle => chart.menu().description().into(),
                 Label::Summary => summary(chart.menu(), s),
                 Label::ChartTitle => chart.label().into(),
-                Label::ChartScale => range.scale_label(chart),
                 Label::Comparison => comparison_text(&display),
                 Label::Inspection => inspection_text(&display),
                 Label::MapSummary => format!("{} households / {} people\n{} paid / {} unmet bread ticks\n{} firms opened / {} closed\n{} distributors / {} discoveries", number(s.households), number(s.population.living), number(s.employed), number(s.shortages), number(s.firm_entries), number(s.firm_closures), number(s.distributors), number(s.research.discoveries)),
@@ -91,54 +97,154 @@ fn draw(
             }
         });
         tabs.iter_mut().for_each(|(tab, mut node)| {
-            node.display = match tab.0.menu() == chart.menu() {
+            let visibility = match tab.0.menu() == chart.menu() {
                 true => bevy::ui::Display::Flex,
                 false => bevy::ui::Display::None,
+            };
+            if node.display != visibility {
+                node.display = visibility;
             };
         });
         let peak = s.regions.iter().copied().max().unwrap_or(1).max(1) as f32;
         regions.iter_mut().for_each(|(region, mut color)| {
-            color.0 = ui::region_color(s.regions.get(region.0).copied().unwrap_or(0) as f32 / peak);
+            color.set_if_neq(BackgroundColor(ui::region_color(
+                s.regions.get(region.0).copied().unwrap_or(0) as f32 / peak,
+            )));
         });
-        if let Ok(entity) = legends.single() {
-            commands
-                .entity(entity)
-                .despawn_children()
-                .with_children(|legend| {
-                    chart
-                        .series()
-                        .into_iter()
-                        .enumerate()
-                        .for_each(|(series, name)| {
-                            legend
-                                .spawn(Node {
-                                    align_items: AlignItems::Center,
-                                    column_gap: px(5),
-                                    ..default()
-                                })
-                                .with_children(|item| {
-                                    item.spawn((
-                                        Node {
-                                            width: px(8),
-                                            height: px(8),
-                                            ..default()
-                                        },
-                                        BackgroundColor(chart_color(chart, series)),
-                                    ));
-                                    item.spawn(ui::text(name, 11.0, ui::MUTED));
-                                });
-                        });
-                });
-        }
-        if let Ok((entity, computed)) = plots.single() {
-            let size = computed.size() * computed.inverse_scale_factor();
-            commands
-                .entity(entity)
-                .despawn_children()
-                .with_children(|plot| {
-                    draw_chart(plot, &display, chart, &range, size);
-                });
-        }
+    }
+}
+
+fn plot_changed(
+    dashboard: Option<Res<Dashboard>>,
+    plots: Query<&ComputedNode, With<Plot>>,
+    mut previous: Local<Option<PresentationVersion>>,
+) -> bool {
+    let current = dashboard.and_then(|dashboard| {
+        plots.single().ok().map(|node| PresentationVersion {
+            revision: dashboard
+                .data
+                .lock()
+                .expect("dashboard lock")
+                .observation_revision,
+            chart: dashboard.chart,
+            plot_size: node.size() * node.inverse_scale_factor(),
+            scale: node.inverse_scale_factor(),
+        })
+    });
+    let changed = current != *previous;
+    *previous = current;
+    changed
+}
+
+fn chart_changed(dashboard: Option<Res<Dashboard>>, mut previous: Local<Option<Chart>>) -> bool {
+    let current = dashboard.map(|dashboard| dashboard.chart);
+    let changed = current != *previous;
+    *previous = current;
+    changed
+}
+
+fn map_changed(dashboard: Option<Res<Dashboard>>, mut previous: Local<Option<u64>>) -> bool {
+    let current =
+        dashboard.map(|dashboard| dashboard.data.lock().expect("dashboard lock").map_revision);
+    let changed = current != *previous;
+    *previous = current;
+    changed
+}
+
+fn draw_legend(
+    dashboard: Res<Dashboard>,
+    legends: Query<Entity, With<Legend>>,
+    mut commands: Commands,
+) {
+    if let Ok(entity) = legends.single() {
+        commands
+            .entity(entity)
+            .despawn_children()
+            .with_children(|legend| {
+                dashboard
+                    .chart
+                    .series()
+                    .into_iter()
+                    .enumerate()
+                    .for_each(|(series, name)| {
+                        legend
+                            .spawn(Node {
+                                align_items: AlignItems::Center,
+                                column_gap: px(5),
+                                ..default()
+                            })
+                            .with_children(|item| {
+                                item.spawn((
+                                    Node {
+                                        width: px(8),
+                                        height: px(8),
+                                        ..default()
+                                    },
+                                    BackgroundColor(chart_color(dashboard.chart, series)),
+                                ));
+                                item.spawn(ui::text(name, 11.0, ui::MUTED));
+                            });
+                    });
+            });
+    }
+}
+
+fn draw_plot(
+    dashboard: Res<Dashboard>,
+    plots: Query<(Entity, &ComputedNode), With<Plot>>,
+    mut renderer: GraphRenderer,
+    mut scales: Query<&mut Text, With<ui::ChartScale>>,
+    mut commands: Commands,
+) {
+    if let Ok((entity, computed)) = plots.single() {
+        let display = dashboard.data.lock().expect("dashboard lock");
+        let chart = dashboard.chart;
+        let range = ChartRange::new(
+            chart,
+            &display.snapshot,
+            &display.history,
+            display.comparison.as_ref(),
+        );
+        scales.iter_mut().for_each(|mut label| {
+            let value = range.scale_label(chart);
+            if label.0 != value {
+                label.0 = value;
+            }
+        });
+        let size = computed.size() * computed.inverse_scale_factor();
+        let area = Vec2::new((size.x - 52.0).max(1.0), (size.y - 30.0).max(1.0));
+        renderer.update(
+            &display,
+            chart,
+            &range,
+            area,
+            computed.inverse_scale_factor(),
+        );
+        commands
+            .entity(entity)
+            .despawn_children()
+            .with_children(|plot| {
+                draw_axes(plot, chart, &range, area);
+                plot.spawn((
+                    Node {
+                        position_type: PositionType::Absolute,
+                        left: px(48),
+                        top: px(6),
+                        width: px(area.x),
+                        height: px(area.y),
+                        ..default()
+                    },
+                    ImageNode::new(renderer.image()),
+                    Pickable::IGNORE,
+                ));
+                if display.history.is_empty() {
+                    plot.spawn(ui::text(
+                        "Waiting for the first observation...",
+                        12.0,
+                        ui::MUTED,
+                    ));
+                }
+            });
     }
 }
 
@@ -162,9 +268,16 @@ fn draw_markers(
             .for_each(|(entity, marker, mut node, mut color)| {
                 match firms.remove(&marker.identity) {
                     Some(firm) => {
-                        node.left = coordinate(firm.position.x);
-                        node.top = coordinate(firm.position.y);
-                        color.0 = chart_color(Chart::Prices, firm.kind.saturating_sub(1) as usize);
+                        let left = coordinate(firm.position.x);
+                        let top = coordinate(firm.position.y);
+                        if (node.left, node.top) != (left, top) {
+                            node.left = left;
+                            node.top = top;
+                        }
+                        color.set_if_neq(BackgroundColor(chart_color(
+                            Chart::Prices,
+                            firm.kind.saturating_sub(1) as usize,
+                        )));
                     }
                     None => {
                         commands.entity(entity).despawn();
@@ -281,8 +394,8 @@ fn comparison_text(display: &Display) -> String {
                 i128::from(display.snapshot.shortages) - i128::from(prior.shortages)
             ),
             None => format!(
-                "Comparing seed {} with seed {}\nAdvancing to day {}...",
-                display.seed, reference.seed, reference.horizon
+                "Seed {} / reference seed {}\nNo saved observation for day {} (reference ends at day {}).",
+                display.seed, reference.seed, display.snapshot.day, reference.horizon
             ),
         },
         None => format!(
@@ -292,7 +405,7 @@ fn comparison_text(display: &Display) -> String {
     }
 }
 
-fn chart_color(chart: Chart, series: usize) -> Color {
+pub(super) fn chart_color(chart: Chart, series: usize) -> Color {
     match (chart, series) {
         (Chart::Employment, 0) => Color::srgb(0.48, 0.78, 0.57),
         (Chart::Employment | Chart::Credit, 1) => Color::srgb(0.90, 0.42, 0.32),
@@ -303,14 +416,7 @@ fn chart_color(chart: Chart, series: usize) -> Color {
     }
 }
 
-fn draw_chart(
-    parent: &mut ChildSpawnerCommands,
-    display: &Display,
-    chart: Chart,
-    range: &ChartRange,
-    size: Vec2,
-) {
-    let area = Vec2::new((size.x - 52.0).max(0.0), (size.y - 30.0).max(0.0));
+fn draw_axes(parent: &mut ChildSpawnerCommands, chart: Chart, range: &ChartRange, area: Vec2) {
     (0..=4).for_each(|row| {
         let value = range.maximum * (1.0 - row as f64 / 4.0);
         let caption = match value {
@@ -349,191 +455,8 @@ fn draw_chart(
                 axis.spawn(ui::text(label, 10.0, ui::MUTED));
             });
         });
-    parent
-        .spawn(Node {
-            position_type: PositionType::Absolute,
-            left: px(48),
-            top: px(6),
-            width: px(area.x),
-            height: px(area.y),
-            overflow: Overflow::clip(),
-            ..default()
-        })
-        .with_children(|plot| {
-            (0..=4).for_each(|row| {
-                let y = row as f32 / 4.0 * (area.y - 1.0).max(0.0);
-                line(
-                    plot,
-                    Vec2::new(0.0, y),
-                    Vec2::new(area.x, y),
-                    ui::RULE.with_alpha(0.5),
-                );
-            });
-            match chart {
-                Chart::Cash => {
-                    if let Some(reference) = display
-                        .comparison
-                        .as_ref()
-                        .and_then(|reference| reference.at_day(display.snapshot.day))
-                    {
-                        draw_cash(plot, reference, range, area, LineStyle::Reference);
-                    }
-                    draw_cash(plot, &display.snapshot, range, area, LineStyle::Current);
-                }
-                _ => {
-                    if let Some(reference) = &display.comparison {
-                        draw_history(
-                            plot,
-                            &reference.history,
-                            chart,
-                            range,
-                            area,
-                            LineStyle::Reference,
-                        );
-                    }
-                    draw_history(
-                        plot,
-                        &display.history,
-                        chart,
-                        range,
-                        area,
-                        LineStyle::Current,
-                    );
-                }
-            }
-            if display.history.is_empty() {
-                plot.spawn(ui::text(
-                    "Waiting for the first observation...",
-                    12.0,
-                    ui::MUTED,
-                ));
-            }
-        });
 }
 
-#[derive(Clone, Copy)]
-enum LineStyle {
-    Current,
-    Reference,
-}
-impl LineStyle {
-    fn color(self, color: Color) -> Color {
-        match self {
-            Self::Current => color,
-            Self::Reference => color.with_alpha(0.30),
-        }
-    }
-}
-
-fn line(parent: &mut ChildSpawnerCommands, from: Vec2, to: Vec2, color: Color) {
-    let delta = to - from;
-    let middle = (from + to) / 2.0;
-    parent.spawn((
-        Node {
-            position_type: PositionType::Absolute,
-            left: px(middle.x - delta.length() / 2.0),
-            top: px(middle.y - 1.0),
-            width: px(delta.length().max(1.0)),
-            height: px(2),
-            ..default()
-        },
-        UiTransform::from_rotation(Rot2::radians(delta.y.atan2(delta.x))),
-        BackgroundColor(color),
-        Pickable::IGNORE,
-    ));
-}
-
-fn draw_history(
-    parent: &mut ChildSpawnerCommands,
-    history: &VecDeque<ObservationSnapshot>,
-    chart: Chart,
-    range: &ChartRange,
-    size: Vec2,
-    style: LineStyle,
-) {
-    let visible = history
-        .iter()
-        .filter(|snapshot| (range.first_day..=range.last_day).contains(&snapshot.day))
-        .collect::<Vec<_>>();
-    let span = range.last_day.saturating_sub(range.first_day).max(1) as f32;
-    let point = |day: u64, value: f64| {
-        Vec2::new(
-            3.0 + day.saturating_sub(range.first_day) as f32 / span * (size.x - 6.0).max(0.0),
-            3.0 + (1.0 - value as f32 / range.maximum as f32) * (size.y - 6.0).max(0.0),
-        )
-    };
-    visible.windows(2).for_each(|pair| {
-        chart
-            .values(pair[0])
-            .into_iter()
-            .zip(chart.values(pair[1]))
-            .enumerate()
-            .for_each(|(series, (from, to))| {
-                line(
-                    parent,
-                    point(pair[0].day, from),
-                    point(pair[1].day, to),
-                    style.color(chart_color(chart, series)),
-                );
-            });
-    });
-    if let Some(last) = visible.last() {
-        chart
-            .values(last)
-            .into_iter()
-            .enumerate()
-            .for_each(|(series, value)| {
-                let point = point(last.day, value);
-                parent.spawn((
-                    Node {
-                        position_type: PositionType::Absolute,
-                        left: px(point.x - 3.0),
-                        top: px(point.y - 3.0),
-                        width: px(6),
-                        height: px(6),
-                        border_radius: BorderRadius::MAX,
-                        ..default()
-                    },
-                    BackgroundColor(style.color(chart_color(chart, series))),
-                    Pickable::IGNORE,
-                ));
-            });
-    }
-}
-
-fn draw_cash(
-    parent: &mut ChildSpawnerCommands,
-    snapshot: &ObservationSnapshot,
-    range: &ChartRange,
-    size: Vec2,
-    style: LineStyle,
-) {
-    let width = size.x / (range.last_bin + 1) as f32;
-    snapshot
-        .wealth_bins
-        .iter()
-        .take(range.last_bin + 1)
-        .enumerate()
-        .for_each(|(bin, count)| {
-            let height = *count as f32 / range.maximum as f32 * (size.y - 3.0).max(0.0);
-            let fraction = match style {
-                LineStyle::Current => 0.55,
-                LineStyle::Reference => 0.90,
-            };
-            parent.spawn((
-                Node {
-                    position_type: PositionType::Absolute,
-                    left: px((bin as f32 + (1.0 - fraction) / 2.0) * width),
-                    bottom: px(0),
-                    width: px(width * fraction),
-                    height: px(height),
-                    ..default()
-                },
-                BackgroundColor(style.color(ui::GOLD)),
-                Pickable::IGNORE,
-            ));
-        });
-}
 fn inspection_text(display: &Display) -> String {
     display
                 .inspection
