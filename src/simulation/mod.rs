@@ -1107,12 +1107,19 @@ impl Simulation {
         });
         match observation {
             Ok(mut snapshot) => {
-                if previous_actors.is_some() {
-                    self.config = configuration::Configuration::new(
-                        &self.device,
-                        &self.scenario,
-                        &self.metadata,
-                    );
+                match (
+                    &management,
+                    plan.transition,
+                    self.scenario.config().property.as_ref(),
+                ) {
+                    (Some(_), _, _) | (_, registry::RegistryTransition::Migration, Some(_)) => {
+                        self.config = configuration::Configuration::new(
+                            &self.device,
+                            &self.scenario,
+                            &self.metadata,
+                        );
+                    }
+                    _ => (),
                 }
                 if let Some(ownership) = ownership {
                     self.ownership = Some(ownership);

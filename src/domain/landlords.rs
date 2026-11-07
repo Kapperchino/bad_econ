@@ -37,14 +37,17 @@ fn region(scenario: &Scenario, actor: &Actor) -> usize {
 impl RentalRegistry {
     pub fn new(scenario: &Scenario, state: &State) -> Self {
         let mut buildings = BTreeMap::<usize, Vec<usize>>::new();
-        let mut accounts = BTreeMap::<usize, Vec<usize>>::new();
+        let mut accounts = Vec::<RentalAccount>::new();
         for (index, actor) in state.actors.iter().enumerate() {
             if actor.kind == Good::Housing as u32 {
                 buildings
                     .entry(region(scenario, &actor))
                     .or_default()
-                    .push(index);
-                accounts.insert(index, Vec::new());
+                    .push(accounts.len());
+                accounts.push(RentalAccount {
+                    landlord: index,
+                    tenants: Vec::new(),
+                });
             }
         }
         for (index, actor) in state.actors.iter().enumerate() {
@@ -54,21 +57,13 @@ impl RentalRegistry {
                         0 => index,
                         _ => actor.owner as usize,
                     };
-                    let landlord = sites[household % sites.len()];
-                    accounts
-                        .get_mut(&landlord)
-                        .expect("rental business")
-                        .push(index);
+                    let account = sites[household % sites.len()];
+                    accounts[account].tenants.push(index);
                 }
                 _ => (),
             }
         }
-        Self {
-            accounts: accounts
-                .into_iter()
-                .map(|(landlord, tenants)| RentalAccount { landlord, tenants })
-                .collect(),
-        }
+        Self { accounts }
     }
 
     pub fn words(&self) -> Vec<u32> {

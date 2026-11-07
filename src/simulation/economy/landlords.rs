@@ -11,6 +11,7 @@ use burn_wgpu::CubeTensor;
 enum RentalStage {
     Reset,
     Supply,
+    Allocate,
     Accounts,
 }
 
@@ -22,6 +23,8 @@ struct RentalInput {
     control: Box<[Atomic<u32>]>,
     #[cube(comptime)]
     stage: RentalStage,
+    #[cube(comptime)]
+    scan: parallel::ScanMode,
 }
 
 struct RentalBusinesses;
@@ -37,7 +40,10 @@ impl GpuPass<RentalInput> for AdvanceRentals {
     type Output = ();
 
     fn execute(mut input: RentalInput) {
-        let group = ABSOLUTE_POS as u32;
+        let group = match comptime!(input.stage) {
+            RentalStage::Allocate | RentalStage::Accounts => CUBE_POS as u32,
+            _ => ABSOLUTE_POS as u32,
+        };
         let count = match comptime!(input.stage) {
             RentalStage::Reset => input.config.actors,
             _ => input.config.rental_businesses,
@@ -60,12 +66,14 @@ impl GpuPass<RentalInput> for AdvanceRentals {
                         0,
                     );
                 }
-                RentalStage::Supply => open(
+                RentalStage::Supply => open(&mut input.state, &input.config, &input.control, group),
+                RentalStage::Allocate => allocate(
                     &mut input.state,
                     &input.actors,
                     &input.config,
                     &input.control,
                     group,
+                    input.scan,
                 ),
                 RentalStage::Accounts => settle(
                     &mut input.state,
@@ -89,18 +97,25 @@ pub(in crate::simulation) fn launch(
 ) {
     let stages: &[RentalStage] = match (config.rental_businesses, phase) {
         (0, _) => &[],
-        (_, Phase::Observation) => &[RentalStage::Reset, RentalStage::Supply],
+        (_, Phase::Observation) => &[
+            RentalStage::Reset,
+            RentalStage::Supply,
+            RentalStage::Allocate,
+        ],
         (_, Phase::AccountsDecisions) => &[RentalStage::Accounts],
         _ => &[],
     };
     for &stage in stages {
         let count = match stage {
-            RentalStage::Reset => config.actors,
-            _ => config.rental_businesses,
+            RentalStage::Reset => config.actors as usize,
+            RentalStage::Allocate | RentalStage::Accounts => {
+                config.rental_businesses as usize * device.workgroup as usize
+            }
+            _ => config.rental_businesses as usize,
         };
         RentalBusinesses::launch(
             device,
-            device.count(count as usize),
+            device.count(count),
             CubeDim::new_1d(device.workgroup),
             RentalInputLaunch {
                 state: state.clone().into_buffer_arg(),
@@ -108,6 +123,7 @@ pub(in crate::simulation) fn launch(
                 config: config.launch(),
                 control: control.clone().into_buffer_arg(),
                 stage,
+                scan: parallel::ScanMode::new(device),
             },
         );
     }
@@ -151,16 +167,8 @@ pub(super) fn maintenance(state: &mut [u32], config: &EconomyConfig, firm: u32) 
 }
 
 #[cube]
-fn open(
-    state: &mut [u32],
-    actors: &[u32],
-    config: &EconomyConfig,
-    control: &[Atomic<u32>],
-    group: u32,
-) {
+fn open(state: &mut [u32], config: &EconomyConfig, control: &[Atomic<u32>], group: u32) {
     let firm = config.rental_accounts[(group * 3) as usize];
-    let start = config.rental_accounts[(group * 3 + 1) as usize];
-    let end = config.rental_accounts[(group * 3 + 2) as usize];
     let expired = value(state, config, comptime!(Field::Housing as u32), firm);
     consume(
         state,
@@ -235,60 +243,100 @@ fn open(
         firm,
         supply,
     );
-    let mut available = supply;
-    for entry in start..end {
-        let tenant = config.rental_accounts[entry as usize];
-        let household = kind(actors, tenant).is(comptime!(ActorKind::Household));
-        let renter = household
-            && number(state, config, comptime!(Field::LandPlots as u32), tenant) == 0
-            && number(
-                state,
-                config,
-                comptime!(Field::LivingMembers as u32),
-                tenant,
-            ) > 0;
-        let housed = renter && !equal(available, zero());
-        available = positive(available, ticks(u32::cast_from(housed), 0));
-        set32(
-            state,
-            config,
-            comptime!(Field::HousingAvailable as u32),
-            tenant,
-            u32::cast_from(housed),
-        );
-        set32(
-            state,
-            config,
-            comptime!(Field::Landlord as u32),
-            tenant,
-            firm + 1,
-        );
-    }
-    consume(
-        state,
-        config,
-        control,
-        firm,
-        comptime!(Good::Housing as u32),
-        minus(supply, available),
-    );
 }
 
 #[cube]
-fn settle(
+fn renter(state: &mut [u32], actors: &[u32], config: &EconomyConfig, tenant: u32) -> bool {
+    kind(actors, tenant).is(comptime!(ActorKind::Household))
+        && number(state, config, comptime!(Field::LandPlots as u32), tenant) == 0
+        && number(
+            state,
+            config,
+            comptime!(Field::LivingMembers as u32),
+            tenant,
+        ) > 0
+}
+
+#[cube]
+fn allocate(
     state: &mut [u32],
     actors: &[u32],
     config: &EconomyConfig,
     control: &[Atomic<u32>],
     group: u32,
+    #[comptime] scan: parallel::ScanMode,
 ) {
     let firm = config.rental_accounts[(group * 3) as usize];
+    let start = config.rental_accounts[(group * 3 + 1) as usize];
+    let end = config.rental_accounts[(group * 3 + 2) as usize];
+    let supply = value(state, config, comptime!(Field::Housing as u32), firm);
+    let mut households = 0u32;
+    let mut offset = start;
+    while offset < end {
+        let entry = offset + UNIT_POS;
+        let mut tenant = 0u32;
+        let mut eligible = false;
+        if entry < end {
+            tenant = config.rental_accounts[entry as usize];
+            eligible = renter(state, actors, config, tenant);
+        }
+        let prefix = parallel::scan_prefix(u32::cast_from(eligible), scan);
+        let housed = eligible && !lt(supply, ticks(households + prefix.inclusive, 0));
+        if entry < end {
+            set32(
+                state,
+                config,
+                comptime!(Field::HousingAvailable as u32),
+                tenant,
+                u32::cast_from(housed),
+            );
+            set32(
+                state,
+                config,
+                comptime!(Field::Landlord as u32),
+                tenant,
+                firm + 1,
+            );
+        }
+        households += prefix.total;
+        offset += CUBE_DIM;
+        sync_cube();
+    }
+    sync_cube();
+    if UNIT_POS == 0 {
+        consume(
+            state,
+            config,
+            control,
+            firm,
+            comptime!(Good::Housing as u32),
+            minimum(supply, ticks(households, 0)),
+        );
+    }
+}
+
+#[derive(CubeType)]
+struct RentalReceipts {
+    cash: Ticks,
+    households: u32,
+    served: u32,
+}
+
+#[cube]
+fn receipts(
+    state: &mut [u32],
+    actors: &[u32],
+    config: &EconomyConfig,
+    control: &[Atomic<u32>],
+    group: u32,
+) -> RentalReceipts {
     let start = config.rental_accounts[(group * 3 + 1) as usize];
     let end = config.rental_accounts[(group * 3 + 2) as usize];
     let mut receipts = zero();
     let mut households = 0u32;
     let mut served = 0u32;
-    for entry in start..end {
+    let mut entry = start + UNIT_POS;
+    while entry < end {
         let tenant = config.rental_accounts[entry as usize];
         receipts = add_checked(
             control,
@@ -302,31 +350,68 @@ fn settle(
             tenant,
             0,
         );
-        let household = kind(actors, tenant).is(comptime!(ActorKind::Household));
-        households += u32::cast_from(
-            household
-                && number(state, config, comptime!(Field::LandPlots as u32), tenant) == 0
-                && number(
-                    state,
-                    config,
-                    comptime!(Field::LivingMembers as u32),
-                    tenant,
-                ) > 0,
-        );
+        households += u32::cast_from(renter(state, actors, config, tenant));
         served += number(
             state,
             config,
             comptime!(Field::HousingAvailable as u32),
             tenant,
         );
+        entry += CUBE_DIM;
     }
+    let mut cash = Shared::<[Ticks]>::new_slice(256usize);
+    cash[UNIT_POS as usize] = receipts;
+    sync_cube();
+    let mut stride = CUBE_DIM / 2;
+    while stride > 0 {
+        if UNIT_POS < stride {
+            cash[UNIT_POS as usize] = add_checked(
+                control,
+                cash[UNIT_POS as usize],
+                cash[(UNIT_POS + stride) as usize],
+            );
+        }
+        sync_cube();
+        stride /= 2;
+    }
+    RentalReceipts {
+        cash: cash[0],
+        households: parallel::reduce(households, comptime!(Reduction::Sum)),
+        served: parallel::reduce(served, comptime!(Reduction::Sum)),
+    }
+}
+
+#[cube]
+fn settle(
+    state: &mut [u32],
+    actors: &[u32],
+    config: &EconomyConfig,
+    control: &[Atomic<u32>],
+    group: u32,
+) {
+    let collected = receipts(state, actors, config, control, group);
+    if UNIT_POS == 0 {
+        close(state, actors, config, control, group, collected);
+    }
+}
+
+#[cube]
+fn close(
+    state: &mut [u32],
+    actors: &[u32],
+    config: &EconomyConfig,
+    control: &[Atomic<u32>],
+    group: u32,
+    collected: RentalReceipts,
+) {
+    let firm = config.rental_accounts[(group * 3) as usize];
     increase(
         state,
         config,
         control,
         comptime!(Field::Cash as u32),
         firm,
-        receipts,
+        collected.cash,
     );
     increase(
         state,
@@ -334,22 +419,28 @@ fn settle(
         control,
         comptime!(Field::RentalIncome as u32),
         firm,
-        receipts,
+        collected.cash,
     );
-    set32(state, config, comptime!(Field::Sales as u32), firm, served);
+    set32(
+        state,
+        config,
+        comptime!(Field::Sales as u32),
+        firm,
+        collected.served,
+    );
     set32(
         state,
         config,
         comptime!(Field::Demand as u32),
         firm,
-        households,
+        collected.households,
     );
     set32(
         state,
         config,
         comptime!(Field::Unfilled as u32),
         firm,
-        households - min(households, served),
+        collected.households - min(collected.households, collected.served),
     );
     let upkeep = multiply(
         control,
@@ -359,7 +450,7 @@ fn settle(
             1,
         ),
     );
-    develop(state, actors, config, firm, households, upkeep);
+    develop(state, actors, config, firm, collected.households, upkeep);
     let project = value(
         state,
         config,
@@ -370,7 +461,7 @@ fn settle(
     let capacity = number(state, config, comptime!(Field::OccupiedPlots as u32), firm)
         * number(state, config, comptime!(Field::OutputTicks as u32), firm);
     let planned = select(
-        interested && households >= capacity,
+        interested && collected.households >= capacity,
         maximum(project, ticks(CONSTRUCTION_WORK_PER_PLOT, 0)),
         project,
     );
@@ -477,5 +568,130 @@ fn develop(
                 );
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::domain::{
+        Experiment, Scenario, enterprise::ExpansionPolicy, landlords::RentalRegistry,
+    };
+    use crate::simulation::{decode, encode, tests::device};
+    use anyhow::Result;
+
+    #[test]
+    fn rental_batches_preserve_tenant_priority_wide_payments_and_overflow_on_gpu() -> Result<()> {
+        let mut policy = Scenario::industrial(1031, 42, Experiment::Concentrated)?
+            .config()
+            .clone();
+        policy.expansion = ExpansionPolicy {
+            small_business_per_mille: 0,
+            industrial_per_mille: 0,
+        };
+        let scenario = Scenario::new(policy)?;
+        let mut initial = scenario.initial()?;
+        let rentals = RentalRegistry::new(&scenario, &initial);
+        assert_eq!(rentals.accounts.len(), 1);
+        let account = &rentals.accounts[0];
+        let firm = account.landlord;
+        let tenants = account
+            .tenants
+            .iter()
+            .copied()
+            .filter(|&tenant| initial.actors.at(tenant).kind == 0)
+            .collect::<Vec<_>>();
+        for &tenant in &tenants {
+            initial.set(Field::LandPlots, tenant, u64::from(tenant % 3 == 0));
+            initial.set(Field::LivingMembers, tenant, u64::from(tenant % 5 != 0));
+        }
+        let eligible = tenants
+            .into_iter()
+            .filter(|&tenant| tenant % 3 != 0 && tenant % 5 != 0)
+            .collect::<Vec<_>>();
+        for &tenant in &account.tenants {
+            initial.set(Field::RentPending, tenant, (1 << 32) + tenant as u64 + 1);
+        }
+        initial.set(Field::OccupiedPlots, firm, 1);
+        initial.set(Field::MaintenanceDays, firm, 1);
+        initial.set(Field::Housing, firm, 7);
+        let payments = account
+            .tenants
+            .iter()
+            .map(|&tenant| initial.get(Field::RentPending, tenant))
+            .sum::<u64>();
+        for workgroup in [32, 64, 128, 256] {
+            let device = device(workgroup)?;
+            let config = Configuration::new(&device, &scenario, &initial);
+            let metadata = initial
+                .actors
+                .iter()
+                .map(|actor| ActorLayout::new(&actor, &scenario))
+                .collect::<ActorMetadataRows>();
+            let actors = device.tensor(&metadata.words());
+            for capacity in [0, 65, 257, u32::MAX] {
+                initial.set(Field::OutputTicks, firm, u64::from(capacity));
+                let state = device.tensor(bytemuck::cast_slice(&encode(&initial.values)));
+                let control = device.tensor(&[0; CONTROL_WORDS]);
+                for phase in [Phase::Observation, Phase::AccountsDecisions] {
+                    launch(&device, &state, &actors, &config, &control, phase);
+                }
+                let mut actual = initial.clone();
+                actual.values = decode(&device.read(&state)?);
+                FaultFlags::read(&device.read(&control)?)?.into_result()?;
+                let housed = eligible
+                    .iter()
+                    .copied()
+                    .take(capacity as usize)
+                    .collect::<Vec<_>>();
+                for &tenant in &account.tenants {
+                    assert_eq!(
+                        actual.get(Field::HousingAvailable, tenant),
+                        u64::from(housed.contains(&tenant))
+                    );
+                    assert_eq!(actual.get(Field::Landlord, tenant), firm as u64 + 1);
+                    assert_eq!(actual.get(Field::RentPending, tenant), 0);
+                }
+                assert_eq!(
+                    actual.get(Field::Housing, firm),
+                    u64::from(capacity) - housed.len() as u64
+                );
+                assert_eq!(
+                    actual.get(Field::Used, firm) - initial.get(Field::Used, firm),
+                    7 + housed.len() as u64
+                );
+                assert_eq!(
+                    actual.get(Field::Cash, firm),
+                    initial.get(Field::Cash, firm) + payments
+                );
+                assert_eq!(
+                    actual.get(Field::RentalIncome, firm),
+                    initial.get(Field::RentalIncome, firm) + payments
+                );
+                assert_eq!(actual.get(Field::Demand, firm), eligible.len() as u64);
+                assert_eq!(actual.get(Field::Sales, firm), housed.len() as u64);
+                assert_eq!(
+                    actual.get(Field::Unfilled, firm),
+                    (eligible.len() - housed.len()) as u64
+                );
+            }
+            let mut overflow = initial.clone();
+            overflow.set(Field::RentPending, account.tenants[0], u64::MAX);
+            let state = device.tensor(bytemuck::cast_slice(&encode(&overflow.values)));
+            let control = device.tensor(&[0; CONTROL_WORDS]);
+            launch(
+                &device,
+                &state,
+                &actors,
+                &config,
+                &control,
+                Phase::AccountsDecisions,
+            );
+            assert!(
+                FaultFlags::read(&device.read(&control)?)?
+                    .contains(FaultFlags::ARITHMETIC_OVERFLOW)
+            );
+        }
+        Ok(())
     }
 }
