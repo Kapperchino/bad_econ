@@ -29,12 +29,29 @@ pub(in crate::simulation) fn patch(
     actors: &ActorRows,
     requests: &[PendingRecord],
 ) -> CubeTensor {
-    let patches = requests
-        .iter()
-        .filter(|record| matches!(record.request >> 24, 3 | 6))
-        .map(|record| ActorPatch {
-            index: record.actor,
-            metadata: ActorLayout::new(&actors.at(record.actor as usize), scenario),
+    patch_actors(
+        device,
+        scenario,
+        source,
+        actors,
+        requests
+            .iter()
+            .filter(|record| matches!(record.request >> 24, 3 | 6))
+            .map(|record| record.actor as usize),
+    )
+}
+
+pub(in crate::simulation) fn patch_actors(
+    device: &Device,
+    scenario: &Scenario,
+    source: &CubeTensor,
+    actors: &ActorRows,
+    indices: impl Iterator<Item = usize>,
+) -> CubeTensor {
+    let patches = indices
+        .map(|index| ActorPatch {
+            index: index as u32,
+            metadata: ActorLayout::new(&actors.at(index), scenario),
         })
         .collect::<Vec<_>>();
     let output = device.empty(source.meta.num_elements());
