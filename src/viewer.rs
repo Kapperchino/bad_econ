@@ -1,4 +1,5 @@
 mod feedback;
+mod graph;
 mod model;
 mod pacing;
 mod presentation;
@@ -11,6 +12,7 @@ use crate::{
 };
 use anyhow::{Context, Result};
 use bevy::{
+    ecs::system::SystemParam,
     input::{ButtonState, mouse::MouseButtonInput},
     prelude::*,
     render::{
@@ -82,6 +84,15 @@ enum VerificationState {
     AwaitComparison,
     AwaitFirmInspection,
     AwaitMapInspection(u64),
+    AwaitSpeed(RetainedPresentation),
+    AwaitPrevious {
+        identity: u64,
+        presentation: RetainedPresentation,
+    },
+    AwaitNext {
+        identity: u64,
+        presentation: RetainedPresentation,
+    },
     AwaitMenu(Chart),
     AwaitChart(Chart),
     Frames(u32),
@@ -92,6 +103,45 @@ enum VerificationState {
     AwaitCompactCapture,
     Complete,
 }
+#[derive(Clone, Copy, Debug)]
+struct RetainedPresentation {
+    plot: Entity,
+    legend: Entity,
+}
+
+#[derive(SystemParam)]
+struct VerificationPresentation<'w, 's> {
+    plots: Query<'w, 's, &'static Children, With<ui::Plot>>,
+    legends: Query<'w, 's, &'static Children, With<ui::Legend>>,
+    meshes: Query<'w, 's, &'static Mesh2d>,
+    windows: Query<'w, 's, &'static mut Window, With<PrimaryWindow>>,
+}
+impl VerificationPresentation<'_, '_> {
+    fn retained(&self) -> RetainedPresentation {
+        assert_eq!(self.meshes.iter().count(), 1, "charts share one GPU mesh");
+        let children = self.plots.single().expect("plot children");
+        assert!(
+            children.len() <= 8,
+            "plot UI must remain bounded independently of history"
+        );
+        RetainedPresentation {
+            plot: children[0],
+            legend: self.legends.single().expect("legend children")[0],
+        }
+    }
+    fn assert_retained(&self, previous: RetainedPresentation) {
+        let current = self.retained();
+        assert_eq!(
+            current.plot, previous.plot,
+            "unrelated controls rebuilt the graph"
+        );
+        assert_eq!(
+            current.legend, previous.legend,
+            "unrelated controls rebuilt the legend"
+        );
+    }
+}
+
 #[derive(Resource)]
 struct Dashboard {
     sender: Sender<Control>,
@@ -112,6 +162,8 @@ struct Display {
     map_size: u32,
     speed: Speed,
     revision: u64,
+    observation_revision: u64,
+    map_revision: u64,
     cues: VecDeque<Cue>,
 }
 enum Control {
@@ -212,7 +264,8 @@ pub fn run(scenario: Scenario, workgroup: u32, mode: ViewMode) -> Result<()> {
             Update,
             (verify, verify_clicks)
                 .chain()
-                .after(feedback::FeedbackSystems),
+                .after(feedback::FeedbackSystems)
+                .after(presentation::PresentationSystems),
         );
     }
     match app.run() {
@@ -230,7 +283,7 @@ fn setup(
     queue: Res<RenderQueue>,
     event_loop: Res<EventLoopProxyWrapper>,
 ) {
-    commands.spawn(Camera2d);
+    commands.spawn((Camera2d, IsDefaultUiCamera));
     let setup = burn_wgpu::WgpuSetup {
         instance: instance.as_ref().clone().into_inner(),
         adapter: adapter.as_ref().clone().into_inner(),
@@ -251,6 +304,8 @@ fn setup(
         map_size: launch.scenario.config().map_size,
         speed: Speed::Normal,
         revision: 0,
+        observation_revision: 0,
+        map_revision: 0,
         cues: VecDeque::new(),
     }));
     let (sender, receiver) = unbounded();
@@ -290,7 +345,7 @@ fn verify(
     dashboard: Option<Res<Dashboard>>,
     launch: Res<Launch>,
     feedback: Res<feedback::Feedback>,
-    mut windows: Query<&mut Window, With<PrimaryWindow>>,
+    mut presentation: VerificationPresentation,
     mut commands: Commands,
     mut exit: MessageWriter<AppExit>,
 ) {
@@ -378,6 +433,56 @@ fn verify(
                             .as_ref()
                             .is_some_and(|record| record.actor.identity == identity) =>
                     {
+                        verification.click = VerificationClick::Move(UiAction::Speed(Speed::Slow));
+                        VerificationState::AwaitSpeed(presentation.retained())
+                    }
+                    VerificationState::AwaitSpeed(retained)
+                        if display.speed == Speed::Slow
+                            && matches!(verification.click, VerificationClick::Idle) =>
+                    {
+                        presentation.assert_retained(retained);
+                        let index = display
+                            .identities
+                            .iter()
+                            .position(|identity| *identity == dashboard.selected)
+                            .expect("selected actor");
+                        let previous = display.identities
+                            [(index + display.identities.len() - 1) % display.identities.len()];
+                        verification.click =
+                            VerificationClick::Move(UiAction::Inspect(ActorSelection::Previous));
+                        VerificationState::AwaitPrevious {
+                            identity: previous,
+                            presentation: retained,
+                        }
+                    }
+                    VerificationState::AwaitPrevious {
+                        identity,
+                        presentation: retained,
+                    } if display
+                        .inspection
+                        .as_ref()
+                        .is_some_and(|record| record.actor.identity == identity)
+                        && matches!(verification.click, VerificationClick::Idle) =>
+                    {
+                        presentation.assert_retained(retained);
+                        let next = display.firms.last().expect("map firm").identity;
+                        verification.click =
+                            VerificationClick::Move(UiAction::Inspect(ActorSelection::Next));
+                        VerificationState::AwaitNext {
+                            identity: next,
+                            presentation: retained,
+                        }
+                    }
+                    VerificationState::AwaitNext {
+                        identity,
+                        presentation: retained,
+                    } if display
+                        .inspection
+                        .as_ref()
+                        .is_some_and(|record| record.actor.identity == identity)
+                        && matches!(verification.click, VerificationClick::Idle) =>
+                    {
+                        presentation.assert_retained(retained);
                         VerificationState::Frames(3)
                     }
                     VerificationState::AwaitMenu(chart)
@@ -406,7 +511,8 @@ fn verify(
                         VerificationState::Resize
                     }
                     VerificationState::Resize => {
-                        windows
+                        presentation
+                            .windows
                             .single_mut()
                             .expect("primary window")
                             .resolution
@@ -493,7 +599,15 @@ fn controls(
         (KeyCode::Digit3, UiAction::Speed(Speed::Fast)),
         (KeyCode::KeyH, UiAction::Inspect(ActorSelection::Household)),
         (KeyCode::KeyF, UiAction::Inspect(ActorSelection::Firm)),
-        (KeyCode::Tab, UiAction::Inspect(ActorSelection::Next)),
+        (
+            KeyCode::Tab,
+            UiAction::Inspect(
+                match keys.pressed(KeyCode::ShiftLeft) || keys.pressed(KeyCode::ShiftRight) {
+                    true => ActorSelection::Previous,
+                    false => ActorSelection::Next,
+                },
+            ),
+        ),
         (KeyCode::KeyG, UiAction::NextChart),
     ];
     let pending = actions
@@ -542,16 +656,18 @@ fn controls(
                                 display.firms.first().map(|actor| actor.identity)
                             }
                             ActorSelection::Identity(identity) => Some(identity),
-                            ActorSelection::Next => {
+                            ActorSelection::Next | ActorSelection::Previous => {
                                 let index = display
                                     .identities
                                     .iter()
                                     .position(|&identity| identity == dashboard.selected)
                                     .unwrap_or(0);
-                                display
-                                    .identities
-                                    .get((index + 1) % display.identities.len().max(1))
-                                    .copied()
+                                let count = display.identities.len().max(1);
+                                let next = match selection {
+                                    ActorSelection::Previous => (index + count - 1) % count,
+                                    _ => (index + 1) % count,
+                                };
+                                display.identities.get(next).copied()
                             }
                         }
                     };
@@ -633,7 +749,7 @@ fn capture_compact_frame(
         });
     verification.capture(&captured.image, "compact");
     eprintln!(
-        "viewer interaction and layout verification passed: shared GPU, native mouse clicks, reset/step/comparison feedback, audited days, household and firm inspection, refreshed inspection, all five menus and ten charts, footer controls, compact window"
+        "viewer interaction and layout verification passed: shared GPU, native mouse clicks, reset/step/comparison feedback, audited days, household and firm inspection, refreshed inspection, all five menus and ten charts, retained GPU chart on speed and inspection changes, previous/next navigation, footer controls, compact window"
     );
     match &verification.capture_error {
         None => {

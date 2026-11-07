@@ -17,13 +17,13 @@ use anyhow::{Context, Result};
 use burn_wgpu::CubeTensor;
 use cubecl::{CubeDim, prelude::*};
 use records::PendingRecord;
-use std::collections::{BTreeMap, BTreeSet};
+use std::collections::BTreeMap;
 use systems::*;
 
 #[derive(Clone, Default)]
 pub(super) struct MigrationRegistry {
     destinations: BTreeMap<usize, Position>,
-    parents: BTreeSet<u64>,
+    children: BTreeMap<u64, Vec<usize>>,
 }
 impl MigrationRegistry {
     pub fn new(state: &State) -> Self {
@@ -40,10 +40,15 @@ impl MigrationRegistry {
                     )
                 })
                 .collect(),
-            parents: (0..state.actors.len())
-                .map(|actor| state.get(Field::ParentHousehold, actor))
-                .filter(|&parent| parent > 0)
-                .collect(),
+            children: (0..state.actors.len())
+                .filter(|&actor| state.get(Field::ParentHousehold, actor) > 0)
+                .fold(BTreeMap::new(), |mut children, actor| {
+                    children
+                        .entry(state.get(Field::ParentHousehold, actor))
+                        .or_default()
+                        .push(actor);
+                    children
+                }),
         }
     }
 
@@ -52,11 +57,16 @@ impl MigrationRegistry {
         actors: &ActorRows,
         formations: &[super::enterprise::HouseholdFormation],
     ) {
-        self.parents.extend(
-            formations
-                .iter()
-                .map(|formation| actors.at(formation.parent).identity),
-        );
+        for formation in formations {
+            self.children
+                .entry(actors.at(formation.parent).identity)
+                .or_default()
+                .push(formation.household);
+        }
+    }
+
+    pub fn children(&self, household: u64) -> impl Iterator<Item = usize> + '_ {
+        self.children.get(&household).into_iter().flatten().copied()
     }
 }
 
@@ -95,9 +105,12 @@ impl RegistryPlan {
             0 => record.request == 0,
             2 | 3 => true,
             4 | 7 => scenario.config().finance.is_none(),
-            5 => !migrations
-                .parents
-                .contains(&metadata.actors.at(record.actor as usize).identity),
+            5 => {
+                scenario.config().finance.is_none()
+                    || !migrations
+                        .children
+                        .contains_key(&metadata.actors.at(record.actor as usize).identity)
+            }
             6 => record.request & 0x00ffffff > 0,
             _ => false,
         });

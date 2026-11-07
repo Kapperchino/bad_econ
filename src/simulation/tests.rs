@@ -297,6 +297,154 @@ fn gpu_registry_migration_births_and_estates_match_audited_rebuilds() -> Result<
 }
 
 #[test]
+fn gpu_parent_estates_preserve_inheritance_without_full_state_readback() -> Result<()> {
+    use crate::domain::demography::{DeathCause, LivingState};
+    use crate::domain::enterprise::OwnershipShare;
+
+    let mut config = Scenario::industrial(3000, 42, Experiment::Baseline)?
+        .config()
+        .clone();
+    config.research = None;
+    config.firms = 6 * Good::COUNT as u32;
+    let scenario = Scenario::new(config)?;
+    let mut initial = scenario.initial()?;
+    assert!(crate::domain::landlords::RentalRegistry::new(&scenario, &initial).accounts.len() > 1);
+    initial.day = 1700;
+    for (child, parent) in [(1, 0), (2, 0), (3, 0), (32, 31), (41, 40)] {
+        initial.set(
+            Field::ParentHousehold,
+            child,
+            initial.actors.at(parent).identity,
+        );
+    }
+    let deceased = [0, 1, 31, 40, 41].map(|index| initial.actors.at(index).identity);
+    for person in &mut initial.people {
+        if deceased.contains(&person.household) {
+            person.state = LivingState::Deceased {
+                day: initial.day,
+                cause: DeathCause::Background,
+            };
+        }
+    }
+    for household in 0..3000 {
+        let identity = initial.actors.at(household).identity;
+        let living = initial
+            .people
+            .iter()
+            .filter(|person| {
+                person.household == identity && matches!(person.state, LivingState::Living)
+            })
+            .count() as u64;
+        initial.set(Field::LivingMembers, household, living);
+    }
+    for (firm, parent) in [(3000, 0), (3001, 31), (3002, 10)] {
+        let mut actor = initial.actors.at(firm);
+        actor.owner = parent as u32;
+        let identity = actor.identity;
+        initial.actors.set(firm, actor);
+        let household = initial.actors.at(parent).identity;
+        let ownership = initial
+            .ownership
+            .iter_mut()
+            .find(|ownership| ownership.firm == identity)
+            .context("issued ownership")?;
+        ownership.shares = vec![OwnershipShare {
+            household,
+            units: 1_000_000,
+        }];
+    }
+    let heir = initial.actors.at(2).identity;
+    initial
+        .ownership
+        .iter_mut()
+        .find(|ownership| ownership.firm == initial.actors.at(3000).identity)
+        .context("joint ownership")?
+        .shares = vec![
+        OwnershipShare {
+            household: initial.actors.at(0).identity,
+            units: 500_000,
+        },
+        OwnershipShare {
+            household: heir,
+            units: 500_000,
+        },
+    ];
+    let slot = (initial.day % scenario.ring() as u64) as usize;
+    let delivery = initial
+        .shipment_coordinate(Good::Bread, slot, scenario.ring(), 0)
+        .0 as usize;
+    initial.set(Field::Bread, 0, initial.get(Field::Bread, 0) - 1);
+    initial.values[delivery] += 1;
+    initial.values[(TRANSIT_FIELDS + Good::Bread as usize - 1) * initial.actors.len()] += 1;
+    initial.set(Field::Transit, 0, initial.get(Field::Transit, 0) + 1);
+    let mut requests = vec![0; initial.actors.len()];
+    for actor in [0, 1, 31, 40, 41] {
+        requests[actor] = 5 << 24;
+    }
+    requests[5] = (2 << 24) + 3003;
+    requests[3001] = (6 << 24) + 2;
+    initial.set(Field::PendingCapacity, 3001, 2);
+    initial.set(Field::InstalledCapital, 3001, 1);
+    for formation in [None, Some(6)] {
+        let mut initial = initial.clone();
+        let mut requests = requests.clone();
+        if let Some(parent) = formation {
+            let identity = initial.actors.at(parent).identity;
+            let person = initial
+                .people
+                .iter()
+                .find(|person| person.household == identity)
+                .context("forming household member")?
+                .identity;
+            initial.set(Field::SplitPerson, parent, person);
+            requests[parent] = (1 << 24) + 1;
+        }
+        let pending =
+            registry::records::PendingRecords::from_dense(&requests, &vec![0; requests.len()])?;
+        let mut expected = initial.clone();
+        enterprise::transitions(&mut expected, &scenario, &requests)?;
+        for workgroup in [32, 128] {
+            let mut gpu =
+                Simulation::from_state(scenario.clone(), initial.clone(), device(workgroup)?)
+                    .context("initial inheritance state")?;
+            gpu.device.write(&gpu.enterprise_requests, &requests);
+            let before = gpu.readback_bytes;
+            match registry::entries::EntryGrowth::new(
+                &scenario,
+                &gpu.metadata,
+                &gpu.migrations,
+                &pending.records,
+            )? {
+                Some(growth) => {
+                    gpu.commit_entries(&growth.requests, growth.plan, &pending.records)?
+                }
+                None => {
+                    let plan = registry::RegistryPlan::new(
+                        &scenario,
+                        &gpu.metadata,
+                        &gpu.migrations,
+                        &pending.records,
+                    )?
+                    .context("parent estates must use sparse GPU settlement")?;
+                    gpu.commit_registry(plan, &pending.records)?;
+                }
+            }
+            assert!(gpu.readback_bytes - before < initial.values.len() as u64);
+            let mut reference =
+                Simulation::from_state(scenario.clone(), expected.clone(), device(64)?)?;
+            assert!(gpu.download()? == reference.download()?);
+            assert_eq!(gpu.actors().at(3000).owner, 2);
+            assert_eq!(gpu.actors().at(3001).owner, 32);
+            gpu.advance()?;
+            reference.advance()?;
+            assert!(gpu.download()? == reference.download()?);
+            gpu.checkpoint()?.restore()?;
+        }
+    }
+    Ok(())
+}
+
+#[test]
 fn gpu_household_growth_matches_rebuilds_and_keeps_unrelated_estates_sparse() -> Result<()> {
     let mut config = Scenario::industrial(300, 42, Experiment::Baseline)?
         .config()
@@ -401,7 +549,14 @@ fn gpu_household_growth_matches_rebuilds_and_keeps_unrelated_estates_sparse() ->
                     &simulation.migrations,
                     &records,
                 )?;
-                assert_eq!(plan.is_some(), actor == 2);
+                assert!(plan.is_some());
+                assert_eq!(
+                    simulation
+                        .migrations
+                        .children(simulation.actors().at(actor as usize).identity)
+                        .count(),
+                    usize::from(actor != 2),
+                );
             }
         }
         let before = gpu.download()?;

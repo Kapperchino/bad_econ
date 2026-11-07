@@ -129,6 +129,24 @@ impl Simulation {
     pub fn actors(&self) -> &ActorRows {
         &self.metadata.actors
     }
+    #[cfg(feature = "viewer")]
+    pub(crate) fn open_firms(&mut self) -> Result<Vec<Actor>> {
+        let actors = &self.metadata.actors;
+        let start = actors.firm_indices().next().unwrap_or(actors.len());
+        let statuses = decode(&self.device.read_range(
+            &self.state,
+            (Field::EnterpriseStatus as usize * actors.len() + start) * TICK_WORDS,
+            (actors.len() - start) * TICK_WORDS,
+        )?);
+        self.readback_bytes += (statuses.len() * TICK_BYTES) as u64;
+        Ok(actors
+            .firm_indices()
+            .filter(|&index| {
+                statuses[index - start] != crate::domain::enterprise::EnterpriseState::Closed as u64
+            })
+            .map(|index| actors.at(index))
+            .collect())
+    }
     pub fn memory_usage(&self) -> cubecl::MemoryUsage {
         self.device
             .client
@@ -753,6 +771,8 @@ impl Simulation {
             self.metadata.actors.len(),
             self.scenario.fields(),
         );
+        plan.migrations
+            .extend_households(&batch.metadata.actors, &batch.formations);
         let settlement = registry::settlement::SettlementBatch::new(
             &self.device,
             &self.scenario,
@@ -760,11 +780,15 @@ impl Simulation {
             &state,
             &entries.transitions,
             self.day,
+            &plan.migrations,
         )?;
         let mut metadata = batch.metadata;
         if let Some(mut actors) = plan.actors {
             actors.extend(metadata.actors.iter_from(actors.len()));
             metadata.actors = actors;
+        }
+        if let Some(batch) = &settlement {
+            batch.update_owners(&mut metadata.actors);
         }
         if let Some(ownership) = settlement
             .as_ref()
@@ -798,6 +822,16 @@ impl Simulation {
                 &plan.changes,
             ),
         };
+        let actors = match settlement.as_ref().filter(|batch| !batch.owners.is_empty()) {
+            Some(batch) => registry::metadata::patch_actors(
+                &self.device,
+                &self.scenario,
+                &actors,
+                &metadata.actors,
+                batch.owners.iter().map(|change| change.firm),
+            ),
+            None => actors,
+        };
         let spatial = match plan.transition {
             registry::RegistryTransition::Migration => registry::spatial::migrate(
                 &self.device,
@@ -826,8 +860,6 @@ impl Simulation {
             true => demography.extend_firms(&self.device, count),
             false => {
                 demography = demography.form_households(&self.device, &batch.formations, count)?;
-                plan.migrations
-                    .extend_households(&metadata.actors, &batch.formations);
             }
         }
         let research = self
@@ -927,7 +959,7 @@ impl Simulation {
     }
     fn commit_registry(
         &mut self,
-        plan: registry::RegistryPlan,
+        mut plan: registry::RegistryPlan,
         births: &[PendingRecord],
     ) -> Result<()> {
         let settlement = registry::settlement::SettlementBatch::new(
@@ -937,7 +969,20 @@ impl Simulation {
             &self.state,
             births,
             self.day,
+            &plan.migrations,
         )?;
+        let management = settlement
+            .as_ref()
+            .filter(|batch| !batch.owners.is_empty())
+            .map(|batch| {
+                let actors = plan
+                    .actors
+                    .get_or_insert_with(|| self.metadata.actors.clone());
+                batch.update_owners(actors);
+                let mut metadata = self.metadata.clone();
+                metadata.actors = actors.clone();
+                management::EnterpriseManagement::new(&self.device, &metadata)
+            });
         let ownership = settlement
             .as_ref()
             .and_then(|batch| batch.ownership.as_ref())
@@ -1004,6 +1049,24 @@ impl Simulation {
                 })
             }
         };
+        let next_buffers = match settlement.as_ref().filter(|batch| !batch.owners.is_empty()) {
+            Some(batch) => Some(registry::RegistryBuffers {
+                actors: registry::metadata::patch_actors(
+                    &self.device,
+                    &self.scenario,
+                    next_buffers
+                        .as_ref()
+                        .map_or(&self.actors, |buffers| &buffers.actors),
+                    plan.actors
+                        .as_ref()
+                        .context("missing inherited actor rows")?,
+                    batch.owners.iter().map(|change| change.firm),
+                ),
+                spatial: next_buffers
+                    .map_or_else(|| self.spatial.clone(), |buffers| buffers.spatial),
+            }),
+            None => next_buffers,
+        };
         self.device.reclaim_memory(0)?;
         match self.memory_usage().bytes_reserved <= self.device.memory_budget.bytes() {
             true => (),
@@ -1044,17 +1107,25 @@ impl Simulation {
         });
         match observation {
             Ok(mut snapshot) => {
-                if let (registry::RegistryTransition::Migration, Some(_)) =
-                    (plan.transition, self.scenario.config().property.as_ref())
-                {
-                    self.config = configuration::Configuration::new(
-                        &self.device,
-                        &self.scenario,
-                        &self.metadata,
-                    );
+                match (
+                    &management,
+                    plan.transition,
+                    self.scenario.config().property.as_ref(),
+                ) {
+                    (Some(_), _, _) | (_, registry::RegistryTransition::Migration, Some(_)) => {
+                        self.config = configuration::Configuration::new(
+                            &self.device,
+                            &self.scenario,
+                            &self.metadata,
+                        );
+                    }
+                    _ => (),
                 }
                 if let Some(ownership) = ownership {
                     self.ownership = Some(ownership);
+                }
+                if let Some(management) = management {
+                    self.management = management;
                 }
                 if let Some(ownership) = settlement.and_then(|batch| batch.ownership) {
                     self.metadata.ownership = ownership;
