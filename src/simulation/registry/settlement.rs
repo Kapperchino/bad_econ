@@ -59,6 +59,16 @@ impl SettlementBatch {
                 _ => (),
             }
         }
+        let company_sites = firms
+            .iter()
+            .flat_map(|&firm| metadata.company_sites(metadata.actors.at(firm).identity))
+            .collect::<BTreeSet<_>>();
+        for (index, actor) in metadata.actors.iter().enumerate() {
+            if company_sites.contains(&actor.identity) {
+                firms.insert(index);
+                selected.insert(index);
+            }
+        }
         let owned = metadata
             .ownership
             .iter()
@@ -136,6 +146,7 @@ impl SettlementBatch {
                 .collect(),
             values: decode(&words),
             ownership,
+            companies: metadata.companies.clone(),
             day,
             next_identity: metadata.next_identity,
             initial_cash: metadata.initial_cash,

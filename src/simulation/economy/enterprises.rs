@@ -554,17 +554,16 @@ pub(super) fn operating_plan(
                 ),
             );
         }
-        let overhead = ceildiv(
-            config.firm_rent,
-            max(
-                number(state, config, comptime!(Field::Plan as u32), firm),
-                1,
+        let demand = value(state, config, comptime!(Field::Demand as u32), firm);
+        let overhead = rent::unit_price(config.firm_rent, demand, output);
+        let packet_cost = add_checked(control, ticks(labor, 0), input_cost);
+        let unit_cost = add_checked(
+            control,
+            divide(
+                add_checked(control, packet_cost, ticks(output - 1, 0)),
+                output,
             ),
-        );
-        let packet_cost = add_checked(control, ticks(labor + overhead, 0), input_cost);
-        let unit_cost = divide(
-            add_checked(control, packet_cost, ticks(output - 1, 0)),
-            output,
+            ticks(overhead, 0),
         );
         let quote = maximum(
             value(state, config, comptime!(Field::Price as u32), firm),
@@ -577,7 +576,6 @@ pub(super) fn operating_plan(
             firm,
             minimum(quote, ticks(config.maximum_price, 0)),
         );
-        let demand = value(state, config, comptime!(Field::Demand as u32), firm);
         let packets = maximum(
             divide(add_checked(control, demand, ticks(output - 1, 0)), output),
             ticks(1, 0),
@@ -754,13 +752,12 @@ pub(super) fn expand(
             comptime!(Field::EnterpriseStatus as u32),
             firm,
         );
-        let operating = status == comptime!(EnterpriseState::Operating as u32)
-            && number(
-                state,
-                config,
-                comptime!(Field::EnterpriseModel as u32),
-                firm,
-            ) == 0;
+        let operating = status == comptime!(EnterpriseState::Operating as u32);
+        let added_workers =
+            comptime!(match config.property_mode {
+                Feature::Disabled => 1u32,
+                Feature::Enabled => 0u32,
+            }) + number(state, config, comptime!(Field::WorkersPerPlot as u32), firm);
         let busy = number(state, config, comptime!(Field::Slots as u32), firm) == 0
             && number(state, config, comptime!(Field::Plan as u32), firm) >= capacity;
         let target = times32(
@@ -784,7 +781,7 @@ pub(super) fn expand(
                     comptime!(match config.property_mode {
                         Feature::Disabled => 720u32,
                         Feature::Enabled =>
-                            crate::domain::property::CONSTRUCTION_WORK_PER_SPACE
+                            crate::domain::property::CONSTRUCTION_WORK_PER_PLOT
                                 * Good::Construction.initial_price(),
                     }),
                     select(
@@ -799,7 +796,7 @@ pub(super) fn expand(
             && busy
             && lt(target, demand)
             && funded
-            && capacity < 10_000
+            && capacity + added_workers <= 10_000
             && (comptime!(config.property_mode == Feature::Enabled)
                 || (!lt(tools, ticks(2, 0)) && !lt(wood, ticks(5, 0))))
             && property::authorized(state, config, firm, owner)
@@ -868,7 +865,7 @@ pub(super) fn expand(
                 set32(
                     state,
                     config,
-                    comptime!(Field::RequestedSpace as u32),
+                    comptime!(Field::RequestedPlots as u32),
                     firm,
                     1,
                 );
@@ -887,7 +884,7 @@ pub(super) fn expand(
                 firm,
                 comptime!(match config.property_mode {
                     Feature::Disabled => 720u32,
-                    Feature::Enabled => crate::domain::property::CONSTRUCTION_WORK_PER_SPACE,
+                    Feature::Enabled => crate::domain::property::CONSTRUCTION_WORK_PER_PLOT,
                 }),
             );
             set32(

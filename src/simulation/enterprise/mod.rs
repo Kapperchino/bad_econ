@@ -351,6 +351,7 @@ pub(super) fn enter(
         let invested = cash / 2;
         state.set(Field::Cash, owner, cash - invested);
         state.set(Field::Cash, firm, invested);
+        state.set(Field::EnterpriseModel, firm, entry.model as u64);
         match &scenario.config().property {
             Some(property) => {
                 state.set(
@@ -361,9 +362,10 @@ pub(super) fn enter(
                 state.set(
                     Field::PropertyUse,
                     firm,
-                    crate::domain::property::PropertyUse::for_actor(&state.actors.at(firm))? as u64,
+                    crate::domain::property::PropertyUse::for_site(state, firm)? as u64,
                 );
-                state.set(Field::RequestedSpace, firm, 1);
+                state.set(Field::RequestedPlots, firm, 1);
+                state.set(Field::WorkersPerPlot, firm, 1);
                 state.set(
                     Field::ProjectStatus,
                     firm,
@@ -389,7 +391,7 @@ pub(super) fn enter(
             Field::ConstructionRemaining,
             firm,
             match scenario.config().property {
-                Some(_) => u64::from(crate::domain::property::CONSTRUCTION_WORK_PER_SPACE),
+                Some(_) => u64::from(crate::domain::property::CONSTRUCTION_WORK_PER_PLOT),
                 None => 720,
             },
         );
@@ -411,7 +413,6 @@ pub(super) fn enter(
         state.set_recipe(firm, entry.recipe);
         state.set(Field::FirstInputCost, firm, entry.first_cost);
         state.set(Field::SecondInputCost, firm, entry.second_cost);
-        state.set(Field::EnterpriseModel, firm, entry.model as u64);
         if entry.model == EnterpriseModel::Distributor {
             state.set(Field::ReplacementCost, firm, entry.first_cost);
             state.set(Field::StockCoverage, firm, 3);
@@ -806,10 +807,20 @@ fn invest(state: &mut crate::domain::State, investor: usize, firm: usize) -> any
         .checked_sub(paid)
         .context("unfunded household investment")?;
     let funds = crate::arithmetic::add(state.get(Field::Cash, firm), paid)?;
-    let book = u128::from(funds)
-        + u128::from(state.get(Field::InstalledCapital, firm)) * 100
-        + u128::from(state.values[state.actors.at(firm).kind as usize * state.actors.len() + firm])
-            * u128::from(state.get(Field::Price, firm));
+    let sites = state.company_sites(state.actors.at(firm).identity);
+    let book = u128::from(paid)
+        + state
+            .actors
+            .iter()
+            .enumerate()
+            .filter(|(_, actor)| sites.contains(&actor.identity))
+            .map(|(site, actor)| {
+                u128::from(state.get(Field::Cash, site))
+                    + u128::from(state.get(Field::InstalledCapital, site)) * 100
+                    + u128::from(state.values[actor.kind as usize * state.actors.len() + site])
+                        * u128::from(state.get(Field::Price, site))
+            })
+            .sum::<u128>();
     let units = (u128::from(paid) * 1_000_000 / book.max(1)).clamp(1, 250_000) as u32;
     let owner = state.actors.at(investor).identity;
     let index = state
@@ -837,7 +848,7 @@ fn invest(state: &mut crate::domain::State, investor: usize, firm: usize) -> any
             .get_mut(&owner)
             .context("investment shares are missing")? -= 1;
     }
-    state.ownership[index] = Ownership::new(Ownership {
+    let ownership = Ownership::new(Ownership {
         firm: state.actors.at(firm).identity,
         shares: combined
             .into_iter()
@@ -845,6 +856,7 @@ fn invest(state: &mut crate::domain::State, investor: usize, firm: usize) -> any
             .map(|(household, units)| OwnershipShare { household, units })
             .collect(),
     })?;
+    state.set_company_ownership(ownership);
     state.set(Field::Cash, investor, household_cash);
     state.set(Field::Cash, firm, funds);
     state.set(Field::EquityInvested, investor, paid);

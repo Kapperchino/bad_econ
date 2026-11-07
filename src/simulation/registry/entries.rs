@@ -133,6 +133,7 @@ impl EntryBatch {
                 .collect(),
             values: decode(&words),
             ownership: Vec::new(),
+            companies: Vec::new(),
             next_identity,
             initial_cash: metadata.initial_cash,
             initial_goods: metadata.initial_goods,

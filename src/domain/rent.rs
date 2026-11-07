@@ -31,8 +31,8 @@ pub struct RentPolicy {
 impl Default for RentPolicy {
     fn default() -> Self {
         Self {
-            household_daily: 5,
-            firm_daily: 5,
+            household_daily: 1,
+            firm_daily: 10,
         }
     }
 }

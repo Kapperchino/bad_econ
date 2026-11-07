@@ -478,6 +478,7 @@
       }
     ]
   },
+  "companies": [{ "identity": 102, "sites": [102, 103, 104] }],
   "property": {
     "regions": [
       {
@@ -489,7 +490,7 @@
           "x": 500,
           "y": 1000
         },
-        "space": 14,
+        "plots": 14,
         "landowner": 1
       },
       {
@@ -501,7 +502,7 @@
           "x": 1000,
           "y": 1000
         },
-        "space": 5,
+        "plots": 5,
         "landowner": 7
       }
     ],
@@ -509,21 +510,21 @@
       {
         "landowner": 1,
         "site": 1,
-        "space": 1,
+        "plots": 1,
         "work": 6,
         "development": "Extension"
       },
       {
         "landowner": 1,
         "site": 102,
-        "space": 2,
+        "plots": 2,
         "work": 6,
         "development": "NewBuilding"
       },
       {
         "landowner": 1,
         "site": 103,
-        "space": 2,
+        "plots": 2,
         "work": 6,
         "development": "NewBuilding"
       }

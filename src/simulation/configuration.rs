@@ -196,7 +196,7 @@ impl Configuration {
                                 region.lower.y,
                                 region.upper.x,
                                 region.upper.y,
-                                region.space,
+                                region.plots,
                                 state
                                     .actors
                                     .iter()

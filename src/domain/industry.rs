@@ -60,6 +60,22 @@ pub struct Recipe {
     pub inputs: [Option<Good>; 2],
 }
 
+pub struct ProductionScale {
+    pub bonus_per_mille: u32,
+}
+
+impl ProductionScale {
+    pub const BONUS_PER_DOUBLING: u32 = 50;
+    pub const MAX_DOUBLINGS: u32 = 3;
+
+    pub fn for_plots(plots: u64) -> Self {
+        Self {
+            bonus_per_mille: plots.max(1).ilog2().min(Self::MAX_DOUBLINGS)
+                * Self::BONUS_PER_DOUBLING,
+        }
+    }
+}
+
 impl ProductionMethod {
     pub const ALL: [Self; 12] = [
         Self::MechanicalHarvesting,

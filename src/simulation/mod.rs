@@ -2006,10 +2006,28 @@ impl Simulation {
                     values[Field::EnterpriseStatus as usize],
                 )?),
             },
+            company_identity: match self.metadata.actors.at(actor).kind {
+                0 => 0,
+                _ => self.metadata.company_identity(request.identity()),
+            },
+            company_sites: match self.metadata.actors.at(actor).kind {
+                0 => Vec::new(),
+                _ => self.metadata.company_sites(request.identity()),
+            },
+            workers_per_plot: values[Field::WorkersPerPlot as usize],
+            scale_bonus_per_mille: match self.metadata.actors.at(actor).kind {
+                0 => 0,
+                _ => {
+                    crate::domain::industry::ProductionScale::for_plots(
+                        values[Field::OccupiedPlots as usize],
+                    )
+                    .bonus_per_mille
+                }
+            },
             construction_minutes_remaining: values[Field::ConstructionRemaining as usize],
             property_region: values[Field::PropertyRegion as usize],
-            property_space: values[Field::PropertySpace as usize],
-            reserved_space: values[Field::ReservedSpace as usize],
+            occupied_plots: values[Field::OccupiedPlots as usize],
+            reserved_plots: values[Field::ReservedPlots as usize],
             subsistence_plots: values[Field::LandPlots as usize],
             displaced_plots: values[Field::DisplacedPlots as usize],
             project_status: crate::domain::property::ProjectStatus::from_index(

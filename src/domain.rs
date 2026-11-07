@@ -7,6 +7,7 @@ use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 
 pub mod bargaining;
+pub mod company;
 pub mod demography;
 mod employment;
 pub mod enterprise;
@@ -30,9 +31,9 @@ pub use population::{
 pub use resources::{ProductionSite, ResourceMap, ResourceRegion};
 
 pub const SCENARIO_VERSION: u32 = 2;
-const CHECKPOINT_VERSION: u32 = 11;
-pub const STATE_HASH_VERSION: &str = "bad-econ/state/CubekV2/v12";
-pub const USED_FIELDS: usize = Field::RentOverdueDays as usize + 1;
+const CHECKPOINT_VERSION: u32 = 12;
+pub const STATE_HASH_VERSION: &str = "bad-econ/state/CubekV2/v13";
+pub const USED_FIELDS: usize = Field::ScaleRemainder as usize + 1;
 pub const TRANSIT_FIELDS: usize = USED_FIELDS + Good::COUNT;
 pub const CONSUMPTION_FIELDS: usize = TRANSIT_FIELDS + Good::COUNT;
 pub const PRODUCTION_FIELDS: usize = CONSUMPTION_FIELDS + Good::COUNT;
@@ -139,13 +140,16 @@ pub enum Field {
     RentArrears,
     PropertyRegion,
     PropertyUse,
-    PropertySpace,
-    RequestedSpace,
-    ReservedSpace,
+    OccupiedPlots,
+    RequestedPlots,
+    ReservedPlots,
     DisplacedPlots,
     ProjectStatus,
     HousingStatus,
     RentOverdueDays,
+    WorkersPerPlot,
+    UnscaledProduced,
+    ScaleRemainder,
 }
 impl Field {
     pub fn inventory(good: Good) -> Self {
@@ -374,6 +378,8 @@ pub struct ScenarioConfig {
     pub distributors: Vec<enterprise::Distributor>,
     #[serde(default)]
     pub ownership: Vec<enterprise::Ownership>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub companies: Vec<company::Company>,
     #[serde(default)]
     pub land_access: Option<enterprise::LandAccess>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -541,6 +547,11 @@ impl Scenario {
             .map(|property| property::PropertyConfig::new(property, config.map_size))
             .transpose()?;
         config.entrepreneurship = enterprise::EntrepreneurshipPolicy::new(config.entrepreneurship)?;
+        config.companies = config
+            .companies
+            .into_iter()
+            .map(company::Company::new)
+            .collect::<Result<_>>()?;
         config.ownership = config
             .ownership
             .into_iter()
@@ -847,6 +858,7 @@ impl Scenario {
             household_production: enterprise::HouseholdProduction::Unavailable,
             distributors: Vec::new(),
             ownership: Vec::new(),
+            companies: Vec::new(),
             land_access: None,
             property: None,
             working_conditions: Vec::new(),
@@ -1074,6 +1086,11 @@ impl Scenario {
             }
             state.ownership[index] = ownership.clone();
         }
+        state.companies = self.config.companies.clone();
+        for company in &self.config.companies {
+            company.initialize(&mut state)?;
+        }
+        company::CompanyRegistry::new(&state)?;
         for actor in self.config.households as usize..self.actors() {
             state.set(
                 Field::EnterpriseStatus,
@@ -1290,6 +1307,7 @@ impl Scenario {
             people: Vec::new(),
             initial_population: 0,
             ownership: Vec::new(),
+            companies: Vec::new(),
         };
         (0..actors).try_for_each(|actor| -> Result<()> {
             let kind = state.actors.at(actor).kind;
@@ -1557,6 +1575,8 @@ pub struct State {
     pub people: Vec<demography::Person>,
     pub initial_population: u64,
     pub ownership: Vec<enterprise::Ownership>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub companies: Vec<company::Company>,
 }
 impl State {
     pub fn retain_basic_recipe(&mut self, actor: usize) {
@@ -1643,6 +1663,7 @@ impl State {
             hash.update(actor.capacity.to_le_bytes());
         });
         hash.update(serde_json::to_vec(&self.ownership).expect("serializable ownership registry"));
+        hash.update(serde_json::to_vec(&self.companies).expect("serializable company registry"));
         hash.update(serde_json::to_vec(&self.people).expect("serializable person registry"));
         hash.update((self.values.len() as u64).to_le_bytes());
         self.values
@@ -1825,6 +1846,10 @@ pub struct Inspection {
     pub fatigue: u64,
     pub employer: u64,
     pub owner_identity: u64,
+    pub company_identity: u64,
+    pub company_sites: Vec<u64>,
+    pub workers_per_plot: u64,
+    pub scale_bonus_per_mille: u32,
     pub available_minutes: u64,
     pub living_members: u64,
     pub equipment_condition: u64,
@@ -1833,8 +1858,8 @@ pub struct Inspection {
     pub enterprise_state: Option<enterprise::EnterpriseState>,
     pub construction_minutes_remaining: u64,
     pub property_region: u64,
-    pub property_space: u64,
-    pub reserved_space: u64,
+    pub occupied_plots: u64,
+    pub reserved_plots: u64,
     pub subsistence_plots: u64,
     pub displaced_plots: u64,
     pub project_status: property::ProjectStatus,
@@ -1900,10 +1925,26 @@ impl Inspection {
                     state.get(Field::EnterpriseStatus, index),
                 )?),
             },
+            company_identity: match state.actors.at(index).kind {
+                0 => 0,
+                _ => state.company_identity(request.identity),
+            },
+            company_sites: match state.actors.at(index).kind {
+                0 => Vec::new(),
+                _ => state.company_sites(request.identity),
+            },
+            workers_per_plot: state.get(Field::WorkersPerPlot, index),
+            scale_bonus_per_mille: match state.actors.at(index).kind {
+                0 => 0,
+                _ => {
+                    industry::ProductionScale::for_plots(state.get(Field::OccupiedPlots, index))
+                        .bonus_per_mille
+                }
+            },
             construction_minutes_remaining: state.get(Field::ConstructionRemaining, index),
             property_region: state.get(Field::PropertyRegion, index),
-            property_space: state.get(Field::PropertySpace, index),
-            reserved_space: state.get(Field::ReservedSpace, index),
+            occupied_plots: state.get(Field::OccupiedPlots, index),
+            reserved_plots: state.get(Field::ReservedPlots, index),
             subsistence_plots: state.get(Field::LandPlots, index),
             displaced_plots: state.get(Field::DisplacedPlots, index),
             project_status: property::ProjectStatus::from_index(
@@ -2194,6 +2235,7 @@ impl<'a> AuditedState<'a> {
         let c = scenario.config();
         let _ = demography::PersonRegistry::new(state)?;
         let _ = enterprise::OwnershipRegistry::new(state)?;
+        let _ = company::CompanyRegistry::new(state)?;
         let shape = state.actors.len() >= scenario.actors()
             && state.values.len()
                 == state.actors.len() * scenario.fields()
@@ -2220,6 +2262,10 @@ impl<'a> AuditedState<'a> {
             };
             let capacity = index >= scenario.actors()
                 || actor.capacity == scenario.actor(index).capacity
+                || (c.property.is_some()
+                    && u128::from(actor.capacity)
+                        == u128::from(state.get(Field::WorkersPerPlot, index))
+                            * u128::from(state.get(Field::OccupiedPlots, index).max(1)))
                 || state.get(Field::InstalledCapital, index) > 0
                 || state.get(Field::EnterpriseStatus, index)
                     == enterprise::EnterpriseState::Closed as u64;
@@ -2602,6 +2648,7 @@ impl TryFrom<ScenarioDocument> for ScenarioConfig {
             household_production: current.household_production,
             distributors: current.distributors,
             ownership: current.ownership,
+            companies: current.companies,
             land_access: current.land_access,
             property: current.property,
             working_conditions: current.working_conditions,
@@ -2673,6 +2720,8 @@ struct CurrentScenario {
     pub distributors: Vec<enterprise::Distributor>,
     #[serde(default)]
     pub ownership: Vec<enterprise::Ownership>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub companies: Vec<company::Company>,
     #[serde(default)]
     pub land_access: Option<enterprise::LandAccess>,
     #[serde(default, skip_serializing_if = "Option::is_none")]

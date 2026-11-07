@@ -8,6 +8,14 @@ pub(super) enum Tenants {
 }
 
 #[cube]
+pub(super) fn unit_price(daily: u32, demand: Ticks, output: u32) -> u32 {
+    let forecast = (u64::cast_from(demand.extract(HIGH_WORD)) << 32)
+        | u64::cast_from(demand.extract(LOW_WORD));
+    let units = max(forecast, u64::cast_from(max(output, 1)));
+    u32::cast_from((u64::cast_from(daily) + units / 2) / units)
+}
+
+#[cube]
 pub(super) fn obligation(
     state: &mut [u32],
     config: &EconomyConfig,

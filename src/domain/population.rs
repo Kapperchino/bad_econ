@@ -215,6 +215,7 @@ impl Population {
             people: Vec::new(),
             initial_population: 0,
             ownership: Vec::new(),
+            companies: Vec::new(),
         };
         self.households
             .iter()

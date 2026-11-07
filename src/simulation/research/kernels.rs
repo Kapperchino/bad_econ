@@ -377,7 +377,7 @@ fn research(
                     main,
                     main_coordinate(
                         config,
-                        comptime!(Field::Produced as u32),
+                        comptime!(Field::UnscaledProduced as u32),
                         config.records[item.field(MachineLayout::FIRM, 1usize)],
                     ),
                 );
@@ -403,7 +403,7 @@ fn research(
                     main,
                     main_coordinate(
                         config,
-                        comptime!(Field::Produced as u32),
+                        comptime!(Field::UnscaledProduced as u32),
                         config.records[item.field(StockLayout::FIRM, 1usize)],
                     ),
                 );
@@ -602,7 +602,7 @@ fn research(
                     main,
                     main_coordinate(
                         config,
-                        comptime!(Field::Produced as u32),
+                        comptime!(Field::UnscaledProduced as u32),
                         config.records[item.field(MachineLayout::FIRM, 1usize)],
                     ),
                 );
@@ -676,7 +676,7 @@ fn research(
                     main,
                     main_coordinate(
                         config,
-                        comptime!(Field::Produced as u32),
+                        comptime!(Field::UnscaledProduced as u32),
                         config.records[item.field(StockLayout::FIRM, 1usize)],
                     ),
                 );

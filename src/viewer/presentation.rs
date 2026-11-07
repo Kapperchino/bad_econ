@@ -75,13 +75,13 @@ fn draw(
                             i.gross_income, i.income_tax, i.employee_charges, i.payroll_reserve
                         ),
                         _ => format!(
-                            "{} {:?} | building {} {}\nCondition {} | safety {}\nRent overdue {} days\nOwner {} | wage {} | price {}\nCapacity {} (+{}) | planned {} | open {}\nMethod {:?} | {} output / {} min",
+                            "{} {:?} | building {} {}\nCondition {} | safety {}\nRent overdue {} days\nCompany {} ({} sites) | owner {}\nWage {} | price {}\nCapacity {} (+{}) | planned {} | open {}\nMethod {:?} | {} output / {} min",
                             i.enterprise_state.map(|state| format!("{state:?}")).unwrap_or_default(),
                             i.enterprise_model, i.construction_minutes_remaining,
                             match i.property_region { 0 => "min", _ => "work" },
                             i.equipment_condition, i.safety_provision,
                             i.rent_overdue_days,
-                            i.owner_identity,
+                            i.company_identity, i.company_sites.len(), i.owner_identity,
                             i.wage,
                             i.price,
                             i.actor.capacity,
@@ -92,7 +92,7 @@ fn draw(
                     };
                     let property = match i.property_region {
                         0 => String::new(),
-                        _ => format!("\nRegion {} | space {} (+{} reserved)\nSubsistence {} | displaced {}\nConstruction {:?} | {} work remaining", i.property_region, i.property_space, i.reserved_space, i.subsistence_plots, i.displaced_plots, i.project_status, i.construction_minutes_remaining),
+                        _ => format!("\nRegion {} | plots {} (+{} reserved)\nWorkers/plot {} | scale bonus {}%\nSubsistence {} | displaced {}\nConstruction {:?} | {} work remaining", i.property_region, i.occupied_plots, i.reserved_plots, i.workers_per_plot, i.scale_bonus_per_mille / 10, i.subsistence_plots, i.displaced_plots, i.project_status, i.construction_minutes_remaining),
                     };
                     format!(
                         "Actor {} | day {} | kind {}\nCash {} | transit {}\nRent paid {} | owed {}\nFood {:?} | other stock {}\n{}{}",

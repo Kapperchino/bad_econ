@@ -298,8 +298,9 @@ fn local(
             }
             Phase::WorkPayment => {
                 if number(state, config, comptime!(Field::EnterpriseModel as u32), id) == 1 {
-                    let services = number(state, config, comptime!(Field::Pipeline as u32), id);
-                    set32(
+                    let services = value(state, config, comptime!(Field::Pipeline as u32), id);
+                    let services = property::scaled_output(state, config, control, id, services);
+                    set(
                         state,
                         config,
                         comptime!(Field::RetailOpen as u32),
@@ -412,6 +413,15 @@ fn local(
                 }
                 _ => {
                     let output = value(state, config, comptime!(Field::Pipeline as u32), id);
+                    increase(
+                        state,
+                        config,
+                        control,
+                        comptime!(Field::UnscaledProduced as u32),
+                        id,
+                        output,
+                    );
+                    let output = property::scaled_output(state, config, control, id, output);
                     increase(state, config, control, k.output(), id, output);
                     increase(
                         state,
@@ -510,18 +520,14 @@ fn local(
                             number(state, config, comptime!(Field::RetailMargin as u32), id);
                         let labor = number(state, config, comptime!(Field::Wage as u32), id)
                             * number(state, config, comptime!(Field::LaborMinutes as u32), id);
-                        let overhead = ceildiv(
-                            config.firm_rent,
-                            max(number(state, config, comptime!(Field::Plan as u32), id), 1),
+                        let output = max(
+                            number(state, config, comptime!(Field::OutputTicks as u32), id),
+                            1,
                         );
+                        let overhead = rent::unit_price(config.firm_rent, demand, output);
                         let quote = replacement * (1000 + margin) / 1000
-                            + ceildiv(
-                                labor + overhead,
-                                max(
-                                    number(state, config, comptime!(Field::OutputTicks as u32), id),
-                                    1,
-                                ),
-                            );
+                            + ceildiv(labor, output)
+                            + overhead;
                         set32(
                             state,
                             config,

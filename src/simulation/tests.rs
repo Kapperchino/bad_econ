@@ -633,6 +633,79 @@ fn sparse_settlements_match_rebuilds_with_shared_assets_migration_and_investment
 }
 
 #[test]
+fn company_investment_updates_every_site_and_closing_one_site_preserves_the_others() -> Result<()> {
+    use crate::domain::{
+        company::Company,
+        enterprise::{EnterpriseState, Ownership, OwnershipShare},
+    };
+    let mut config = Scenario::baseline(8, 42, Experiment::Concentrated)?
+        .config()
+        .clone();
+    config.entrepreneurship.interested_per_mille = 0;
+    config.companies = vec![Company {
+        identity: 9,
+        sites: vec![9, 10],
+    }];
+    config.ownership = vec![Ownership {
+        firm: 9,
+        shares: vec![
+            OwnershipShare {
+                household: 1,
+                units: 500_000,
+            },
+            OwnershipShare {
+                household: 2,
+                units: 500_000,
+            },
+        ],
+    }];
+    let scenario = Scenario::new(config)?;
+    let mut expected = scenario.initial()?;
+    let mut gpu = Simulation::from_state(scenario.clone(), expected.clone(), device(64)?)?;
+    let mut requests = vec![0; expected.actors.len()];
+    requests[2] = (7 << 24) + 10;
+    requests[9] = 4 << 24;
+    let pending =
+        registry::records::PendingRecords::from_dense(&requests, &vec![0; requests.len()])?;
+    gpu.device.write(&gpu.enterprise_requests, &requests);
+    let plan =
+        registry::RegistryPlan::new(&scenario, &gpu.metadata, &gpu.migrations, &pending.records)?
+            .context("company settlement")?;
+    gpu.commit_registry(plan, &pending.records)?;
+    enterprise::transitions(&mut expected, &scenario, &requests)?;
+    let actual = gpu.download()?;
+    assert_eq!(actual, expected);
+    let primary = actual
+        .ownership
+        .iter()
+        .find(|entry| entry.firm == 9)
+        .unwrap();
+    let branch = actual
+        .ownership
+        .iter()
+        .find(|entry| entry.firm == 10)
+        .unwrap();
+    assert_eq!(primary.shares, branch.shares);
+    assert!(
+        primary
+            .shares
+            .iter()
+            .any(|share| share.household == 3 && share.units > 0)
+    );
+    assert_eq!(
+        actual.get(Field::EnterpriseStatus, 8),
+        EnterpriseState::Operating as u64
+    );
+    assert_eq!(
+        actual.get(Field::EnterpriseStatus, 9),
+        EnterpriseState::Closed as u64
+    );
+    gpu.copy_audited(CopyDirection::Save)?;
+    gpu.checkpoint()?.restore()?;
+    Ok(())
+}
+
+#[test]
 fn device_markets_match_original_gpu_phases() -> Result<()> {
     for workgroup in [32, 64, 128, 256] {
         let scenario = Scenario::industrial(193, 42, Experiment::Concentrated)?;

@@ -106,6 +106,52 @@ fn contains(actors: &[u32], config: &EconomyConfig, region: u32, actor: u32) -> 
 }
 
 #[cube]
+pub(super) fn scaled_output(
+    state: &mut [u32],
+    config: &EconomyConfig,
+    control: &[Atomic<u32>],
+    actor: u32,
+    output: Ticks,
+) -> Ticks {
+    let mut scaled = output;
+    if comptime!(config.property_mode == Feature::Enabled) {
+        let plots = number(state, config, comptime!(Field::OccupiedPlots as u32), actor);
+        let mut bonus = 0u32;
+        #[unroll]
+        for level in 1..comptime!(crate::domain::industry::ProductionScale::MAX_DOUBLINGS + 1) {
+            bonus += select(
+                plots >= 1u32 << level,
+                comptime!(crate::domain::industry::ProductionScale::BONUS_PER_DOUBLING),
+                0u32,
+            );
+        }
+        let whole = divide(output, 1000);
+        let fraction = minus(output, multiply(control, whole, 1000));
+        let carried = number(
+            state,
+            config,
+            comptime!(Field::ScaleRemainder as u32),
+            actor,
+        );
+        let fractional = fraction.extract(LOW_WORD) * bonus + carried;
+        let extra = add_checked(
+            control,
+            multiply(control, whole, bonus),
+            ticks(fractional / 1000, 0),
+        );
+        scaled = add_checked(control, output, extra);
+        set32(
+            state,
+            config,
+            comptime!(Field::ScaleRemainder as u32),
+            actor,
+            fractional % 1000,
+        );
+    }
+    scaled
+}
+
+#[cube]
 fn initialize(state: &mut [u32], actors: &[u32], config: &EconomyConfig, actor: u32) {
     if actor < config.actors {
         let current = number(
@@ -143,6 +189,17 @@ fn initialize(state: &mut [u32], actors: &[u32], config: &EconomyConfig, actor: 
             usage,
         );
         usage = select(kind == 0, comptime!(PropertyUse::Housing as u32), usage);
+        usage = select(
+            kind > 0
+                && number(
+                    state,
+                    config,
+                    comptime!(Field::EnterpriseModel as u32),
+                    actor,
+                ) == 1,
+            comptime!(PropertyUse::Store as u32),
+            usage,
+        );
         set32(
             state,
             config,
@@ -169,14 +226,14 @@ fn initialize(state: &mut [u32], actors: &[u32], config: &EconomyConfig, actor: 
             set32(
                 state,
                 config,
-                comptime!(Field::RequestedSpace as u32),
+                comptime!(Field::RequestedPlots as u32),
                 actor,
                 0,
             );
             set32(
                 state,
                 config,
-                comptime!(Field::ReservedSpace as u32),
+                comptime!(Field::ReservedPlots as u32),
                 actor,
                 0,
             );
@@ -238,12 +295,12 @@ fn allocate(
                 occupied = add_checked(
                     control,
                     occupied,
-                    value(state, config, comptime!(Field::PropertySpace as u32), actor),
+                    value(state, config, comptime!(Field::OccupiedPlots as u32), actor),
                 );
                 occupied = add_checked(
                     control,
                     occupied,
-                    value(state, config, comptime!(Field::ReservedSpace as u32), actor),
+                    value(state, config, comptime!(Field::ReservedPlots as u32), actor),
                 );
             }
         }
@@ -279,7 +336,7 @@ fn reserve_site(state: &mut [u32], config: &EconomyConfig, actor: u32, available
     let requested = value(
         state,
         config,
-        comptime!(Field::RequestedSpace as u32),
+        comptime!(Field::RequestedPlots as u32),
         actor,
     );
     if status == comptime!(ProjectStatus::Requested as u32) && !lt(free, requested) {
@@ -287,14 +344,14 @@ fn reserve_site(state: &mut [u32], config: &EconomyConfig, actor: u32, available
         set(
             state,
             config,
-            comptime!(Field::ReservedSpace as u32),
+            comptime!(Field::ReservedPlots as u32),
             actor,
             requested,
         );
         set32(
             state,
             config,
-            comptime!(Field::RequestedSpace as u32),
+            comptime!(Field::RequestedPlots as u32),
             actor,
             0,
         );
@@ -405,10 +462,20 @@ fn construct(
                 work,
             );
             if equal(work, remaining) {
-                let space = value(state, config, comptime!(Field::PropertySpace as u32), actor);
-                let built = value(state, config, comptime!(Field::ReservedSpace as u32), actor);
+                let plots = value(state, config, comptime!(Field::OccupiedPlots as u32), actor);
+                let built = value(state, config, comptime!(Field::ReservedPlots as u32), actor);
                 let firm = !kind(actors, actor).is(comptime!(ActorKind::Household));
-                let expansion = select(firm && !equal(space, zero()), built, zero());
+                let workers = number(
+                    state,
+                    config,
+                    comptime!(Field::WorkersPerPlot as u32),
+                    actor,
+                );
+                let developed = add_checked(control, plots, built);
+                let target = multiply(control, developed, workers);
+                let capacity = actors
+                    [ActorLayout::CAPACITY * (actors.len() / ActorLayout::WORDS) + actor as usize];
+                let expansion = select(firm, positive(target, ticks(capacity, 0)), zero());
                 increase(
                     state,
                     config,
@@ -420,14 +487,14 @@ fn construct(
                 set(
                     state,
                     config,
-                    comptime!(Field::PropertySpace as u32),
+                    comptime!(Field::OccupiedPlots as u32),
                     actor,
-                    add_checked(control, space, built),
+                    add_checked(control, plots, built),
                 );
                 set32(
                     state,
                     config,
-                    comptime!(Field::ReservedSpace as u32),
+                    comptime!(Field::ReservedPlots as u32),
                     actor,
                     0,
                 );
