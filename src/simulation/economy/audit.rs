@@ -84,6 +84,7 @@ enum Source {
     Distributor,
     Closure,
     Square,
+    Homeless,
 }
 
 pub(in crate::simulation) struct AuditBuffers {
@@ -110,6 +111,10 @@ impl AuditBuffers {
                     S::EMPLOYEE_CHARGES => definition.field = Field::ChargeTreasury as u32,
                     S::RENT_COLLECTED => definition.field = Field::RentTreasury as u32,
                     S::RENT_ARREARS => definition.field = Field::RentArrears as u32,
+                    S::HOMELESS_HOUSEHOLDS => {
+                        definition.source = Source::Homeless as u32;
+                        definition.kind = 0;
+                    }
                     S::EMPLOYED => {
                         definition.field = Field::Employed as u32;
                         definition.kind = 0;
@@ -428,6 +433,18 @@ fn summarize_metrics(input: &mut SummaryInput) {
                     7 => {
                         amount &= 0xffff_ffff;
                         amount *= amount;
+                    }
+                    8 => {
+                        amount = u64::cast_from(
+                            number(state, config, comptime!(Field::LivingMembers as u32), actor)
+                                > 0
+                                && number(
+                                    state,
+                                    config,
+                                    comptime!(Field::HousingStatus as u32),
+                                    actor,
+                                ) == comptime!(crate::domain::HousingState::Homeless as u32),
+                        );
                     }
                     _ => (),
                 }

@@ -17,12 +17,13 @@ use anyhow::{Context, Result};
 use burn_wgpu::CubeTensor;
 use cubecl::{CubeDim, prelude::*};
 use records::PendingRecord;
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 use systems::*;
 
 #[derive(Clone, Default)]
 pub(super) struct MigrationRegistry {
     destinations: BTreeMap<usize, Position>,
+    parents: BTreeSet<u64>,
 }
 impl MigrationRegistry {
     pub fn new(state: &State) -> Self {
@@ -39,7 +40,23 @@ impl MigrationRegistry {
                     )
                 })
                 .collect(),
+            parents: (0..state.actors.len())
+                .map(|actor| state.get(Field::ParentHousehold, actor))
+                .filter(|&parent| parent > 0)
+                .collect(),
         }
+    }
+
+    pub fn extend_households(
+        &mut self,
+        actors: &ActorRows,
+        formations: &[super::enterprise::HouseholdFormation],
+    ) {
+        self.parents.extend(
+            formations
+                .iter()
+                .map(|formation| actors.at(formation.parent).identity),
+        );
     }
 }
 
@@ -74,13 +91,13 @@ impl RegistryPlan {
         migrations: &MigrationRegistry,
         requests: &[PendingRecord],
     ) -> Result<Option<Self>> {
-        let heirs_possible =
-            metadata.actors.len() - metadata.actors.firms() > scenario.config().households as usize;
         let supported = requests.iter().all(|record| match record.request >> 24 {
             0 => record.request == 0,
             2 | 3 => true,
             4 | 7 => scenario.config().finance.is_none(),
-            5 => !heirs_possible,
+            5 => !migrations
+                .parents
+                .contains(&metadata.actors.at(record.actor as usize).identity),
             6 => record.request & 0x00ffffff > 0,
             _ => false,
         });

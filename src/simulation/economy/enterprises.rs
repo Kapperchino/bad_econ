@@ -335,16 +335,26 @@ pub(super) fn lifecycle(state: &mut [u32], config: &EconomyConfig, firm: u32) {
     );
     let inactive = number(state, config, comptime!(Field::IdleDays as u32), firm);
     let days = select((sales || funded) && current, 0, min(inactive + 1, 365));
-    let mut next = status;
-    if status == comptime!(EnterpriseState::Operating as u32) && !funded {
-        next = comptime!(EnterpriseState::Dormant as u32);
-    }
-    if status == comptime!(EnterpriseState::Dormant as u32) && funded {
-        next = comptime!(EnterpriseState::Operating as u32);
-    }
-    if days >= 90 && status != comptime!(EnterpriseState::Closed as u32) {
-        next = comptime!(EnterpriseState::Liquidating as u32);
-    }
+    let funded_state = select(
+        funded,
+        comptime!(EnterpriseState::Operating as u32),
+        comptime!(EnterpriseState::Dormant as u32),
+    );
+    let active_state = select(
+        status == comptime!(EnterpriseState::Forming as u32),
+        status,
+        funded_state,
+    );
+    let next = select(
+        days >= 30,
+        comptime!(EnterpriseState::Liquidating as u32),
+        active_state,
+    );
+    let next = select(
+        status >= comptime!(EnterpriseState::Liquidating as u32),
+        status,
+        next,
+    );
     set32(state, config, comptime!(Field::IdleDays as u32), firm, days);
     set32(
         state,

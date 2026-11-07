@@ -282,21 +282,16 @@ fn local(
                         );
                         planned = minimum(minimum(shifts, funded), capacity);
                     }
-                    if comptime!(
-                        config.home_mode == Feature::Enabled
-                            || config.property_mode == Feature::Enabled
-                    ) {
-                        let status =
-                            number(state, config, comptime!(Field::EnterpriseStatus as u32), id);
-                        planned = select(
-                            status
-                                == comptime!(
-                                    crate::domain::enterprise::EnterpriseState::Operating as u32
-                                ),
-                            planned,
-                            zero(),
-                        );
-                    }
+                    let status =
+                        number(state, config, comptime!(Field::EnterpriseStatus as u32), id);
+                    planned = select(
+                        status
+                            == comptime!(
+                                crate::domain::enterprise::EnterpriseState::Operating as u32
+                            ),
+                        planned,
+                        zero(),
+                    );
                     set(state, config, comptime!(Field::Slots as u32), id, planned);
                     set(state, config, comptime!(Field::Plan as u32), id, planned);
                 }
@@ -1797,6 +1792,27 @@ fn summarize(
             let k = kind(actors, actor);
             match k.bits() {
                 ActorKind::HOUSEHOLD_BITS => {
+                    totals[SummaryLayout::HOMELESS_HOUSEHOLDS as usize] = add_checked(
+                        control,
+                        totals[SummaryLayout::HOMELESS_HOUSEHOLDS as usize],
+                        ticks(
+                            u32::cast_from(
+                                number(
+                                    state,
+                                    config,
+                                    comptime!(Field::LivingMembers as u32),
+                                    actor,
+                                ) > 0
+                                    && number(
+                                        state,
+                                        config,
+                                        comptime!(Field::HousingStatus as u32),
+                                        actor,
+                                    ) == comptime!(crate::domain::HousingState::Homeless as u32),
+                            ),
+                            0,
+                        ),
+                    );
                     totals[SummaryLayout::EMPLOYED as usize] = add_checked(
                         control,
                         totals[SummaryLayout::EMPLOYED as usize],

@@ -1,6 +1,26 @@
 use anyhow::{Result, anyhow};
 use serde::{Deserialize, Serialize};
 
+pub const FIRM_RENT_GRACE_DAYS: u32 = 30;
+
+#[repr(u32)]
+#[derive(Clone, Copy, Debug, Default, Serialize, Deserialize, PartialEq, Eq)]
+pub enum HousingState {
+    #[default]
+    Housed,
+    Homeless,
+}
+
+impl HousingState {
+    pub fn from_index(index: u64) -> Result<Self> {
+        match index {
+            0 => Ok(Self::Housed),
+            1 => Ok(Self::Homeless),
+            _ => Err(anyhow!("unknown housing state {index}")),
+        }
+    }
+}
+
 #[derive(Clone, Copy, Debug, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(deny_unknown_fields)]
 pub struct RentPolicy {

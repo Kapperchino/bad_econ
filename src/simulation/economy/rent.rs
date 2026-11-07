@@ -1,5 +1,5 @@
 use super::*;
-use crate::domain::enterprise::EnterpriseState;
+use crate::domain::{FIRM_RENT_GRACE_DAYS, HousingState, enterprise::EnterpriseState};
 
 #[derive(Clone, Copy, Debug, Hash, PartialEq, Eq)]
 pub(super) enum Tenants {
@@ -37,7 +37,7 @@ pub(super) fn collect(
             Tenants::Firms => !household,
         };
         if selected {
-            let daily = match kind(actors, actor).bits() {
+            let mut daily = match kind(actors, actor).bits() {
                 ActorKind::HOUSEHOLD_BITS => select(
                     number(state, config, comptime!(Field::LivingMembers as u32), actor) > 0
                         && number(state, config, comptime!(Field::LandPlots as u32), actor) == 0,
@@ -50,16 +50,13 @@ pub(super) fn collect(
                         config,
                         comptime!(Field::EnterpriseStatus as u32),
                         actor,
-                    ) != comptime!(EnterpriseState::Closed as u32),
+                    ) < comptime!(EnterpriseState::Liquidating as u32),
                     config.firm_rent,
                     0,
                 ),
             };
-            let due = add_checked(
-                control,
-                value(state, config, comptime!(Field::RentArrears as u32), actor),
-                ticks(daily, 0),
-            );
+            let arrears = value(state, config, comptime!(Field::RentArrears as u32), actor);
+            let obligation = add_checked(control, arrears, ticks(daily, 0));
             let cash = value(state, config, comptime!(Field::Cash as u32), actor);
             let mut available = cash;
             if comptime!(tenants == Tenants::Households) {
@@ -79,7 +76,72 @@ pub(super) fn collect(
                 );
                 available = select(lt(food, reserve), zero(), cash);
             }
+            let mut housing = 0u32;
+            if comptime!(tenants == Tenants::Households) {
+                let previous = number(state, config, comptime!(Field::HousingStatus as u32), actor);
+                let sheltered = daily == 0
+                    || previous == comptime!(HousingState::Housed as u32)
+                    || !lt(available, obligation);
+                daily = select(sheltered, daily, 0);
+                housing = select(
+                    sheltered,
+                    comptime!(HousingState::Housed as u32),
+                    comptime!(HousingState::Homeless as u32),
+                );
+            }
+            let due = add_checked(control, arrears, ticks(daily, 0));
             let paid = minimum(available, due);
+            let remaining = minus(due, paid);
+            match tenants {
+                Tenants::Households => {
+                    let evicted = daily > 0 && !equal(remaining, zero());
+                    set32(
+                        state,
+                        config,
+                        comptime!(Field::HousingStatus as u32),
+                        actor,
+                        select(evicted, comptime!(HousingState::Homeless as u32), housing),
+                    );
+                }
+                Tenants::Firms => {
+                    let previous = number(
+                        state,
+                        config,
+                        comptime!(Field::RentOverdueDays as u32),
+                        actor,
+                    );
+                    let days = select(
+                        equal(remaining, zero()),
+                        0,
+                        min(previous + 1, FIRM_RENT_GRACE_DAYS),
+                    );
+                    let status = number(
+                        state,
+                        config,
+                        comptime!(Field::EnterpriseStatus as u32),
+                        actor,
+                    );
+                    let next = select(
+                        days == FIRM_RENT_GRACE_DAYS,
+                        max(status, comptime!(EnterpriseState::Liquidating as u32)),
+                        status,
+                    );
+                    set32(
+                        state,
+                        config,
+                        comptime!(Field::RentOverdueDays as u32),
+                        actor,
+                        days,
+                    );
+                    set32(
+                        state,
+                        config,
+                        comptime!(Field::EnterpriseStatus as u32),
+                        actor,
+                        next,
+                    );
+                }
+            }
             let treasury = add_checked(
                 control,
                 value(state, config, comptime!(Field::RentTreasury as u32), actor),
@@ -97,7 +159,7 @@ pub(super) fn collect(
                 config,
                 comptime!(Field::RentArrears as u32),
                 actor,
-                minus(due, paid),
+                remaining,
             );
             set(
                 state,
@@ -318,6 +380,264 @@ mod tests {
                     (1 << 32) + case.paid
                 );
                 assert_eq!(actual.get(Field::RentArrears, case.actor), case.remaining);
+            }
+            for (actor, housing) in [
+                HousingState::Housed,
+                HousingState::Homeless,
+                HousingState::Homeless,
+                HousingState::Housed,
+                HousingState::Homeless,
+                HousingState::Housed,
+            ]
+            .into_iter()
+            .enumerate()
+            {
+                assert_eq!(actual.get(Field::HousingStatus, actor), housing as u64);
+            }
+            assert_eq!(actual.get(Field::RentOverdueDays, 7), 1);
+            FaultFlags::read(&device.read(&control)?)?.into_result()?;
+        }
+        Ok(())
+    }
+
+    #[test]
+    fn housing_recovery_and_thirty_day_firm_eviction_run_on_gpu() -> Result<()> {
+        struct RentCase {
+            housing: HousingState,
+            status: EnterpriseState,
+            overdue: u64,
+            cash: u64,
+            arrears: u64,
+            paid: u64,
+            remaining: u64,
+            next_housing: HousingState,
+            next_status: EnterpriseState,
+            next_overdue: u64,
+        }
+        let households = [
+            RentCase {
+                housing: HousingState::Housed,
+                status: EnterpriseState::Operating,
+                overdue: 0,
+                cash: 59,
+                arrears: 0,
+                paid: 59,
+                remaining: 1,
+                next_housing: HousingState::Homeless,
+                next_status: EnterpriseState::Operating,
+                next_overdue: 0,
+            },
+            RentCase {
+                housing: HousingState::Housed,
+                status: EnterpriseState::Operating,
+                overdue: 0,
+                cash: 60,
+                arrears: 0,
+                paid: 60,
+                remaining: 0,
+                next_housing: HousingState::Housed,
+                next_status: EnterpriseState::Operating,
+                next_overdue: 0,
+            },
+            RentCase {
+                housing: HousingState::Homeless,
+                status: EnterpriseState::Operating,
+                overdue: 0,
+                cash: 0,
+                arrears: 60,
+                paid: 0,
+                remaining: 60,
+                next_housing: HousingState::Homeless,
+                next_status: EnterpriseState::Operating,
+                next_overdue: 0,
+            },
+            RentCase {
+                housing: HousingState::Homeless,
+                status: EnterpriseState::Operating,
+                overdue: 0,
+                cash: 60,
+                arrears: 60,
+                paid: 60,
+                remaining: 0,
+                next_housing: HousingState::Homeless,
+                next_status: EnterpriseState::Operating,
+                next_overdue: 0,
+            },
+            RentCase {
+                housing: HousingState::Homeless,
+                status: EnterpriseState::Operating,
+                overdue: 0,
+                cash: 120,
+                arrears: 60,
+                paid: 120,
+                remaining: 0,
+                next_housing: HousingState::Housed,
+                next_status: EnterpriseState::Operating,
+                next_overdue: 0,
+            },
+            RentCase {
+                housing: HousingState::Homeless,
+                status: EnterpriseState::Operating,
+                overdue: 0,
+                cash: 119,
+                arrears: 60,
+                paid: 60,
+                remaining: 0,
+                next_housing: HousingState::Homeless,
+                next_status: EnterpriseState::Operating,
+                next_overdue: 0,
+            },
+        ];
+        let firms = [
+            RentCase {
+                housing: HousingState::Housed,
+                status: EnterpriseState::Operating,
+                overdue: 28,
+                cash: 0,
+                arrears: 1680,
+                paid: 0,
+                remaining: 1740,
+                next_housing: HousingState::Housed,
+                next_status: EnterpriseState::Operating,
+                next_overdue: 29,
+            },
+            RentCase {
+                housing: HousingState::Housed,
+                status: EnterpriseState::Operating,
+                overdue: 29,
+                cash: 0,
+                arrears: 1740,
+                paid: 0,
+                remaining: 1800,
+                next_housing: HousingState::Housed,
+                next_status: EnterpriseState::Liquidating,
+                next_overdue: 30,
+            },
+            RentCase {
+                housing: HousingState::Housed,
+                status: EnterpriseState::Dormant,
+                overdue: 29,
+                cash: 1800,
+                arrears: 1740,
+                paid: 1800,
+                remaining: 0,
+                next_housing: HousingState::Housed,
+                next_status: EnterpriseState::Dormant,
+                next_overdue: 0,
+            },
+            RentCase {
+                housing: HousingState::Housed,
+                status: EnterpriseState::Forming,
+                overdue: 29,
+                cash: 0,
+                arrears: 1740,
+                paid: 0,
+                remaining: 1800,
+                next_housing: HousingState::Housed,
+                next_status: EnterpriseState::Liquidating,
+                next_overdue: 30,
+            },
+            RentCase {
+                housing: HousingState::Housed,
+                status: EnterpriseState::Closed,
+                overdue: 30,
+                cash: 0,
+                arrears: 1800,
+                paid: 0,
+                remaining: 1800,
+                next_housing: HousingState::Housed,
+                next_status: EnterpriseState::Closed,
+                next_overdue: 30,
+            },
+            RentCase {
+                housing: HousingState::Housed,
+                status: EnterpriseState::Liquidating,
+                overdue: 30,
+                cash: 100,
+                arrears: 1800,
+                paid: 100,
+                remaining: 1700,
+                next_housing: HousingState::Housed,
+                next_status: EnterpriseState::Liquidating,
+                next_overdue: 30,
+            },
+        ];
+        let cases = households.into_iter().chain(firms).collect::<Vec<_>>();
+        let mut policy = Scenario::baseline(6, 42, Experiment::Concentrated)?
+            .config()
+            .clone();
+        policy.firms = 6;
+        policy.rent = Some(RentPolicy {
+            household_daily: 60,
+            firm_daily: 60,
+        });
+        let scenario = Scenario::new(policy)?;
+        let mut initial = scenario.initial()?;
+        for (actor, case) in cases.iter().enumerate() {
+            let living = u64::from(initial.actors.at(actor).kind == 0);
+            initial.set(Field::LivingMembers, actor, living);
+            initial.set(Field::FoodNeed, actor, living);
+            initial.set(Field::LandPlots, actor, 0);
+            initial.set(Field::HousingStatus, actor, case.housing as u64);
+            initial.set(Field::EnterpriseStatus, actor, case.status as u64);
+            initial.set(Field::RentOverdueDays, actor, case.overdue);
+            initial.set(Field::Cash, actor, case.cash);
+            initial.set(Field::RentArrears, actor, case.arrears);
+            initial.set(Field::Bread, actor, 1000);
+        }
+        for workgroup in [32, 128] {
+            let device = device(workgroup)?;
+            let config = Configuration::new(&device, &scenario, &initial);
+            let state = device.tensor(bytemuck::cast_slice(&encode(&initial.values)));
+            let metadata = initial
+                .actors
+                .iter()
+                .map(|actor| ActorLayout::new(&actor, &scenario))
+                .collect::<ActorMetadataRows>();
+            let actors = device.tensor(&metadata.words());
+            let control = device.tensor(&[0; CONTROL_WORDS]);
+            collect_rent::launch(
+                &device.client,
+                device.count(initial.actors.len()),
+                CubeDim::new_1d(workgroup),
+                state.clone().into_buffer_arg(),
+                actors.into_buffer_arg(),
+                config.launch(),
+                control.clone().into_buffer_arg(),
+            );
+            let mut actual = initial.clone();
+            actual.values = decode(&device.read(&state)?);
+            for (actor, case) in cases.iter().enumerate() {
+                assert_eq!(
+                    actual.get(Field::Cash, actor),
+                    case.cash - case.paid,
+                    "actor {actor}"
+                );
+                assert_eq!(
+                    actual.get(Field::RentTreasury, actor),
+                    case.paid,
+                    "actor {actor}"
+                );
+                assert_eq!(
+                    actual.get(Field::RentArrears, actor),
+                    case.remaining,
+                    "actor {actor}"
+                );
+                assert_eq!(
+                    actual.get(Field::HousingStatus, actor),
+                    case.next_housing as u64,
+                    "actor {actor}"
+                );
+                assert_eq!(
+                    actual.get(Field::EnterpriseStatus, actor),
+                    case.next_status as u64,
+                    "actor {actor}"
+                );
+                assert_eq!(
+                    actual.get(Field::RentOverdueDays, actor),
+                    case.next_overdue,
+                    "actor {actor}"
+                );
             }
             FaultFlags::read(&device.read(&control)?)?.into_result()?;
         }

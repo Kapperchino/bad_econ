@@ -718,7 +718,7 @@ impl Simulation {
     fn commit_entries(
         &mut self,
         entries: &registry::entries::EntryRequests,
-        plan: registry::RegistryPlan,
+        mut plan: registry::RegistryPlan,
         births: &[PendingRecord],
     ) -> Result<()> {
         let newborns = births.iter().filter(|record| record.birth > 0).count();
@@ -822,7 +822,14 @@ impl Simulation {
             0 => self.demography.clone(),
             _ => self.grow_births(births)?,
         };
-        demography.extend_firms(&self.device, count);
+        match batch.formations.is_empty() {
+            true => demography.extend_firms(&self.device, count),
+            false => {
+                demography = demography.form_households(&self.device, &batch.formations, count)?;
+                plan.migrations
+                    .extend_households(&metadata.actors, &batch.formations);
+            }
+        }
         let research = self
             .research
             .as_ref()
@@ -1731,6 +1738,7 @@ impl Simulation {
                 .transpose()?
                 .unwrap_or_default(),
             employed: totals.employed.into(),
+            homeless_households: totals.homeless_households.into(),
             households: (self.metadata.actors.len() - self.metadata.actors.firms()) as u64,
             shortages: totals.shortages.into(),
             firms: self.metadata.actors.firms() as u64,
@@ -1957,6 +1965,13 @@ impl Simulation {
             employee_charges: values[Field::ChargeTreasury as usize],
             rent_collected: values[Field::RentTreasury as usize],
             rent_arrears: values[Field::RentArrears as usize],
+            housing_state: match self.metadata.actors.at(actor).kind {
+                0 => Some(crate::domain::HousingState::from_index(
+                    values[Field::HousingStatus as usize],
+                )?),
+                _ => None,
+            },
+            rent_overdue_days: values[Field::RentOverdueDays as usize],
             inventory: values[Field::Grain as usize..Field::Escrow as usize].try_into()?,
             transit: values[Field::Transit as usize],
             fatigue: values[Field::Fatigue as usize],

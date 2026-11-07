@@ -37,7 +37,7 @@ impl EntryRequests {
     }
 
     fn is_entry(action: u32) -> bool {
-        (1..=Good::COUNT as u32).contains(&action) || matches!(action >> 24, 8 | 9)
+        (1..=Good::COUNT as u32).contains(&action) || matches!(action >> 24, 1 | 8 | 9)
     }
 }
 
@@ -66,6 +66,7 @@ impl EntryGrowth {
 pub(in crate::simulation) struct EntryBatch {
     pub metadata: State,
     pub readback_bytes: u64,
+    pub formations: Vec<enterprise::HouseholdFormation>,
     indices: CubeTensor,
     values: CubeTensor,
 }
@@ -154,12 +155,16 @@ impl EntryBatch {
             };
         }
         enterprise::enter(&mut compact, scenario, &compact_requests)?;
+        let formations = enterprise::form_households(&mut compact, scenario, &compact_requests)?;
         let mut grown = metadata.clone();
         let before = metadata.actors.len();
         grown
             .actors
             .extend(compact.actors.iter_from(selected.len()).map(|mut actor| {
-                actor.owner = selected[actor.owner as usize] as u32;
+                actor.owner = match (actor.owner as usize) < selected.len() {
+                    true => selected[actor.owner as usize] as u32,
+                    false => (before + actor.owner as usize - selected.len()) as u32,
+                };
                 actor
             }));
         grown.next_identity = compact.next_identity;
@@ -172,7 +177,12 @@ impl EntryBatch {
         let patches = owners
             .chain(selected.len()..compact.actors.len())
             .collect::<Vec<_>>();
-        for (offset, record) in entries.entries.iter().enumerate() {
+        for (offset, record) in entries
+            .entries
+            .iter()
+            .filter(|record| record.request >> 24 != 1)
+            .enumerate()
+        {
             compact.set(
                 Field::InvestmentFirm,
                 selected
@@ -200,6 +210,14 @@ impl EntryBatch {
         Ok(Self {
             metadata: grown,
             readback_bytes,
+            formations: formations
+                .into_iter()
+                .map(|formation| enterprise::HouseholdFormation {
+                    parent: selected[formation.parent],
+                    household: before + formation.household - selected.len(),
+                    person: formation.person,
+                })
+                .collect(),
             indices: device.tensor(&indices),
             values: device.tensor(bytemuck::cast_slice(&encode(&values))),
         })

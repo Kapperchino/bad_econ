@@ -159,10 +159,7 @@ fn requests(
             comptime!(Field::EstateSettled as u32) * count + actor,
         )
         .extract(0usize);
-        if kind > 0
-            && status == comptime!(EnterpriseState::Liquidating as u32)
-            && (day + actor) % 30 == 0
-        {
+        if kind > 0 && status == comptime!(EnterpriseState::Liquidating as u32) {
             action = 0x04000000u32;
         }
         if kind == 0 && living == 0 && (estate == 0 || (estate == 3 && (day + actor) % 30 == 0)) {
@@ -432,19 +429,26 @@ pub(super) fn enter(
     Ok(entries.len())
 }
 
-pub(super) fn transitions(
+pub(in crate::simulation) struct HouseholdFormation {
+    pub parent: usize,
+    pub household: usize,
+    pub person: u64,
+}
+
+pub(in crate::simulation) fn form_households(
     state: &mut crate::domain::State,
     scenario: &crate::domain::Scenario,
     requests: &[u32],
-) -> anyhow::Result<()> {
-    use crate::domain::{Actor, Position, demography::LivingState};
-    use anyhow::{Context, anyhow};
+) -> anyhow::Result<Vec<HouseholdFormation>> {
+    use crate::domain::Actor;
+    use anyhow::Context;
     let splits = requests
         .iter()
         .enumerate()
         .filter(|(_, action)| **action >> 24 == 1)
         .map(|(household, _)| household)
         .collect::<Vec<_>>();
+    let mut formations = Vec::with_capacity(splits.len());
     let before = state.actors.len();
     let after = before + splits.len();
     if after > before {
@@ -473,16 +477,11 @@ pub(super) fn transitions(
         for (offset, &parent) in splits.iter().enumerate() {
             let household = before + offset;
             let person_identity = state.get(Field::SplitPerson, parent);
-            let person = state
-                .people
-                .iter_mut()
-                .find(|person| person.identity == person_identity)
-                .context("unknown household formation person")?;
-            match person.state {
-                LivingState::Living => (),
-                _ => Err(anyhow!("deceased person cannot form a household"))?,
-            }
-            person.household = state.actors.at(household).identity;
+            formations.push(HouseholdFormation {
+                parent,
+                household,
+                person: person_identity,
+            });
             for field in std::iter::once(Field::Cash)
                 .chain(Good::ALL.map(Field::inventory))
                 .chain([Field::LandPlots, Field::CropWork])
@@ -519,6 +518,28 @@ pub(super) fn transitions(
                 );
             }
         }
+    }
+    Ok(formations)
+}
+
+pub(super) fn transitions(
+    state: &mut crate::domain::State,
+    scenario: &crate::domain::Scenario,
+    requests: &[u32],
+) -> anyhow::Result<()> {
+    use crate::domain::{Position, demography::LivingState};
+    use anyhow::{Context, anyhow};
+    for formation in form_households(state, scenario, requests)? {
+        let person = state
+            .people
+            .iter_mut()
+            .find(|person| person.identity == formation.person)
+            .context("unknown household formation person")?;
+        match person.state {
+            LivingState::Living => (),
+            _ => Err(anyhow!("deceased person cannot form a household"))?,
+        }
+        person.household = state.actors.at(formation.household).identity;
     }
     let mut heirs = std::collections::HashMap::new();
     for actor in 0..state.actors.len() {

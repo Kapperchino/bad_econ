@@ -297,6 +297,136 @@ fn gpu_registry_migration_births_and_estates_match_audited_rebuilds() -> Result<
 }
 
 #[test]
+fn gpu_household_growth_matches_rebuilds_and_keeps_unrelated_estates_sparse() -> Result<()> {
+    let mut config = Scenario::industrial(300, 42, Experiment::Baseline)?
+        .config()
+        .clone();
+    config.household_cash = 1_000_000;
+    config.household_liquidity = HouseholdLiquidity::Uniform;
+    config.buffer_days = 30;
+    config.demography.annual_births_per_million_fertile_women = 0;
+    let scenario = Scenario::new(config)?;
+    let mut initial = scenario.initial()?;
+    for person in &mut initial.people {
+        person.identity += 1 << 32;
+    }
+    initial.next_identity += 1 << 32;
+    let parents = [0, 31, 299];
+    for parent in parents {
+        let identity = initial.actors.at(parent).identity;
+        let person = initial
+            .people
+            .iter()
+            .filter(|person| person.household == identity)
+            .nth(parent % 3)
+            .context("household member")?
+            .identity;
+        initial.set(Field::SplitPerson, parent, person);
+        initial.set(
+            Field::LivingMembers,
+            parent,
+            initial
+                .people
+                .iter()
+                .filter(|person| person.household == identity)
+                .count() as u64,
+        );
+    }
+    for (good, amount) in [(Good::Tools, 2), (Good::Wood, 5)] {
+        let field = Field::inventory(good);
+        let donor = (300..initial.actors.len())
+            .max_by_key(|&actor| initial.get(field, actor))
+            .context("material supplier")?;
+        initial.set(field, donor, initial.get(field, donor) - amount);
+        initial.set(field, 1, initial.get(field, 1) + amount);
+    }
+    initial.set(Field::PendingCapacity, 302, 2);
+    initial.set(Field::InstalledCapital, 302, 1);
+    for workgroup in [32, 128] {
+        let mut gpu =
+            Simulation::from_state(scenario.clone(), initial.clone(), device(workgroup)?)?;
+        let mut reference = Simulation::from_state(scenario.clone(), initial.clone(), device(64)?)?;
+        let mut requests = vec![0; initial.actors.len()];
+        for parent in parents {
+            requests[parent] = 1 << 24 | 1;
+        }
+        requests[1] = Good::Bread as u32;
+        requests[5] = (2 << 24) + 302;
+        requests[300] = 4 << 24;
+        requests[302] = (6 << 24) + 2;
+        let mut births = vec![0; requests.len()];
+        births[0] = 1;
+        births[1] = 2;
+        births[299] = 2;
+        for simulation in [&gpu, &reference] {
+            simulation
+                .device
+                .write(simulation.demography.birth_buffer(), &births);
+        }
+        let pending = registry::records::PendingRecords::from_dense(&requests, &births)?;
+        let growth = registry::entries::EntryGrowth::new(
+            &scenario,
+            &gpu.metadata,
+            &gpu.migrations,
+            &pending.records,
+        )?
+        .context("household growth should use the GPU")?;
+        gpu.commit_entries(&growth.requests, growth.plan, &pending.records)?;
+        let mut expected = reference.download()?;
+        expected.people = reference
+            .demography
+            .reference_births(&reference.device, &births, expected.next_identity)?
+            .download(&reference.device, &expected, CopyDirection::Save)?;
+        expected.next_identity += 3;
+        enterprise::enter(&mut expected, &scenario, &requests)?;
+        enterprise::transitions(&mut expected, &scenario, &requests)?;
+        reference
+            .replace(scenario.clone(), expected)
+            .context("reference household rebuild")?;
+        assert_eq!(gpu.download()?, reference.download()?);
+        assert_eq!(gpu.snapshot, reference.snapshot);
+        gpu.copy_audited(CopyDirection::Save)?;
+        let checkpoint = gpu.checkpoint().context("grown household checkpoint")?;
+        let restored = Simulation::from_checkpoint(checkpoint, device(workgroup)?)?;
+        for simulation in [&gpu, &restored] {
+            for actor in [0, 31, 299, 2] {
+                let records = [PendingRecord {
+                    actor,
+                    request: 5 << 24,
+                    birth: 0,
+                }];
+                let plan = registry::RegistryPlan::new(
+                    &scenario,
+                    &simulation.metadata,
+                    &simulation.migrations,
+                    &records,
+                )?;
+                assert_eq!(plan.is_some(), actor == 2);
+            }
+        }
+        let before = gpu.download()?;
+        let invalid = [enterprise::HouseholdFormation {
+            parent: 0,
+            household: gpu.actors().len(),
+            person: u64::MAX,
+        }];
+        assert!(
+            gpu.demography
+                .form_households(&gpu.device, &invalid, gpu.actors().len() + 1)
+                .is_err()
+        );
+        assert_eq!(gpu.download()?, before);
+        for _ in 0..3 {
+            gpu.advance()?;
+            reference.advance()?;
+            assert_eq!(gpu.download()?, reference.download()?);
+            assert_eq!(gpu.snapshot, reference.snapshot);
+        }
+    }
+    Ok(())
+}
+
+#[test]
 fn gpu_firm_growth_matches_full_rebuild_with_births_and_migration() -> Result<()> {
     let mut config = Scenario::industrial(300, 42, Experiment::Baseline)?
         .config()
@@ -893,6 +1023,8 @@ fn partitioned_audits_match_original_tiles_extrema_and_overflow_on_gpu() -> Resu
                 initial.set(Field::Price, index, (1u64 << 41) + index as u64);
                 initial.set(Field::EnterpriseStatus, index, 4 * (index % 2) as u64);
                 initial.set(Field::EnterpriseModel, index, (index % 2) as u64);
+                initial.set(Field::HousingStatus, index, (index % 2) as u64);
+                initial.set(Field::LivingMembers, index, (index % 3) as u64);
             }
             simulation.actors = simulation.device.tensor(
                 &initial

@@ -16,7 +16,7 @@ pub mod industry;
 mod payroll;
 pub mod property;
 mod rent;
-pub use rent::RentPolicy;
+pub use rent::{FIRM_RENT_GRACE_DAYS, HousingState, RentPolicy};
 pub mod research;
 pub use households::{HouseholdLiquidity, HouseholdPolicy};
 pub use industry::{Economy, ProductionMethod, Technology};
@@ -30,9 +30,9 @@ pub use population::{
 pub use resources::{ProductionSite, ResourceMap, ResourceRegion};
 
 pub const SCENARIO_VERSION: u32 = 2;
-const CHECKPOINT_VERSION: u32 = 10;
-pub const STATE_HASH_VERSION: &str = "bad-econ/state/CubekV2/v11";
-pub const USED_FIELDS: usize = Field::ProjectStatus as usize + 1;
+const CHECKPOINT_VERSION: u32 = 11;
+pub const STATE_HASH_VERSION: &str = "bad-econ/state/CubekV2/v12";
+pub const USED_FIELDS: usize = Field::RentOverdueDays as usize + 1;
 pub const TRANSIT_FIELDS: usize = USED_FIELDS + Good::COUNT;
 pub const CONSUMPTION_FIELDS: usize = TRANSIT_FIELDS + Good::COUNT;
 pub const PRODUCTION_FIELDS: usize = CONSUMPTION_FIELDS + Good::COUNT;
@@ -144,6 +144,8 @@ pub enum Field {
     ReservedSpace,
     DisplacedPlots,
     ProjectStatus,
+    HousingStatus,
+    RentOverdueDays,
 }
 impl Field {
     pub fn inventory(good: Good) -> Self {
@@ -1816,6 +1818,8 @@ pub struct Inspection {
     pub employee_charges: u64,
     pub rent_collected: u64,
     pub rent_arrears: u64,
+    pub housing_state: Option<HousingState>,
+    pub rent_overdue_days: u64,
     pub inventory: [u64; Good::COUNT],
     pub transit: u64,
     pub fatigue: u64,
@@ -1860,6 +1864,13 @@ impl Inspection {
             employee_charges: state.get(Field::ChargeTreasury, index),
             rent_collected: state.get(Field::RentTreasury, index),
             rent_arrears: state.get(Field::RentArrears, index),
+            housing_state: match state.actors.at(index).kind {
+                0 => Some(HousingState::from_index(
+                    state.get(Field::HousingStatus, index),
+                )?),
+                _ => None,
+            },
+            rent_overdue_days: state.get(Field::RentOverdueDays, index),
             inventory: Good::ALL.map(|good| state.get(Field::inventory(good), index)),
             transit: state.get(Field::Transit, index),
             fatigue: state.get(Field::Fatigue, index),
@@ -1962,6 +1973,7 @@ pub struct ObservationSnapshot {
     pub research: research::ResearchSummary,
     pub employed: u64,
     pub households: u64,
+    pub homeless_households: u64,
     pub firms: u64,
     pub firm_entries: u64,
     pub firm_closures: u64,
@@ -2073,6 +2085,11 @@ impl ObservationSnapshot {
                 match actor.kind {
                     0 => {
                         snapshot.employed += state.get(Field::Employed, i);
+                        snapshot.homeless_households += u64::from(
+                            state.get(Field::LivingMembers, i) > 0
+                                && state.get(Field::HousingStatus, i)
+                                    == HousingState::Homeless as u64,
+                        );
                         snapshot.shortages =
                             add(snapshot.shortages, state.get(Field::Shortage, i))?;
                         snapshot.consumed = add(snapshot.consumed, state.get(Field::Consumed, i))?;
@@ -2249,7 +2266,9 @@ impl<'a> AuditedState<'a> {
                             .is_some_and(|actor| actor.kind > 0)
                 }
             };
-            let limits = state.get(Field::EquipmentCondition, i) <= 1000
+            let limits = state.get(Field::HousingStatus, i) <= HousingState::Homeless as u64
+                && state.get(Field::RentOverdueDays, i) <= u64::from(FIRM_RENT_GRACE_DAYS)
+                && state.get(Field::EquipmentCondition, i) <= 1000
                 && state.get(Field::SafetyProvision, i) <= 900
                 && state.get(Field::EnterpriseStatus, i)
                     <= enterprise::EnterpriseState::Closed as u64

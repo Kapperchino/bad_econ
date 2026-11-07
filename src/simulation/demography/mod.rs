@@ -1,3 +1,4 @@
+mod households;
 mod kernels;
 mod systems;
 use super::registry::records::PendingRecord;

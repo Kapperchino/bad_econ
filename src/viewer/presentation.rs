@@ -69,16 +69,18 @@ fn draw(
                 .map(|i| {
                     let detail = match i.actor.kind {
                         0 => format!(
-                            "Members {} | fatigue {} | labor {} min\nEmployer {} | gross paid {}\nTax {} | charges {} | payroll reserve {}",
+                            "{} | members {} | fatigue {} | labor {} min\nEmployer {} | gross paid {}\nTax {} | charges {} | payroll reserve {}",
+                            i.housing_state.map(|state| format!("{state:?}")).unwrap_or_default(),
                             i.living_members, i.fatigue, i.available_minutes, i.employer,
                             i.gross_income, i.income_tax, i.employee_charges, i.payroll_reserve
                         ),
                         _ => format!(
-                            "{} {:?} | building {} {}\nCondition {} | safety {}\nOwner {} | wage {} | price {}\nCapacity {} (+{}) | planned {} | open {}\nMethod {:?} | {} output / {} min",
+                            "{} {:?} | building {} {}\nCondition {} | safety {}\nRent overdue {} days\nOwner {} | wage {} | price {}\nCapacity {} (+{}) | planned {} | open {}\nMethod {:?} | {} output / {} min",
                             i.enterprise_state.map(|state| format!("{state:?}")).unwrap_or_default(),
                             i.enterprise_model, i.construction_minutes_remaining,
                             match i.property_region { 0 => "min", _ => "work" },
                             i.equipment_condition, i.safety_provision,
+                            i.rent_overdue_days,
                             i.owner_identity,
                             i.wage,
                             i.price,
@@ -142,7 +144,7 @@ fn draw(
                 .collect::<Vec<_>>()
                 .join("\n");
             let text = format!(
-                "{} | seed {}\nDay {} | target {}\nPaid households {} | unmet bread {}\nPopulation {} | births {}\nDeaths background/work/famine {:?}\nFirms {} | entries {} | closed {} | stores {}\nHousehold food output {:?}\nCash {}\nFood stocks {:?} | other stocks {}\nIn transit {}\nTax {} | charges {} | payroll reserve {}\nRent collected {} | owed {}\nBank/support cash {} | loan principal {}\nLoans {} active / {} overdue | interest {}\nResearch {} attempts / {} successes | strikes {}\n\nPrice / wage | means\n{}\n\n{}\n\n{}\n{}",
+                "{} | seed {}\nDay {} | target {}\nPaid households {} | unmet bread {}\nPopulation {} | births {}\nDeaths background/work/famine {:?}\nFirms {} | entries {} | closed {} | stores {}\nHousehold food output {:?}\nCash {}\nFood stocks {:?} | other stocks {}\nIn transit {}\nTax {} | charges {} | payroll reserve {}\nRent collected {} | owed {} | homeless {}\nBank/support cash {} | loan principal {}\nLoans {} active / {} overdue | interest {}\nResearch {} attempts / {} successes | strikes {}\n\nPrice / wage | means\n{}\n\n{}\n\n{}\n{}",
                 display.status.label(),
                 display.seed,
                 s.day,
@@ -172,6 +174,7 @@ fn draw(
                 s.payroll_reserves,
                 s.rent_collected,
                 s.rent_arrears,
+                s.homeless_households,
                 s.financial_cash,
                 s.loan_principal,
                 s.active_loans,
