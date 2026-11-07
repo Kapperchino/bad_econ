@@ -3,7 +3,7 @@ use super::{
     ComparisonRun, Control, Display, DisplayState, Publication, RunTarget, Speed, WorkerState,
 };
 use crate::{
-    domain::{InspectionRequest, Scenario, enterprise::EnterpriseState},
+    domain::{Actor, InspectionRequest, Scenario, enterprise::EnterpriseState},
     runtime::{RuntimeState, SimulationCommand},
     simulation::Simulation,
 };
@@ -12,7 +12,7 @@ use crossbeam_channel::{Receiver, RecvTimeoutError};
 use std::{
     collections::BTreeSet,
     sync::{Arc, Mutex},
-    time::{Duration, Instant},
+    time::Instant,
 };
 
 #[cfg(test)]
@@ -59,13 +59,13 @@ pub(super) fn run(
         Some(Cue::Ready),
     )?;
     while matches!(workflow, WorkerState::Active) {
-        let timeout = match simulation.status {
-            RuntimeState::Running => next_day
-                .saturating_duration_since(Instant::now())
-                .min(Duration::from_millis(50)),
-            _ => Duration::from_millis(50),
+        let control = match simulation.status {
+            RuntimeState::Running => {
+                receiver.recv_timeout(next_day.saturating_duration_since(Instant::now()))
+            }
+            _ => receiver.recv().map_err(|_| RecvTimeoutError::Disconnected),
         };
-        let result = match receiver.recv_timeout(timeout) {
+        let result = match control {
             Ok(Control::Simulation(command)) => {
                 let cue = match &*command {
                     SimulationCommand::Pause => Cue::Paused,
@@ -198,35 +198,34 @@ fn publish(
     publication: Publication,
     cue: Option<Cue>,
 ) -> Result<()> {
-    let firms = simulation.open_firms()?;
-    let snapshot = crate::domain::ObservationSnapshot {
-        firms: firms.len() as u64,
-        ..simulation.snapshot.clone()
-    };
-    let firm_identities = firms
-        .iter()
-        .map(|firm| firm.identity)
-        .collect::<BTreeSet<_>>();
-    let identities = simulation
-        .actors()
-        .iter()
-        .filter(|actor| match actor.kind {
-            0 => true,
-            _ => firm_identities.contains(&actor.identity),
-        })
-        .map(|actor| actor.identity)
-        .collect::<Vec<_>>();
+    let observation = {
+        let display = publisher.data.lock().expect("dashboard lock");
+        match (
+            publication,
+            display.history.back().map(|snapshot| snapshot.day),
+        ) {
+            (Publication::Snapshot, Some(day)) if day == simulation.snapshot.day => None,
+            _ => Some(()),
+        }
+    }
+    .map(|()| ObservationUpdate::new(simulation))
+    .transpose()?;
     let request = match publication {
         Publication::Restart => None,
         Publication::Snapshot => {
             let display = publisher.data.lock().expect("dashboard lock");
+            let identities = observation
+                .as_ref()
+                .map_or(display.identities.as_slice(), |update| {
+                    update.identities.as_slice()
+                });
             display
                 .inspection
                 .as_ref()
                 .filter(|inspection| identities.contains(&inspection.actor.identity))
                 .filter(|inspection| inspection.day != simulation.snapshot.day)
                 .map(|inspection| {
-                    InspectionRequest::from_registry(inspection.actor.identity, &identities)
+                    InspectionRequest::from_registry(inspection.actor.identity, identities)
                 })
                 .transpose()?
         }
@@ -238,20 +237,28 @@ fn publish(
         if let Some(inspection) = refreshed {
             display.inspection = Some(inspection);
         }
-        display.inspection = display
-            .inspection
-            .take()
-            .filter(|inspection| identities.contains(&inspection.actor.identity));
-        display.firms = firms;
-        display.identities = identities;
-        match publication {
-            Publication::Restart => {
-                display.map_size = simulation.scenario.config().map_size;
-                display.history.clear();
-                display.inspection = None;
-            }
-            Publication::Snapshot => (),
+        if let Publication::Restart = publication {
+            display.map_size = simulation.scenario.config().map_size;
+            display.history.clear();
+            display.inspection = None;
+            display.map_revision = display.map_revision.wrapping_add(1);
         }
+        if let Some(observation) = observation {
+            display.inspection = display
+                .inspection
+                .take()
+                .filter(|inspection| observation.identities.contains(&inspection.actor.identity));
+            if display.firms != observation.firms {
+                display.firms = observation.firms;
+                display.map_revision = display.map_revision.wrapping_add(1);
+            }
+            display.identities = observation.identities;
+            display.observation_revision = display.observation_revision.wrapping_add(1);
+        }
+        let snapshot = crate::domain::ObservationSnapshot {
+            firms: display.firms.len() as u64,
+            ..simulation.snapshot.clone()
+        };
         match display.history.back().map(|s| s.day) {
             Some(day) if day == simulation.snapshot.day => (),
             _ => {
@@ -268,4 +275,29 @@ fn publish(
         display.cues.extend(cue);
     });
     Ok(())
+}
+
+struct ObservationUpdate {
+    firms: Vec<Actor>,
+    identities: Vec<u64>,
+}
+
+impl ObservationUpdate {
+    fn new(simulation: &mut Simulation) -> Result<Self> {
+        let firms = simulation.open_firms()?;
+        let firm_identities = firms
+            .iter()
+            .map(|firm| firm.identity)
+            .collect::<BTreeSet<_>>();
+        let identities = simulation
+            .actors()
+            .iter()
+            .filter(|actor| match actor.kind {
+                0 => true,
+                _ => firm_identities.contains(&actor.identity),
+            })
+            .map(|actor| actor.identity)
+            .collect();
+        Ok(Self { firms, identities })
+    }
 }

@@ -31,7 +31,14 @@ impl Plugin for UiPlugin {
             .add_systems(Startup, setup)
             .add_systems(
                 Update,
-                (style_buttons, style_markers, scroll, reset_report_scroll).after(super::controls),
+                (
+                    style_buttons,
+                    style_markers,
+                    scroll,
+                    reset_report_scroll,
+                    reset_inspector_scroll,
+                )
+                    .after(super::controls),
             );
     }
 }
@@ -41,6 +48,7 @@ pub(super) enum ActorSelection {
     Household,
     Firm,
     Next,
+    Previous,
     Identity(u64),
 }
 
@@ -59,6 +67,32 @@ pub(super) enum UiAction {
     Motion,
 }
 
+impl UiAction {
+    pub fn hint(self) -> String {
+        match self {
+            Self::Menu(menu) => menu.description().into(),
+            Self::Chart(chart) => chart.label().into(),
+            Self::NextChart => "G: cycle through all graphs".into(),
+            Self::ToggleRun => "Space: resume or pause the simulation".into(),
+            Self::Step => "N: advance one day and pause".into(),
+            Self::Reset => "R: discard this run and restore the launch scenario".into(),
+            Self::Speed(speed) => format!("Simulation speed: {}", speed.label()),
+            Self::Inspect(ActorSelection::Household) => "H: inspect the first household".into(),
+            Self::Inspect(ActorSelection::Firm) => "F: inspect the first firm".into(),
+            Self::Inspect(ActorSelection::Next) => "Tab: inspect the next actor".into(),
+            Self::Inspect(ActorSelection::Previous) => {
+                "Shift+Tab: inspect the previous actor".into()
+            }
+            Self::Inspect(ActorSelection::Identity(identity)) => format!("Inspect firm {identity}"),
+            Self::Compare => {
+                "C: save this history and compare the next seed at the same day".into()
+            }
+            Self::Sound => "M: toggle feedback sounds".into(),
+            Self::Motion => "V: toggle feedback flashes".into(),
+        }
+    }
+}
+
 #[derive(Component)]
 pub(super) enum Label {
     Resources,
@@ -67,7 +101,6 @@ pub(super) enum Label {
     Subtitle,
     Summary,
     ChartTitle,
-    ChartScale,
     Comparison,
     Inspection,
     MapSummary,
@@ -78,7 +111,11 @@ pub(super) enum Label {
 #[derive(Component)]
 struct Report;
 #[derive(Component)]
+struct InspectorDetails;
+#[derive(Component)]
 pub(super) struct Plot;
+#[derive(Component)]
+pub(super) struct ChartScale;
 #[derive(Component)]
 pub(super) struct Legend;
 #[derive(Component)]
@@ -238,9 +275,9 @@ fn setup(mut commands: Commands, mut fonts: ResMut<Assets<Font>>) {
                     time.spawn(row(5.0)).with_children(|controls| {
                         button(controls, UiAction::ToggleRun, "Resume");
                         button(controls, UiAction::Step, "+1 day");
-                        button(controls, UiAction::Speed(Speed::Slow), "1");
-                        button(controls, UiAction::Speed(Speed::Normal), "2");
-                        button(controls, UiAction::Speed(Speed::Fast), "3");
+                        button(controls, UiAction::Speed(Speed::Slow), "0.5 d/s");
+                        button(controls, UiAction::Speed(Speed::Normal), "2 d/s");
+                        button(controls, UiAction::Speed(Speed::Fast), "Max");
                     });
                 });
             });
@@ -393,7 +430,7 @@ fn report(parent: &mut ChildSpawnerCommands) {
                         },
                     ));
                 });
-            label(report, Label::ChartScale, 11.0, MUTED);
+            report.spawn((ChartScale, text("", 11.0, MUTED)));
             report.spawn((
                 Legend,
                 Node {
@@ -531,15 +568,15 @@ fn inspector(parent: &mut ChildSpawnerCommands) {
                         "Household",
                     );
                     button(controls, UiAction::Inspect(ActorSelection::Firm), "Firm");
-                    button(
-                        controls,
-                        UiAction::Inspect(ActorSelection::Next),
-                        "Next actor",
-                    );
+                    controls.spawn(Node { width: percent(100), ..row(6.0) }).with_children(|navigation| {
+                        button(navigation, UiAction::Inspect(ActorSelection::Previous), "Previous");
+                        button(navigation, UiAction::Inspect(ActorSelection::Next), "Next");
+                    });
                 });
             rule(panel);
             panel
                 .spawn((
+                    InspectorDetails,
                     Node {
                         flex_grow: 1.0,
                         min_height: px(0),
@@ -551,7 +588,7 @@ fn inspector(parent: &mut ChildSpawnerCommands) {
                 ))
                 .with_children(|details| label(details, Label::Inspection, 13.0, PAPER));
             panel.spawn(text(
-                "H  Household    F  Firm\nTab  Next actor\nScroll to read all details",
+                "H  Household    F  Firm\nTab / Shift+Tab  Next / previous\nScroll to read all details",
                 11.0,
                 MUTED,
             ));
@@ -658,5 +695,27 @@ fn style_markers(
                     node.border = thickness;
                 }
             });
+    }
+}
+
+fn reset_inspector_scroll(
+    dashboard: Option<Res<Dashboard>>,
+    mut panels: Query<&mut ScrollPosition, With<InspectorDetails>>,
+    mut previous: Local<Option<u64>>,
+) {
+    let current = dashboard.and_then(|dashboard| {
+        dashboard
+            .data
+            .lock()
+            .expect("dashboard lock")
+            .inspection
+            .as_ref()
+            .map(|inspection| inspection.actor.identity)
+    });
+    if current != *previous {
+        panels
+            .iter_mut()
+            .for_each(|mut position| position.0 = Vec2::ZERO);
+        *previous = current;
     }
 }

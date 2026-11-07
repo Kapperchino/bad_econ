@@ -8,7 +8,7 @@ use crate::{
         ui::{FirmMarker, MapMarkers},
     },
 };
-use bevy::prelude::{App, MinimalPlugins};
+use bevy::prelude::{App, Assets, ColorMaterial, Image, Mesh, MinimalPlugins};
 use std::collections::VecDeque;
 
 #[test]
@@ -70,6 +70,8 @@ fn closed_firms_leave_the_map_navigation_and_inspector_on_gpu() -> Result<()> {
             map_size: scenario.config().map_size,
             speed: Speed::Normal,
             revision: 0,
+            observation_revision: 0,
+            map_revision: 0,
             cues: VecDeque::new(),
         })),
         wake: || (),
@@ -83,6 +85,9 @@ fn closed_firms_leave_the_map_navigation_and_inspector_on_gpu() -> Result<()> {
         chart: Chart::Businesses,
     });
     app.add_plugins((MinimalPlugins, PresentationPlugin));
+    app.init_resource::<Assets<Image>>()
+        .init_resource::<Assets<Mesh>>()
+        .init_resource::<Assets<ColorMaterial>>();
     app.world_mut().spawn(MapMarkers);
     publish(&mut simulation, &publisher, Publication::Restart, None)?;
     let request = InspectionRequest::new(4, &scenario)?;
@@ -121,6 +126,18 @@ fn closed_firms_leave_the_map_navigation_and_inspector_on_gpu() -> Result<()> {
     }
     inspect(&mut simulation, &publisher, request)?;
     assert!(publisher.data.lock().unwrap().inspection.is_none());
+
+    let readback_bytes = simulation.readback_bytes;
+    let map_revision = publisher.data.lock().unwrap().map_revision;
+    let observation_revision = publisher.data.lock().unwrap().observation_revision;
+    publish(&mut simulation, &publisher, Publication::Snapshot, None)?;
+    assert_eq!(simulation.readback_bytes, readback_bytes);
+    assert_eq!(publisher.data.lock().unwrap().map_revision, map_revision);
+    assert_eq!(
+        publisher.data.lock().unwrap().observation_revision,
+        observation_revision
+    );
+    assert_eq!(publisher.data.lock().unwrap().snapshot.firms, 2);
 
     let checkpoint = simulation.checkpoint()?;
     simulation.command(SimulationCommand::Restore(Box::new(checkpoint)))?;
