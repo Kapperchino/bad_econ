@@ -507,7 +507,14 @@ fn local(
                         let packets = number(state, config, comptime!(Field::Plan as u32), id)
                             - number(state, config, comptime!(Field::Slots as u32), id);
                         enterprises::maintain(state, config, control, id, packets);
-                        enterprises::lifecycle(state, config, id);
+                    }
+                    if comptime!(config.home_mode == Feature::Enabled)
+                        || number(state, config, comptime!(Field::EnterpriseModel as u32), id)
+                            == comptime!(
+                                crate::domain::enterprise::EnterpriseModel::Distributor as u32
+                            )
+                    {
+                        enterprises::lifecycle(state, config, control, id);
                     }
                     let old = value(state, config, comptime!(Field::Demand as u32), id);
                     let signal = add_checked(
@@ -1974,7 +1981,15 @@ fn summarize(
                                     config,
                                     comptime!(Field::EnterpriseModel as u32),
                                     actor,
-                                ) == 1,
+                                ) == 1
+                                    && number(
+                                        state,
+                                        config,
+                                        comptime!(Field::EnterpriseStatus as u32),
+                                        actor,
+                                    ) != comptime!(
+                                        crate::domain::enterprise::EnterpriseState::Closed as u32
+                                    ),
                             ),
                             0,
                         ),

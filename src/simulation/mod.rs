@@ -1111,9 +1111,17 @@ impl Simulation {
                 match (
                     &management,
                     plan.transition,
-                    self.scenario.config().property.as_ref(),
+                    self.config.property_mode,
+                    self.config.rental_businesses,
                 ) {
-                    (Some(_), _, _) | (_, registry::RegistryTransition::Migration, Some(_)) => {
+                    (Some(_), _, _, _)
+                    | (
+                        _,
+                        registry::RegistryTransition::Migration,
+                        configuration::Feature::Enabled,
+                        _,
+                    )
+                    | (_, registry::RegistryTransition::Migration, _, 1..) => {
                         self.config = configuration::Configuration::new(
                             &self.device,
                             &self.scenario,
@@ -2165,8 +2173,9 @@ impl Simulation {
             equipment_condition: values[Field::EquipmentCondition as usize],
             safety_provision: values[Field::SafetyProvision as usize],
             business_scale: (self.metadata.actors.at(actor).kind > 0).then(|| {
-                crate::domain::enterprise::BusinessScale::from_workers(
-                    self.metadata.actors.at(actor).capacity,
+                crate::domain::enterprise::BusinessScale::for_business(
+                    &self.metadata.actors.at(actor),
+                    values[Field::OccupiedPlots as usize] * values[Field::OutputTicks as usize],
                 )
             }),
             enterprise_model: match values[Field::EnterpriseModel as usize] {

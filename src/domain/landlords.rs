@@ -1,5 +1,5 @@
 use super::{
-    Actor, Field, Good, Scenario, State, Technique,
+    Actor, Field, Good, Position, Scenario, State, Technique,
     enterprise::{EnterpriseState, Ownership, OwnershipShare},
     property::PropertyUse,
 };
@@ -10,6 +10,7 @@ use std::collections::BTreeMap;
 pub const HOUSEHOLDS_PER_BUILDING: usize = 32;
 pub const MAINTENANCE_DAYS: u32 = 30;
 pub const DEFAULT_HOUSING_UNITS: u32 = 8;
+pub const EXPANSION_OCCUPANCY_PERCENT: u32 = 95;
 
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
 pub struct RentalBusiness {
@@ -26,6 +27,11 @@ pub struct RentalRegistry {
     pub accounts: Vec<RentalAccount>,
 }
 
+struct RentalSite {
+    account: usize,
+    position: Position,
+}
+
 fn region(scenario: &Scenario, actor: &Actor) -> usize {
     scenario.config().property.as_ref().map_or(0, |property| {
         property
@@ -36,14 +42,17 @@ fn region(scenario: &Scenario, actor: &Actor) -> usize {
 
 impl RentalRegistry {
     pub fn new(scenario: &Scenario, state: &State) -> Self {
-        let mut buildings = BTreeMap::<usize, Vec<usize>>::new();
+        let mut buildings = BTreeMap::<usize, Vec<RentalSite>>::new();
         let mut accounts = Vec::<RentalAccount>::new();
         for (index, actor) in state.actors.iter().enumerate() {
             if actor.kind == Good::Housing as u32 {
                 buildings
                     .entry(region(scenario, &actor))
                     .or_default()
-                    .push(accounts.len());
+                    .push(RentalSite {
+                        account: accounts.len(),
+                        position: actor.position,
+                    });
                 accounts.push(RentalAccount {
                     landlord: index,
                     tenants: Vec::new(),
@@ -57,8 +66,14 @@ impl RentalRegistry {
                         0 => index,
                         _ => actor.owner as usize,
                     };
-                    let account = sites[household % sites.len()];
-                    accounts[account].tenants.push(index);
+                    let site = sites
+                        .iter()
+                        .cycle()
+                        .skip(household % sites.len())
+                        .take(sites.len())
+                        .min_by_key(|site| actor.position.distance(site.position))
+                        .expect("rental region has buildings");
+                    accounts[site.account].tenants.push(index);
                 }
                 _ => (),
             }
@@ -192,12 +207,19 @@ pub fn initialize(scenario: &Scenario, state: &mut State) -> Result<()> {
         let mut plots = 0;
         for tenant in account.tenants {
             state.set(Field::Landlord, tenant, account.landlord as u64 + 1);
-            if automatic && state.actors.at(tenant).kind == 0 {
-                plots += match scenario.config().property {
-                    Some(_) => state.get(Field::OccupiedPlots, tenant),
-                    None => 1,
-                };
-                state.set(Field::OccupiedPlots, tenant, 0);
+            match (
+                automatic,
+                state.actors.at(tenant).kind,
+                state.get(Field::LandPlots, tenant),
+            ) {
+                (true, 0, 0) => {
+                    plots += match scenario.config().property {
+                        Some(_) => state.get(Field::OccupiedPlots, tenant),
+                        None => 1,
+                    };
+                    state.set(Field::OccupiedPlots, tenant, 0);
+                }
+                _ => (),
             }
         }
         let site = account.landlord;
