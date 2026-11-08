@@ -264,7 +264,7 @@ pub(super) fn prepare(
             }
         }
         if comptime!(matches!(market, MarketFlag::Input(_))) {
-            let rail = railway::demand(state, config, id, good);
+            let rail = railway::demand(state, actors, config, id, good);
             wanted = maximum(wanted, rail);
             search = search || !equal(rail, zero());
         }
@@ -419,7 +419,7 @@ pub(super) fn candidate(
             MarketFlag::Labor => railway::animal_route(actors, config, id, firm),
             _ => railway::route(actors, config, id, firm),
         };
-        let quote = number(state, config, comptime!(Field::Price as u32), firm) + route.fee;
+        let quote = number(state, config, comptime!(Field::Price as u32), firm);
         let mut inspect = true;
         if comptime!(market != MarketFlag::Labor) {
             let cash = purchasing_power;

@@ -34,9 +34,9 @@ pub use population::{
 pub use resources::{ProductionSite, ResourceMap, ResourceRegion};
 
 pub const SCENARIO_VERSION: u32 = 2;
-const CHECKPOINT_VERSION: u32 = 15;
-pub const STATE_HASH_VERSION: &str = "bad-econ/state/CubekV2/v16";
-pub const USED_FIELDS: usize = Field::RailRevenue as usize + 1;
+const CHECKPOINT_VERSION: u32 = 16;
+pub const STATE_HASH_VERSION: &str = "bad-econ/state/CubekV2/v17";
+pub const USED_FIELDS: usize = Field::RailCapacity as usize + 1;
 pub const TRANSIT_FIELDS: usize = USED_FIELDS + Good::COUNT;
 pub const CONSUMPTION_FIELDS: usize = TRANSIT_FIELDS + Good::COUNT;
 pub const PRODUCTION_FIELDS: usize = CONSUMPTION_FIELDS + Good::COUNT;
@@ -169,6 +169,7 @@ pub enum Field {
     RailOperating,
     FreightEscrow,
     RailRevenue,
+    RailCapacity,
 }
 impl Field {
     pub fn inventory(good: Good) -> Self {
@@ -434,6 +435,7 @@ pub struct Scenario {
     config: ScenarioConfig,
     totals: InitialTotals,
     resources: resources::ResourceGeography,
+    rail_geography: railway::RailGeography,
     capacities: [u32; Good::COUNT],
     starting_stocks: [u64; Good::COUNT],
     retailers: std::collections::BTreeMap<u64, enterprise::Distributor>,
@@ -810,6 +812,7 @@ impl Scenario {
                     config,
                     totals,
                     resources,
+                    rail_geography: railway::RailGeography::default(),
                     capacities,
                     starting_stocks,
                     retailers,
@@ -861,6 +864,10 @@ impl Scenario {
                     scenario.config.railway.clone(),
                     &scenario.initial_actors,
                     scenario.config.map_size,
+                )?;
+                scenario.rail_geography = railway::RailGeography::new(
+                    &scenario.config.railway,
+                    scenario.config.property.as_ref(),
                 )?;
                 let ring = scenario.ring();
                 let side = scenario
@@ -1004,7 +1011,12 @@ impl Scenario {
             + 1
     }
     pub fn fields(&self) -> usize {
-        BASE_FIELDS + self.ring() * Good::COUNT
+        BASE_FIELDS
+            + self.ring() * Good::COUNT
+            + self.rail_geography.blocks(self.actors()) * railway::RailCapacityField::COUNT
+    }
+    pub fn rail_geography(&self) -> &railway::RailGeography {
+        &self.rail_geography
     }
     pub fn state_len(&self) -> usize {
         self.actors() * self.fields()
@@ -1966,6 +1978,8 @@ impl Inspection {
                     built_segments: state.get(Field::RailBuilt, index),
                     operating_segments: state.get(Field::RailOperating, index),
                     daily_receipts: state.get(Field::RailRevenue, index),
+                    daily_capacity: state.get(Field::RailCapacity, index),
+                    available_units: state.get(Field::Railway, index),
                 }
             }),
             business_account: (state.actors.at(index).kind > 0).then(|| {
@@ -2367,6 +2381,7 @@ impl<'a> AuditedState<'a> {
             false => Err(anyhow!("state shape does not match scenario")),
         }?;
         c.railway.audit(state)?;
+        scenario.rail_geography.audit(scenario, state)?;
         property::PropertySnapshot::from_state(scenario, state)?;
         let ownership = state
             .ownership
@@ -2574,7 +2589,7 @@ impl<'a> AuditedState<'a> {
             let planning = state.get(Field::Slots, i) <= state.get(Field::Plan, i)
                 && state.get(Field::Plan, i) <= u64::from(capacity);
             let production = match (actor.kind, capacity) {
-                (kind, _) if kind == Good::Housing as u32 => true,
+                (kind, _) if kind == Good::Housing as u32 || kind == Good::Railway as u32 => true,
                 (_, 0) => state.get(Field::Produced, i) == 0,
                 _ => true,
             };

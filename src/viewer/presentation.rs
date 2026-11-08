@@ -517,7 +517,7 @@ fn inspection_text(display: &Display) -> String {
                         format!("\nDaily receipts {} | cash outlays {}\nCash profit {:+} (before owner payouts)", account.revenue, account.outlays(), account.profit())
                     });
                     let railway = i.railway_business.as_ref().map_or_else(String::new, |business| {
-                        format!("\nRailway {:?} | {} segments built | {} operating\nDaily freight and access receipts {}", business.status(), business.built_segments, business.operating_segments, business.daily_receipts)
+                        format!("\nRailway {:?} | {} segments built | {} operating\nRail units available {} / {} daily capacity\nDaily freight and access receipts {}", business.status(), business.built_segments, business.operating_segments, business.available_units, business.daily_capacity, business.daily_receipts)
                     });
                     let rental = i.rental_business.as_ref().map_or_else(String::new, |business| {
                         format!("\nLandlord business | homes {} | rental income {}\nHousing project {:?} | {} work remaining", business.homes, business.income, i.project_status, i.construction_minutes_remaining)

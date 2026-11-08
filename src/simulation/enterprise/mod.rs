@@ -723,7 +723,9 @@ fn transfer_estate(
             Field::InstalledCapital as usize,
         ])
         .chain(crate::domain::TRANSIT_FIELDS..crate::domain::TRANSIT_FIELDS + Good::COUNT)
-        .chain(crate::domain::BASE_FIELDS..scenario.fields())
+        .chain(
+            crate::domain::BASE_FIELDS..crate::domain::BASE_FIELDS + scenario.ring() * Good::COUNT,
+        )
         .filter(|&field| {
             shared_region || ![Field::LandPlots as usize, Field::CropWork as usize].contains(&field)
         });
@@ -768,7 +770,10 @@ fn liquidate(
                 Field::CropWork as usize,
                 Field::InstalledCapital as usize,
             ])
-            .chain(crate::domain::BASE_FIELDS..scenario.fields());
+            .chain(
+                crate::domain::BASE_FIELDS
+                    ..crate::domain::BASE_FIELDS + scenario.ring() * Good::COUNT,
+            );
         for field in fields {
             let balance = state.values[field * count + firm];
             let amount =

@@ -43,6 +43,7 @@
   "railway": {
     "speed_multiplier": 10,
     "length_unit": 1000,
+    "units_per_level": 100,
     "construction": {
       "coal": 20,
       "steel": 40,

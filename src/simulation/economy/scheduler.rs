@@ -250,6 +250,7 @@ pub(in crate::simulation) fn apply(
 pub(in crate::simulation) enum Posting {
     All,
     CheckActor,
+    CheckAll,
     ApplyActor,
 }
 
@@ -269,7 +270,8 @@ pub(in crate::simulation) fn settle(
     for slot in 0..MAX_LEGS as u32 {
         let base = (id * MAX_LEGS as u32 + slot) * LEG_WORDS as u32;
         let cell = events[base as usize + LegLayout::COORDINATE];
-        let relevant = comptime!(posting == Posting::All) || cell % actors == actor;
+        let relevant = comptime!(posting == Posting::All || posting == Posting::CheckAll)
+            || cell % actors == actor;
         if cell != EMPTY && relevant {
             if cell < balances.len() as u32 / TICK_WORDS as u32 {
                 let balance = load(balances, cell);
@@ -310,12 +312,13 @@ pub(in crate::simulation) fn settle(
         status.set(comptime!(EventStatus::Faulted));
         faults.record(control);
     }
-    if comptime!(posting != Posting::CheckActor)
+    if comptime!(posting != Posting::CheckActor && posting != Posting::CheckAll)
         && status.contains(comptime!(EventStatus::Accepted))
     {
         for slot in 0..MAX_LEGS as u32 {
             let cell = events[((id * MAX_LEGS as u32 + slot) * LEG_WORDS as u32) as usize];
-            let relevant = comptime!(posting == Posting::All) || cell % actors == actor;
+            let relevant = comptime!(posting == Posting::All || posting == Posting::CheckAll)
+                || cell % actors == actor;
             if cell != EMPTY && relevant {
                 store(
                     balances,

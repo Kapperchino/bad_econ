@@ -459,8 +459,10 @@ fn local(
             },
             Phase::AccountsDecisions => {
                 if !k.is(comptime!(ActorKind::Household)) {
-                    let revenue = match u32::cast_from(k.bits() == comptime!(Good::Housing as u32))
-                    {
+                    let business = u32::cast_from(k.bits() == comptime!(Good::Housing as u32))
+                        + 2 * u32::cast_from(k.bits() == comptime!(Good::Railway as u32));
+                    let revenue = match business {
+                        2 => zero(),
                         1 => minus(
                             value(state, config, comptime!(Field::RentalIncome as u32), id),
                             value(
@@ -888,7 +890,7 @@ fn propose(
             }
         }
         if comptime!(matches!(market, MarketFlag::Input(_))) {
-            let rail = railway::demand(state, config, id, good);
+            let rail = railway::demand(state, actors, config, id, good);
             wanted = maximum(wanted, rail);
             search = search || !equal(rail, zero());
         }
@@ -995,8 +997,7 @@ fn propose(
                                     _ => railway::route(actors, config, id, firm),
                                 };
                                 let quote =
-                                    number(state, config, comptime!(Field::Price as u32), firm)
-                                        + route.fee;
+                                    number(state, config, comptime!(Field::Price as u32), firm);
                                 let mut inspect = true;
                                 if comptime!(market != MarketFlag::Labor) {
                                     let cash = purchasing_power;
@@ -1358,6 +1359,42 @@ fn construct(
     #[comptime] storage: EventStorage,
 ) {
     if id < parameters.count {
+        let actor = id + parameters.offset;
+        let other = proposals[actor as usize * ProposalLayout::WORDS + ProposalLayout::ACTOR];
+        let mut path = railway::animal_route(actors, config, actor, actor);
+        if comptime!(parameters.market.good().is_some()) && other < config.actors {
+            let planned = railway::route(actors, config, actor, other);
+            path.replace(&planned);
+        }
+        construct_route(
+            state,
+            actors,
+            config,
+            proposals,
+            bundles,
+            control,
+            parameters,
+            &path,
+            id,
+            comptime!(storage),
+        );
+    }
+}
+
+#[cube]
+fn construct_route(
+    state: &mut [u32],
+    actors: &[u32],
+    config: &EconomyConfig,
+    proposals: &mut [u32],
+    bundles: &mut [u32],
+    control: &[Atomic<u32>],
+    parameters: &EconomyParameters,
+    route: &railway::FreightRoute,
+    id: u32,
+    #[comptime] storage: EventStorage,
+) {
+    if id < parameters.count {
         let event_id = match comptime!(storage) {
             EventStorage::Buffer => id,
             EventStorage::Local => 0,
@@ -1643,27 +1680,16 @@ fn construct(
                         quantity,
                         number(state, config, comptime!(Field::Price as u32), other),
                     );
-                    let route = railway::route(actors, config, actor, other);
                     let freight = multiply(control, quantity, route.fee);
                     let slot = BASE_FIELDS as u32
                         + (good - 1) * config.ring
                         + (parameters.day + route.days) % config.ring;
-                    if comptime!(config.railway.enabled == Feature::Enabled) {
-                        event.transfer(
-                            config,
-                            bundles,
-                            comptime!(Field::FreightEscrow as u32),
-                            actor,
-                            zero,
-                            freight,
-                        );
-                    }
                     event.transfer(
                         config,
                         bundles,
                         comptime!(Field::Cash as u32),
                         actor,
-                        add_checked(control, cost, freight),
+                        cost,
                         zero,
                     );
                     event.transfer(
@@ -1671,7 +1697,7 @@ fn construct(
                         bundles,
                         comptime!(Field::Cash as u32),
                         other,
-                        zero,
+                        freight,
                         cost,
                     );
                     let retained =
@@ -2260,6 +2286,7 @@ pub enum EconomyStage {
     GroupSort,
     GroupMerge,
     GroupExecute,
+    RailExecute,
     GroupRemainder,
     GroupPrepare,
     GroupFinalize,
@@ -2403,6 +2430,9 @@ pub fn economy(
             }
             EconomyStage::GroupSort => group_sort(bundles, control, parameters, id),
             EconomyStage::GroupMerge => group_merge(bundles, control, parameters, id),
+            EconomyStage::RailExecute => railway::dispatch(
+                state, actors, config, proposals, bundles, control, parameters, id,
+            ),
             EconomyStage::GroupExecute => group_execute(
                 state, actors, config, proposals, bundles, control, parameters, id,
             ),

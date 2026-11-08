@@ -520,7 +520,7 @@ impl Simulation {
                 self.local(phase)
             }
             Phase::ProvisionPurchase => {
-                self.railways(economy::railway::RailStage::Routes, 0);
+                self.railways(economy::railway::RailStage::Routes);
                 self.scenario
                     .goods_markets()
                     .into_iter()
@@ -559,6 +559,8 @@ impl Simulation {
                 }
             }
             Phase::Audit => {
+                self.railways(economy::railway::RailStage::Close);
+                self.fault_check()?;
                 if let Some(research) = &self.research {
                     research.phase(&self.device, &self.state, phase, self.day)?;
                 }
@@ -1229,7 +1231,7 @@ impl Simulation {
             );
         }
         if phase == Phase::Opening {
-            self.railways(economy::railway::RailStage::Infrastructure, 0);
+            self.railways(economy::railway::RailStage::Infrastructure);
         }
         economy::property::launch(
             &self.device,
@@ -1249,21 +1251,25 @@ impl Simulation {
         );
         self.fault_check()
     }
-    fn railways(&self, stage: economy::railway::RailStage, sort_source: u32) {
+    fn railways(&self, stage: economy::railway::RailStage) {
         economy::railway::launch(
             &self.device,
             &self.state,
             &self.actors,
             &self.config,
-            &self.proposals,
-            &self.scratch,
             &self.control,
             stage,
-            sort_source,
         );
     }
     fn market_result(&mut self, evidence: &mut PhaseEvidence) -> Result<()> {
-        match self.market_execution {
+        let execution = match (
+            self.next_phase,
+            self.scenario.config().railway.companies.is_empty(),
+        ) {
+            (Phase::ProvisionPurchase, false) => MarketExecution::Grouped,
+            _ => self.market_execution,
+        };
+        match execution {
             MarketExecution::Grouped => {
                 let words = self.device.read_range(&self.control, 0, CONTROL_WORDS)?;
                 self.readback_bytes += (CONTROL_WORDS * WORD_BYTES) as u64;
@@ -1284,7 +1290,13 @@ impl Simulation {
         trace: Trace,
         evidence: &mut PhaseEvidence,
     ) -> Result<()> {
+        let regional_transport = !self.scenario.config().railway.companies.is_empty()
+            && matches!(
+                market,
+                Market::Input(_) | Market::Consumer(_) | Market::Household
+            );
         match self.market_execution {
+            _ if regional_transport => self.device_market(market, phase, trace, evidence),
             MarketExecution::Grouped => self.device_market(market, phase, trace, evidence),
             #[cfg(test)]
             _ => self.original_market(market, phase, trace, evidence),
@@ -1297,8 +1309,14 @@ impl Simulation {
         trace: Trace,
         evidence: &mut PhaseEvidence,
     ) -> Result<()> {
+        let regional_transport = !self.scenario.config().railway.companies.is_empty()
+            && matches!(
+                market,
+                Market::Input(_) | Market::Consumer(_) | Market::Household
+            );
         let count = self.metadata.actors.len();
         let mut parameters = self.parameters(phase, market, 0, count)?;
+        parameters.discovery = Discovery::Indexed;
         let launch = |stage, invocations, parameters: &EconomyParameters| {
             let dispatch = match stage {
                 EconomyStage::GroupExecute => {
@@ -1342,7 +1360,10 @@ impl Simulation {
             }
         };
         launch(EconomyStage::MarketStart, 1, &parameters);
-        if let Market::Labor | Market::Input(_) | Market::Consumer(_) | Market::Household = market {
+        if matches!(
+            market,
+            Market::Labor | Market::Input(_) | Market::Consumer(_) | Market::Household
+        ) {
             let side = self
                 .scenario
                 .config()
@@ -1450,7 +1471,12 @@ impl Simulation {
             }
         }
         launch(EconomyStage::MarketBoundary, 1, &parameters);
-        if let Market::Labor | Market::Input(_) | Market::Consumer(_) | Market::Household = market {
+        if !regional_transport
+            && matches!(
+                market,
+                Market::Labor | Market::Input(_) | Market::Consumer(_) | Market::Household
+            )
+        {
             launch(EconomyStage::GroupPrepare, count, &parameters);
         }
         launch(EconomyStage::MarketBoundary, 1, &parameters);
@@ -1464,6 +1490,7 @@ impl Simulation {
         launch(EconomyStage::GroupRanges, count, &parameters);
         launch(EconomyStage::MarketBoundary, 1, &parameters);
         match market {
+            _ if regional_transport => launch(EconomyStage::RailExecute, 1, &parameters),
             Market::Labor if self.scenario.config().bargaining.is_none() => {
                 economy::batch::labor::LaborSettlement::launch(
                     &self.device,
@@ -1495,20 +1522,19 @@ impl Simulation {
             }
             _ => launch(EconomyStage::GroupExecute, count, &parameters),
         }
-        if let Market::Household = market {
+        if !regional_transport && market == Market::Household {
             launch(EconomyStage::GroupRemainder, count, &parameters);
         }
         launch(EconomyStage::MarketBoundary, 1, &parameters);
-        if let Market::Labor | Market::Input(_) | Market::Consumer(_) | Market::Household = market {
+        if !regional_transport
+            && matches!(
+                market,
+                Market::Labor | Market::Input(_) | Market::Consumer(_) | Market::Household
+            )
+        {
             launch(EconomyStage::GroupFinalize, count, &parameters);
         }
         launch(EconomyStage::MarketBoundary, 1, &parameters);
-        if matches!(
-            market,
-            Market::Input(_) | Market::Consumer(_) | Market::Household
-        ) {
-            self.railways(economy::railway::RailStage::Fees, parameters.sort_source);
-        }
         parameters.status_start = 4 * count as u32;
         if let (Market::Input(_) | Market::Consumer(_) | Market::Household, true) =
             (market, self.matching_round + 1 == MATCHING_ROUNDS)
@@ -1680,12 +1706,6 @@ impl Simulation {
         FaultFlags::new(counters.faults)?.into_result()?;
         evidence.frontier_depth = evidence.frontier_depth.max(counters.progress as usize);
         evidence.events += counters.completed as usize;
-        if matches!(
-            market,
-            Market::Input(_) | Market::Consumer(_) | Market::Household
-        ) {
-            self.railways(economy::railway::RailStage::Fees, parameters.sort_source);
-        }
         parameters.status_start = 4 * count as u32;
         if let (Market::Input(_) | Market::Consumer(_) | Market::Household, true) =
             (market, self.matching_round + 1 == MATCHING_ROUNDS)
@@ -1787,13 +1807,6 @@ impl Simulation {
                 self.readback_bytes += result.readback_bytes;
                 Ok(())
             })?;
-        if matches!(
-            market,
-            Market::Input(_) | Market::Consumer(_) | Market::Household
-        ) {
-            self.railways(economy::railway::RailStage::ReferenceFees, 0);
-            self.fault_check()?;
-        }
         evidence.decisions.extend(decisions.into_iter().flatten());
         Ok(())
     }
@@ -2109,6 +2122,8 @@ impl Simulation {
                     built_segments: values[Field::RailBuilt as usize],
                     operating_segments: values[Field::RailOperating as usize],
                     daily_receipts: values[Field::RailRevenue as usize],
+                    daily_capacity: values[Field::RailCapacity as usize],
+                    available_units: values[Field::Railway as usize],
                 },
             ),
             business_account: (self.metadata.actors.at(actor).kind > 0).then(|| {

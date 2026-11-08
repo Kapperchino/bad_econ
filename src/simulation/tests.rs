@@ -308,7 +308,12 @@ fn gpu_parent_estates_preserve_inheritance_without_full_state_readback() -> Resu
     config.firms = 6 * Good::COUNT as u32;
     let scenario = Scenario::new(config)?;
     let mut initial = scenario.initial()?;
-    assert!(crate::domain::landlords::RentalRegistry::new(&scenario, &initial).accounts.len() > 1);
+    assert!(
+        crate::domain::landlords::RentalRegistry::new(&scenario, &initial)
+            .accounts
+            .len()
+            > 1
+    );
     initial.day = 1700;
     for (child, parent) in [(1, 0), (2, 0), (3, 0), (32, 31), (41, 40)] {
         initial.set(

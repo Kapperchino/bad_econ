@@ -197,7 +197,7 @@ impl Configuration {
             map_size: config.map_size,
             commute_speed: config.commute_speed,
             shipment_speed: config.shipment_speed,
-            railway: super::economy::railway::Network::new(device, &config.railway, state),
+            railway: super::economy::railway::Network::new(device, scenario, state),
             household_need: config.household_need,
             economy: config.economy,
             home: HomeProduction::new(config.household_production),
