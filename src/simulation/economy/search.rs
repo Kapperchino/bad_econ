@@ -157,6 +157,7 @@ pub(super) fn prepare(
                     search = true;
                 }
                 if !k.is(comptime!(ActorKind::Household))
+                    && k.bits() != comptime!(Good::Railway as u32)
                     && good == comptime!(Good::Tools as u32)
                     && comptime!(config.home_mode == Feature::Enabled)
                 {
@@ -261,6 +262,11 @@ pub(super) fn prepare(
                     }
                 }
             }
+        }
+        if comptime!(matches!(market, MarketFlag::Input(_))) {
+            let rail = railway::demand(state, config, id, good);
+            wanted = maximum(wanted, rail);
+            search = search || !equal(rail, zero());
         }
         if good > 0u32 {
             wanted = positive(
@@ -409,7 +415,11 @@ pub(super) fn candidate(
     let dist = distance(actors, id, firm);
     if dist <= config.search_radius {
         let mut wage = number(state, config, comptime!(Field::Wage as u32), firm);
-        let quote = number(state, config, comptime!(Field::Price as u32), firm);
+        let route = match comptime!(market) {
+            MarketFlag::Labor => railway::animal_route(actors, config, id, firm),
+            _ => railway::route(actors, config, id, firm),
+        };
+        let quote = number(state, config, comptime!(Field::Price as u32), firm) + route.fee;
         let mut inspect = true;
         if comptime!(market != MarketFlag::Labor) {
             let cash = purchasing_power;
@@ -422,10 +432,7 @@ pub(super) fn candidate(
         if inspect {
             eligible = true;
 
-            score = ticks(
-                quote + max(ceildiv(dist, config.shipment_speed), 1u32) * config.delivery_penalty,
-                0u32,
-            );
+            score = ticks(quote + route.days * config.delivery_penalty, 0u32);
             amount = ticks(1u32, 0u32);
             if comptime!(market == MarketFlag::Labor) {
                 if comptime!(config.bargaining.enabled == Feature::Enabled) {

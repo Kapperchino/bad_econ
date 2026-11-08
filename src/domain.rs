@@ -20,6 +20,7 @@ mod payroll;
 pub mod property;
 mod rent;
 pub use rent::{FIRM_RENT_GRACE_DAYS, HousingState, RentPolicy};
+pub mod railway;
 pub mod research;
 pub use households::{HouseholdLiquidity, HouseholdPolicy};
 pub use industry::{Economy, ProductionMethod, Technology};
@@ -33,9 +34,9 @@ pub use population::{
 pub use resources::{ProductionSite, ResourceMap, ResourceRegion};
 
 pub const SCENARIO_VERSION: u32 = 2;
-const CHECKPOINT_VERSION: u32 = 14;
-pub const STATE_HASH_VERSION: &str = "bad-econ/state/CubekV2/v15";
-pub const USED_FIELDS: usize = Field::BusinessRevenue as usize + 1;
+const CHECKPOINT_VERSION: u32 = 15;
+pub const STATE_HASH_VERSION: &str = "bad-econ/state/CubekV2/v16";
+pub const USED_FIELDS: usize = Field::RailRevenue as usize + 1;
 pub const TRANSIT_FIELDS: usize = USED_FIELDS + Good::COUNT;
 pub const CONSUMPTION_FIELDS: usize = TRANSIT_FIELDS + Good::COUNT;
 pub const PRODUCTION_FIELDS: usize = CONSUMPTION_FIELDS + Good::COUNT;
@@ -63,6 +64,8 @@ pub enum Field {
     Glass,
     Construction,
     Housing,
+    Locomotives,
+    Railway,
     Escrow,
     Slots,
     Wage,
@@ -162,6 +165,10 @@ pub enum Field {
     BusinessClosingCash,
     BusinessOpeningRent,
     BusinessRevenue,
+    RailBuilt,
+    RailOperating,
+    FreightEscrow,
+    RailRevenue,
 }
 impl Field {
     pub fn inventory(good: Good) -> Self {
@@ -184,6 +191,8 @@ impl Field {
             Good::Glass => Self::Glass,
             Good::Construction => Self::Construction,
             Good::Housing => Self::Housing,
+            Good::Locomotives => Self::Locomotives,
+            Good::Railway => Self::Railway,
         }
     }
 }
@@ -215,9 +224,11 @@ pub enum Good {
     Glass = 16,
     Construction = 17,
     Housing = 18,
+    Locomotives = 19,
+    Railway = 20,
 }
 impl Good {
-    pub const COUNT: usize = 18;
+    pub const COUNT: usize = 20;
     pub const ALL: [Self; Self::COUNT] = [
         Self::Grain,
         Self::Flour,
@@ -237,6 +248,8 @@ impl Good {
         Self::Glass,
         Self::Construction,
         Self::Housing,
+        Self::Locomotives,
+        Self::Railway,
     ];
     pub fn kind(self) -> GoodKind {
         match self {
@@ -257,7 +270,9 @@ impl Good {
             | Self::Furniture
             | Self::Glass
             | Self::Construction
-            | Self::Housing => GoodKind::Manufactured,
+            | Self::Housing
+            | Self::Locomotives
+            | Self::Railway => GoodKind::Manufactured,
         }
     }
     pub fn inputs(self) -> [Option<Self>; 2] {
@@ -272,6 +287,7 @@ impl Good {
             Self::Furniture | Self::Construction => [Some(Self::Wood), Some(Self::Tools)],
             Self::Glass => [Some(Self::Coal), None],
             Self::Housing => [Some(Self::Construction), None],
+            Self::Locomotives => [Some(Self::Steel), Some(Self::Tools)],
             _ => [None, None],
         }
     }
@@ -286,7 +302,8 @@ impl Good {
     }
     pub fn initial_price(self) -> u32 {
         [
-            150, 300, 450, 160, 100, 350, 100, 220, 260, 600, 100, 320, 500, 100, 120, 250, 120, 10,
+            150, 300, 450, 160, 100, 350, 100, 220, 260, 600, 100, 320, 500, 100, 120, 250, 120,
+            10, 800, 1,
         ][self as usize - 1]
     }
     pub fn food<T: Default + Copy>(values: [T; 3]) -> [T; Self::COUNT] {
@@ -314,6 +331,8 @@ impl Good {
             16 => Ok(Self::Glass),
             17 => Ok(Self::Construction),
             18 => Ok(Self::Housing),
+            19 => Ok(Self::Locomotives),
+            20 => Ok(Self::Railway),
 
             _ => Err(anyhow!("invalid good")),
         }
@@ -343,6 +362,8 @@ pub struct ScenarioConfig {
     pub search_radius: u32,
     pub commute_speed: u32,
     pub shipment_speed: u32,
+    #[serde(default)]
+    pub railway: railway::RailwayConfig,
     pub household_cash: u64,
     #[serde(default, skip_serializing_if = "HouseholdLiquidity::is_uniform")]
     pub household_liquidity: HouseholdLiquidity,
@@ -428,7 +449,10 @@ impl Scenario {
         let transport_scale = config.map_size / 1000;
         config.search_radius *= transport_scale;
         config.commute_speed *= transport_scale;
-        config.shipment_speed *= transport_scale;
+        config.shipment_speed = match experiment {
+            Experiment::Transport => 50,
+            _ => 100,
+        } * transport_scale;
         config.demography.initial_household_members = 3;
         config.household_production = enterprise::HouseholdProduction::industrial();
         config.firms = config.firms.max(3 * Good::COUNT as u32);
@@ -466,11 +490,13 @@ impl Scenario {
             .collect();
         let labs = (0..config.firms.min(households))
             .filter(|&firm| {
-                generated_good(&config, firm as usize) != Good::Housing
-                    && !config
-                        .distributors
-                        .iter()
-                        .any(|store| store.firm == u64::from(households + firm + 1))
+                !matches!(
+                    generated_good(&config, firm as usize),
+                    Good::Housing | Good::Railway
+                ) && !config
+                    .distributors
+                    .iter()
+                    .any(|store| store.firm == u64::from(households + firm + 1))
             })
             .map(|firm| research::ResearchLab {
                 owner: u64::from(households + firm + 1),
@@ -507,6 +533,10 @@ impl Scenario {
             labs,
             ..Default::default()
         });
+        let scenario = Self::new(config)?;
+        let mut config = scenario.config.clone();
+        config.railway =
+            railway::RailwayConfig::generated(&scenario.initial_actors, config.map_size);
         Self::new(config)
     }
 
@@ -539,6 +569,12 @@ impl Scenario {
                 .map(|store| store.good as u32),
         );
         inputs.insert(Good::Bread as u32);
+        inputs.extend(
+            [Good::Coal, Good::Steel, Good::Locomotives]
+                .into_iter()
+                .filter(|_| !self.config.railway.companies.is_empty())
+                .map(|good| good as u32),
+        );
         inputs.insert(Good::Tools as u32);
         inputs.insert(Good::Wood as u32);
         if self.config.property.is_some() || self.config.rent.is_some() {
@@ -620,7 +656,7 @@ impl Scenario {
             (1..=100_000).contains(&config.map_size),
             (1..=config.map_size).contains(&config.search_radius),
             config.commute_speed > 0,
-            config.shipment_speed > 0,
+            (1..=1_000_000).contains(&config.shipment_speed),
             config.household_need > 0,
             config.household_need <= 100,
             (1..=10_000).contains(&config.capacity),
@@ -672,7 +708,7 @@ impl Scenario {
                 });
                 let capacities =
                     std::array::from_fn(|good| match (Good::ALL[good], config.economy) {
-                        (Good::Housing, _) => 0,
+                        (Good::Housing | Good::Railway, _) => 0,
                         (_, Economy::Agrarian) => config.capacity,
                         (_, Economy::Industrial) => {
                             (daily[good].div_ceil(config.packet_output.into()) as u32)
@@ -680,22 +716,24 @@ impl Scenario {
                                 .min(config.capacity)
                         }
                     });
-                let starting_stocks = std::array::from_fn(|good| match config.economy {
-                    Economy::Agrarian => {
-                        u64::from(config.capacity)
-                            * u64::from(config.packet_output)
-                            * u64::from(config.buffer_days)
-                    }
-                    Economy::Industrial => {
-                        daily[good]
-                            * u64::from(
-                                config
-                                    .producer_buffer_days
-                                    .unwrap_or(config.buffer_days)
-                                    .min(config.coverage.saturating_sub(1)),
-                            )
-                    }
-                });
+                let starting_stocks =
+                    std::array::from_fn(|good| match (Good::ALL[good], config.economy) {
+                        (Good::Railway, _) => 0,
+                        (_, Economy::Agrarian) => {
+                            u64::from(config.capacity)
+                                * u64::from(config.packet_output)
+                                * u64::from(config.buffer_days)
+                        }
+                        (_, Economy::Industrial) => {
+                            daily[good]
+                                * u64::from(
+                                    config
+                                        .producer_buffer_days
+                                        .unwrap_or(config.buffer_days)
+                                        .min(config.coverage.saturating_sub(1)),
+                                )
+                        }
+                    });
                 let totals = match &config.population {
                     Some(population) => population.totals()?,
                     None => {
@@ -819,6 +857,11 @@ impl Scenario {
                         .unwrap_or(0);
                     scenario.totals.cash = add(scenario.totals.cash, financial_cash)?;
                 }
+                scenario.config.railway = railway::RailwayConfig::new(
+                    scenario.config.railway.clone(),
+                    &scenario.initial_actors,
+                    scenario.config.map_size,
+                )?;
                 let ring = scenario.ring();
                 let side = scenario
                     .config
@@ -849,6 +892,7 @@ impl Scenario {
             search_radius: 1000,
             commute_speed: 50,
             shipment_speed: 1000,
+            railway: railway::RailwayConfig::default(),
             household_cash: 5000,
             household_liquidity: HouseholdLiquidity::Uniform,
             entrepreneurship: enterprise::EntrepreneurshipPolicy::default(),
@@ -1025,6 +1069,7 @@ impl Scenario {
             index.checked_sub(self.config.households as usize),
         ) {
             (Some(population), Some(firm)) => population.firms[firm].technique,
+            _ if self.actor(index).kind == Good::Railway as u32 => Technique::railway(),
             _ if self.actor(index).kind == Good::Housing as u32 => {
                 Technique::housing(landlords::DEFAULT_HOUSING_UNITS).expect("housing recipe")
             }
@@ -1122,6 +1167,7 @@ impl Scenario {
             company.initialize(&mut state)?;
         }
         company::CompanyRegistry::new(&state)?;
+        self.config.railway.audit(&state)?;
         for actor in self.config.households as usize..self.actors() {
             state.set(
                 Field::EnterpriseStatus,
@@ -1859,6 +1905,7 @@ impl InspectionRequest {
 }
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
 pub struct Inspection {
+    pub railway_business: Option<railway::RailwayBusiness>,
     pub business_account: Option<diagnostics::BusinessAccount>,
     pub production_method: Option<ProductionMethod>,
     pub labor_minutes: u64,
@@ -1914,6 +1961,13 @@ impl Inspection {
             .context("unknown actor identity")?;
         Ok(Self {
             actor: state.actors.at(index),
+            railway_business: (state.actors.at(index).kind == Good::Railway as u32).then(|| {
+                railway::RailwayBusiness {
+                    built_segments: state.get(Field::RailBuilt, index),
+                    operating_segments: state.get(Field::RailOperating, index),
+                    daily_receipts: state.get(Field::RailRevenue, index),
+                }
+            }),
             business_account: (state.actors.at(index).kind > 0).then(|| {
                 diagnostics::BusinessAccount {
                     opening_cash: state.get(Field::BusinessOpeningCash, index),
@@ -1970,8 +2024,12 @@ impl Inspection {
             living_members: state.get(Field::LivingMembers, index),
             equipment_condition: state.get(Field::EquipmentCondition, index),
             safety_provision: state.get(Field::SafetyProvision, index),
-            business_scale: (state.actors.at(index).kind > 0)
-                .then(|| enterprise::BusinessScale::from_workers(state.actors.at(index).capacity)),
+            business_scale: (state.actors.at(index).kind > 0).then(|| {
+                enterprise::BusinessScale::for_business(
+                    &state.actors.at(index),
+                    state.get(Field::OccupiedPlots, index) * state.get(Field::OutputTicks, index),
+                )
+            }),
             enterprise_model: match state.get(Field::EnterpriseModel, index) {
                 1 => enterprise::EnterpriseModel::Distributor,
                 _ => enterprise::EnterpriseModel::Producer,
@@ -2210,7 +2268,9 @@ impl ObservationSnapshot {
                         );
                         snapshot.distributors += u64::from(
                             state.get(Field::EnterpriseModel, i)
-                                == enterprise::EnterpriseModel::Distributor as u64,
+                                == enterprise::EnterpriseModel::Distributor as u64
+                                && state.get(Field::EnterpriseStatus, i)
+                                    != enterprise::EnterpriseState::Closed as u64,
                         );
                         let j = kind as usize - 1;
                         snapshot.markets[j]
@@ -2306,6 +2366,7 @@ impl<'a> AuditedState<'a> {
             true => Ok(()),
             false => Err(anyhow!("state shape does not match scenario")),
         }?;
+        c.railway.audit(state)?;
         property::PropertySnapshot::from_state(scenario, state)?;
         let ownership = state
             .ownership
@@ -2393,9 +2454,14 @@ impl<'a> AuditedState<'a> {
                 && state.get(Field::Employed, i) <= 1
                 && state.get(Field::Employer, i) <= state.actors.len() as u64
                 && job;
-            let closed = [Field::Escrow, Field::Due, Field::Pipeline]
-                .into_iter()
-                .all(|field| state.get(field, i) == 0);
+            let closed = [
+                Field::Escrow,
+                Field::Due,
+                Field::Pipeline,
+                Field::FreightEscrow,
+            ]
+            .into_iter()
+            .all(|field| state.get(field, i) == 0);
             let actor = &state.actors.at(i);
             let recipe = match (actor.kind, state.get(Field::EnterpriseModel, i)) {
                 (_, 1) => {
@@ -2407,6 +2473,14 @@ impl<'a> AuditedState<'a> {
                             state.get(Field::OutputTicks, i) as u32,
                         )
                         .is_ok()
+                }
+                (kind, _) if kind == Good::Railway as u32 => {
+                    actor.capacity == 0
+                        && state.get(Field::LaborMinutes, i) == 0
+                        && state.get(Field::FirstInput, i) == 0
+                        && state.get(Field::SecondInput, i) == 0
+                        && state.get(Field::InputTicks, i) == 0
+                        && state.get(Field::OutputTicks, i) == 1
                 }
                 (kind, _) if kind == Good::Housing as u32 => {
                     actor.capacity == 0
@@ -2694,6 +2768,7 @@ impl TryFrom<ScenarioDocument> for ScenarioConfig {
             search_radius: current.search_radius,
             commute_speed: current.commute_speed,
             shipment_speed: current.shipment_speed,
+            railway: current.railway,
             household_cash: current.household_cash,
             household_liquidity: current.household_liquidity,
             entrepreneurship: current.entrepreneurship,
@@ -2752,6 +2827,8 @@ struct CurrentScenario {
     pub search_radius: u32,
     pub commute_speed: u32,
     pub shipment_speed: u32,
+    #[serde(default)]
+    pub railway: railway::RailwayConfig,
     pub household_cash: u64,
     #[serde(default)]
     pub household_liquidity: HouseholdLiquidity,

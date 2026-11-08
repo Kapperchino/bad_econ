@@ -454,7 +454,15 @@ fn summarize_metrics(input: &mut SummaryInput) {
                                 config,
                                 comptime!(Field::EnterpriseModel as u32),
                                 actor,
-                            ) == 1,
+                            ) == 1
+                                && number(
+                                    state,
+                                    config,
+                                    comptime!(Field::EnterpriseStatus as u32),
+                                    actor,
+                                ) != comptime!(
+                                    crate::domain::enterprise::EnterpriseState::Closed as u32
+                                ),
                         )
                     }
                     6 => {

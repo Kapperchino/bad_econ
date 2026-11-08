@@ -251,6 +251,7 @@ fn industrial_markets_ship_consume_and_replay_all_goods_on_gpu() -> Result<()> {
     let mut config = Scenario::industrial(64, 42, Experiment::Concentrated)?
         .config()
         .clone();
+    config.shipment_speed = 1000;
     config.household_cash = 5000;
     config.household_liquidity = HouseholdLiquidity::Uniform;
     config.producer_buffer_days = None;

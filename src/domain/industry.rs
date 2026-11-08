@@ -135,7 +135,7 @@ impl ProductionMethod {
             Good::Furniture => vec![Self::FurnitureWorkshops],
             Good::Glass => vec![Self::Glassworks],
             Good::Construction => vec![Self::MechanizedConstruction],
-            Good::Housing => vec![],
+            Good::Housing | Good::Locomotives | Good::Railway => vec![],
         }
     }
 
@@ -165,7 +165,7 @@ where
 {
     let values = Vec::<T>::deserialize(deserializer)?;
     match values.len() {
-        3 | 16 | 17 | Good::COUNT => {
+        3 | 16 | 17 | 18 | 19 | Good::COUNT => {
             let mut result = [T::default(); Good::COUNT];
             result[..values.len()].copy_from_slice(&values);
             Ok(result)

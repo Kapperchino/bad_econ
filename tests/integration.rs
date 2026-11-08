@@ -18,6 +18,7 @@ mod payroll;
 mod policies;
 mod population;
 mod property;
+mod railway;
 mod rent;
 mod research;
 mod resources;

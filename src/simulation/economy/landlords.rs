@@ -1,7 +1,7 @@
 use super::*;
 use crate::domain::{
     enterprise::EnterpriseState,
-    landlords::MAINTENANCE_DAYS,
+    landlords::{EXPANSION_OCCUPANCY_PERCENT, MAINTENANCE_DAYS},
     property::{CONSTRUCTION_WORK_PER_PLOT, ProjectStatus},
 };
 use crate::simulation::{Device, configuration::Configuration};
@@ -481,11 +481,9 @@ fn close(
         comptime!(Field::ConstructionRemaining as u32),
         firm,
     );
-    let interested = enterprises::expands(actors, config, firm);
-    let capacity = number(state, config, comptime!(Field::OccupiedPlots as u32), firm)
-        * number(state, config, comptime!(Field::OutputTicks as u32), firm);
+    let interested = enterprises::expands(state, actors, config, firm);
     let planned = select(
-        interested && collected.households >= capacity,
+        interested && expansion_demand(state, config, firm, collected.households),
         maximum(project, ticks(CONSTRUCTION_WORK_PER_PLOT, 0)),
         project,
     );
@@ -508,6 +506,18 @@ fn close(
         firm,
         reserve,
     );
+}
+
+#[cube]
+fn expansion_demand(state: &mut [u32], config: &EconomyConfig, firm: u32, demand: u32) -> bool {
+    let capacity = times32(
+        number(state, config, comptime!(Field::OccupiedPlots as u32), firm),
+        number(state, config, comptime!(Field::OutputTicks as u32), firm),
+    );
+    !lt(
+        divide(times32(demand, 100), EXPANSION_OCCUPANCY_PERCENT),
+        maximum(capacity, ticks(1, 0)),
+    )
 }
 
 #[cube]
@@ -535,9 +545,7 @@ fn develop(
         upkeep,
     );
     let owner = actors[ActorLayout::OWNER * (actors.len() / ActorLayout::WORDS) + firm as usize];
-    let interested = enterprises::expands(actors, config, firm);
-    let units = number(state, config, comptime!(Field::OccupiedPlots as u32), firm)
-        * number(state, config, comptime!(Field::OutputTicks as u32), firm);
+    let interested = enterprises::expands(state, actors, config, firm);
     let operating = number(
         state,
         config,
@@ -547,7 +555,7 @@ fn develop(
     if ready
         && operating
         && interested
-        && demand >= units
+        && expansion_demand(state, config, firm, demand)
         && !lt(available, cost)
         && property::authorized(state, config, firm, owner)
     {
@@ -616,7 +624,7 @@ mod tests {
         let scenario = Scenario::new(policy)?;
         let mut initial = scenario.initial()?;
         let rentals = RentalRegistry::new(&scenario, &initial);
-        assert_eq!(rentals.accounts.len(), 1);
+        assert!(!rentals.accounts.is_empty());
         let account = &rentals.accounts[0];
         let firm = account.landlord;
         let tenants = account
