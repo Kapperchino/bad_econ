@@ -85,6 +85,10 @@ enum Source {
     Closure,
     Square,
     Homeless,
+    Labor,
+    ActiveFirm,
+    BusinessType,
+    BusinessState,
 }
 
 pub(in crate::simulation) struct AuditBuffers {
@@ -105,6 +109,39 @@ impl AuditBuffers {
                     source: Source::Field as u32,
                 };
                 match metric {
+                    S::WORKFORCE | S::SUBSISTENCE | S::INACTIVE => {
+                        definition.source = Source::Labor as u32;
+                        definition.field = metric - S::WORKFORCE;
+                        definition.kind = 0;
+                    }
+                    S::HOUSEHOLD_CASH => {
+                        definition.field = Field::Cash as u32;
+                        definition.kind = 0;
+                    }
+                    metric if (S::BUSINESS_TYPES..S::BUSINESS_STATES).contains(&metric) => {
+                        definition.source = Source::BusinessType as u32;
+                        definition.field = metric - S::BUSINESS_TYPES;
+                        definition.kind = Good::COUNT as u32 + 1;
+                    }
+                    metric if (S::BUSINESS_STATES..S::FIRM_CASH).contains(&metric) => {
+                        definition.source = Source::BusinessState as u32;
+                        definition.field = metric - S::BUSINESS_STATES;
+                        definition.kind = Good::COUNT as u32 + 1;
+                    }
+                    metric if metric >= S::FIRM_CASH => {
+                        let group = (metric - S::FIRM_CASH) / Good::COUNT as u32;
+                        definition.kind = (metric - S::FIRM_CASH) % Good::COUNT as u32 + 1;
+                        definition.field = match group {
+                            0 => Field::Cash,
+                            1 => Field::BusinessOpeningCash,
+                            2 => Field::BusinessClosingCash,
+                            _ => Field::BusinessRevenue,
+                        } as u32;
+                    }
+                    metric if (S::ACTIVE_BY_GOOD..S::BUSINESS_TYPES).contains(&metric) => {
+                        definition.kind = metric - S::ACTIVE_BY_GOOD + 1;
+                        definition.source = Source::ActiveFirm as u32;
+                    }
                     S::CASH => definition.source = Source::Cash as u32,
                     S::PAYROLL_RESERVES => definition.field = Field::PayrollReserve as u32,
                     S::INCOME_TAX => definition.field = Field::TaxTreasury as u32,
@@ -433,6 +470,59 @@ fn summarize_metrics(input: &mut SummaryInput) {
                     7 => {
                         amount &= 0xffff_ffff;
                         amount *= amount;
+                    }
+                    9 => {
+                        let working = number(state, config, comptime!(Field::Worker as u32), actor)
+                            != NO_ACTOR
+                            && number(state, config, comptime!(Field::LivingMembers as u32), actor)
+                                > 0;
+                        let subsistence =
+                            comptime!(config.economy == crate::domain::Economy::Industrial)
+                                && number(state, config, comptime!(Field::LandPlots as u32), actor)
+                                    > 0;
+                        let category = select(working, select(subsistence, 1u32, 0u32), 2u32);
+                        amount = u64::cast_from(category == field);
+                    }
+                    10 => {
+                        amount = u64::cast_from(
+                            number(
+                                state,
+                                config,
+                                comptime!(Field::EnterpriseStatus as u32),
+                                actor,
+                            ) < 4,
+                        );
+                    }
+                    11 => {
+                        let category = select(
+                            actor_kind == comptime!(Good::Housing as u32),
+                            2u32,
+                            number(
+                                state,
+                                config,
+                                comptime!(Field::EnterpriseModel as u32),
+                                actor,
+                            ),
+                        );
+                        amount = u64::cast_from(
+                            category == field
+                                && number(
+                                    state,
+                                    config,
+                                    comptime!(Field::EnterpriseStatus as u32),
+                                    actor,
+                                ) < 4,
+                        );
+                    }
+                    12 => {
+                        amount = u64::cast_from(
+                            number(
+                                state,
+                                config,
+                                comptime!(Field::EnterpriseStatus as u32),
+                                actor,
+                            ) == field,
+                        );
                     }
                     8 => {
                         amount = u64::cast_from(

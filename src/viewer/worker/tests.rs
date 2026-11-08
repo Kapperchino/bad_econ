@@ -83,6 +83,8 @@ fn closed_firms_leave_the_map_navigation_and_inspector_on_gpu() -> Result<()> {
         data: publisher.data.clone(),
         selected: 4,
         chart: Chart::Businesses,
+        period: super::super::model::Period::default(),
+        series: super::super::model::SeriesSelection::All,
     });
     app.add_plugins((MinimalPlugins, PresentationPlugin));
     app.init_resource::<Assets<Image>>()

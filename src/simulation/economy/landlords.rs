@@ -421,6 +421,30 @@ fn close(
         firm,
         collected.cash,
     );
+    let cash = value(state, config, comptime!(Field::Cash as u32), firm);
+    let revenue = minus(
+        value(state, config, comptime!(Field::RentalIncome as u32), firm),
+        value(
+            state,
+            config,
+            comptime!(Field::BusinessOpeningRent as u32),
+            firm,
+        ),
+    );
+    set(
+        state,
+        config,
+        comptime!(Field::BusinessClosingCash as u32),
+        firm,
+        cash,
+    );
+    set(
+        state,
+        config,
+        comptime!(Field::BusinessRevenue as u32),
+        firm,
+        revenue,
+    );
     set32(
         state,
         config,

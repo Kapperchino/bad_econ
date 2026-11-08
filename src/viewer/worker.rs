@@ -263,9 +263,6 @@ fn publish(
             Some(day) if day == simulation.snapshot.day => (),
             _ => {
                 display.history.push_back(snapshot.clone());
-                if display.history.len() > 160 {
-                    display.history.pop_front();
-                }
             }
         }
         display.snapshot = snapshot;

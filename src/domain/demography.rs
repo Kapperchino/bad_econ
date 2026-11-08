@@ -250,8 +250,41 @@ impl DemographicPolicy {
     }
 }
 
+#[repr(u32)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Occupation {
+    Farmer,
+    WageWorker,
+    Owner,
+    Unemployed,
+    Dependent,
+    OtherAdult,
+}
+impl Occupation {
+    pub const ALL: [Self; 6] = [
+        Self::Farmer,
+        Self::WageWorker,
+        Self::Owner,
+        Self::Unemployed,
+        Self::Dependent,
+        Self::OtherAdult,
+    ];
+    pub fn label(self) -> &'static str {
+        match self {
+            Self::Farmer => "Farmers",
+            Self::WageWorker => "Wage workers",
+            Self::Owner => "Owners",
+            Self::Unemployed => "Unemployed",
+            Self::Dependent => "Dependents",
+            Self::OtherAdult => "Other adults",
+        }
+    }
+}
+
 #[derive(Clone, Debug, Default, Serialize, Deserialize, PartialEq, Eq)]
 pub struct PopulationObservation {
+    #[serde(default)]
+    pub occupations: [u64; 6],
     pub living: u64,
     pub dependents: u64,
     pub births: u64,
@@ -261,16 +294,58 @@ pub struct PopulationObservation {
 }
 
 impl PopulationObservation {
+    pub fn unemployment_rate(&self) -> Option<f64> {
+        let unemployed = self.occupations[Occupation::Unemployed as usize];
+        let workforce = unemployed + self.occupations[Occupation::WageWorker as usize];
+        match workforce {
+            0 => None,
+            count => Some(100.0 * unemployed as f64 / count as f64),
+        }
+    }
+
     pub fn from_state(state: &State, policy: &DemographicPolicy) -> Self {
-        state.people.iter().fold(
+        let households = state
+            .actors
+            .iter()
+            .enumerate()
+            .map(|(index, actor)| (actor.identity, index))
+            .collect::<std::collections::HashMap<_, _>>();
+        state.people.iter().enumerate().fold(
             Self {
                 births: state.people.len() as u64 - state.initial_population,
                 ..Self::default()
             },
-            |mut observation, person| {
+            |mut observation, (index, person)| {
                 match person.state {
                     LivingState::Living => {
                         observation.living += 1;
+                        let household = households[&person.household];
+                        let selected = state.get(super::Field::Worker, household) == index as u64;
+                        let owner = state
+                            .get(super::Field::InvestmentFirm, household)
+                            .checked_sub(1)
+                            .filter(|&firm| {
+                                state.get(super::Field::EnterpriseStatus, firm as usize)
+                                    < super::enterprise::EnterpriseState::Closed as u64
+                            })
+                            .is_some();
+                        let category = match () {
+                            _ if person.age_days
+                                < policy.minimum_work_age_years * DAYS_PER_YEAR
+                                || person.age_days
+                                    >= policy.retirement_age_years * DAYS_PER_YEAR =>
+                            {
+                                Occupation::Dependent
+                            }
+                            _ if selected && owner => Occupation::Owner,
+                            _ if selected && state.get(super::Field::LandPlots, household) > 0 => {
+                                Occupation::Farmer
+                            }
+                            _ if person.employer.is_some() => Occupation::WageWorker,
+                            _ if selected => Occupation::Unemployed,
+                            _ => Occupation::OtherAdult,
+                        };
+                        observation.occupations[category as usize] += 1;
                         observation.dependents += u64::from(
                             person.age_days < policy.minimum_work_age_years * DAYS_PER_YEAR
                                 || person.age_days >= policy.retirement_age_years * DAYS_PER_YEAR,

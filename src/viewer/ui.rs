@@ -1,6 +1,6 @@
 use super::{
     Dashboard, Speed, feedback,
-    model::{Chart, Menu},
+    model::{Chart, Menu, Period, SeriesSelection},
 };
 use bevy::{
     asset::uuid_handle,
@@ -57,6 +57,9 @@ pub(super) enum UiAction {
     Menu(Menu),
     Chart(Chart),
     NextChart,
+    Period(Period),
+    NextSeries,
+    AllSeries,
     ToggleRun,
     Step,
     Reset,
@@ -72,6 +75,9 @@ impl UiAction {
         match self {
             Self::Menu(menu) => menu.description().into(),
             Self::Chart(chart) => chart.label().into(),
+            Self::Period(period) => format!("Show {} across charts", period.label()),
+            Self::NextSeries => "Focus on the next series and rescale the chart".into(),
+            Self::AllSeries => "Show all series together".into(),
             Self::NextChart => "G: cycle through all graphs".into(),
             Self::ToggleRun => "Space: resume or pause the simulation".into(),
             Self::Step => "N: advance one day and pause".into(),
@@ -101,6 +107,8 @@ pub(super) enum Label {
     Subtitle,
     Summary,
     ChartTitle,
+    ChartDescription,
+    SeriesFocus,
     Comparison,
     Inspection,
     MapSummary,
@@ -116,6 +124,8 @@ struct InspectorDetails;
 pub(super) struct Plot;
 #[derive(Component)]
 pub(super) struct ChartScale;
+#[derive(Component)]
+pub(super) struct ChartReadout;
 #[derive(Component)]
 pub(super) struct Legend;
 #[derive(Component)]
@@ -368,9 +378,9 @@ fn report(parent: &mut ChildSpawnerCommands) {
         .spawn((
             Report,
             Node {
-                width: percent(42),
-                min_width: px(360),
-                max_width: px(560),
+                width: percent(52),
+                min_width: px(400),
+                max_width: px(800),
                 flex_shrink: 0.0,
                 padding: UiRect::all(px(18)),
                 border: UiRect::all(px(1)),
@@ -387,7 +397,6 @@ fn report(parent: &mut ChildSpawnerCommands) {
             label(report, Label::Title, 30.0, PAPER);
             label(report, Label::Subtitle, 13.0, MUTED);
             rule(report);
-            label(report, Label::Summary, 14.0, PAPER);
             report
                 .spawn(Node {
                     flex_wrap: FlexWrap::Wrap,
@@ -400,7 +409,21 @@ fn report(parent: &mut ChildSpawnerCommands) {
                         tabs.commands().entity(entity).insert(ChartTab(chart));
                     });
                 });
+            report
+                .spawn(Node {
+                    flex_wrap: FlexWrap::Wrap,
+                    row_gap: px(6),
+                    ..row(6.0)
+                })
+                .with_children(|controls| {
+                    Period::ALL.into_iter().for_each(|period| {
+                        button(controls, UiAction::Period(period), period.label());
+                    });
+                    button(controls, UiAction::NextSeries, "Focus next");
+                    button(controls, UiAction::AllSeries, "Show all");
+                });
             label(report, Label::ChartTitle, 15.0, GOLD);
+            label(report, Label::SeriesFocus, 11.0, MUTED);
             report
                 .spawn((
                     Node {
@@ -422,6 +445,7 @@ fn report(parent: &mut ChildSpawnerCommands) {
                 .with_children(|frame| {
                     frame.spawn((
                         Plot,
+                        RelativeCursorPosition::default(),
                         Node {
                             width: percent(100),
                             height: percent(100),
@@ -441,6 +465,10 @@ fn report(parent: &mut ChildSpawnerCommands) {
                 },
             ));
             rule(report);
+            report.spawn((ChartReadout, text("", 13.0, PAPER)));
+            label(report, Label::ChartDescription, 12.0, MUTED);
+            rule(report);
+            label(report, Label::Summary, 13.0, PAPER);
             label(report, Label::Comparison, 12.0, MUTED);
             label(report, Label::Error, 13.0, Color::srgb(0.94, 0.48, 0.39));
         });
@@ -619,6 +647,9 @@ fn style_buttons(
             let selected = match button.action {
                 UiAction::Menu(menu) => *menu == dashboard.chart.menu(),
                 UiAction::Chart(chart) => *chart == dashboard.chart,
+                UiAction::Period(period) => *period == dashboard.period,
+                UiAction::AllSeries => dashboard.series == SeriesSelection::All,
+                UiAction::NextSeries => matches!(dashboard.series, SeriesSelection::Only(_)),
                 UiAction::Speed(speed) => *speed == display.speed,
                 _ => false,
             };

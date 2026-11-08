@@ -9,6 +9,7 @@ use sha2::{Digest, Sha256};
 pub mod bargaining;
 pub mod company;
 pub mod demography;
+pub mod diagnostics;
 mod employment;
 pub mod enterprise;
 pub mod finance;
@@ -32,9 +33,9 @@ pub use population::{
 pub use resources::{ProductionSite, ResourceMap, ResourceRegion};
 
 pub const SCENARIO_VERSION: u32 = 2;
-const CHECKPOINT_VERSION: u32 = 13;
-pub const STATE_HASH_VERSION: &str = "bad-econ/state/CubekV2/v14";
-pub const USED_FIELDS: usize = Field::MaintenanceDays as usize + 1;
+const CHECKPOINT_VERSION: u32 = 14;
+pub const STATE_HASH_VERSION: &str = "bad-econ/state/CubekV2/v15";
+pub const USED_FIELDS: usize = Field::BusinessRevenue as usize + 1;
 pub const TRANSIT_FIELDS: usize = USED_FIELDS + Good::COUNT;
 pub const CONSUMPTION_FIELDS: usize = TRANSIT_FIELDS + Good::COUNT;
 pub const PRODUCTION_FIELDS: usize = CONSUMPTION_FIELDS + Good::COUNT;
@@ -157,6 +158,10 @@ pub enum Field {
     RentalIncome,
     HousingAvailable,
     MaintenanceDays,
+    BusinessOpeningCash,
+    BusinessClosingCash,
+    BusinessOpeningRent,
+    BusinessRevenue,
 }
 impl Field {
     pub fn inventory(good: Good) -> Self {
@@ -1853,6 +1858,7 @@ impl InspectionRequest {
 }
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
 pub struct Inspection {
+    pub business_account: Option<diagnostics::BusinessAccount>,
     pub production_method: Option<ProductionMethod>,
     pub labor_minutes: u64,
     pub output_ticks: u64,
@@ -1907,6 +1913,13 @@ impl Inspection {
             .context("unknown actor identity")?;
         Ok(Self {
             actor: state.actors.at(index),
+            business_account: (state.actors.at(index).kind > 0).then(|| {
+                diagnostics::BusinessAccount {
+                    opening_cash: state.get(Field::BusinessOpeningCash, index),
+                    closing_cash: state.get(Field::BusinessClosingCash, index),
+                    revenue: state.get(Field::BusinessRevenue, index),
+                }
+            }),
             production_method: ProductionMethod::from_index(state.get(Field::ActiveMethod, index))?,
             labor_minutes: state.get(Field::LaborMinutes, index),
             output_ticks: state.get(Field::OutputTicks, index),
@@ -2042,6 +2055,8 @@ pub struct MarketObservation {
 
 #[derive(Clone, Debug, Default, Serialize, Deserialize, PartialEq, Eq)]
 pub struct ObservationSnapshot {
+    #[serde(default)]
+    pub economy: diagnostics::EconomyObservation,
     pub day: u64,
     pub cash: u64,
     pub payroll_reserves: u64,
@@ -2085,6 +2100,7 @@ impl ObservationSnapshot {
         let state = admitted.state;
         let mut snapshot = Self {
             day: state.day,
+            economy: diagnostics::EconomyObservation::from_state(scenario, state)?,
             research: state
                 .research
                 .as_ref()

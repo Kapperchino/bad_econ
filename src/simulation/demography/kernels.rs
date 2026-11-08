@@ -1,4 +1,4 @@
-use super::{DemographyPolicy, OBSERVATION_SHARDS, PersonLayout as P, Stage};
+use super::{DemographyPolicy, OBSERVATION_METRICS, OBSERVATION_SHARDS, PersonLayout as P, Stage};
 use crate::simulation::configuration::EconomyConfig;
 use crate::{
     domain::{
@@ -395,15 +395,47 @@ pub fn step(
 }
 
 #[cube]
-pub fn observe(people: &[u32], policy: &DemographyPolicy, output: &[Atomic<u32>], count: u32) {
+pub fn observe(
+    people: &[u32],
+    state: &mut [u32],
+    config: &EconomyConfig,
+    policy: &DemographyPolicy,
+    output: &[Atomic<u32>],
+    count: u32,
+) {
     let index = ABSOLUTE_POS;
     if index < count as usize {
         let base = index * P::WORDS;
-        let shard = index % OBSERVATION_SHARDS * 8;
+        let shard = index % OBSERVATION_SHARDS * OBSERVATION_METRICS;
         let cause = people[base + P::CAUSE];
         if cause == 0 {
             output[shard].fetch_add(1);
             let age = people[base + P::AGE];
+            let household = people[base + P::HOUSEHOLD];
+            let selected =
+                get(state, config, comptime!(Field::Worker as u32), household) == index as u32;
+            let firm = get(
+                state,
+                config,
+                comptime!(Field::InvestmentFirm as u32),
+                household,
+            );
+            let owner = firm > 0
+                && get(
+                    state,
+                    config,
+                    comptime!(Field::EnterpriseStatus as u32),
+                    max(firm, 1) - 1,
+                ) < 4;
+            let farmer = get(state, config, comptime!(Field::LandPlots as u32), household) > 0;
+            let dependent =
+                age < policy.parameters.minimum_age || age >= policy.parameters.retirement_age;
+            let mut category = select(selected, 3u32, 5u32);
+            category = select(people[base + P::EMPLOYER] > 0, 1u32, category);
+            category = select(selected && farmer, 0u32, category);
+            category = select(selected && owner, 2u32, category);
+            category = select(dependent, 4u32, category);
+            output[shard + 8 + category as usize].fetch_add(1);
             output[shard + 1].fetch_add(u32::cast_from(
                 age < policy.parameters.minimum_age || age >= policy.parameters.retirement_age,
             ));
@@ -420,7 +452,7 @@ pub fn observe(people: &[u32], policy: &DemographyPolicy, output: &[Atomic<u32>]
 #[cube]
 pub fn observation_totals(sums: &[u64], output: &mut [u32]) {
     let metric = ABSOLUTE_POS;
-    if metric < 7 {
+    if metric < OBSERVATION_METRICS && metric != 7 {
         output[metric] = sums[metric] as u32;
         if metric == 6 {
             output[7usize] = ((sums[6usize] >> 32) + sums[7usize]) as u32;

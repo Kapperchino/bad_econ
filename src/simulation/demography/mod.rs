@@ -12,6 +12,7 @@ use std::{collections::HashMap, mem::offset_of};
 use systems::*;
 
 const OBSERVATION_SHARDS: usize = 1024;
+const OBSERVATION_METRICS: usize = 14;
 
 #[repr(C)]
 #[derive(Clone, Copy, Pod, Zeroable)]
@@ -331,9 +332,14 @@ impl DemographyRuntime {
             })
             .collect()
     }
-    pub fn observation(&self, device: &Device) -> Result<PopulationObservation> {
-        let shards = device.tensor(&[0; OBSERVATION_SHARDS * 8]);
-        let output = device.empty(8);
+    pub fn observation(
+        &self,
+        device: &Device,
+        state: &CubeTensor,
+        config: &super::configuration::Configuration,
+    ) -> Result<PopulationObservation> {
+        let shards = device.tensor(&[0; OBSERVATION_SHARDS * OBSERVATION_METRICS]);
+        let output = device.empty(OBSERVATION_METRICS);
         let argument = |tensor: &CubeTensor| tensor.clone().into_buffer_arg();
         let cube_count = device.count(self.count);
         PopulationCounting::launch(
@@ -341,6 +347,8 @@ impl DemographyRuntime {
             cube_count,
             CubeDim::new_1d(device.workgroup),
             PopulationInputLaunch {
+                state: argument(state),
+                config: config.launch(),
                 people: argument(&self.people),
                 policy: self.policy.launch(),
                 output: argument(&shards),
@@ -348,7 +356,7 @@ impl DemographyRuntime {
             },
         );
         let input = cubecl::std::tensor::TensorHandle::new_contiguous(
-            [OBSERVATION_SHARDS, 8],
+            [OBSERVATION_SHARDS, OBSERVATION_METRICS],
             shards.handle,
             <u32 as cubecl::prelude::Scalar>::elem_type_native(),
         );
@@ -370,6 +378,7 @@ impl DemographyRuntime {
         );
         let totals = device.read(&output)?;
         Ok(PopulationObservation {
+            occupations: std::array::from_fn(|index| u64::from(totals[8 + index])),
             living: totals[0].into(),
             dependents: totals[1].into(),
             births: self.count as u64 - self.initial_population,

@@ -103,24 +103,14 @@ impl GraphRenderer<'_, '_> {
                 ui::RULE.with_alpha(0.5),
             );
         });
-        match chart {
-            Chart::Cash => {
-                if let Some(reference) = display
-                    .comparison
-                    .as_ref()
-                    .and_then(|run| run.at_day(display.snapshot.day))
-                {
-                    geometry.cash(reference, range, size, LineStyle::Reference);
-                }
-                geometry.cash(&display.snapshot, range, size, LineStyle::Current);
-            }
-            _ => {
-                if let Some(reference) = &display.comparison {
-                    geometry.history(&reference.history, chart, range, size, LineStyle::Reference);
-                }
-                geometry.history(&display.history, chart, range, size, LineStyle::Current);
-            }
+        if range.minimum < 0.0 {
+            let y = 3.0 + (1.0 - range.fraction(0.0) as f32) * (size.y - 6.0).max(0.0);
+            geometry.line(Vec2::new(0.0, y), Vec2::new(size.x, y), ui::MUTED);
         }
+        if let Some(reference) = &display.comparison {
+            geometry.history(&reference.history, chart, range, size, LineStyle::Reference);
+        }
+        geometry.history(&display.history, chart, range, size, LineStyle::Current);
         *self.meshes.get_mut(&self.graph.mesh).expect("graph mesh") = geometry.mesh(size);
     }
 
@@ -176,15 +166,19 @@ impl Geometry {
         let point = |day: u64, value: f64| {
             Vec2::new(
                 3.0 + day.saturating_sub(range.first_day) as f32 / span * (size.x - 6.0).max(0.0),
-                3.0 + (1.0 - (value / range.maximum) as f32) * (size.y - 6.0).max(0.0),
+                3.0 + (1.0 - range.fraction(value) as f32) * (size.y - 6.0).max(0.0),
             )
         };
         let points = history
             .iter()
-            .filter(|snapshot| (range.first_day..=range.last_day).contains(&snapshot.day))
-            .map(|snapshot| {
+            .enumerate()
+            .filter(|(_, snapshot)| (range.first_day..=range.last_day).contains(&snapshot.day))
+            .map(|(index, snapshot)| {
                 chart
-                    .values(snapshot)
+                    .values(
+                        snapshot,
+                        index.checked_sub(1).and_then(|index| history.get(index)),
+                    )
                     .into_iter()
                     .map(|value| point(snapshot.day, value))
                     .collect::<Vec<_>>()
@@ -195,56 +189,29 @@ impl Geometry {
                 .iter()
                 .zip(&pair[1])
                 .enumerate()
+                .filter(|(series, (from, to))| {
+                    range.selection.includes(*series) && from.is_finite() && to.is_finite()
+                })
                 .for_each(|(series, (&from, &to))| {
                     self.line(from, to, style.color(chart_color(chart, series)));
                 });
         });
         if let Some(last) = points.last() {
-            last.iter().enumerate().for_each(|(series, &point)| {
-                self.quad(
-                    [
-                        point + Vec2::new(-3.0, -3.0),
-                        point + Vec2::new(3.0, -3.0),
-                        point + Vec2::new(3.0, 3.0),
-                        point + Vec2::new(-3.0, 3.0),
-                    ],
-                    style.color(chart_color(chart, series)),
-                );
-            });
+            last.iter()
+                .enumerate()
+                .filter(|(series, point)| range.selection.includes(*series) && point.is_finite())
+                .for_each(|(series, &point)| {
+                    self.quad(
+                        [
+                            point + Vec2::new(-3.0, -3.0),
+                            point + Vec2::new(3.0, -3.0),
+                            point + Vec2::new(3.0, 3.0),
+                            point + Vec2::new(-3.0, 3.0),
+                        ],
+                        style.color(chart_color(chart, series)),
+                    );
+                });
         }
-    }
-
-    fn cash(
-        &mut self,
-        snapshot: &crate::domain::ObservationSnapshot,
-        range: &ChartRange,
-        size: Vec2,
-        style: LineStyle,
-    ) {
-        let width = size.x / (range.last_bin + 1) as f32;
-        let fraction = match style {
-            LineStyle::Current => 0.55,
-            LineStyle::Reference => 0.90,
-        };
-        snapshot
-            .wealth_bins
-            .iter()
-            .take(range.last_bin + 1)
-            .enumerate()
-            .for_each(|(bin, count)| {
-                let height = (*count as f64 / range.maximum) as f32 * (size.y - 3.0).max(0.0);
-                let left = (bin as f32 + (1.0 - fraction) / 2.0) * width;
-                let right = left + width * fraction;
-                self.quad(
-                    [
-                        Vec2::new(left, size.y - height),
-                        Vec2::new(right, size.y - height),
-                        Vec2::new(right, size.y),
-                        Vec2::new(left, size.y),
-                    ],
-                    style.color(ui::GOLD),
-                );
-            });
     }
 
     fn mesh(mut self, size: Vec2) -> Mesh {

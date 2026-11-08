@@ -650,7 +650,7 @@ impl Simulation {
                 .checked_add(newborns as u64)
                 .context("identity capacity exhausted")?;
             let grown = self.grow_births(records)?;
-            let population = grown.observation(&self.device)?;
+            let population = grown.observation(&self.device, &self.state, &self.config)?;
             self.device.reclaim_memory(0)?;
             match self.memory_usage().bytes_reserved <= self.device.memory_budget.bytes() {
                 true => (),
@@ -1004,7 +1004,7 @@ impl Simulation {
         };
         let population = grown
             .as_ref()
-            .map(|grown| grown.observation(&self.device))
+            .map(|grown| grown.observation(&self.device, &self.state, &self.config))
             .transpose()?;
         let previous_actor_buffer = self.actors.clone();
         let previous_spatial = self.spatial.clone();
@@ -1807,6 +1807,21 @@ impl Simulation {
             .as_ref()
             .map_or(0, finance::FinanceRuntime::readback_bytes_per_observation);
         let snapshot = ObservationSnapshot {
+            economy: diagnostics::EconomyObservation {
+                workforce: totals.workforce.into(),
+                subsistence: totals.subsistence.into(),
+                inactive: totals.inactive.into(),
+                household_cash: totals.household_cash.into(),
+                active_by_good: totals.active_by_good.map(u64::from),
+                business_types: totals.business_types.map(u64::from),
+                business_states: totals.business_states.map(u64::from),
+                firm_cash: totals.firm_cash.map(u64::from),
+                accounts: std::array::from_fn(|good| diagnostics::BusinessAccount {
+                    opening_cash: totals.business_opening[good].into(),
+                    closing_cash: totals.business_closing[good].into(),
+                    revenue: totals.business_revenue[good].into(),
+                }),
+            },
             day: self.day,
             cash: add(totals.cash.into(), financial.cash()?)?,
             payroll_reserves: totals.payroll_reserves.into(),
@@ -1839,7 +1854,9 @@ impl Simulation {
             firm_closures: totals.closures.into(),
             distributors: totals.distributors.into(),
             household_production: totals.household_production.map(u64::from),
-            population: self.demography.observation(&self.device)?,
+            population: self
+                .demography
+                .observation(&self.device, &self.state, &self.config)?,
             inventories: totals.inventories.map(u64::from),
             transit: totals.transit.map(u64::from),
             produced: totals.produced.map(u64::from),
@@ -2041,6 +2058,13 @@ impl Simulation {
         )?);
         self.readback_bytes += (values.len() * TICK_BYTES) as u64;
         Ok(Inspection {
+            business_account: (self.metadata.actors.at(actor).kind > 0).then(|| {
+                diagnostics::BusinessAccount {
+                    opening_cash: values[Field::BusinessOpeningCash as usize],
+                    closing_cash: values[Field::BusinessClosingCash as usize],
+                    revenue: values[Field::BusinessRevenue as usize],
+                }
+            }),
             production_method: ProductionMethod::from_index(values[Field::ActiveMethod as usize])?,
             labor_minutes: values[Field::LaborMinutes as usize],
             output_ticks: values[Field::OutputTicks as usize],

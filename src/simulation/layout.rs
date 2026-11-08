@@ -206,6 +206,17 @@ pub struct SummaryLayout {
     pub price_maxima: [TickLayout; Good::COUNT],
     pub price_totals: [TickLayout; Good::COUNT],
     pub price_squares: [TickLayout; Good::COUNT],
+    pub workforce: TickLayout,
+    pub subsistence: TickLayout,
+    pub inactive: TickLayout,
+    pub household_cash: TickLayout,
+    pub active_by_good: [TickLayout; Good::COUNT],
+    pub business_types: [TickLayout; 3],
+    pub business_states: [TickLayout; 4],
+    pub firm_cash: [TickLayout; Good::COUNT],
+    pub business_opening: [TickLayout; Good::COUNT],
+    pub business_closing: [TickLayout; Good::COUNT],
+    pub business_revenue: [TickLayout; Good::COUNT],
 }
 impl SummaryLayout {
     pub const CASH: u32 = (offset_of!(Self, cash) / TICK_BYTES) as u32;
@@ -241,6 +252,17 @@ impl SummaryLayout {
     pub const PRICE_MAXIMA: u32 = (offset_of!(Self, price_maxima) / TICK_BYTES) as u32;
     pub const PRICE_TOTALS: u32 = (offset_of!(Self, price_totals) / TICK_BYTES) as u32;
     pub const PRICE_SQUARES: u32 = (offset_of!(Self, price_squares) / TICK_BYTES) as u32;
+    pub const WORKFORCE: u32 = (offset_of!(Self, workforce) / TICK_BYTES) as u32;
+    pub const SUBSISTENCE: u32 = (offset_of!(Self, subsistence) / TICK_BYTES) as u32;
+    pub const INACTIVE: u32 = (offset_of!(Self, inactive) / TICK_BYTES) as u32;
+    pub const HOUSEHOLD_CASH: u32 = (offset_of!(Self, household_cash) / TICK_BYTES) as u32;
+    pub const ACTIVE_BY_GOOD: u32 = (offset_of!(Self, active_by_good) / TICK_BYTES) as u32;
+    pub const BUSINESS_TYPES: u32 = (offset_of!(Self, business_types) / TICK_BYTES) as u32;
+    pub const BUSINESS_STATES: u32 = (offset_of!(Self, business_states) / TICK_BYTES) as u32;
+    pub const FIRM_CASH: u32 = (offset_of!(Self, firm_cash) / TICK_BYTES) as u32;
+    pub const BUSINESS_OPENING: u32 = (offset_of!(Self, business_opening) / TICK_BYTES) as u32;
+    pub const BUSINESS_CLOSING: u32 = (offset_of!(Self, business_closing) / TICK_BYTES) as u32;
+    pub const BUSINESS_REVENUE: u32 = (offset_of!(Self, business_revenue) / TICK_BYTES) as u32;
     pub const METRICS: usize = size_of::<Self>() / TICK_BYTES;
     pub const WORDS: usize = size_of::<Self>() / WORD_BYTES;
     pub const ACTORS_PER_GROUP: u32 = 64;

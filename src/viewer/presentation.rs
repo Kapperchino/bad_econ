@@ -1,7 +1,7 @@
 use super::{
     Chart, Dashboard, Display,
     graph::{self, GraphRenderer},
-    model::{ChartRange, Menu},
+    model::{ChartRange, Menu, Period, SeriesSelection},
     ui::{
         self, ActorSelection, ChartTab, FirmMarker, Label, Legend, MapMarkers, Plot, Region,
         UiAction,
@@ -22,6 +22,7 @@ impl Plugin for PresentationPlugin {
             Update,
             (
                 draw.run_if(needs_refresh),
+                draw_readout,
                 draw_plot.run_if(plot_changed),
                 draw_legend.run_if(chart_changed),
                 draw_markers.run_if(map_changed),
@@ -39,6 +40,8 @@ pub(super) struct PresentationSystems;
 struct PresentationVersion {
     revision: u64,
     chart: Chart,
+    period: Period,
+    selection: SeriesSelection,
     plot_size: Vec2,
     scale: f32,
 }
@@ -47,6 +50,7 @@ struct PresentationVersion {
 struct LabelVersion {
     revision: u64,
     chart: Chart,
+    selection: SeriesSelection,
 }
 
 fn needs_refresh(
@@ -56,6 +60,7 @@ fn needs_refresh(
     let current = dashboard.map(|dashboard| LabelVersion {
         revision: dashboard.data.lock().expect("dashboard lock").revision,
         chart: dashboard.chart,
+        selection: dashboard.series,
     });
     let changed = current != *previous;
     *previous = current;
@@ -80,6 +85,11 @@ fn draw(
                 Label::Subtitle => chart.menu().description().into(),
                 Label::Summary => summary(chart.menu(), s),
                 Label::ChartTitle => chart.label().into(),
+                Label::ChartDescription => chart.description().into(),
+                Label::SeriesFocus => match dashboard.series {
+                    SeriesSelection::All => "Showing all series".into(),
+                    SeriesSelection::Only(index) => format!("Focused: {}", chart.series().get(index).cloned().unwrap_or_default()),
+                },
                 Label::Comparison => comparison_text(&display),
                 Label::Inspection => inspection_text(&display),
                 Label::MapSummary => format!("{} households / {} people\n{} paid / {} unmet bread ticks\n{} firms opened / {} closed\n{} distributors / {} discoveries", number(s.households), number(s.population.living), number(s.employed), number(s.shortages), number(s.firm_entries), number(s.firm_closures), number(s.distributors), number(s.research.discoveries)),
@@ -127,6 +137,8 @@ fn plot_changed(
                 .expect("dashboard lock")
                 .observation_revision,
             chart: dashboard.chart,
+            period: dashboard.period,
+            selection: dashboard.series,
             plot_size: node.size() * node.inverse_scale_factor(),
             scale: node.inverse_scale_factor(),
         })
@@ -136,8 +148,11 @@ fn plot_changed(
     changed
 }
 
-fn chart_changed(dashboard: Option<Res<Dashboard>>, mut previous: Local<Option<Chart>>) -> bool {
-    let current = dashboard.map(|dashboard| dashboard.chart);
+fn chart_changed(
+    dashboard: Option<Res<Dashboard>>,
+    mut previous: Local<Option<(Chart, SeriesSelection)>>,
+) -> bool {
+    let current = dashboard.map(|dashboard| (dashboard.chart, dashboard.series));
     let changed = current != *previous;
     *previous = current;
     changed
@@ -166,6 +181,7 @@ fn draw_legend(
                     .series()
                     .into_iter()
                     .enumerate()
+                    .filter(|(series, _)| dashboard.series.includes(*series))
                     .for_each(|(series, name)| {
                         legend
                             .spawn(Node {
@@ -204,6 +220,8 @@ fn draw_plot(
             &display.snapshot,
             &display.history,
             display.comparison.as_ref(),
+            dashboard.period,
+            dashboard.series,
         );
         scales.iter_mut().for_each(|mut label| {
             let value = range.scale_label(chart);
@@ -224,7 +242,7 @@ fn draw_plot(
             .entity(entity)
             .despawn_children()
             .with_children(|plot| {
-                draw_axes(plot, chart, &range, area);
+                draw_axes(plot, &range, area);
                 plot.spawn((
                     Node {
                         position_type: PositionType::Absolute,
@@ -353,7 +371,7 @@ fn summary(menu: Menu, s: &ObservationSnapshot) -> String {
             number(s.distributors)
         ),
         Menu::Industry => format!(
-            "Active firms    {}\nEntries / closures    {} / {}\nResearch attempts / discoveries    {} / {}\nStriking    {}",
+            "Open business sites    {}\nEntries / closures to date    {} / {}\nResearch attempts / discoveries    {} / {}\nStriking    {}",
             number(s.firms),
             number(s.firm_entries),
             number(s.firm_closures),
@@ -416,12 +434,16 @@ pub(super) fn chart_color(chart: Chart, series: usize) -> Color {
     }
 }
 
-fn draw_axes(parent: &mut ChildSpawnerCommands, chart: Chart, range: &ChartRange, area: Vec2) {
+fn draw_axes(parent: &mut ChildSpawnerCommands, range: &ChartRange, area: Vec2) {
     (0..=4).for_each(|row| {
-        let value = range.maximum * (1.0 - row as f64 / 4.0);
+        let value = range.maximum - (range.maximum - range.minimum) * row as f64 / 4.0;
         let caption = match value {
-            value if value >= 1000.0 => number(value as u128),
-            value if value >= 10.0 => format!("{value:.0}"),
+            value if value.abs() >= 1000.0 => format!(
+                "{}{:.1}k",
+                if value < 0.0 { "-" } else { "" },
+                value.abs() / 1000.0
+            ),
+            value if value.abs() >= 10.0 => format!("{value:.0}"),
             _ => format!("{value:.1}"),
         };
         parent.spawn((
@@ -434,13 +456,10 @@ fn draw_axes(parent: &mut ChildSpawnerCommands, chart: Chart, range: &ChartRange
             ui::text(caption, 10.0, ui::MUTED),
         ));
     });
-    let labels = match chart {
-        Chart::Cash => vec!["0 cash".into(), "Cash brackets: 1, 2-3, 4-7, ...".into()],
-        _ => vec![
-            format!("Day {}", range.first_day),
-            format!("Day {}", range.last_day),
-        ],
-    };
+    let labels = [
+        format!("Day {}", range.first_day),
+        format!("Day {}", range.last_day),
+    ];
     parent
         .spawn(Node {
             position_type: PositionType::Absolute,
@@ -489,11 +508,14 @@ fn inspection_text(display: &Display) -> String {
                         0 => String::new(),
                         _ => format!("\nRegion {} | plots {} (+{} reserved)\nWorkers/plot {} | scale bonus {}%\nSubsistence {} | displaced {}\nConstruction {:?} | {} work remaining", i.property_region, i.occupied_plots, i.reserved_plots, i.workers_per_plot, i.scale_bonus_per_mille / 10, i.subsistence_plots, i.displaced_plots, i.project_status, i.construction_minutes_remaining),
                     };
+                    let accounts = i.business_account.map_or_else(String::new, |account| {
+                        format!("\nDaily receipts {} | cash outlays {}\nCash profit {:+} (before owner payouts)", account.revenue, account.outlays(), account.profit())
+                    });
                     let rental = i.rental_business.as_ref().map_or_else(String::new, |business| {
                         format!("\nLandlord business | homes {} | rental income {}\nHousing project {:?} | {} work remaining", business.homes, business.income, i.project_status, i.construction_minutes_remaining)
                     });
                     format!(
-                        "Actor {} | day {} | kind {}\nCash {} | transit {}\nRent paid {} | owed {}\nFood {:?} | other stock {}\n{}{}{}",
+                        "Actor {} | day {} | kind {}\nCash {} | transit {}\nRent paid {} | owed {}\nFood {:?} | other stock {}\n{}{}{}{}",
                         i.actor.identity,
                         i.day,
                         i.actor.kind,
@@ -505,8 +527,105 @@ fn inspection_text(display: &Display) -> String {
                         i.inventory[3..].iter().map(|&stock| u128::from(stock)).sum::<u128>(),
                         detail,
                         property,
-                        rental
+                        rental,
+                        accounts
                     )
                 })
                 .unwrap_or_else(|| "Select a household or firm to inspect its accounts, property and production.".into())
+}
+
+fn exact_value(value: f64) -> String {
+    match value {
+        value if !value.is_finite() => "unavailable".into(),
+        value if value.fract().abs() < 0.000_001 => format!("{value:.0}"),
+        _ => format!("{value:.3}"),
+    }
+}
+
+fn draw_readout(
+    dashboard: Option<Res<Dashboard>>,
+    plots: Query<(&bevy::ui::RelativeCursorPosition, &ComputedNode), With<Plot>>,
+    mut labels: Query<&mut Text, With<ui::ChartReadout>>,
+) {
+    if let Some(dashboard) = dashboard {
+        let display = dashboard.data.lock().expect("dashboard lock");
+        let chart = dashboard.chart;
+        let first_day = display
+            .history
+            .front()
+            .map_or(display.snapshot.day, |point| point.day)
+            .max(dashboard.period.first_day(display.snapshot.day));
+        let last_day = display.snapshot.day;
+        let hovered = plots.single().ok().and_then(|(cursor, node)| {
+            cursor
+                .normalized
+                .filter(|_| cursor.cursor_over())
+                .map(|position| {
+                    let width = node.size().x * node.inverse_scale_factor();
+                    (((position.x + 0.5) * width - 48.0) / (width - 52.0).max(1.0)).clamp(0.0, 1.0)
+                })
+        });
+        let day = hovered.map_or(last_day, |fraction| {
+            first_day + (f64::from(fraction) * (last_day - first_day) as f64).round() as u64
+        });
+        let index = display
+            .history
+            .iter()
+            .position(|point| point.day >= day)
+            .unwrap_or(display.history.len().saturating_sub(1));
+        let snapshot = display.history.get(index).unwrap_or(&display.snapshot);
+        let previous = index
+            .checked_sub(1)
+            .and_then(|index| display.history.get(index));
+        let reference = display.comparison.as_ref().and_then(|run| {
+            run.history
+                .iter()
+                .position(|point| point.day == snapshot.day)
+                .map(|index| {
+                    chart.values(
+                        &run.history[index],
+                        index
+                            .checked_sub(1)
+                            .and_then(|index| run.history.get(index)),
+                    )
+                })
+        });
+        let detail = {
+            let values = chart.values(snapshot, previous);
+            let rows = chart
+                .series()
+                .into_iter()
+                .zip(values)
+                .enumerate()
+                .filter(|(series, _)| dashboard.series.includes(*series))
+                .map(|(series, (name, value))| {
+                    let comparison = reference
+                        .as_ref()
+                        .and_then(|values| values.get(series))
+                        .filter(|prior| prior.is_finite() && value.is_finite())
+                        .map_or_else(String::new, |prior| {
+                            format!(
+                                " | reference {} | change {:+.3}",
+                                exact_value(*prior),
+                                value - prior
+                            )
+                        });
+                    let people = match chart {
+                        Chart::Occupations => {
+                            format!(" ({} people)", snapshot.population.occupations[series])
+                        }
+                        _ => String::new(),
+                    };
+                    format!("{name}  {}{people}{comparison}", exact_value(value))
+                })
+                .collect::<Vec<_>>()
+                .join("\n");
+            format!("DAY {} | {}\n{}", snapshot.day, chart.unit(), rows)
+        };
+        labels.iter_mut().for_each(|mut text| {
+            if text.0 != detail {
+                text.0 = detail.clone();
+            }
+        });
+    }
 }

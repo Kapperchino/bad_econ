@@ -2,6 +2,7 @@ mod analytics;
 mod bargaining;
 mod contracts;
 mod demography;
+mod diagnostics;
 mod distributors;
 mod enterprise;
 #[cfg(feature = "compute")]

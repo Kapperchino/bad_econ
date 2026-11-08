@@ -51,6 +51,8 @@ impl GpuPass<DemographyInput> for AdvanceHouseholds {
 
 #[derive(CubeType, CubeLaunch)]
 pub(super) struct PopulationInput {
+    pub state: Box<[u32]>,
+    pub config: EconomyConfig,
     pub people: Box<[u32]>,
     pub policy: DemographyPolicy,
     pub output: Box<[Atomic<u32>]>,
@@ -69,8 +71,15 @@ impl System for PopulationCounting {
 impl GpuPass<PopulationInput> for CountPopulation {
     type Output = ();
 
-    fn execute(input: PopulationInput) {
-        kernels::observe(&input.people, &input.policy, &input.output, input.count);
+    fn execute(mut input: PopulationInput) {
+        kernels::observe(
+            &input.people,
+            &mut input.state,
+            &input.config,
+            &input.policy,
+            &input.output,
+            input.count,
+        );
     }
 }
 

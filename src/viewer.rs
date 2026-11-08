@@ -26,7 +26,7 @@ use bevy::{
 };
 use crossbeam_channel::{Sender, unbounded};
 use feedback::Cue;
-use model::{Chart, ComparisonRun, DisplayState, RunTarget};
+use model::{Chart, ComparisonRun, DisplayState, Period, RunTarget, SeriesSelection};
 use std::{
     collections::VecDeque,
     io::Write,
@@ -97,6 +97,9 @@ enum VerificationState {
     AwaitChart(Chart),
     Frames(u32),
     AwaitCapture,
+    AwaitPeriod(Period),
+    AwaitFocus,
+    AwaitAllSeries,
     AwaitPreferences,
     Resize,
     CompactFrames(u32),
@@ -148,6 +151,8 @@ struct Dashboard {
     data: Arc<Mutex<Display>>,
     selected: u64,
     chart: Chart,
+    period: Period,
+    series: SeriesSelection,
 }
 struct Display {
     snapshot: ObservationSnapshot,
@@ -314,6 +319,8 @@ fn setup(
         data: data.clone(),
         selected: launch.scenario.identity(0).expect("first household"),
         chart: Chart::Employment,
+        period: Period::default(),
+        series: SeriesSelection::All,
     });
     let scenario = launch.scenario.clone();
     let workgroup = launch.workgroup;
@@ -505,6 +512,46 @@ fn verify(
                         VerificationState::AwaitCapture
                     }
                     VerificationState::Frames(frames) => VerificationState::Frames(frames - 1),
+                    VerificationState::AwaitPeriod(period)
+                        if dashboard.period == period
+                            && matches!(verification.click, VerificationClick::Idle) =>
+                    {
+                        match period {
+                            Period::Month => {
+                                verification.click =
+                                    VerificationClick::Move(UiAction::Period(Period::Year));
+                                VerificationState::AwaitPeriod(Period::Year)
+                            }
+                            Period::Year => {
+                                verification.click =
+                                    VerificationClick::Move(UiAction::Period(Period::FiveYears));
+                                VerificationState::AwaitPeriod(Period::FiveYears)
+                            }
+                            Period::FiveYears => {
+                                verification.click =
+                                    VerificationClick::Move(UiAction::Period(Period::All));
+                                VerificationState::AwaitPeriod(Period::All)
+                            }
+                            Period::All => {
+                                verification.click = VerificationClick::Move(UiAction::NextSeries);
+                                VerificationState::AwaitFocus
+                            }
+                        }
+                    }
+                    VerificationState::AwaitFocus
+                        if dashboard.series == SeriesSelection::Only(0)
+                            && matches!(verification.click, VerificationClick::Idle) =>
+                    {
+                        verification.click = VerificationClick::Move(UiAction::AllSeries);
+                        VerificationState::AwaitAllSeries
+                    }
+                    VerificationState::AwaitAllSeries
+                        if dashboard.series == SeriesSelection::All
+                            && matches!(verification.click, VerificationClick::Idle) =>
+                    {
+                        verification.click = VerificationClick::Move(UiAction::Sound);
+                        VerificationState::AwaitPreferences
+                    }
                     VerificationState::AwaitPreferences
                         if feedback.current() == Some(Cue::Preferences) =>
                     {
@@ -625,14 +672,29 @@ fn controls(
             let control = match action {
                 UiAction::Menu(menu) => {
                     dashboard.chart = menu.charts()[0];
+                    dashboard.series = SeriesSelection::All;
                     None
                 }
                 UiAction::Chart(chart) => {
                     dashboard.chart = chart;
+                    dashboard.series = SeriesSelection::All;
+                    None
+                }
+                UiAction::Period(period) => {
+                    dashboard.period = period;
+                    None
+                }
+                UiAction::NextSeries => {
+                    dashboard.series = dashboard.series.next(dashboard.chart.series().len());
+                    None
+                }
+                UiAction::AllSeries => {
+                    dashboard.series = SeriesSelection::All;
                     None
                 }
                 UiAction::NextChart => {
                     dashboard.chart = dashboard.chart.next();
+                    dashboard.series = SeriesSelection::All;
                     None
                 }
                 UiAction::ToggleRun => Some(Control::command(
@@ -713,11 +775,11 @@ fn capture_verified_frame(
     mut verification: ResMut<Verification>,
 ) {
     let chart = dashboard.chart;
-    verification.capture(&captured.image, chart.file_label());
+    verification.capture(&captured.image, &chart.file_label());
     match chart {
         Chart::Research => {
-            verification.click = VerificationClick::Move(UiAction::Sound);
-            verification.state = VerificationState::AwaitPreferences;
+            verification.click = VerificationClick::Move(UiAction::Period(Period::Month));
+            verification.state = VerificationState::AwaitPeriod(Period::Month);
         }
         _ => {
             let next = chart.next();
@@ -749,7 +811,7 @@ fn capture_compact_frame(
         });
     verification.capture(&captured.image, "compact");
     eprintln!(
-        "viewer interaction and layout verification passed: shared GPU, native mouse clicks, reset/step/comparison feedback, audited days, household and firm inspection, refreshed inspection, all five menus and ten charts, retained GPU chart on speed and inspection changes, previous/next navigation, footer controls, compact window"
+        "viewer interaction and layout verification passed: shared GPU, native mouse clicks, reset/step/comparison feedback, audited days, household and firm inspection, refreshed inspection, all five menus and 28 charts, four history periods, series focus, retained GPU chart on speed and inspection changes, previous/next navigation, footer controls, compact window"
     );
     match &verification.capture_error {
         None => {

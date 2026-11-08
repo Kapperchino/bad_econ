@@ -185,6 +185,24 @@ fn local(
             }
             Phase::Observation => {}
             Phase::Proposal => {
+                if !k.is(comptime!(ActorKind::Household)) {
+                    let cash = value(state, config, comptime!(Field::Cash as u32), id);
+                    let rent = value(state, config, comptime!(Field::RentalIncome as u32), id);
+                    set(
+                        state,
+                        config,
+                        comptime!(Field::BusinessOpeningCash as u32),
+                        id,
+                        cash,
+                    );
+                    set(
+                        state,
+                        config,
+                        comptime!(Field::BusinessOpeningRent as u32),
+                        id,
+                        rent,
+                    );
+                }
                 if !k.is(comptime!(ActorKind::Household))
                     && k.bits() != comptime!(Good::Housing as u32)
                 {
@@ -438,6 +456,40 @@ fn local(
                 }
             },
             Phase::AccountsDecisions => {
+                if !k.is(comptime!(ActorKind::Household)) {
+                    let revenue = match u32::cast_from(k.bits() == comptime!(Good::Housing as u32))
+                    {
+                        1 => minus(
+                            value(state, config, comptime!(Field::RentalIncome as u32), id),
+                            value(
+                                state,
+                                config,
+                                comptime!(Field::BusinessOpeningRent as u32),
+                                id,
+                            ),
+                        ),
+                        _ => multiply(
+                            control,
+                            value(state, config, comptime!(Field::Sales as u32), id),
+                            number(state, config, comptime!(Field::Price as u32), id),
+                        ),
+                    };
+                    let cash = value(state, config, comptime!(Field::Cash as u32), id);
+                    set(
+                        state,
+                        config,
+                        comptime!(Field::BusinessClosingCash as u32),
+                        id,
+                        cash,
+                    );
+                    set(
+                        state,
+                        config,
+                        comptime!(Field::BusinessRevenue as u32),
+                        id,
+                        revenue,
+                    );
+                }
                 if k.is(comptime!(ActorKind::Household))
                     && comptime!(config.home_mode == Feature::Enabled)
                 {
@@ -1976,6 +2028,95 @@ fn summarize(
                         ),
                         value(state, config, comptime!(Field::Price as u32), actor),
                         totals[SummaryLayout::MAXIMUM_PRICE as usize],
+                    );
+                }
+            }
+            match k.bits() {
+                ActorKind::HOUSEHOLD_BITS => {
+                    let working = number(state, config, comptime!(Field::Worker as u32), actor)
+                        != NO_ACTOR
+                        && number(state, config, comptime!(Field::LivingMembers as u32), actor) > 0;
+                    let subsistence =
+                        comptime!(config.economy == crate::domain::Economy::Industrial)
+                            && number(state, config, comptime!(Field::LandPlots as u32), actor) > 0;
+                    let category = select(working, select(subsistence, 1u32, 0u32), 2u32);
+                    let metric = (SummaryLayout::WORKFORCE + category) as usize;
+                    totals[metric] = add_checked(control, totals[metric], ticks(1, 0));
+                    totals[SummaryLayout::HOUSEHOLD_CASH as usize] = add_checked(
+                        control,
+                        totals[SummaryLayout::HOUSEHOLD_CASH as usize],
+                        value(state, config, comptime!(Field::Cash as u32), actor),
+                    );
+                }
+                _ => {
+                    let good = k.output() - 1;
+                    let status = number(
+                        state,
+                        config,
+                        comptime!(Field::EnterpriseStatus as u32),
+                        actor,
+                    );
+                    if status < 4 {
+                        let category = select(
+                            k.output() == comptime!(Good::Housing as u32),
+                            2u32,
+                            number(
+                                state,
+                                config,
+                                comptime!(Field::EnterpriseModel as u32),
+                                actor,
+                            ),
+                        );
+                        totals[(SummaryLayout::ACTIVE_BY_GOOD + good) as usize] = add_checked(
+                            control,
+                            totals[(SummaryLayout::ACTIVE_BY_GOOD + good) as usize],
+                            ticks(1, 0),
+                        );
+                        totals[(SummaryLayout::BUSINESS_TYPES + category) as usize] = add_checked(
+                            control,
+                            totals[(SummaryLayout::BUSINESS_TYPES + category) as usize],
+                            ticks(1, 0),
+                        );
+                        totals[(SummaryLayout::BUSINESS_STATES + status) as usize] = add_checked(
+                            control,
+                            totals[(SummaryLayout::BUSINESS_STATES + status) as usize],
+                            ticks(1, 0),
+                        );
+                    }
+                    totals[(SummaryLayout::FIRM_CASH + good) as usize] = add_checked(
+                        control,
+                        totals[(SummaryLayout::FIRM_CASH + good) as usize],
+                        value(state, config, comptime!(Field::Cash as u32), actor),
+                    );
+                    totals[(SummaryLayout::BUSINESS_OPENING + good) as usize] = add_checked(
+                        control,
+                        totals[(SummaryLayout::BUSINESS_OPENING + good) as usize],
+                        value(
+                            state,
+                            config,
+                            comptime!(Field::BusinessOpeningCash as u32),
+                            actor,
+                        ),
+                    );
+                    totals[(SummaryLayout::BUSINESS_CLOSING + good) as usize] = add_checked(
+                        control,
+                        totals[(SummaryLayout::BUSINESS_CLOSING + good) as usize],
+                        value(
+                            state,
+                            config,
+                            comptime!(Field::BusinessClosingCash as u32),
+                            actor,
+                        ),
+                    );
+                    totals[(SummaryLayout::BUSINESS_REVENUE + good) as usize] = add_checked(
+                        control,
+                        totals[(SummaryLayout::BUSINESS_REVENUE + good) as usize],
+                        value(
+                            state,
+                            config,
+                            comptime!(Field::BusinessRevenue as u32),
+                            actor,
+                        ),
                     );
                 }
             }
