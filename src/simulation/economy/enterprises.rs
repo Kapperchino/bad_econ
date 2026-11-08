@@ -792,7 +792,7 @@ pub(super) fn expand(
                 ),
             ),
         );
-        let interested = expands(actors, config, firm);
+        let interested = expands(state, actors, config, firm);
         if operating
             && interested
             && kind(actors, firm).bits() != comptime!(Good::Housing as u32)
@@ -905,12 +905,26 @@ pub(super) fn expand(
 }
 
 #[cube]
-pub(super) fn expands(actors: &[u32], config: &EconomyConfig, firm: u32) -> bool {
+pub(super) fn expands(
+    state: &mut [u32],
+    actors: &[u32],
+    config: &EconomyConfig,
+    firm: u32,
+) -> bool {
     let count = actors.len() / ActorLayout::WORDS;
     let workers = actors[ActorLayout::CAPACITY * count + firm as usize];
+    let homes = times32(
+        number(state, config, comptime!(Field::OccupiedPlots as u32), firm),
+        number(state, config, comptime!(Field::OutputTicks as u32), firm),
+    );
+    let capacity = select(
+        kind(actors, firm).bits() == comptime!(Good::Housing as u32),
+        homes,
+        ticks(workers, 0),
+    );
     let draw = actors[ActorLayout::EXPANSION_DRAW * count + firm as usize];
     draw < select(
-        workers >= 20,
+        !lt(capacity, ticks(20, 0)),
         config.industrial_expansion,
         config.small_business_expansion,
     )

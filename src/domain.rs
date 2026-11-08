@@ -1969,8 +1969,12 @@ impl Inspection {
             living_members: state.get(Field::LivingMembers, index),
             equipment_condition: state.get(Field::EquipmentCondition, index),
             safety_provision: state.get(Field::SafetyProvision, index),
-            business_scale: (state.actors.at(index).kind > 0)
-                .then(|| enterprise::BusinessScale::from_workers(state.actors.at(index).capacity)),
+            business_scale: (state.actors.at(index).kind > 0).then(|| {
+                enterprise::BusinessScale::for_business(
+                    &state.actors.at(index),
+                    state.get(Field::OccupiedPlots, index) * state.get(Field::OutputTicks, index),
+                )
+            }),
             enterprise_model: match state.get(Field::EnterpriseModel, index) {
                 1 => enterprise::EnterpriseModel::Distributor,
                 _ => enterprise::EnterpriseModel::Producer,
