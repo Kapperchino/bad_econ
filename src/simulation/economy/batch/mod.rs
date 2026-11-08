@@ -198,36 +198,38 @@ fn settle_units(
         let end = start + length;
         let peer = scratch[(parameters.sort_source + start) as usize];
         let good = comptime!(parameters.market.good().expect("consumer good") as u32);
-        let mut balances = UnitBalances::new(state, actors, config, peer, good, length);
-        let mut cursor = start;
-        let mut faulted = 0u32;
-        while cursor < end {
-            let index = cursor + UNIT_POS;
-            let mut actor = 0u32;
-            let mut prior = KernelEventStatus::new(comptime!(EventStatus::Inactive));
-            if index < end {
-                actor = scratch[(parameters.sort_source + count + index) as usize];
-                prior.replace(KernelEventStatus::load(scratch, 4 * count + actor));
+        if railway::parallel_settlement(config, parameters, peer) {
+            let mut balances = UnitBalances::new(state, actors, config, peer, good, length);
+            let mut cursor = start;
+            let mut faulted = 0u32;
+            while cursor < end {
+                let index = cursor + UNIT_POS;
+                let mut actor = 0u32;
+                let mut prior = KernelEventStatus::new(comptime!(EventStatus::Inactive));
+                if index < end {
+                    actor = scratch[(parameters.sort_source + count + index) as usize];
+                    prior.replace(KernelEventStatus::load(scratch, 4 * count + actor));
+                }
+                let eligible = u32::cast_from(prior.contains(comptime!(EventStatus::Accepted)));
+                let prefix = parallel::scan_prefix(eligible, comptime!(parameters.scan));
+                if index < end {
+                    let decision = balances.decision(prior, prefix.inclusive - eligible);
+                    faulted |= u32::cast_from(decision.overflow);
+                    decision.status.store(scratch, 4 * count + actor);
+                }
+                balances.apply(prefix.total);
+                sync_cube();
+                cursor += CUBE_DIM;
             }
-            let eligible = u32::cast_from(prior.contains(comptime!(EventStatus::Accepted)));
-            let prefix = parallel::scan_prefix(eligible, comptime!(parameters.scan));
-            if index < end {
-                let decision = balances.decision(prior, prefix.inclusive - eligible);
-                faulted |= u32::cast_from(decision.overflow);
-                decision.status.store(scratch, 4 * count + actor);
+            let faults = parallel::scan_prefix(faulted, comptime!(parameters.scan));
+            if UNIT_POS == 0 && faults.total > 0 {
+                KernelFaults::new(comptime!(FaultFlags::ARITHMETIC_OVERFLOW)).record(control);
             }
-            balances.apply(prefix.total);
-            sync_cube();
-            cursor += CUBE_DIM;
-        }
-        let faults = parallel::scan_prefix(faulted, comptime!(parameters.scan));
-        if UNIT_POS == 0 && faults.total > 0 {
-            KernelFaults::new(comptime!(FaultFlags::ARITHMETIC_OVERFLOW)).record(control);
-        }
-        if UNIT_POS == 0 {
-            balances.store(state, config, peer, good);
-            control[PROGRESS_WORD].fetch_max(length);
-            control[COMPLETED_WORD].fetch_add(length);
+            if UNIT_POS == 0 {
+                balances.store(state, config, peer, good);
+                control[PROGRESS_WORD].fetch_max(length);
+                control[COMPLETED_WORD].fetch_add(length);
+            }
         }
     }
 }

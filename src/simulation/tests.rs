@@ -118,6 +118,28 @@ fn cooperative_consumer_markets_preserve_trades_and_accounting_at_every_phase() 
 }
 
 #[test]
+fn mixed_rail_and_animal_sellers_match_serial_settlement_at_every_phase() -> Result<()> {
+    for units in [1, 100] {
+        let mut config: ScenarioConfig =
+            serde_json::from_str(include_str!("../../scenarios/railway.json"))?;
+        config.railway.units_per_level = units;
+        config.firms += 1;
+        let population = config.population.as_mut().expect("explicit population");
+        population.households[1].position = Position { x: 900, y: 900 };
+        population.households[1].cash = 3000;
+        population.households[1].inventories = [0; Good::COUNT];
+        let mut local = population.firms[0].clone();
+        local.identity = 19;
+        local.owner = 2;
+        local.position = Position { x: 900, y: 900 };
+        local.price += 1;
+        population.firms.push(local);
+        compare_market_execution(Scenario::new(config)?, 8)?;
+    }
+    Ok(())
+}
+
+#[test]
 fn grouped_institutions_and_custom_packets_match_coordinate_scheduler() -> Result<()> {
     for scenario in [
         include_str!("../../scenarios/institutions.json"),

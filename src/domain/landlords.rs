@@ -29,7 +29,133 @@ pub struct RentalRegistry {
 
 struct RentalSite {
     account: usize,
+    ordinal: usize,
     position: Position,
+}
+
+#[derive(Clone, Copy)]
+enum RentalAxis {
+    Horizontal,
+    Vertical,
+}
+
+impl RentalAxis {
+    fn coordinate(self, position: Position) -> u32 {
+        match self {
+            Self::Horizontal => position.x,
+            Self::Vertical => position.y,
+        }
+    }
+
+    fn next(self) -> Self {
+        match self {
+            Self::Horizontal => Self::Vertical,
+            Self::Vertical => Self::Horizontal,
+        }
+    }
+}
+
+enum RentalTree {
+    Empty,
+    Site {
+        site: RentalSite,
+        axis: RentalAxis,
+        lower: Box<RentalTree>,
+        upper: Box<RentalTree>,
+    },
+}
+
+#[derive(Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+struct RentalMatch {
+    distance: u32,
+    priority: usize,
+    account: usize,
+}
+
+impl RentalTree {
+    fn new(mut sites: Vec<RentalSite>, axis: RentalAxis) -> Self {
+        match sites.len() {
+            0 => Self::Empty,
+            count => {
+                let middle = count / 2;
+                sites.select_nth_unstable_by_key(middle, |site| {
+                    (axis.coordinate(site.position), site.account)
+                });
+                let upper = sites.split_off(middle + 1);
+                let site = sites.pop().expect("rental tree median");
+                Self::Site {
+                    site,
+                    axis,
+                    lower: Box::new(Self::new(sites, axis.next())),
+                    upper: Box::new(Self::new(upper, axis.next())),
+                }
+            }
+        }
+    }
+
+    fn nearest(
+        &self,
+        position: Position,
+        start: usize,
+        count: usize,
+        best: RentalMatch,
+    ) -> RentalMatch {
+        match self {
+            Self::Empty => best,
+            Self::Site {
+                site,
+                axis,
+                lower,
+                upper,
+            } => {
+                let candidate = RentalMatch {
+                    distance: position.distance(site.position),
+                    priority: (site.ordinal + count - start) % count,
+                    account: site.account,
+                };
+                let coordinate = axis.coordinate(position);
+                let split = axis.coordinate(site.position);
+                let (near, far) = match coordinate < split {
+                    true => (lower, upper),
+                    false => (upper, lower),
+                };
+                let nearest = near.nearest(position, start, count, best.min(candidate));
+                match coordinate.abs_diff(split) <= nearest.distance {
+                    true => far.nearest(position, start, count, nearest),
+                    false => nearest,
+                }
+            }
+        }
+    }
+}
+
+struct RentalRegion {
+    tree: RentalTree,
+    count: usize,
+}
+
+impl RentalRegion {
+    fn new(sites: Vec<RentalSite>) -> Self {
+        Self {
+            count: sites.len(),
+            tree: RentalTree::new(sites, RentalAxis::Horizontal),
+        }
+    }
+
+    fn account(&self, position: Position, household: usize) -> usize {
+        self.tree
+            .nearest(
+                position,
+                household % self.count,
+                self.count,
+                RentalMatch {
+                    distance: u32::MAX,
+                    priority: usize::MAX,
+                    account: usize::MAX,
+                },
+            )
+            .account
+    }
 }
 
 fn region(scenario: &Scenario, actor: &Actor) -> usize {
@@ -46,19 +172,22 @@ impl RentalRegistry {
         let mut accounts = Vec::<RentalAccount>::new();
         for (index, actor) in state.actors.iter().enumerate() {
             if actor.kind == Good::Housing as u32 {
-                buildings
-                    .entry(region(scenario, &actor))
-                    .or_default()
-                    .push(RentalSite {
-                        account: accounts.len(),
-                        position: actor.position,
-                    });
+                let sites = buildings.entry(region(scenario, &actor)).or_default();
+                sites.push(RentalSite {
+                    account: accounts.len(),
+                    ordinal: sites.len(),
+                    position: actor.position,
+                });
                 accounts.push(RentalAccount {
                     landlord: index,
                     tenants: Vec::new(),
                 });
             }
         }
+        let buildings = buildings
+            .into_iter()
+            .map(|(region, sites)| (region, RentalRegion::new(sites)))
+            .collect::<BTreeMap<_, _>>();
         for (index, actor) in state.actors.iter().enumerate() {
             match (actor.kind, buildings.get(&region(scenario, &actor))) {
                 (kind, Some(sites)) if kind != Good::Housing as u32 => {
@@ -66,14 +195,8 @@ impl RentalRegistry {
                         0 => index,
                         _ => actor.owner as usize,
                     };
-                    let site = sites
-                        .iter()
-                        .cycle()
-                        .skip(household % sites.len())
-                        .take(sites.len())
-                        .min_by_key(|site| actor.position.distance(site.position))
-                        .expect("rental region has buildings");
-                    accounts[site.account].tenants.push(index);
+                    let account = sites.account(actor.position, household);
+                    accounts[account].tenants.push(index);
                 }
                 _ => (),
             }

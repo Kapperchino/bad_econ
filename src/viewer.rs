@@ -15,12 +15,7 @@ use bevy::{
     ecs::system::SystemParam,
     input::{ButtonState, mouse::MouseButtonInput},
     prelude::*,
-    render::{
-        RenderApp, RenderPlugin,
-        renderer::{RenderAdapter, RenderDevice, RenderInstance, RenderQueue},
-        settings::{RenderCreation, WgpuSettings},
-        view::screenshot::{Screenshot, ScreenshotCaptured},
-    },
+    render::view::screenshot::{Screenshot, ScreenshotCaptured},
     window::{CursorMoved, PrimaryWindow, WindowEvent},
     winit::{EventLoopProxyWrapper, WinitUserEvent},
 };
@@ -34,19 +29,6 @@ use std::{
     time::{Duration, Instant},
 };
 use ui::{ActorSelection, UiAction};
-
-struct SharedGpu;
-impl Plugin for SharedGpu {
-    fn build(&self, _: &mut App) {}
-    fn finish(&self, app: &mut App) {
-        let instance = app
-            .sub_app(RenderApp)
-            .world()
-            .resource::<RenderInstance>()
-            .clone();
-        app.insert_resource(instance);
-    }
-}
 
 #[derive(Resource)]
 struct Launch {
@@ -215,42 +197,26 @@ enum Publication {
 }
 
 pub fn run(scenario: Scenario, workgroup: u32, mode: ViewMode) -> Result<()> {
-    let settings = WgpuSettings {
-        limits: burn_wgpu::wgpu::Limits {
-            max_storage_buffer_binding_size: 1024 * 1024 * 1024,
-            max_buffer_size: 2 * 1024 * 1024 * 1024,
-            ..Default::default()
-        },
-        ..Default::default()
-    };
     let mut app = App::new();
     app.insert_resource(Launch {
         scenario,
         workgroup,
     })
     .insert_resource(ClearColor(Color::srgb(0.035, 0.045, 0.07)))
-    .add_plugins(
-        DefaultPlugins
-            .set(WindowPlugin {
-                primary_window: Some(Window {
-                    title: "Spatial industrial economy".into(),
-                    resolution: (1600, 960).into(),
-                    resize_constraints: bevy::window::WindowResizeConstraints {
-                        min_width: 1280.0,
-                        min_height: 800.0,
-                        ..Default::default()
-                    },
-                    ..Default::default()
-                }),
+    .add_plugins(DefaultPlugins.set(WindowPlugin {
+        primary_window: Some(Window {
+            title: "Spatial industrial economy".into(),
+            resolution: (1600, 960).into(),
+            resize_constraints: bevy::window::WindowResizeConstraints {
+                min_width: 1280.0,
+                min_height: 800.0,
                 ..Default::default()
-            })
-            .set(RenderPlugin {
-                render_creation: RenderCreation::Automatic(Box::new(settings)),
-                ..Default::default()
-            }),
-    )
+            },
+            ..Default::default()
+        }),
+        ..Default::default()
+    }))
     .add_plugins((
-        SharedGpu,
         ui::UiPlugin,
         presentation::PresentationPlugin,
         pacing::PacingPlugin,
@@ -279,23 +245,8 @@ pub fn run(scenario: Scenario, workgroup: u32, mode: ViewMode) -> Result<()> {
     }
 }
 
-fn setup(
-    mut commands: Commands,
-    launch: Res<Launch>,
-    instance: Res<RenderInstance>,
-    adapter: Res<RenderAdapter>,
-    device: Res<RenderDevice>,
-    queue: Res<RenderQueue>,
-    event_loop: Res<EventLoopProxyWrapper>,
-) {
+fn setup(mut commands: Commands, launch: Res<Launch>, event_loop: Res<EventLoopProxyWrapper>) {
     commands.spawn((Camera2d, IsDefaultUiCamera));
-    let setup = burn_wgpu::WgpuSetup {
-        instance: instance.as_ref().clone().into_inner(),
-        adapter: adapter.as_ref().clone().into_inner(),
-        device: device.wgpu_device().clone(),
-        queue: queue.as_ref().clone().into_inner(),
-        backend: adapter.get_info().backend,
-    };
     let data = Arc::new(Mutex::new(Display {
         snapshot: ObservationSnapshot::default(),
         history: VecDeque::new(),
@@ -327,7 +278,7 @@ fn setup(
     let wake = (**event_loop).clone();
     std::thread::spawn(move || {
         let worker_wake = wake.clone();
-        let result = Device::import(setup, workgroup)
+        let result = Device::headless(workgroup)
             .and_then(|device| Simulation::new(scenario, device))
             .and_then(|simulation| {
                 worker::run(simulation, receiver, data.clone(), move || {
@@ -811,7 +762,7 @@ fn capture_compact_frame(
         });
     verification.capture(&captured.image, "compact");
     eprintln!(
-        "viewer interaction and layout verification passed: shared GPU, native mouse clicks, reset/step/comparison feedback, audited days, household and firm inspection, refreshed inspection, all five menus and 28 charts, four history periods, series focus, retained GPU chart on speed and inspection changes, previous/next navigation, footer controls, compact window"
+        "viewer interaction and layout verification passed: separate rendering and simulation queues, native mouse clicks, reset/step/comparison feedback, audited days, household and firm inspection, refreshed inspection, all five menus and 28 charts, four history periods, series focus, retained GPU chart on speed and inspection changes, previous/next navigation, footer controls, compact window"
     );
     match &verification.capture_error {
         None => {

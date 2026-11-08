@@ -19,6 +19,10 @@ pub(super) fn prepare(
     parameters: &EconomyParameters,
     invocation: u32,
 ) {
+    railway::reset_settlements(config, invocation);
+    if invocation == 0 {
+        railway::reset_settlements(config, config.actors);
+    }
     let mut id = invocation;
     let mut searching = false;
     let masks = ceildiv(config.actors, 32);

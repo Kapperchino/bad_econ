@@ -103,6 +103,71 @@ fn region(plots: u32) -> PropertyConfig {
 }
 
 #[test]
+fn indexed_rentals_preserve_nearest_buildings_and_cyclic_ties_on_gpu() -> Result<()> {
+    let mut config = rentals()?;
+    let population = config.population.as_mut().unwrap();
+    let building = population.firms.pop().unwrap();
+    population.firms.extend((0..17).map(|index| FirmSeed {
+        identity: 103 + index,
+        position: match index % 4 {
+            0 => Position { x: 200, y: 250 },
+            1 => Position { x: 300, y: 250 },
+            2 => Position { x: 250, y: 200 },
+            _ => Position { x: 250, y: 300 },
+        },
+        ..building.clone()
+    }));
+    for household in population.households.iter_mut().skip(4) {
+        household.position = Position {
+            x: household.identity as u32 * 71,
+            y: 150 + household.identity as u32 * 21,
+        };
+    }
+    config.firms = population.firms.len() as u32;
+    let scenario = Scenario::new(config)?;
+    let initial = scenario.initial()?;
+    let buildings = initial
+        .actors
+        .iter()
+        .enumerate()
+        .filter(|(_, actor)| actor.kind == Good::Housing as u32)
+        .map(|(index, _)| index)
+        .collect::<Vec<_>>();
+    let mut simulation = Simulation::new(scenario, support::device(64)?)?;
+    simulation.advance()?;
+    let state = simulation.download()?;
+    for (index, actor) in initial
+        .actors
+        .iter()
+        .enumerate()
+        .filter(|(_, actor)| actor.kind != Good::Housing as u32)
+    {
+        let household = match actor.kind {
+            0 => index,
+            _ => actor.owner as usize,
+        };
+        let expected = buildings
+            .iter()
+            .copied()
+            .cycle()
+            .skip(household % buildings.len())
+            .take(buildings.len())
+            .min_by_key(|&building| {
+                actor
+                    .position
+                    .distance(initial.actors.at(building).position)
+            })
+            .unwrap();
+        assert_eq!(
+            state.get(Field::Landlord, index),
+            expected as u64 + 1,
+            "tenant {index}"
+        );
+    }
+    Ok(())
+}
+
+#[test]
 fn generated_rentals_house_local_renters_without_counting_subsistence_homes_on_gpu() -> Result<()> {
     let scenario = Scenario::industrial(10_000, 42, Experiment::Baseline)?;
     let initial = scenario.initial()?;

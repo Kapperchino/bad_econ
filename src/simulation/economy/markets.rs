@@ -191,6 +191,7 @@ pub(in crate::simulation) fn ranges(
             high = select(same, high, middle);
         }
         length = low - id;
+        scratch[(7 * count + key) as usize] = low;
         slots = min(length, MAX_RANGE_SPACING);
         if comptime!(
             matches!(parameters.market, MarketFlag::Consumer(_))

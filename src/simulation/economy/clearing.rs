@@ -17,6 +17,7 @@ pub(super) fn actor_settlement(
     id: u32,
     #[comptime] posting: Posting,
 ) {
+    let index = id;
     let mut invocation = id;
     if comptime!(parameters.discovery == Discovery::Indexed) {
         invocation = parameters.count;
@@ -29,11 +30,30 @@ pub(super) fn actor_settlement(
         let actor = id + parameters.offset;
         let other = proposals[actor as usize * ProposalLayout::WORDS + ProposalLayout::ACTOR];
         let status = KernelEventStatus::load(scratch, 4 * parameters.count + id);
+        if comptime!(
+            config.railway.enabled == Feature::Enabled
+                && parameters.market.good().is_some()
+                && matches!(posting, Posting::ApplyActor)
+        ) && other != NO_ACTOR
+        {
+            railway::finalize_rejection(
+                state,
+                actors,
+                config,
+                control,
+                parameters,
+                &*proposals,
+                scratch,
+                actor,
+                other,
+                index,
+            );
+        }
         let eligible = match comptime!(posting) {
             Posting::CheckActor => other != NO_ACTOR,
             _ => status.contains(comptime!(EventStatus::Accepted)),
         };
-        if eligible {
+        if eligible && railway::parallel_settlement(config, parameters, other) {
             let mut event = Array::<u32>::new(EVENT_WORDS);
             construct(
                 state,

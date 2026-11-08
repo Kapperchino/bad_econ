@@ -12,7 +12,7 @@ pub enum DisplayState {
 impl DisplayState {
     pub fn label(&self) -> String {
         match self {
-            Self::Initializing => "Initializing shared GPU...".into(),
+            Self::Initializing => "Initializing simulation...".into(),
             Self::Active(state) => format!("{state:?}"),
             Self::Unavailable(message) => format!("Fault: {message}"),
         }

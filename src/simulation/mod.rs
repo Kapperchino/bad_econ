@@ -520,7 +520,9 @@ impl Simulation {
                 self.local(phase)
             }
             Phase::ProvisionPurchase => {
+                self.railways(economy::railway::RailStage::Access);
                 self.railways(economy::railway::RailStage::Routes);
+                self.railways(economy::railway::RailStage::Quotes);
                 self.scenario
                     .goods_markets()
                     .into_iter()
@@ -1237,6 +1239,7 @@ impl Simulation {
             &self.device,
             &self.state,
             &self.actors,
+            &self.spatial,
             &self.config,
             &self.control,
             phase,
@@ -1322,7 +1325,9 @@ impl Simulation {
                 EconomyStage::GroupExecute => {
                     markets::dispatch(&self.searches.dispatches, markets::RANGE_DISPATCH)
                 }
-                EconomyStage::GroupPrepare
+                EconomyStage::RailClassify
+                | EconomyStage::RailDependencies
+                | EconomyStage::GroupPrepare
                 | EconomyStage::GroupFinalize
                 | EconomyStage::GroupRadixLocal
                 | EconomyStage::GroupRadixScatter
@@ -1471,12 +1476,21 @@ impl Simulation {
             }
         }
         launch(EconomyStage::MarketBoundary, 1, &parameters);
-        if !regional_transport
-            && matches!(
-                market,
-                Market::Labor | Market::Input(_) | Market::Consumer(_) | Market::Household
-            )
-        {
+        if regional_transport {
+            launch(EconomyStage::RailClassify, count, &parameters);
+            launch(EconomyStage::RailDependencies, count, &parameters);
+            #[cfg(test)]
+            if matches!(
+                self.market_execution,
+                MarketExecution::Original | MarketExecution::Reference
+            ) {
+                self.config.railway.serial_settlements(&self.device);
+            }
+        }
+        if matches!(
+            market,
+            Market::Labor | Market::Input(_) | Market::Consumer(_) | Market::Household
+        ) {
             launch(EconomyStage::GroupPrepare, count, &parameters);
         }
         launch(EconomyStage::MarketBoundary, 1, &parameters);
@@ -1489,8 +1503,10 @@ impl Simulation {
         )?;
         launch(EconomyStage::GroupRanges, count, &parameters);
         launch(EconomyStage::MarketBoundary, 1, &parameters);
+        if regional_transport {
+            launch(EconomyStage::RailExecute, 1, &parameters);
+        }
         match market {
-            _ if regional_transport => launch(EconomyStage::RailExecute, 1, &parameters),
             Market::Labor if self.scenario.config().bargaining.is_none() => {
                 economy::batch::labor::LaborSettlement::launch(
                     &self.device,
@@ -1505,33 +1521,29 @@ impl Simulation {
                     },
                 )
             }
-            Market::Consumer(_) if self.scenario.config().railway.companies.is_empty() => {
-                economy::batch::ConsumerSettlement::launch(
-                    &self.device,
-                    markets::dispatch(&self.searches.dispatches, markets::QUEUE_DISPATCH),
-                    cubecl::CubeDim::new_1d(self.device.workgroup),
-                    economy::batch::SettlementInputLaunch {
-                        state: self.state.clone().into_buffer_arg(),
-                        actors: self.actors.clone().into_buffer_arg(),
-                        config: self.config.launch(),
-                        scratch: self.scratch.clone().into_buffer_arg(),
-                        control: self.control.clone().into_buffer_arg(),
-                        parameters: parameters.launch(),
-                    },
-                )
-            }
+            Market::Consumer(_) => economy::batch::ConsumerSettlement::launch(
+                &self.device,
+                markets::dispatch(&self.searches.dispatches, markets::QUEUE_DISPATCH),
+                cubecl::CubeDim::new_1d(self.device.workgroup),
+                economy::batch::SettlementInputLaunch {
+                    state: self.state.clone().into_buffer_arg(),
+                    actors: self.actors.clone().into_buffer_arg(),
+                    config: self.config.launch(),
+                    scratch: self.scratch.clone().into_buffer_arg(),
+                    control: self.control.clone().into_buffer_arg(),
+                    parameters: parameters.launch(),
+                },
+            ),
             _ => launch(EconomyStage::GroupExecute, count, &parameters),
         }
-        if !regional_transport && market == Market::Household {
+        if market == Market::Household {
             launch(EconomyStage::GroupRemainder, count, &parameters);
         }
         launch(EconomyStage::MarketBoundary, 1, &parameters);
-        if !regional_transport
-            && matches!(
-                market,
-                Market::Labor | Market::Input(_) | Market::Consumer(_) | Market::Household
-            )
-        {
+        if matches!(
+            market,
+            Market::Labor | Market::Input(_) | Market::Consumer(_) | Market::Household
+        ) {
             launch(EconomyStage::GroupFinalize, count, &parameters);
         }
         launch(EconomyStage::MarketBoundary, 1, &parameters);

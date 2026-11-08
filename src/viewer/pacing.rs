@@ -26,11 +26,23 @@ pub(super) enum Cadence {
     Animating,
 }
 
-fn update(cadence: Res<Cadence>, mut settings: ResMut<WinitSettings>) {
+fn update(
+    cadence: Res<Cadence>,
+    verification: Option<Res<super::Verification>>,
+    mut settings: ResMut<WinitSettings>,
+) {
     let interval = match *cadence {
         Cadence::Idle => Duration::from_millis(250),
         Cadence::Animating => Duration::from_secs_f64(1.0 / 60.0),
     };
-    settings.focused_mode = UpdateMode::reactive_low_power(interval);
-    settings.unfocused_mode = UpdateMode::reactive_low_power(Duration::from_millis(500));
+    *settings = match verification {
+        Some(_) => WinitSettings {
+            focused_mode: UpdateMode::Continuous,
+            unfocused_mode: UpdateMode::Continuous,
+        },
+        None => WinitSettings {
+            focused_mode: UpdateMode::reactive_low_power(interval),
+            unfocused_mode: UpdateMode::reactive_low_power(Duration::from_millis(500)),
+        },
+    };
 }

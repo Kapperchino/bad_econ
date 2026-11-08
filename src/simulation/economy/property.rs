@@ -6,6 +6,9 @@ use crate::domain::{
 use crate::simulation::{Device, configuration::Configuration};
 use burn_wgpu::CubeTensor;
 
+#[cfg(test)]
+mod tests;
+
 #[derive(Clone, Copy, Debug, Hash, PartialEq, Eq)]
 enum PropertyStage {
     Initialize,
@@ -25,6 +28,7 @@ enum ConsolidationState {
 struct PropertyInput {
     state: Box<[u32]>,
     actors: Box<[u32]>,
+    spatial: Box<[u32]>,
     config: EconomyConfig,
     control: Box<[Atomic<u32>]>,
     #[cube(comptime)]
@@ -33,6 +37,81 @@ struct PropertyInput {
 
 struct PropertySystem;
 struct AllocateProperty;
+
+#[derive(CubeType, CubeLaunch)]
+struct ParcelIndexInput {
+    actors: Box<[u32]>,
+    spatial: Box<[u32]>,
+    parcels: Box<[u32]>,
+    count: u32,
+    source: u32,
+    side: u32,
+    size: u32,
+}
+
+struct ParcelIndex;
+struct IndexParcels;
+
+impl System for ParcelIndex {
+    type Input = ParcelIndexInput;
+    type Passes = gpu_passes![IndexParcels];
+}
+
+#[cube]
+impl GpuPass<ParcelIndexInput> for IndexParcels {
+    type Output = ();
+
+    fn execute(mut input: ParcelIndexInput) {
+        let id = ABSOLUTE_POS as u32;
+        let cells = input.side * input.side;
+        if id < input.count {
+            input.parcels[(cells + 1 + id) as usize] = input.spatial[(input.source + id) as usize];
+        }
+        if id <= cells {
+            let mut low = 0;
+            let mut high = input.count;
+            while low < high {
+                let middle = low + (high - low) / 2;
+                let actor = input.spatial[(input.source + middle) as usize];
+                let x = input.actors[(ActorLayout::X as u32 * input.count + actor) as usize];
+                let y = input.actors[(ActorLayout::Y as u32 * input.count + actor) as usize];
+                let before = y / input.size * input.side + x / input.size < id;
+                low = select(before, middle + 1, low);
+                high = select(before, high, middle);
+            }
+            input.parcels[id as usize] = low;
+        }
+    }
+}
+
+fn parcel_index(
+    device: &Device,
+    actors: &CubeTensor,
+    spatial: &CubeTensor,
+    config: &Configuration,
+) -> CubeTensor {
+    let size = config.map_size.div_ceil(128);
+    let side = config.map_size.div_ceil(size);
+    let cells = side * side;
+    let parcels = device.empty((cells + 1 + config.actors) as usize);
+    ParcelIndex::launch(
+        device,
+        device.count(config.actors.max(cells + 1) as usize),
+        CubeDim::new_1d(device.workgroup),
+        ParcelIndexInputLaunch {
+            actors: actors.clone().into_buffer_arg(),
+            spatial: spatial.clone().into_buffer_arg(),
+            parcels: parcels.clone().into_buffer_arg(),
+            count: config.actors,
+            source: 3 * (config.spatial_side * config.spatial_side + 1 + config.actors)
+                + config.actors.div_ceil(DISCOVERY_BLOCK)
+                + 1,
+            side,
+            size,
+        },
+    );
+    parcels
+}
 
 impl System for PropertySystem {
     type Input = PropertyInput;
@@ -68,6 +147,7 @@ impl GpuPass<PropertyInput> for AllocateProperty {
             PropertyStage::Consolidate => consolidate(
                 &mut input.state,
                 &input.actors,
+                &input.spatial,
                 &input.config,
                 &input.control,
             ),
@@ -79,6 +159,7 @@ pub(in crate::simulation) fn launch(
     device: &Device,
     state: &CubeTensor,
     actors: &CubeTensor,
+    spatial: &CubeTensor,
     config: &Configuration,
     control: &CubeTensor,
     phase: Phase,
@@ -111,13 +192,22 @@ pub(in crate::simulation) fn launch(
             PropertyStage::Consolidate => 1,
             _ => config.actors as usize,
         };
+        let workgroup = match stage {
+            PropertyStage::Consolidate => 256,
+            _ => device.workgroup,
+        };
+        let spatial = match stage {
+            PropertyStage::Consolidate => parcel_index(device, actors, spatial, config),
+            _ => spatial.clone(),
+        };
         PropertySystem::launch(
             device,
             device.count(count),
-            CubeDim::new_1d(device.workgroup),
+            CubeDim::new_1d(workgroup),
             PropertyInputLaunch {
                 state: state.clone().into_buffer_arg(),
                 actors: actors.clone().into_buffer_arg(),
+                spatial: spatial.clone().into_buffer_arg(),
                 config: config.launch(),
                 control: control.clone().into_buffer_arg(),
                 stage,
@@ -127,7 +217,13 @@ pub(in crate::simulation) fn launch(
 }
 
 #[cube]
-fn consolidate(state: &mut [u32], actors: &[u32], config: &EconomyConfig, control: &[Atomic<u32>]) {
+fn consolidate(
+    state: &mut [u32],
+    actors: &[u32],
+    spatial: &[u32],
+    config: &EconomyConfig,
+    control: &[Atomic<u32>],
+) {
     for index in 0..config.grain_farms.len() - 1 {
         let farm = config.grain_farms[index];
         let output = number(state, config, comptime!(Field::OutputTicks as u32), farm);
@@ -180,6 +276,7 @@ fn consolidate(state: &mut [u32], actors: &[u32], config: &EconomyConfig, contro
             consolidate_farm(
                 state,
                 actors,
+                spatial,
                 config,
                 control,
                 farm,
@@ -190,89 +287,268 @@ fn consolidate(state: &mut [u32], actors: &[u32], config: &EconomyConfig, contro
 }
 
 #[cube]
+fn sum_plots(amount: u64) -> u64 {
+    let mut plots = Shared::<[u64]>::new_slice(256usize);
+    plots[UNIT_POS as usize] = amount;
+    sync_cube();
+    let mut stride = CUBE_DIM / 2;
+    while stride > 0 {
+        if UNIT_POS < stride {
+            plots[UNIT_POS as usize] += plots[(UNIT_POS + stride) as usize];
+        }
+        sync_cube();
+        stride /= 2;
+    }
+    plots[0usize]
+}
+
+#[cube]
+fn prefix_plots(amount: u64) -> u64 {
+    let mut plots = Shared::<[u64]>::new_slice(256usize);
+    plots[UNIT_POS as usize] = amount;
+    sync_cube();
+    let mut stride = 1;
+    while stride < CUBE_DIM {
+        let index = (UNIT_POS + 1) * stride * 2 - 1;
+        if index < CUBE_DIM {
+            plots[index as usize] += plots[(index - stride) as usize];
+        }
+        sync_cube();
+        stride *= 2;
+    }
+    stride = CUBE_DIM / 4;
+    while stride > 0 {
+        let index = (UNIT_POS + 1) * stride * 2 - 1;
+        if index + stride < CUBE_DIM {
+            plots[(index + stride) as usize] += plots[index as usize];
+        }
+        sync_cube();
+        stride /= 2;
+    }
+    plots[UNIT_POS as usize]
+}
+
+#[cube]
+fn local_plots(state: &mut [u32], actors: &[u32], config: &EconomyConfig, household: u32) -> u64 {
+    let plots = number(state, config, comptime!(Field::LandPlots as u32), household);
+    u64::cast_from(select(
+        kind(actors, household).is(comptime!(ActorKind::Household)),
+        plots,
+        0,
+    ))
+}
+
+#[derive(CubeType)]
+struct LandNeighborhood {
+    x: u32,
+    y: u32,
+    width: u32,
+    height: u32,
+    side: u32,
+}
+
+#[cube]
+impl LandNeighborhood {
+    fn new(actors: &[u32], config: &EconomyConfig, farm: u32, radius: u32) -> Self {
+        let stride = actors.len() / ActorLayout::WORDS;
+        let x = actors[ActorLayout::X * stride + farm as usize];
+        let y = actors[ActorLayout::Y * stride + farm as usize];
+        let size = ceildiv(config.map_size, 128);
+        let side = ceildiv(config.map_size, size);
+        let lower_x = (max(x, radius) - radius) / size;
+        let lower_y = (max(y, radius) - radius) / size;
+        let upper_x = min((x + radius) / size, side - 1);
+        let upper_y = min((y + radius) / size, side - 1);
+        LandNeighborhood {
+            x: lower_x,
+            y: lower_y,
+            width: upper_x - lower_x + 1,
+            height: upper_y - lower_y + 1,
+            side,
+        }
+    }
+
+    fn cell(&self, index: u32) -> u32 {
+        (self.y + index / self.width) * self.side + self.x + index % self.width
+    }
+
+    fn actor(&self, spatial: &[u32], index: u32) -> u32 {
+        spatial[(self.side * self.side + 1 + index) as usize]
+    }
+
+    fn lower_bound(&self, spatial: &[u32], cell: u32, actor: u32) -> u32 {
+        let mut low = spatial[cell as usize];
+        let mut high = spatial[cell as usize + 1];
+        while low < high {
+            let middle = low + (high - low) / 2;
+            let before = self.actor(spatial, middle) < actor;
+            low = select(before, middle + 1, low);
+            high = select(before, high, middle);
+        }
+        low
+    }
+}
+
+#[cube]
+fn nearby_plots(
+    state: &mut [u32],
+    actors: &[u32],
+    spatial: &[u32],
+    config: &EconomyConfig,
+    farm: u32,
+    radius: u32,
+) -> u64 {
+    let neighborhood = LandNeighborhood::new(actors, config, farm, radius);
+    let mut plots = u64::new(0);
+    for index in 0..neighborhood.width * neighborhood.height {
+        let cell = neighborhood.cell(index);
+        let mut member = spatial[cell as usize] + UNIT_POS;
+        let end = spatial[cell as usize + 1];
+        while member < end {
+            let household = neighborhood.actor(spatial, member);
+            let grant = local_plots(state, actors, config, household);
+            plots += select(
+                distance(actors, farm, household) <= radius,
+                grant,
+                u64::new(0),
+            );
+            member += CUBE_DIM;
+        }
+    }
+    sum_plots(plots)
+}
+
+#[cube]
 fn consolidate_farm(
     state: &mut [u32],
     actors: &[u32],
+    spatial: &[u32],
     config: &EconomyConfig,
     control: &[Atomic<u32>],
     farm: u32,
     required: u32,
 ) {
-    let mut remaining = required;
-    while remaining > 0 {
-        let selected = nearest_farmer(state, actors, config, farm);
-        if selected < config.actors {
-            let plots = value(state, config, comptime!(Field::LandPlots as u32), selected);
-            sync_storage();
-            if UNIT_POS == 0 {
-                increase(
-                    state,
-                    config,
-                    control,
-                    comptime!(Field::OccupiedPlots as u32),
-                    farm,
-                    plots,
-                );
-                increase(
-                    state,
-                    config,
-                    control,
-                    comptime!(Field::DisplacedPlots as u32),
-                    selected,
-                    plots,
-                );
-                set32(
-                    state,
-                    config,
-                    comptime!(Field::LandPlots as u32),
-                    selected,
-                    0,
-                );
-                set32(
-                    state,
-                    config,
-                    comptime!(Field::CropWork as u32),
-                    selected,
-                    0,
-                );
+    if required > 0 {
+        let mut low = 0;
+        let mut high = min(1u32, config.search_radius);
+        let mut available = nearby_plots(state, actors, spatial, config, farm, high);
+        while high < config.search_radius && available < u64::cast_from(required) {
+            low = high + 1;
+            high = min(high * 2, config.search_radius);
+            available = nearby_plots(state, actors, spatial, config, farm, high);
+        }
+        while low < high {
+            let radius = low + (high - low) / 2;
+            let plots = nearby_plots(state, actors, spatial, config, farm, radius);
+            let short = plots < u64::cast_from(required);
+            low = select(short, radius + 1, low);
+            high = select(short, high, radius);
+        }
+        let radius = low;
+        let neighborhood = LandNeighborhood::new(actors, config, farm, radius);
+        let block = ceildiv(config.actors, CUBE_DIM);
+        let start = UNIT_POS * block;
+        let end = min(start + block, config.actors);
+        let mut closer = u64::new(0);
+        let mut boundary = u64::new(0);
+        for index in 0..neighborhood.width * neighborhood.height {
+            let cell = neighborhood.cell(index);
+            let first = neighborhood.lower_bound(spatial, cell, start);
+            let last = neighborhood.lower_bound(spatial, cell, end);
+            for member in first..last {
+                let household = neighborhood.actor(spatial, member);
+                let plots = local_plots(state, actors, config, household);
+                let trip = distance(actors, farm, household);
+                closer += select(trip < radius, plots, u64::new(0));
+                boundary += select(trip == radius, plots, u64::new(0));
             }
-            remaining = max(remaining, plots.extract(LOW_WORD)) - plots.extract(LOW_WORD);
-        } else {
-            remaining = 0;
+        }
+        let preceding = sum_plots(closer) + prefix_plots(boundary) - boundary;
+        let mut cutoff = Shared::<[u32]>::new_slice(1usize);
+        if UNIT_POS == 0 {
+            cutoff[0] = config.actors;
+        }
+        sync_cube();
+        if preceding < u64::cast_from(required) && preceding + boundary >= u64::cast_from(required)
+        {
+            let mut low = start;
+            let mut high = end - 1;
+            while low < high {
+                let middle = low + (high - low) / 2;
+                let mut plots = preceding;
+                for index in 0..neighborhood.width * neighborhood.height {
+                    let cell = neighborhood.cell(index);
+                    let first = neighborhood.lower_bound(spatial, cell, start);
+                    let last = neighborhood.lower_bound(spatial, cell, middle + 1);
+                    for member in first..last {
+                        let household = neighborhood.actor(spatial, member);
+                        plots += select(
+                            distance(actors, farm, household) == radius,
+                            local_plots(state, actors, config, household),
+                            u64::new(0),
+                        );
+                    }
+                }
+                let short = plots < u64::cast_from(required);
+                low = select(short, middle + 1, low);
+                high = select(short, high, middle);
+            }
+            cutoff[0] = low;
+        }
+        sync_cube();
+        let mut acquired = u64::new(0);
+        for index in 0..neighborhood.width * neighborhood.height {
+            let cell = neighborhood.cell(index);
+            let mut member = spatial[cell as usize] + UNIT_POS;
+            let end = spatial[cell as usize + 1];
+            while member < end {
+                let household = neighborhood.actor(spatial, member);
+                let plots = local_plots(state, actors, config, household);
+                let trip = distance(actors, farm, household);
+                let selected = plots > u64::new(0)
+                    && (trip < radius || trip == radius && household <= cutoff[0]);
+                if selected {
+                    increase(
+                        state,
+                        config,
+                        control,
+                        comptime!(Field::DisplacedPlots as u32),
+                        household,
+                        ticks(u32::cast_from(plots), 0),
+                    );
+                    set32(
+                        state,
+                        config,
+                        comptime!(Field::LandPlots as u32),
+                        household,
+                        0,
+                    );
+                    set32(
+                        state,
+                        config,
+                        comptime!(Field::CropWork as u32),
+                        household,
+                        0,
+                    );
+                    acquired += plots;
+                }
+                member += CUBE_DIM;
+            }
+        }
+        let total = sum_plots(acquired);
+        sync_storage();
+        if UNIT_POS == 0 {
+            increase(
+                state,
+                config,
+                control,
+                comptime!(Field::OccupiedPlots as u32),
+                farm,
+                ticks(u32::cast_from(total), u32::cast_from(total >> 32)),
+            );
         }
         sync_storage();
     }
-}
-
-#[cube]
-fn nearest_farmer(state: &mut [u32], actors: &[u32], config: &EconomyConfig, farm: u32) -> u32 {
-    let mut nearest = u64::new(comptime!(u64::MAX as i64));
-    let mut household = UNIT_POS;
-    while household < config.actors {
-        let plots = number(state, config, comptime!(Field::LandPlots as u32), household);
-        let trip = distance(actors, farm, household);
-        let eligible = kind(actors, household).is(comptime!(ActorKind::Household))
-            && plots > 0
-            && trip <= config.search_radius;
-        let rank = (u64::cast_from(trip) << 32) | u64::cast_from(household);
-        nearest = min(nearest, select(eligible, rank, u64::MAX));
-        household += CUBE_DIM;
-    }
-    let mut ranks = Shared::<[u64]>::new_slice(256usize);
-    ranks[UNIT_POS as usize] = nearest;
-    sync_cube();
-    let mut stride = CUBE_DIM / 2;
-    while stride > 0 {
-        if UNIT_POS < stride {
-            ranks[UNIT_POS as usize] = min(
-                ranks[UNIT_POS as usize],
-                ranks[(UNIT_POS + stride) as usize],
-            );
-        }
-        sync_cube();
-        stride /= 2;
-    }
-    u32::cast_from(ranks[0])
 }
 
 #[cube]

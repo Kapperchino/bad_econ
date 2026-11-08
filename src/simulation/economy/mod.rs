@@ -1363,8 +1363,12 @@ fn construct(
         let other = proposals[actor as usize * ProposalLayout::WORDS + ProposalLayout::ACTOR];
         let mut path = railway::animal_route(actors, config, actor, actor);
         if comptime!(parameters.market.good().is_some()) && other < config.actors {
-            let planned = railway::route(actors, config, actor, other);
+            let planned = railway::animal_route(actors, config, actor, other);
             path.replace(&planned);
+            if !railway::parallel_settlement(config, parameters, other) {
+                let planned = railway::route(actors, config, actor, other);
+                path.replace(&planned);
+            }
         }
         construct_route(
             state,
@@ -2286,6 +2290,8 @@ pub enum EconomyStage {
     GroupSort,
     GroupMerge,
     GroupExecute,
+    RailClassify,
+    RailDependencies,
     RailExecute,
     GroupRemainder,
     GroupPrepare,
@@ -2430,6 +2436,19 @@ pub fn economy(
             }
             EconomyStage::GroupSort => group_sort(bundles, control, parameters, id),
             EconomyStage::GroupMerge => group_merge(bundles, control, parameters, id),
+            EconomyStage::RailClassify => railway::classify(
+                state,
+                actors,
+                config,
+                &*proposals,
+                &*bundles,
+                control,
+                parameters,
+                id,
+            ),
+            EconomyStage::RailDependencies => {
+                railway::dependencies(config, &*proposals, &*bundles, control, parameters, id)
+            }
             EconomyStage::RailExecute => railway::dispatch(
                 state, actors, config, proposals, bundles, control, parameters, id,
             ),
@@ -2656,7 +2675,7 @@ fn group_execute(
         if id > 0 {
             first = scratch[(source + id - 1) as usize] != key;
         }
-        if first {
+        if first && railway::parallel_settlement(config, parameters, key) {
             let low = id;
             let mut cursor = low;
             let mut active = true;
@@ -2736,7 +2755,9 @@ fn group_remainder(
     let count = parameters.count;
     if id < markets::active(control, parameters) {
         let key = scratch[(parameters.sort_source + id) as usize];
-        if id >= scratch[(7 * count + key) as usize] {
+        if id >= scratch[(7 * count + key) as usize]
+            && railway::parallel_settlement(config, parameters, key)
+        {
             let actor = scratch[(parameters.sort_source + count + id) as usize];
             let prior = KernelEventStatus::load(scratch, 4 * count + actor);
             let mut peer = PeerBalances::new(state, actors, config, parameters, key);
