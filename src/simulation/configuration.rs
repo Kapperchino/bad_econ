@@ -126,6 +126,7 @@ pub struct EconomyConfig {
     #[cube(comptime)]
     pub property_mode: Feature,
     pub property_regions: Box<[u32]>,
+    pub grain_farms: Box<[u32]>,
     pub rental_accounts: Box<[u32]>,
     pub rental_businesses: u32,
     pub small_business_expansion: u32,
@@ -174,6 +175,7 @@ pub struct Configuration {
     pub tax_brackets: Vec<TaxBracket>,
     pub property_mode: Feature,
     pub property_regions: burn_wgpu::CubeTensor,
+    pub grain_farms: burn_wgpu::CubeTensor,
     pub rental_accounts: burn_wgpu::CubeTensor,
     pub rental_businesses: u32,
     pub small_business_expansion: u32,
@@ -200,6 +202,16 @@ impl Configuration {
             economy: config.economy,
             home: HomeProduction::new(config.household_production),
             property_mode: Feature::from(config.property.as_ref()),
+            grain_farms: device.tensor(
+                &state
+                    .actors
+                    .iter()
+                    .enumerate()
+                    .filter(|(_, actor)| actor.kind == Good::Grain as u32)
+                    .map(|(index, _)| index as u32)
+                    .chain([u32::MAX])
+                    .collect::<Vec<_>>(),
+            ),
             property_regions: device.tensor(&config.property.as_ref().map_or_else(
                 || vec![0; 6],
                 |property| {
@@ -291,6 +303,7 @@ impl Configuration {
             rental_businesses: self.rental_businesses,
             property_mode: self.property_mode,
             property_regions: self.property_regions.clone().into_buffer_arg(),
+            grain_farms: self.grain_farms.clone().into_buffer_arg(),
             actors: self.actors,
             fields: self.fields,
             ring: self.ring,

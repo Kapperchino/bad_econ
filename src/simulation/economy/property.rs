@@ -11,6 +11,14 @@ enum PropertyStage {
     Initialize,
     Allocate,
     Construct,
+    Consolidate,
+}
+
+#[repr(u32)]
+enum ConsolidationState {
+    Ineligible,
+    Building,
+    Ready,
 }
 
 #[derive(CubeType, CubeLaunch)]
@@ -57,6 +65,12 @@ impl GpuPass<PropertyInput> for AllocateProperty {
                 &input.control,
                 ABSOLUTE_POS as u32,
             ),
+            PropertyStage::Consolidate => consolidate(
+                &mut input.state,
+                &input.actors,
+                &input.config,
+                &input.control,
+            ),
         }
     }
 }
@@ -77,9 +91,24 @@ pub(in crate::simulation) fn launch(
         }
         _ => &[],
     };
-    for &stage in stages {
+    let consolidation = match (
+        config.property_mode,
+        phase,
+        config.economy,
+        config.home_mode,
+    ) {
+        (
+            Feature::Disabled,
+            Phase::AccountsDecisions,
+            crate::domain::Economy::Industrial,
+            Feature::Enabled,
+        ) => Some(PropertyStage::Consolidate),
+        _ => None,
+    };
+    for stage in stages.iter().copied().chain(consolidation) {
         let count = match stage {
             PropertyStage::Allocate => config.property_regions.meta.num_elements() / 6,
+            PropertyStage::Consolidate => 1,
             _ => config.actors as usize,
         };
         PropertySystem::launch(
@@ -95,6 +124,155 @@ pub(in crate::simulation) fn launch(
             },
         );
     }
+}
+
+#[cube]
+fn consolidate(state: &mut [u32], actors: &[u32], config: &EconomyConfig, control: &[Atomic<u32>]) {
+    for index in 0..config.grain_farms.len() - 1 {
+        let farm = config.grain_farms[index];
+        let output = number(state, config, comptime!(Field::OutputTicks as u32), farm);
+        let labor = number(state, config, comptime!(Field::LaborMinutes as u32), farm);
+        let operating = number(
+            state,
+            config,
+            comptime!(Field::EnterpriseStatus as u32),
+            farm,
+        ) == comptime!(EnterpriseState::Operating as u32);
+        let producer = number(
+            state,
+            config,
+            comptime!(Field::EnterpriseModel as u32),
+            farm,
+        ) == 0;
+        let completed = number(
+            state,
+            config,
+            comptime!(Field::ConstructionRemaining as u32),
+            farm,
+        ) == 0;
+        let required = number(
+            state,
+            config,
+            comptime!(Field::PendingCapacity as u32),
+            farm,
+        );
+        let status = select(
+            operating
+                && producer
+                && output * 365 > config.home.annual_yield_per_plot
+                && output * config.home.cultivation_minutes > labor,
+            select(
+                completed,
+                comptime!(ConsolidationState::Ready as u32),
+                comptime!(ConsolidationState::Building as u32),
+            ),
+            comptime!(ConsolidationState::Ineligible as u32),
+        );
+        if status == comptime!(ConsolidationState::Ready as u32) {
+            let replacement = divide(
+                add_checked(
+                    control,
+                    times32(required, output * 365),
+                    ticks(config.home.annual_yield_per_plot - 1, 0),
+                ),
+                config.home.annual_yield_per_plot,
+            );
+            consolidate_farm(
+                state,
+                actors,
+                config,
+                control,
+                farm,
+                replacement.extract(LOW_WORD),
+            );
+        }
+    }
+}
+
+#[cube]
+fn consolidate_farm(
+    state: &mut [u32],
+    actors: &[u32],
+    config: &EconomyConfig,
+    control: &[Atomic<u32>],
+    farm: u32,
+    required: u32,
+) {
+    let mut remaining = required;
+    while remaining > 0 {
+        let selected = nearest_farmer(state, actors, config, farm);
+        if selected < config.actors {
+            let plots = value(state, config, comptime!(Field::LandPlots as u32), selected);
+            sync_storage();
+            if UNIT_POS == 0 {
+                increase(
+                    state,
+                    config,
+                    control,
+                    comptime!(Field::OccupiedPlots as u32),
+                    farm,
+                    plots,
+                );
+                increase(
+                    state,
+                    config,
+                    control,
+                    comptime!(Field::DisplacedPlots as u32),
+                    selected,
+                    plots,
+                );
+                set32(
+                    state,
+                    config,
+                    comptime!(Field::LandPlots as u32),
+                    selected,
+                    0,
+                );
+                set32(
+                    state,
+                    config,
+                    comptime!(Field::CropWork as u32),
+                    selected,
+                    0,
+                );
+            }
+            remaining = max(remaining, plots.extract(LOW_WORD)) - plots.extract(LOW_WORD);
+        } else {
+            remaining = 0;
+        }
+        sync_storage();
+    }
+}
+
+#[cube]
+fn nearest_farmer(state: &mut [u32], actors: &[u32], config: &EconomyConfig, farm: u32) -> u32 {
+    let mut nearest = u64::new(comptime!(u64::MAX as i64));
+    let mut household = UNIT_POS;
+    while household < config.actors {
+        let plots = number(state, config, comptime!(Field::LandPlots as u32), household);
+        let trip = distance(actors, farm, household);
+        let eligible = kind(actors, household).is(comptime!(ActorKind::Household))
+            && plots > 0
+            && trip <= config.search_radius;
+        let rank = (u64::cast_from(trip) << 32) | u64::cast_from(household);
+        nearest = min(nearest, select(eligible, rank, u64::MAX));
+        household += CUBE_DIM;
+    }
+    let mut ranks = Shared::<[u64]>::new_slice(256usize);
+    ranks[UNIT_POS as usize] = nearest;
+    sync_cube();
+    let mut stride = CUBE_DIM / 2;
+    while stride > 0 {
+        if UNIT_POS < stride {
+            ranks[UNIT_POS as usize] = min(
+                ranks[UNIT_POS as usize],
+                ranks[(UNIT_POS + stride) as usize],
+            );
+        }
+        sync_cube();
+        stride /= 2;
+    }
+    u32::cast_from(ranks[0])
 }
 
 #[cube]
@@ -117,8 +295,8 @@ pub(super) fn scaled_output(
     output: Ticks,
 ) -> Ticks {
     let mut scaled = output;
-    if comptime!(config.property_mode == Feature::Enabled) {
-        let plots = number(state, config, comptime!(Field::OccupiedPlots as u32), actor);
+    let plots = number(state, config, comptime!(Field::OccupiedPlots as u32), actor);
+    if plots > 1 {
         let mut bonus = 0u32;
         #[unroll]
         for level in 1..comptime!(crate::domain::industry::ProductionScale::MAX_DOUBLINGS + 1) {

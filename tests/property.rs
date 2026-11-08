@@ -140,6 +140,141 @@ fn development() -> Result<ScenarioConfig> {
     Ok(config)
 }
 
+fn commercial_expansion() -> Result<Scenario> {
+    let mut config = development()?;
+    config.property = None;
+    config.search_radius = 200;
+    config.expansion = enterprise::ExpansionPolicy {
+        small_business_per_mille: 1000,
+        industrial_per_mille: 1000,
+    };
+    for (index, firm) in config
+        .population
+        .as_mut()
+        .unwrap()
+        .firms
+        .iter_mut()
+        .enumerate()
+    {
+        firm.owner = match index {
+            1 => 1,
+            _ => 5 + index as u64,
+        };
+        firm.capacity = 1;
+        firm.technique.output_ticks = 10;
+    }
+    Scenario::new(config)
+}
+
+#[test]
+fn completed_commercial_expansion_consolidates_local_land_and_releases_workers_on_gpu() -> Result<()>
+{
+    let scenario = commercial_expansion()?;
+    let mut initial = scenario.initial()?;
+    initial.set(Field::Demand, 9, 100);
+    initial.set(Field::CropWork, 1, 100);
+    let mut simulation =
+        Simulation::from_checkpoint(Checkpoint::new(&scenario, &initial)?, support::device(64)?)?;
+    simulation.advance()?;
+    let building = simulation.download()?;
+    assert_eq!(building.get(Field::PendingCapacity, 9), 1);
+    assert!(building.get(Field::ConstructionRemaining, 9) > 0);
+    assert_eq!(building.get(Field::LandPlots, 1), 2);
+    assert_eq!(building.get(Field::DisplacedPlots, 1), 0);
+    let mut replay = Simulation::from_checkpoint(simulation.checkpoint()?, support::device(128)?)?;
+    let mut employed = 0;
+    for _ in 0..8 {
+        simulation.advance()?;
+        replay.advance()?;
+        let state = simulation.download()?;
+        assert_eq!(state, replay.download()?);
+        employed += state.get(Field::Employed, 1);
+        let plots = state
+            .actors
+            .iter()
+            .enumerate()
+            .filter(|(_, actor)| actor.kind == 0)
+            .map(|(farmer, _)| state.get(Field::LandPlots, farmer))
+            .sum::<u64>();
+        assert_eq!(plots + state.get(Field::OccupiedPlots, 9), 9);
+        assert_eq!(state.get(Field::LandPlots, 6), 3);
+        assert_eq!(state.get(Field::DisplacedPlots, 6), 0);
+        assert_eq!(simulation.snapshot.cash, initial.initial_cash);
+    }
+    let state = simulation.download()?;
+    assert_eq!(state.get(Field::LandPlots, 1), 0);
+    assert_eq!(state.get(Field::DisplacedPlots, 1), 2);
+    assert_eq!(state.get(Field::CropWork, 1), 0);
+    assert_eq!(state.get(Field::Grain, 1), initial.get(Field::Grain, 1));
+    assert_eq!(state.get(Field::OccupiedPlots, 9), 6);
+    assert!(state.get(Field::Produced, 9) > state.get(Field::UnscaledProduced, 9));
+    assert!(state.actors.at(9).capacity > initial.actors.at(9).capacity);
+    assert!(employed > 0);
+    assert_eq!(
+        simulation.snapshot,
+        ObservationSnapshot::from_state(&scenario, &state)?
+    );
+    simulation.checkpoint()?.restore()?;
+    Ok(())
+}
+
+#[test]
+fn unfunded_farms_cannot_displace_subsistence_households_on_gpu() -> Result<()> {
+    let scenario = commercial_expansion()?;
+    let mut initial = scenario.initial()?;
+    let cash = initial.get(Field::Cash, 9);
+    initial.set(Field::Cash, 9, 0);
+    initial.set(Field::Cash, 7, initial.get(Field::Cash, 7) + cash);
+    initial.set(Field::Demand, 9, 100);
+    let mut simulation =
+        Simulation::from_checkpoint(Checkpoint::new(&scenario, &initial)?, support::device(64)?)?;
+    for _ in 0..5 {
+        simulation.advance()?;
+    }
+    let state = simulation.download()?;
+    assert_eq!(state.get(Field::OccupiedPlots, 9), 0);
+    for farmer in [1, 2, 3, 6] {
+        assert_eq!(
+            state.get(Field::LandPlots, farmer),
+            initial.get(Field::LandPlots, farmer)
+        );
+        assert_eq!(state.get(Field::DisplacedPlots, farmer), 0);
+    }
+    simulation.checkpoint()?.restore()?;
+    Ok(())
+}
+
+#[test]
+fn farm_expansion_without_a_productivity_advantage_leaves_subsistence_land_intact_on_gpu()
+-> Result<()> {
+    for technique in [Technique::new(10, 0, 2)?, Technique::new(240, 0, 10)?] {
+        let mut config = commercial_expansion()?.config().clone();
+        config.population.as_mut().unwrap().firms[1].technique = technique;
+        let scenario = Scenario::new(config)?;
+        let mut initial = scenario.initial()?;
+        initial.set(Field::Demand, 9, 100);
+        let mut simulation = Simulation::from_checkpoint(
+            Checkpoint::new(&scenario, &initial)?,
+            support::device(64)?,
+        )?;
+        for _ in 0..9 {
+            simulation.advance()?;
+        }
+        let state = simulation.download()?;
+        assert!(state.actors.at(9).capacity > initial.actors.at(9).capacity);
+        assert_eq!(state.get(Field::OccupiedPlots, 9), 0);
+        for farmer in [1, 2, 3, 6] {
+            assert_eq!(
+                state.get(Field::LandPlots, farmer),
+                initial.get(Field::LandPlots, farmer)
+            );
+            assert_eq!(state.get(Field::DisplacedPlots, farmer), 0);
+        }
+        simulation.checkpoint()?.restore()?;
+    }
+    Ok(())
+}
+
 #[test]
 fn contractors_build_housing_farms_and_factories_and_displace_only_local_farmers() -> Result<()> {
     let scenario = Scenario::new(development()?)?;
