@@ -1,5 +1,5 @@
 use super::*;
-use crate::domain::enterprise::EnterpriseState;
+use crate::domain::enterprise::{EnterpriseModel, EnterpriseState};
 use crate::simulation::configuration::{EconomyConfig, Feature};
 
 #[cube]
@@ -314,7 +314,54 @@ pub(crate) fn mobility(
 }
 
 #[cube]
-pub(super) fn lifecycle(state: &mut [u32], config: &EconomyConfig, firm: u32) {
+fn retail_viable(
+    state: &mut [u32],
+    config: &EconomyConfig,
+    control: &[Atomic<u32>],
+    firm: u32,
+) -> bool {
+    let sales = value(state, config, comptime!(Field::Sales as u32), firm);
+    let replacement = multiply(
+        control,
+        sales,
+        number(
+            state,
+            config,
+            comptime!(Field::ReplacementCost as u32),
+            firm,
+        ),
+    );
+    let shifts = number(state, config, comptime!(Field::Plan as u32), firm)
+        - number(state, config, comptime!(Field::Slots as u32), firm);
+    let payroll = multiply(
+        control,
+        times32(
+            number(state, config, comptime!(Field::Wage as u32), firm),
+            number(state, config, comptime!(Field::LaborMinutes as u32), firm),
+        ),
+        shifts,
+    );
+    let costs = add_checked(
+        control,
+        add_checked(control, replacement, payroll),
+        ticks(config.firm_rent, 0),
+    );
+    let revenue = value(
+        state,
+        config,
+        comptime!(Field::BusinessRevenue as u32),
+        firm,
+    );
+    !equal(sales, zero()) && !lt(revenue, costs)
+}
+
+#[cube]
+pub(super) fn lifecycle(
+    state: &mut [u32],
+    config: &EconomyConfig,
+    control: &[Atomic<u32>],
+    firm: u32,
+) {
     let status = number(
         state,
         config,
@@ -333,8 +380,22 @@ pub(super) fn lifecycle(state: &mut [u32], config: &EconomyConfig, firm: u32) {
         value(state, config, comptime!(Field::Sales as u32), firm),
         zero(),
     );
+    let viable = match u32::cast_from(
+        number(
+            state,
+            config,
+            comptime!(Field::EnterpriseModel as u32),
+            firm,
+        ) == comptime!(EnterpriseModel::Distributor as u32),
+    ) {
+        1 => {
+            status == comptime!(EnterpriseState::Forming as u32)
+                || retail_viable(state, config, control, firm)
+        }
+        _ => sales || funded,
+    };
     let inactive = number(state, config, comptime!(Field::IdleDays as u32), firm);
-    let days = select((sales || funded) && current, 0, min(inactive + 1, 365));
+    let days = select(viable && current, 0, min(inactive + 1, 365));
     let funded_state = select(
         funded,
         comptime!(EnterpriseState::Operating as u32),

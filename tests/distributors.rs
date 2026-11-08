@@ -80,6 +80,276 @@ fn economy() -> Result<Scenario> {
     Scenario::new(config)
 }
 
+fn competing_warehouses() -> Result<ScenarioConfig> {
+    use bad_econ::domain::property::{Building, PropertyConfig, PropertyRegion};
+    let mut config = economy()?.config().clone();
+    config.households = 30;
+    config.forecast_weight = 1000;
+    config.entrepreneurship.interested_per_mille = 0;
+    config.demography.mortality.famine_daily_ppm_at_thirty_days = 0;
+    config.behavior.work_fatigue = 0;
+    config.behavior.rest_recovery = 0;
+    config.behavior.wage_increment = 0;
+    config.rent = Some(RentPolicy {
+        household_daily: 0,
+        firm_daily: 10,
+    });
+    config.population = Some(Population {
+        households: (1..=30)
+            .map(|identity| HouseholdSeed {
+                identity,
+                position: Position { x: 999, y: 0 },
+                cash: 100_000,
+                inventories: [0; Good::COUNT],
+                fatigue: 0,
+            })
+            .collect(),
+        firms: [
+            FirmSeed {
+                identity: 31,
+                position: Position { x: 0, y: 0 },
+                owner: 1,
+                good: Good::Bread,
+                cash: 100_000,
+                inventories: Good::food([0, 0, 100_000]),
+                capacity: 1,
+                technique: Technique::new(60, 1, 100)?,
+                wage: 1,
+                price: 10,
+            },
+            FirmSeed {
+                identity: 32,
+                position: Position { x: 500, y: 0 },
+                owner: 2,
+                good: Good::Bread,
+                cash: 100_000,
+                inventories: Good::food([0, 0, 500]),
+                capacity: 1,
+                technique: Technique::new(60, 10, 10)?,
+                wage: 1,
+                price: 16,
+            },
+            FirmSeed {
+                identity: 33,
+                position: Position { x: 500, y: 0 },
+                owner: 3,
+                good: Good::Bread,
+                cash: 100_000,
+                inventories: Good::food([0, 0, 500]),
+                capacity: 1,
+                technique: Technique::new(60, 10, 10)?,
+                wage: 1,
+                price: 14,
+            },
+        ]
+        .into(),
+    });
+    config.distributors = [32, 33]
+        .into_iter()
+        .map(|firm| Distributor {
+            firm,
+            good: Good::Bread,
+            handling_minutes: match firm {
+                32 => 60,
+                _ => 30,
+            },
+            units_per_shift: 24,
+            reserve_days: 3,
+            margin_per_mille: 250,
+        })
+        .collect();
+    config.property = Some(PropertyConfig {
+        regions: vec![PropertyRegion {
+            lower: Position { x: 0, y: 0 },
+            upper: Position { x: 1000, y: 1000 },
+            plots: 100,
+            landowner: 1,
+        }],
+        buildings: vec![Building { site: 33, plots: 4 }],
+        orders: Vec::new(),
+    });
+    Ok(config)
+}
+
+#[test]
+fn larger_competitor_drives_a_funded_warehouse_out_of_business() -> Result<()> {
+    use bad_econ::domain::{enterprise::EnterpriseState, property::PropertyUse};
+    let scenario = Scenario::new(competing_warehouses()?)?;
+    let mut initial = scenario.initial()?;
+    for firm in [31, 32] {
+        initial.set(Field::ReplacementCost, firm, 10);
+    }
+    let mut simulation =
+        Simulation::from_checkpoint(Checkpoint::new(&scenario, &initial)?, support::device(64)?)?;
+    for _ in 0..29 {
+        simulation.advance()?;
+    }
+    let struggling = simulation.download()?;
+    assert!(struggling.get(Field::Cash, 31) > 90_000);
+    assert!(struggling.get(Field::IdleDays, 31) > 20);
+    assert_eq!(
+        struggling.get(Field::PropertyUse, 31),
+        PropertyUse::Store as u64
+    );
+    assert_eq!(struggling.get(Field::OccupiedPlots, 31), 1);
+    assert_eq!(struggling.get(Field::OccupiedPlots, 32), 4);
+    assert_eq!(struggling.get(Field::RentTreasury, 31), 290);
+    assert_eq!(struggling.get(Field::RentArrears, 31), 0);
+    assert_eq!(struggling.get(Field::Sales, 31), 0);
+    assert!(struggling.get(Field::Sales, 32) > 0);
+    let mut replay = Simulation::from_checkpoint(simulation.checkpoint()?, support::device(128)?)?;
+    for _ in 0..6 {
+        simulation.advance()?;
+        replay.advance()?;
+        assert_eq!(simulation.download()?, replay.download()?);
+    }
+    let closed = simulation.download()?;
+    assert_eq!(
+        closed.get(Field::EnterpriseStatus, 31),
+        EnterpriseState::Closed as u64
+    );
+    assert_eq!(closed.get(Field::Cash, 31), 0);
+    assert_eq!(closed.get(Field::Bread, 31), 0);
+    assert_eq!(closed.get(Field::OccupiedPlots, 31), 1);
+    assert_eq!(
+        closed.get(Field::EnterpriseStatus, 32),
+        EnterpriseState::Operating as u64
+    );
+    assert_eq!(simulation.snapshot.distributors, 1);
+    assert_eq!(simulation.snapshot.cash, initial.initial_cash);
+    assert_eq!(
+        simulation.snapshot,
+        ObservationSnapshot::from_state(&scenario, &closed)?
+    );
+    Ok(())
+}
+
+#[test]
+fn profitable_small_warehouse_survives_and_recovers_from_a_sales_slump() -> Result<()> {
+    use bad_econ::domain::enterprise::EnterpriseState;
+    let mut config = competing_warehouses()?;
+    config.distributors.pop();
+    let competitor = &mut config.population.as_mut().unwrap().firms[2];
+    competitor.good = Good::Grain;
+    competitor.inventories = [0; Good::COUNT];
+    competitor.technique = Technique::new(60, 0, 10)?;
+    let scenario = Scenario::new(config)?;
+    let mut initial = scenario.initial()?;
+    initial.set(Field::ReplacementCost, 31, 10);
+    initial.set(Field::IdleDays, 31, 29);
+    let mut simulation =
+        Simulation::from_checkpoint(Checkpoint::new(&scenario, &initial)?, support::device(64)?)?;
+    simulation.advance()?;
+    let recovered = simulation.download()?;
+    assert!(recovered.get(Field::Sales, 31) > 0);
+    assert_eq!(recovered.get(Field::IdleDays, 31), 0);
+    for _ in 0..34 {
+        simulation.advance()?;
+    }
+    let state = simulation.download()?;
+    assert_eq!(state.get(Field::OccupiedPlots, 31), 1);
+    assert_eq!(
+        state.get(Field::EnterpriseStatus, 31),
+        EnterpriseState::Operating as u64
+    );
+    assert_eq!(state.get(Field::RentTreasury, 31), 350);
+    assert_eq!(simulation.snapshot.distributors, 1);
+    assert_eq!(simulation.snapshot.cash, initial.initial_cash);
+    assert_eq!(
+        simulation.snapshot,
+        ObservationSnapshot::from_state(&scenario, &state)?
+    );
+    Ok(())
+}
+
+#[test]
+fn occasional_sales_do_not_save_a_warehouse_that_cannot_cover_costs() -> Result<()> {
+    use bad_econ::domain::enterprise::EnterpriseState;
+    let mut config = economy()?.config().clone();
+    config.rent = Some(RentPolicy {
+        household_daily: 0,
+        firm_daily: 10,
+    });
+    config.behavior.wage_increment = 0;
+    config.behavior.work_fatigue = 0;
+    let store = &mut config.population.as_mut().unwrap().firms[1];
+    store.cash = 100_000;
+    store.inventories = Good::food([0, 0, 500]);
+    let scenario = Scenario::new(config)?;
+    let mut initial = scenario.initial()?;
+    initial.set(Field::ReplacementCost, 4, 10);
+    let mut simulation =
+        Simulation::from_checkpoint(Checkpoint::new(&scenario, &initial)?, support::device(64)?)?;
+    for _ in 0..29 {
+        simulation.advance()?;
+    }
+    let struggling = simulation.download()?;
+    assert!(struggling.get(Field::Cash, 4) > 90_000);
+    assert!(struggling.get(Field::Sales, 4) > 0);
+    assert!(struggling.get(Field::IdleDays, 4) > 20);
+    assert!(
+        struggling.get(Field::BusinessRevenue, 4)
+            < struggling.get(Field::Sales, 4) * struggling.get(Field::ReplacementCost, 4) + 70
+    );
+    for _ in 0..6 {
+        simulation.advance()?;
+    }
+    let closed = simulation.download()?;
+    assert_eq!(
+        closed.get(Field::EnterpriseStatus, 4),
+        EnterpriseState::Closed as u64
+    );
+    assert_eq!(simulation.snapshot.distributors, 0);
+    assert_eq!(simulation.snapshot.cash, initial.initial_cash);
+    assert_eq!(
+        simulation.snapshot,
+        ObservationSnapshot::from_state(&scenario, &closed)?
+    );
+    Ok(())
+}
+
+#[test]
+fn warehouse_construction_blocks_trading_but_still_requires_rent() -> Result<()> {
+    use bad_econ::domain::{
+        enterprise::EnterpriseState,
+        property::{ConstructionOrder, Development, ProjectStatus},
+    };
+    let mut config = competing_warehouses()?;
+    config.population.as_mut().unwrap().firms[1].owner = 1;
+    config.property.as_mut().unwrap().orders = vec![ConstructionOrder {
+        landowner: 1,
+        site: 32,
+        plots: 1,
+        work: 20,
+        development: Development::NewBuilding,
+    }];
+    let scenario = Scenario::new(config)?;
+    let mut simulation = Simulation::new(scenario.clone(), support::device(64)?)?;
+    for _ in 0..35 {
+        simulation.advance()?;
+    }
+    let state = simulation.download()?;
+    assert_eq!(state.get(Field::OccupiedPlots, 31), 0);
+    assert_eq!(state.get(Field::ReservedPlots, 31), 1);
+    assert_eq!(
+        state.get(Field::ProjectStatus, 31),
+        ProjectStatus::Building as u64
+    );
+    assert_eq!(
+        state.get(Field::EnterpriseStatus, 31),
+        EnterpriseState::Forming as u64
+    );
+    assert_eq!(state.get(Field::IdleDays, 31), 0);
+    assert_eq!(state.get(Field::RetailOpen, 31), 0);
+    assert_eq!(state.get(Field::Sales, 31), 0);
+    assert_eq!(state.get(Field::RentTreasury, 31), 350);
+    assert_eq!(
+        simulation.snapshot,
+        ObservationSnapshot::from_state(&scenario, &state)?
+    );
+    Ok(())
+}
+
 #[test]
 fn grocery_restock_delivery_staffing_and_resale_conserve_food_and_cash() -> Result<()> {
     let scenario = economy()?;

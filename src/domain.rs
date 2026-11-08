@@ -2213,7 +2213,9 @@ impl ObservationSnapshot {
                         );
                         snapshot.distributors += u64::from(
                             state.get(Field::EnterpriseModel, i)
-                                == enterprise::EnterpriseModel::Distributor as u64,
+                                == enterprise::EnterpriseModel::Distributor as u64
+                                && state.get(Field::EnterpriseStatus, i)
+                                    != enterprise::EnterpriseState::Closed as u64,
                         );
                         let j = kind as usize - 1;
                         snapshot.markets[j]

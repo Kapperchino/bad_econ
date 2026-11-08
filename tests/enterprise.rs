@@ -660,7 +660,7 @@ fn local_tool_quotes_and_input_access_fund_a_nonfood_enterprise() -> Result<()> 
 }
 
 #[test]
-fn unfunded_food_firms_enter_liquidation_without_erasing_accounts() -> Result<()> {
+fn unfunded_food_firms_close_without_erasing_accounts() -> Result<()> {
     let mut config = transition_economy()?.config().clone();
     let population = config
         .population
@@ -685,11 +685,11 @@ fn unfunded_food_firms_enter_liquidation_without_erasing_accounts() -> Result<()
     for _ in 0..90 {
         simulation.advance()?;
     }
-    let liquidating = simulation.download()?;
+    let closed = simulation.download()?;
     for firm in 3..6 {
         assert_eq!(
-            liquidating.get(Field::EnterpriseStatus, firm),
-            enterprise::EnterpriseState::Liquidating as u64
+            closed.get(Field::EnterpriseStatus, firm),
+            enterprise::EnterpriseState::Closed as u64
         );
     }
     for _ in 0..30 {
