@@ -441,8 +441,9 @@ impl Scenario {
             Experiment::Shortage => 0,
             _ => 6,
         };
-        config.packet_minutes = 240;
+        config.packet_minutes = 20;
         config.packet_output = 10;
+        config.wage = 12;
         config.prices = [24, 48, 72];
         config.household_cash = 7
             * (u64::from(config.household_need)
@@ -457,7 +458,7 @@ impl Scenario {
             .map(|firm| enterprise::Distributor {
                 firm: u64::from(households + firm + 1),
                 good: Good::Bread,
-                handling_minutes: 60,
+                handling_minutes: 5,
                 units_per_shift: 24,
                 reserve_days: 3,
                 margin_per_mille: 250,
@@ -2565,7 +2566,15 @@ impl<'a> AuditedState<'a> {
             }
         };
         let land = (0..state.actors.len())
-            .map(|index| u128::from(state.get(Field::LandPlots, index)))
+            .map(|index| {
+                let consolidated = match (&c.property, state.actors.at(index).kind) {
+                    (None, kind) if kind == Good::Grain as u32 => {
+                        state.get(Field::OccupiedPlots, index)
+                    }
+                    _ => 0,
+                };
+                u128::from(state.get(Field::LandPlots, index)) + u128::from(consolidated)
+            })
             .sum::<u128>();
         let valid = resources
             && land <= u128::from(land_limit)

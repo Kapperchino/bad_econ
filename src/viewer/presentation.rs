@@ -7,7 +7,10 @@ use super::{
         UiAction,
     },
 };
-use crate::{domain::ObservationSnapshot, runtime::RuntimeState};
+use crate::{
+    domain::{Good, ObservationSnapshot},
+    runtime::RuntimeState,
+};
 use bevy::{
     picking::{Pickable, hover::Hovered},
     prelude::*,
@@ -505,6 +508,8 @@ fn inspection_text(display: &Display) -> String {
                         ),
                     };
                     let property = match i.property_region {
+                        0 if i.subsistence_plots + i.displaced_plots > 0 => format!("\nSubsistence plots {} | displaced {}", i.subsistence_plots, i.displaced_plots),
+                        0 if i.actor.kind == Good::Grain as u32 && i.occupied_plots > 0 => format!("\nConsolidated farmland {} plots | scale bonus {}%", i.occupied_plots, i.scale_bonus_per_mille / 10),
                         0 => String::new(),
                         _ => format!("\nRegion {} | plots {} (+{} reserved)\nWorkers/plot {} | scale bonus {}%\nSubsistence {} | displaced {}\nConstruction {:?} | {} work remaining", i.property_region, i.occupied_plots, i.reserved_plots, i.workers_per_plot, i.scale_bonus_per_mille / 10, i.subsistence_plots, i.displaced_plots, i.project_status, i.construction_minutes_remaining),
                     };

@@ -62,6 +62,64 @@ fn steelworks(coal: u64) -> Result<ScenarioConfig> {
     Ok(config)
 }
 
+#[test]
+fn industrial_food_production_is_more_efficient_than_subsistence_on_gpu() -> Result<()> {
+    let mut config = Scenario::industrial(1000, 42, Experiment::Concentrated)?
+        .config()
+        .clone();
+    config.research = None;
+    config.entrepreneurship.interested_per_mille = 0;
+    config.expansion = enterprise::ExpansionPolicy {
+        small_business_per_mille: 0,
+        industrial_per_mille: 0,
+    };
+    let household_minutes = match config.household_production {
+        enterprise::HouseholdProduction::Available {
+            cultivation_minutes,
+            milling_minutes,
+            baking_minutes,
+            ..
+        } => [cultivation_minutes, milling_minutes, baking_minutes],
+        enterprise::HouseholdProduction::Unavailable => [0; 3],
+    };
+    let scenario = Scenario::new(config)?;
+    let mut simulation = Simulation::new(scenario.clone(), support::device(64)?)?;
+    simulation.advance()?;
+    let state = simulation.download()?;
+    for good in [Good::Grain, Good::Flour, Good::Bread] {
+        let home_minutes = u64::from(household_minutes[good as usize - 1]);
+        let advantage = match good {
+            Good::Grain => 5,
+            _ => 15,
+        };
+        let firms = state
+            .actors
+            .iter()
+            .enumerate()
+            .filter(|(index, actor)| {
+                actor.kind == good as u32 && state.get(Field::EnterpriseModel, *index) == 0
+            })
+            .map(|(index, _)| index)
+            .collect::<Vec<_>>();
+        assert!(
+            firms
+                .iter()
+                .map(|&firm| state.get(Field::Produced, firm))
+                .sum::<u64>()
+                > 0
+        );
+        for firm in firms {
+            let output = state.get(Field::OutputTicks, firm);
+            let minutes = state.get(Field::LaborMinutes, firm);
+            assert_eq!(output * home_minutes, minutes * advantage);
+            assert_eq!(minutes * state.get(Field::Wage, firm), 240);
+        }
+    }
+    assert_eq!(simulation.snapshot.cash, scenario.opening_totals().cash);
+    simulation.checkpoint()?.restore()?;
+    Ok(())
+}
+
 fn research_lab() -> ResearchLab {
     ResearchLab {
         owner: 100,
