@@ -89,7 +89,13 @@ pub(super) fn skip(
     let max_y = scratch[base + comptime!(BlockField::MaxY as usize)];
     let distance = max(x, min_x) - min(x, max_x) + max(y, min_y) - min(y, max_y);
     let delivery = times32(
-        max(ceildiv(distance, config.shipment_speed), 1),
+        max(
+            ceildiv(
+                distance,
+                config.shipment_speed * config.railway.speed_multiplier,
+            ),
+            1,
+        ),
         config.delivery_penalty,
     );
     let lower_score = plus(ticks(empty_price, 0), delivery).value;

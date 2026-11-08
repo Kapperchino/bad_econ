@@ -511,11 +511,14 @@ fn inspection_text(display: &Display) -> String {
                     let accounts = i.business_account.map_or_else(String::new, |account| {
                         format!("\nDaily receipts {} | cash outlays {}\nCash profit {:+} (before owner payouts)", account.revenue, account.outlays(), account.profit())
                     });
+                    let railway = i.railway_business.as_ref().map_or_else(String::new, |business| {
+                        format!("\nRailway {:?} | {} segments built | {} operating\nDaily freight and access receipts {}", business.status(), business.built_segments, business.operating_segments, business.daily_receipts)
+                    });
                     let rental = i.rental_business.as_ref().map_or_else(String::new, |business| {
                         format!("\nLandlord business | homes {} | rental income {}\nHousing project {:?} | {} work remaining", business.homes, business.income, i.project_status, i.construction_minutes_remaining)
                     });
                     format!(
-                        "Actor {} | day {} | kind {}\nCash {} | transit {}\nRent paid {} | owed {}\nFood {:?} | other stock {}\n{}{}{}{}",
+                        "Actor {} | day {} | kind {}\nCash {} | transit {}\nRent paid {} | owed {}\nFood {:?} | other stock {}\n{}{}{}{}{}",
                         i.actor.identity,
                         i.day,
                         i.actor.kind,
@@ -528,7 +531,8 @@ fn inspection_text(display: &Display) -> String {
                         detail,
                         property,
                         rental,
-                        accounts
+                        accounts,
+                        railway
                     )
                 })
                 .unwrap_or_else(|| "Select a household or firm to inspect its accounts, property and production.".into())

@@ -1,0 +1,707 @@
+{
+  "batch_size": 65536,
+  "buffer_days": 4,
+  "capacity": 100,
+  "commute_speed": 50,
+  "coverage": 3,
+  "delivery_penalty": 5,
+  "distribution_rate": 0,
+  "experiment": "Transport",
+  "firm_cash": 200000,
+  "firms": 9,
+  "forecast_weight": 0,
+  "household_cash": 5000,
+  "household_need": 1,
+  "households": 8,
+  "map_size": 1000,
+  "maximum_price": 10000,
+  "minimum_price": 1,
+  "packet_minutes": 360,
+  "packet_output": 3,
+  "prices": [
+    150,
+    300,
+    450
+  ],
+  "reserve": 100000,
+  "reserved_minutes": 960,
+  "search_radius": 1000,
+  "seed": 42,
+  "shipment_speed": 100,
+  "version": 2,
+  "wage": 1,
+  "work_cap": 480,
+  "entrepreneurship": {
+    "interested_per_mille": 0
+  },
+  "behavior": {
+    "work_fatigue": 0,
+    "rest_recovery": 0,
+    "wage_increment": 0,
+    "price_response": 0
+  },
+  "railway": {
+    "speed_multiplier": 10,
+    "length_unit": 1000,
+    "construction": {
+      "coal": 20,
+      "steel": 40,
+      "locomotives": 5
+    },
+    "maintenance": {
+      "coal": 2,
+      "steel": 1,
+      "locomotives": 1
+    },
+    "companies": [
+      {
+        "firm": 11,
+        "freight_rate": 2,
+        "access_fee": 3
+      },
+      {
+        "firm": 12,
+        "freight_rate": 3,
+        "access_fee": 5
+      }
+    ],
+    "segments": [
+      {
+        "company": 11,
+        "from": {
+          "x": 0,
+          "y": 0
+        },
+        "to": {
+          "x": 400,
+          "y": 0
+        }
+      },
+      {
+        "company": 12,
+        "from": {
+          "x": 400,
+          "y": 0
+        },
+        "to": {
+          "x": 900,
+          "y": 0
+        }
+      }
+    ]
+  },
+  "population": {
+    "households": [
+      {
+        "identity": 1,
+        "position": {
+          "x": 900,
+          "y": 0
+        },
+        "cash": 3000,
+        "inventories": [
+          0,
+          0,
+          0,
+          0,
+          0,
+          0,
+          0,
+          0,
+          0,
+          0,
+          0,
+          0,
+          0,
+          0,
+          0,
+          0,
+          0,
+          0,
+          0,
+          0
+        ],
+        "fatigue": 0
+      },
+      {
+        "identity": 2,
+        "position": {
+          "x": 0,
+          "y": 0
+        },
+        "cash": 0,
+        "inventories": [
+          0,
+          0,
+          100,
+          0,
+          0,
+          0,
+          0,
+          0,
+          0,
+          0,
+          0,
+          0,
+          0,
+          0,
+          0,
+          0,
+          0,
+          0,
+          0,
+          0
+        ],
+        "fatigue": 0
+      },
+      {
+        "identity": 3,
+        "position": {
+          "x": 0,
+          "y": 0
+        },
+        "cash": 0,
+        "inventories": [
+          0,
+          0,
+          100,
+          0,
+          0,
+          0,
+          0,
+          0,
+          0,
+          0,
+          0,
+          0,
+          0,
+          0,
+          0,
+          0,
+          0,
+          0,
+          0,
+          0
+        ],
+        "fatigue": 0
+      },
+      {
+        "identity": 4,
+        "position": {
+          "x": 0,
+          "y": 0
+        },
+        "cash": 0,
+        "inventories": [
+          0,
+          0,
+          100,
+          0,
+          0,
+          0,
+          0,
+          0,
+          0,
+          0,
+          0,
+          0,
+          0,
+          0,
+          0,
+          0,
+          0,
+          0,
+          0,
+          0
+        ],
+        "fatigue": 0
+      },
+      {
+        "identity": 5,
+        "position": {
+          "x": 0,
+          "y": 0
+        },
+        "cash": 0,
+        "inventories": [
+          0,
+          0,
+          100,
+          0,
+          0,
+          0,
+          0,
+          0,
+          0,
+          0,
+          0,
+          0,
+          0,
+          0,
+          0,
+          0,
+          0,
+          0,
+          0,
+          0
+        ],
+        "fatigue": 0
+      },
+      {
+        "identity": 6,
+        "position": {
+          "x": 0,
+          "y": 0
+        },
+        "cash": 0,
+        "inventories": [
+          0,
+          0,
+          100,
+          0,
+          0,
+          0,
+          0,
+          0,
+          0,
+          0,
+          0,
+          0,
+          0,
+          0,
+          0,
+          0,
+          0,
+          0,
+          0,
+          0
+        ],
+        "fatigue": 0
+      },
+      {
+        "identity": 7,
+        "position": {
+          "x": 0,
+          "y": 0
+        },
+        "cash": 0,
+        "inventories": [
+          0,
+          0,
+          100,
+          0,
+          0,
+          0,
+          0,
+          0,
+          0,
+          0,
+          0,
+          0,
+          0,
+          0,
+          0,
+          0,
+          0,
+          0,
+          0,
+          0
+        ],
+        "fatigue": 0
+      },
+      {
+        "identity": 8,
+        "position": {
+          "x": 0,
+          "y": 0
+        },
+        "cash": 0,
+        "inventories": [
+          0,
+          0,
+          100,
+          0,
+          0,
+          0,
+          0,
+          0,
+          0,
+          0,
+          0,
+          0,
+          0,
+          0,
+          0,
+          0,
+          0,
+          0,
+          0,
+          0
+        ],
+        "fatigue": 0
+      }
+    ],
+    "firms": [
+      {
+        "identity": 10,
+        "position": {
+          "x": 0,
+          "y": 0
+        },
+        "owner": 1,
+        "good": "Bread",
+        "cash": 2000,
+        "inventories": [
+          0,
+          200,
+          1000,
+          0,
+          0,
+          0,
+          0,
+          0,
+          0,
+          0,
+          0,
+          0,
+          0,
+          0,
+          0,
+          0,
+          0,
+          0,
+          0,
+          0
+        ],
+        "capacity": 1,
+        "technique": {
+          "labor_minutes": 60,
+          "input_ticks": 1,
+          "output_ticks": 1
+        },
+        "wage": 1,
+        "price": 10
+      },
+      {
+        "identity": 11,
+        "position": {
+          "x": 0,
+          "y": 0
+        },
+        "owner": 2,
+        "good": "Railway",
+        "cash": 2000,
+        "inventories": [
+          0,
+          0,
+          0,
+          0,
+          0,
+          0,
+          0,
+          0,
+          0,
+          0,
+          0,
+          0,
+          0,
+          0,
+          0,
+          0,
+          0,
+          0,
+          0,
+          0
+        ],
+        "capacity": 0,
+        "technique": {
+          "labor_minutes": 0,
+          "input_ticks": 0,
+          "output_ticks": 1
+        },
+        "wage": 1,
+        "price": 10
+      },
+      {
+        "identity": 12,
+        "position": {
+          "x": 0,
+          "y": 0
+        },
+        "owner": 3,
+        "good": "Railway",
+        "cash": 2000,
+        "inventories": [
+          0,
+          0,
+          0,
+          0,
+          0,
+          0,
+          0,
+          0,
+          0,
+          0,
+          0,
+          0,
+          0,
+          0,
+          0,
+          0,
+          0,
+          0,
+          0,
+          0
+        ],
+        "capacity": 0,
+        "technique": {
+          "labor_minutes": 0,
+          "input_ticks": 0,
+          "output_ticks": 1
+        },
+        "wage": 1,
+        "price": 10
+      },
+      {
+        "identity": 13,
+        "position": {
+          "x": 0,
+          "y": 0
+        },
+        "owner": 4,
+        "good": "Coal",
+        "cash": 2000,
+        "inventories": [
+          0,
+          0,
+          0,
+          0,
+          1000,
+          0,
+          0,
+          0,
+          0,
+          0,
+          0,
+          0,
+          0,
+          0,
+          0,
+          0,
+          0,
+          0,
+          0,
+          0
+        ],
+        "capacity": 1,
+        "technique": {
+          "labor_minutes": 60,
+          "input_ticks": 0,
+          "output_ticks": 1
+        },
+        "wage": 1,
+        "price": 10
+      },
+      {
+        "identity": 14,
+        "position": {
+          "x": 0,
+          "y": 0
+        },
+        "owner": 5,
+        "good": "Steel",
+        "cash": 2000,
+        "inventories": [
+          0,
+          0,
+          0,
+          200,
+          200,
+          1000,
+          0,
+          0,
+          0,
+          0,
+          0,
+          0,
+          0,
+          0,
+          0,
+          0,
+          0,
+          0,
+          0,
+          0
+        ],
+        "capacity": 1,
+        "technique": {
+          "labor_minutes": 60,
+          "input_ticks": 1,
+          "output_ticks": 1
+        },
+        "wage": 1,
+        "price": 10
+      },
+      {
+        "identity": 15,
+        "position": {
+          "x": 0,
+          "y": 0
+        },
+        "owner": 6,
+        "good": "Locomotives",
+        "cash": 2000,
+        "inventories": [
+          0,
+          0,
+          0,
+          0,
+          0,
+          200,
+          0,
+          0,
+          0,
+          0,
+          0,
+          200,
+          0,
+          0,
+          0,
+          0,
+          0,
+          0,
+          1000,
+          0
+        ],
+        "capacity": 1,
+        "technique": {
+          "labor_minutes": 60,
+          "input_ticks": 1,
+          "output_ticks": 1
+        },
+        "wage": 1,
+        "price": 10
+      },
+      {
+        "identity": 16,
+        "position": {
+          "x": 0,
+          "y": 0
+        },
+        "owner": 7,
+        "good": "Tools",
+        "cash": 2000,
+        "inventories": [
+          0,
+          0,
+          0,
+          200,
+          0,
+          0,
+          0,
+          0,
+          0,
+          0,
+          200,
+          1000,
+          0,
+          0,
+          0,
+          0,
+          0,
+          0,
+          0,
+          0
+        ],
+        "capacity": 1,
+        "technique": {
+          "labor_minutes": 60,
+          "input_ticks": 1,
+          "output_ticks": 1
+        },
+        "wage": 1,
+        "price": 10
+      },
+      {
+        "identity": 17,
+        "position": {
+          "x": 0,
+          "y": 0
+        },
+        "owner": 8,
+        "good": "Iron",
+        "cash": 2000,
+        "inventories": [
+          0,
+          0,
+          0,
+          1000,
+          0,
+          0,
+          0,
+          0,
+          0,
+          0,
+          0,
+          0,
+          0,
+          0,
+          0,
+          0,
+          0,
+          0,
+          0,
+          0
+        ],
+        "capacity": 1,
+        "technique": {
+          "labor_minutes": 60,
+          "input_ticks": 0,
+          "output_ticks": 1
+        },
+        "wage": 1,
+        "price": 10
+      },
+      {
+        "identity": 18,
+        "position": {
+          "x": 0,
+          "y": 0
+        },
+        "owner": 1,
+        "good": "Wood",
+        "cash": 2000,
+        "inventories": [
+          0,
+          0,
+          0,
+          0,
+          0,
+          0,
+          0,
+          0,
+          0,
+          0,
+          1000,
+          0,
+          0,
+          0,
+          0,
+          0,
+          0,
+          0,
+          0,
+          0
+        ],
+        "capacity": 1,
+        "technique": {
+          "labor_minutes": 60,
+          "input_ticks": 0,
+          "output_ticks": 1
+        },
+        "wage": 1,
+        "price": 10
+      }
+    ]
+  }
+}

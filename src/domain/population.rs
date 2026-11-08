@@ -12,6 +12,14 @@ pub struct Technique {
     pub output_ticks: u32,
 }
 impl Technique {
+    pub fn railway() -> Self {
+        Self {
+            labor_minutes: 0,
+            input_ticks: 0,
+            output_ticks: 1,
+        }
+    }
+
     pub fn housing(units: u32) -> Result<Self> {
         match (1..=100).contains(&units) {
             true => Ok(Self {
@@ -27,6 +35,12 @@ impl Technique {
 
     pub fn for_good(self, good: Good) -> Result<Self> {
         match good {
+            Good::Railway => match self == Self::railway() {
+                true => Ok(self),
+                false => Err(anyhow!(
+                    "railways use infrastructure rather than production packets"
+                )),
+            },
             Good::Housing => match self.labor_minutes == 0
                 && (1..=100).contains(&self.input_ticks)
                 && (1..=100).contains(&self.output_ticks)
@@ -149,7 +163,7 @@ impl Population {
                     .binary_search_by_key(&actor.owner, |owner| owner.identity)
                     .is_ok()
                 && match actor.good {
-                    Good::Housing => actor.capacity == 0,
+                    Good::Housing | Good::Railway => actor.capacity == 0,
                     _ => (1..=10_000).contains(&actor.capacity),
                 }
                 && (1..=10_000).contains(&actor.wage)

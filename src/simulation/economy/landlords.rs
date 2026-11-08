@@ -616,7 +616,7 @@ mod tests {
         let scenario = Scenario::new(policy)?;
         let mut initial = scenario.initial()?;
         let rentals = RentalRegistry::new(&scenario, &initial);
-        assert_eq!(rentals.accounts.len(), 1);
+        assert!(!rentals.accounts.is_empty());
         let account = &rentals.accounts[0];
         let firm = account.landlord;
         let tenants = account

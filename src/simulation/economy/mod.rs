@@ -38,6 +38,7 @@ pub(super) mod indexing;
 pub(in crate::simulation) mod landlords;
 pub(super) mod opening;
 pub(in crate::simulation) mod property;
+pub(in crate::simulation) mod railway;
 mod rent;
 pub(super) mod search;
 pub(super) mod sorting;
@@ -205,6 +206,7 @@ fn local(
                 }
                 if !k.is(comptime!(ActorKind::Household))
                     && k.bits() != comptime!(Good::Housing as u32)
+                    && k.bits() != comptime!(Good::Railway as u32)
                 {
                     if comptime!(config.home_mode == Feature::Enabled) {
                         enterprises::available_method(state, actors, config, control, id);
@@ -482,12 +484,14 @@ fn local(
                         id,
                         cash,
                     );
+                    let rail_revenue =
+                        value(state, config, comptime!(Field::RailRevenue as u32), id);
                     set(
                         state,
                         config,
                         comptime!(Field::BusinessRevenue as u32),
                         id,
-                        revenue,
+                        add_checked(control, revenue, rail_revenue),
                     );
                 }
                 if k.is(comptime!(ActorKind::Household))
@@ -497,6 +501,7 @@ fn local(
                 }
                 if !k.is(comptime!(ActorKind::Household))
                     && k.bits() != comptime!(Good::Housing as u32)
+                    && k.bits() != comptime!(Good::Railway as u32)
                 {
                     if comptime!(config.home_mode == Feature::Enabled) {
                         let packets = number(state, config, comptime!(Field::Plan as u32), id)
@@ -769,6 +774,7 @@ fn propose(
                     search = true;
                 }
                 if !k.is(comptime!(ActorKind::Household))
+                    && k.bits() != comptime!(Good::Railway as u32)
                     && good == comptime!(Good::Tools as u32)
                     && comptime!(config.home_mode == Feature::Enabled)
                 {
@@ -874,6 +880,11 @@ fn propose(
                 }
             }
         }
+        if comptime!(matches!(market, MarketFlag::Input(_))) {
+            let rail = railway::demand(state, config, id, good);
+            wanted = maximum(wanted, rail);
+            search = search || !equal(rail, zero());
+        }
         if good > 0u32 {
             wanted = positive(
                 wanted,
@@ -970,8 +981,15 @@ fn propose(
                             if dist <= config.search_radius {
                                 let mut wage =
                                     number(state, config, comptime!(Field::Wage as u32), firm);
+                                let route = match comptime!(market) {
+                                    MarketFlag::Labor => {
+                                        railway::animal_route(actors, config, id, firm)
+                                    }
+                                    _ => railway::route(actors, config, id, firm),
+                                };
                                 let quote =
-                                    number(state, config, comptime!(Field::Price as u32), firm);
+                                    number(state, config, comptime!(Field::Price as u32), firm)
+                                        + route.fee;
                                 let mut inspect = true;
                                 if comptime!(market != MarketFlag::Labor) {
                                     let cash = purchasing_power;
@@ -986,12 +1004,8 @@ fn propose(
                                 if inspect {
                                     let mut eligible = dist <= config.search_radius;
 
-                                    let mut score = ticks(
-                                        quote
-                                            + max(ceildiv(dist, config.shipment_speed), 1u32)
-                                                * config.delivery_penalty,
-                                        0u32,
-                                    );
+                                    let mut score =
+                                        ticks(quote + route.days * config.delivery_penalty, 0u32);
                                     let mut amount = ticks(1u32, 0u32);
                                     if comptime!(market == MarketFlag::Labor) {
                                         if comptime!(config.bargaining.enabled == Feature::Enabled)
@@ -1622,16 +1636,27 @@ fn construct(
                         quantity,
                         number(state, config, comptime!(Field::Price as u32), other),
                     );
+                    let route = railway::route(actors, config, actor, other);
+                    let freight = multiply(control, quantity, route.fee);
                     let slot = BASE_FIELDS as u32
                         + (good - 1) * config.ring
-                        + (parameters.day + max(ceildiv(trip, config.shipment_speed), 1u32))
-                            % config.ring;
+                        + (parameters.day + route.days) % config.ring;
+                    if comptime!(config.railway.enabled == Feature::Enabled) {
+                        event.transfer(
+                            config,
+                            bundles,
+                            comptime!(Field::FreightEscrow as u32),
+                            actor,
+                            zero,
+                            freight,
+                        );
+                    }
                     event.transfer(
                         config,
                         bundles,
                         comptime!(Field::Cash as u32),
                         actor,
-                        cost,
+                        add_checked(control, cost, freight),
                         zero,
                     );
                     event.transfer(

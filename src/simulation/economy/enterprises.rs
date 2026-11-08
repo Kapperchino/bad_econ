@@ -796,6 +796,7 @@ pub(super) fn expand(
         if operating
             && interested
             && kind(actors, firm).bits() != comptime!(Good::Housing as u32)
+            && kind(actors, firm).bits() != comptime!(Good::Railway as u32)
             && busy
             && lt(target, demand)
             && funded
