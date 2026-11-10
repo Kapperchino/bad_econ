@@ -1808,20 +1808,30 @@ impl Simulation {
                 device_profile.end(&simulation.device, window, "FREIGHT", stage);
             };
             freight(self, Stage::Initialize);
-            let mut pending = 1;
-            while pending > 0 {
+            let mut round = settlement::Round::Initial;
+            while let Some(commit) = round.commit() {
+                freight(self, Stage::Queue);
                 freight(self, Stage::Reset);
                 freight(self, Stage::Propose);
-                freight(self, Stage::Commit);
+                freight(self, Stage::CountClaims);
+                let claims = settlement::prepare_claims(&self.device, &mut self.config)?;
+                self.readback_bytes += (2 * WORD_BYTES) as u64;
+                if let settlement::ClaimWork::Ready = claims {
+                    freight(self, Stage::EmitClaims);
+                    freight(self, Stage::SortClaims);
+                    freight(self, Stage::ClaimOffsets);
+                    freight(self, Stage::Resolve);
+                }
+                freight(self, commit);
                 freight(self, Stage::Release);
-                let progress = settlement::progress(&self.device, &self.config, &self.control)?;
-                pending = progress.pending;
-                matching = match progress.searches {
-                    0 => MatchingState::Exhausted,
-                    _ => MatchingState::Searching,
-                };
-                self.readback_bytes += (3 * WORD_BYTES) as u64;
+                round = round.next(claims);
             }
+            let progress = settlement::progress(&self.device, &self.config, &self.control)?;
+            matching = match progress.searches {
+                0 => MatchingState::Exhausted,
+                _ => MatchingState::Searching,
+            };
+            self.readback_bytes += (2 * WORD_BYTES) as u64;
             freight(self, Stage::Accounts);
         }
         parameters.status_start = 4 * count as u32;

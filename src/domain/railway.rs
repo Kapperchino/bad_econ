@@ -5,9 +5,12 @@ use std::collections::{BTreeMap, BTreeSet};
 
 pub(crate) const RAIL_ROUTE_WORDS: usize = 6;
 pub(crate) const FREIGHT_RESOURCE_WORDS: usize = 11;
-pub(crate) const FREIGHT_ACCOUNT_WORDS: usize = 8;
+pub(crate) const FREIGHT_ACCOUNT_WORDS: usize = 9;
 pub(crate) const FREIGHT_BOOKING_WORDS: usize = 2;
-pub(crate) const FREIGHT_DISPATCH_WORDS: usize = 9;
+pub(crate) const FREIGHT_QUEUE_WORDS: usize = 2;
+pub(crate) const FREIGHT_CLAIM_WORDS: usize = 5;
+pub(crate) const FREIGHT_CLAIM_SORT_WORDS: usize = 2;
+pub(crate) const FREIGHT_DISPATCH_WORDS: usize = 15;
 
 #[derive(Clone, Copy, Debug, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(deny_unknown_fields)]

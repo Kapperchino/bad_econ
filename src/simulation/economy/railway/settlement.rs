@@ -1,18 +1,40 @@
 use super::*;
 
 use crate::domain::railway::{
-    FREIGHT_ACCOUNT_WORDS as ACCOUNT_WORDS, FREIGHT_BOOKING_WORDS, FREIGHT_DISPATCH_WORDS,
-    FREIGHT_RESOURCE_WORDS as RESOURCE_WORDS,
+    FREIGHT_ACCOUNT_WORDS as ACCOUNT_WORDS, FREIGHT_BOOKING_WORDS, FREIGHT_CLAIM_WORDS,
+    FREIGHT_DISPATCH_WORDS, FREIGHT_QUEUE_WORDS, FREIGHT_RESOURCE_WORDS as RESOURCE_WORDS,
 };
 const PENDING: usize = 0;
+const ACTIVE: usize = 1;
+const CLAIM_COUNT: usize = 2;
+const CLAIM_CURSOR: usize = 4;
+const RESOURCE_CLAIMS: usize = 10;
+const REQUESTED: usize = 2;
+const CONSUMED: usize = 4;
+const PREFERRED: usize = 6;
+const REQUEST_OVERFLOW: usize = 8;
+const PREFERRED_OVERFLOW: usize = 9;
+const DENIED: usize = 8;
+
+mod claims;
+
+#[cfg(test)]
+mod tests;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub enum Stage {
     Snapshot,
     Initialize,
+    Queue,
     Reset,
     Propose,
+    CountClaims,
+    EmitClaims,
+    SortClaims,
+    ClaimOffsets,
+    Resolve,
     Commit,
+    CommitFinal,
     Release,
     Accounts,
 }
@@ -23,6 +45,7 @@ enum BookingState {
     Pending,
     Ready,
     Complete,
+    Retrying,
 }
 
 #[derive(Clone, Copy)]
@@ -38,17 +61,30 @@ pub struct Buffers {
     resources: CubeTensor,
     accounts: CubeTensor,
     bookings: CubeTensor,
+    queue: CubeTensor,
+    claims: CubeTensor,
+    claim_capacity: usize,
     progress: CubeTensor,
     dispatches: CubeTensor,
 }
 
 impl Buffers {
     pub fn new(device: &Device, actors: usize, regions: usize) -> Self {
+        let claim_capacity = actors * 2;
         Self {
             resources: device.empty((actors + regions) * RESOURCE_WORDS),
             accounts: device.empty(actors * ACCOUNT_WORDS),
             bookings: device.empty(actors * FREIGHT_BOOKING_WORDS),
-            progress: device.tensor(&[0]),
+            queue: device.empty(actors * FREIGHT_QUEUE_WORDS),
+            claims: device.empty(
+                claim_capacity
+                    * (FREIGHT_CLAIM_WORDS + crate::domain::railway::FREIGHT_CLAIM_SORT_WORDS)
+                    + actors
+                    + regions
+                    + 1,
+            ),
+            claim_capacity,
+            progress: device.tensor(&[0, 0, 0, 0, 0]),
             dispatches: device
                 .client
                 .memory_dedicated_allocation(FREIGHT_DISPATCH_WORDS, |words| device.empty(words)),
@@ -97,6 +133,36 @@ impl GpuPass<DispatchInput> for PrepareDispatch {
 }
 
 #[derive(CubeType, CubeLaunch)]
+struct QueueInput {
+    progress: Box<[Atomic<u32>]>,
+    dispatches: Box<[u32]>,
+    workgroup: u32,
+}
+
+struct FreightQueue;
+struct PrepareQueue;
+
+impl System for FreightQueue {
+    type Input = QueueInput;
+    type Passes = gpu_passes![PrepareQueue];
+}
+
+#[cube]
+impl GpuPass<QueueInput> for PrepareQueue {
+    type Output = ();
+
+    fn execute(mut input: QueueInput) {
+        let count = input.progress[PENDING].load();
+        input.progress[ACTIVE].store(count);
+        input.progress[PENDING].store(0);
+        let groups = ceildiv(max(count, 1), input.workgroup);
+        input.dispatches[9usize] = min(groups, 65535);
+        input.dispatches[10usize] = ceildiv(groups, 65535);
+        input.dispatches[11usize] = 1;
+    }
+}
+
+#[derive(CubeType, CubeLaunch)]
 struct Input {
     state: Box<[u32]>,
     actors: Box<[u32]>,
@@ -108,6 +174,10 @@ struct Input {
     resources: Box<[Atomic<u32>]>,
     accounts: Box<[Atomic<u32>]>,
     bookings: Box<[u32]>,
+    queue: Box<[u32]>,
+    claims: Box<[u32]>,
+    claim_source: u32,
+    claim_offsets: u32,
     progress: Box<[Atomic<u32>]>,
     parameters: EconomyParameters,
     #[cube(comptime)]
@@ -150,30 +220,53 @@ pub fn launch(
         );
     }
     let dispatch = match stage {
-        Stage::Propose | Stage::Commit => 3,
-        Stage::Initialize => 6,
-        _ => 0,
+        Stage::Queue => CubeCount::Static(1, 1, 1),
+        Stage::Propose | Stage::EmitClaims | Stage::Commit | Stage::CommitFinal => {
+            markets::dispatch(&buffers.dispatches, 9)
+        }
+        Stage::Initialize | Stage::Reset => markets::dispatch(&buffers.dispatches, 6),
+        Stage::ClaimOffsets => {
+            device.count((config.actors + config.railway.region_count) as usize + 1)
+        }
+        _ => markets::dispatch(&buffers.dispatches, 0),
     };
-    FreightSettlement::launch(
-        device,
-        markets::dispatch(&buffers.dispatches, dispatch),
-        CubeDim::new_1d(device.workgroup),
-        InputLaunch {
-            state: state.clone().into_buffer_arg(),
-            actors: actors.clone().into_buffer_arg(),
-            spatial: spatial.clone().into_buffer_arg(),
-            config: config.launch(),
-            proposals: proposals.clone().into_buffer_arg(),
-            scratch: scratch.clone().into_buffer_arg(),
-            control: control.clone().into_buffer_arg(),
-            resources: buffers.resources.clone().into_buffer_arg(),
-            accounts: buffers.accounts.clone().into_buffer_arg(),
-            bookings: buffers.bookings.clone().into_buffer_arg(),
-            progress: buffers.progress.clone().into_buffer_arg(),
-            parameters: parameters.launch(),
-            stage,
-        },
-    );
+    match stage {
+        Stage::SortClaims => claims::sort(device, buffers),
+        Stage::Queue => FreightQueue::launch(
+            device,
+            CubeCount::Static(1, 1, 1),
+            CubeDim::new_1d(1),
+            QueueInputLaunch {
+                progress: buffers.progress.clone().into_buffer_arg(),
+                dispatches: buffers.dispatches.clone().into_buffer_arg(),
+                workgroup: device.workgroup,
+            },
+        ),
+        _ => FreightSettlement::launch(
+            device,
+            dispatch,
+            CubeDim::new_1d(device.workgroup),
+            InputLaunch {
+                state: state.clone().into_buffer_arg(),
+                actors: actors.clone().into_buffer_arg(),
+                spatial: spatial.clone().into_buffer_arg(),
+                config: config.launch(),
+                proposals: proposals.clone().into_buffer_arg(),
+                scratch: scratch.clone().into_buffer_arg(),
+                control: control.clone().into_buffer_arg(),
+                resources: buffers.resources.clone().into_buffer_arg(),
+                accounts: buffers.accounts.clone().into_buffer_arg(),
+                bookings: buffers.bookings.clone().into_buffer_arg(),
+                queue: buffers.queue.clone().into_buffer_arg(),
+                claims: buffers.claims.clone().into_buffer_arg(),
+                claim_source: claims::sorted_source(buffers.claim_capacity),
+                claim_offsets: claims::offsets_start(buffers.claim_capacity),
+                progress: buffers.progress.clone().into_buffer_arg(),
+                parameters: parameters.launch(),
+                stage,
+            },
+        ),
+    }
 }
 
 #[cube]
@@ -205,13 +298,94 @@ fn resource(input: &Input, index: u32) -> u32 {
 }
 
 pub struct Progress {
+    #[cfg(test)]
     pub pending: u32,
     pub searches: u32,
 }
 
+pub enum ClaimWork {
+    Empty,
+    Ready,
+}
+
+#[derive(Clone, Copy)]
+pub enum Round {
+    Initial,
+    Retry,
+    Complete,
+}
+
+impl Round {
+    pub fn commit(self) -> Option<Stage> {
+        match self {
+            Self::Initial => Some(Stage::Commit),
+            Self::Retry => Some(Stage::CommitFinal),
+            Self::Complete => None,
+        }
+    }
+
+    pub fn next(self, claims: ClaimWork) -> Self {
+        match (self, claims) {
+            (Self::Initial, ClaimWork::Ready) => Self::Retry,
+            _ => Self::Complete,
+        }
+    }
+}
+
+struct ClaimAllocation {
+    capacity: usize,
+    words: usize,
+}
+
+impl ClaimAllocation {
+    fn new(count: u64, resources: usize) -> anyhow::Result<Self> {
+        use anyhow::Context;
+        let capacity = usize::try_from(count)?
+            .checked_next_power_of_two()
+            .context("too many freight claims")?;
+        let words = capacity
+            .checked_mul(FREIGHT_CLAIM_WORDS + crate::domain::railway::FREIGHT_CLAIM_SORT_WORDS)
+            .and_then(|words| words.checked_add(resources + 1))
+            .context("freight claim storage overflow")?;
+        u32::try_from(words).context("freight claims exceed GPU indexing capacity")?;
+        Ok(Self { capacity, words })
+    }
+}
+
+pub fn prepare_claims(device: &Device, config: &mut Configuration) -> anyhow::Result<ClaimWork> {
+    let buffers = &mut config.railway.freight;
+    let count = device.read_range(&buffers.progress, CLAIM_COUNT, 2)?;
+    let count = u64::from(count[0]) | (u64::from(count[1]) << 32);
+    if count > buffers.claim_capacity as u64 {
+        let allocation = ClaimAllocation::new(
+            count,
+            (config.actors + config.railway.region_count) as usize,
+        )?;
+        let additional = allocation.words as u64 * size_of::<u32>() as u64;
+        device.reclaim_memory(additional)?;
+        let reserved = device
+            .client
+            .memory_report(cubecl::MemoryScope::Device)
+            .usage()
+            .bytes_reserved;
+        match reserved.saturating_add(additional) <= device.memory_budget.bytes() {
+            true => Ok(()),
+            false => Err(anyhow::anyhow!(
+                "freight claims exceed the device memory budget"
+            )),
+        }?;
+        buffers.claims = device.empty(allocation.words);
+        buffers.claim_capacity = allocation.capacity;
+    }
+    Ok(match count {
+        0 => ClaimWork::Empty,
+        _ => ClaimWork::Ready,
+    })
+}
+
 pub fn progress(
     device: &Device,
-    config: &Configuration,
+    _config: &Configuration,
     control: &CubeTensor,
 ) -> anyhow::Result<Progress> {
     let word = |index: usize| {
@@ -223,15 +397,17 @@ pub fn progress(
             .offset_end(size - (offset + size_of::<u32>()) as u64)
     };
     let values = device.client.read(vec![
-        config.railway.freight.progress.handle.clone(),
         word(crate::simulation::flags::FAULT_WORD),
         word(markets::SEARCHES_WORD),
+        #[cfg(test)]
+        _config.railway.freight.progress.handle.clone(),
     ])?;
-    let faults = u32::from_le_bytes(values[1][..4].try_into()?);
+    let faults = u32::from_le_bytes(values[0][..4].try_into()?);
     FaultFlags::new(faults)?.into_result()?;
     Ok(Progress {
-        pending: u32::from_le_bytes(values[0][..4].try_into()?),
-        searches: u32::from_le_bytes(values[2][..4].try_into()?),
+        #[cfg(test)]
+        pending: u32::from_le_bytes(values[2][..4].try_into()?),
+        searches: u32::from_le_bytes(values[1][..4].try_into()?),
     })
 }
 
@@ -265,34 +441,24 @@ fn budget(input: &Input, resource: u32) -> Ticks {
 }
 
 #[cube]
-fn claim(input: &Input, resource: u32, amount: Ticks, maximum: Ticks, priority: u32) {
+fn claim(input: &Input, resource: u32, amount: Ticks) {
     let base = resource as usize * RESOURCE_WORDS;
-    atomic_add(&input.resources, base + 2, amount, &input.control);
-    input.resources[base + 4].fetch_min(priority);
-    input.resources[base + 9].fetch_max(maximum.extract(LOW_WORD));
-    input.resources[base + 10].fetch_max(maximum.extract(HIGH_WORD));
-}
-
-#[cube]
-fn approved(input: &Input, resource: u32, priority: u32) -> bool {
-    let base = resource as usize * RESOURCE_WORDS;
-    let first = input.resources[base + 4].load();
-    let prefix = times(
-        atomic_ticks(&input.resources, base + 9),
-        priority - first + 1,
-    );
-    !lt(
-        budget(input, resource),
-        atomic_ticks(&input.resources, base + 2),
-    ) || first == priority
-        || prefix.faults.is_empty() && !lt(budget(input, resource), prefix.value)
+    if !equal(amount, zero()) {
+        input.resources[base + RESOURCE_CLAIMS].fetch_add(1);
+        claims::add_demand(
+            &input.resources,
+            base + REQUESTED,
+            base + REQUEST_OVERFLOW,
+            amount,
+        );
+    }
 }
 
 #[cube]
 fn consume_resource(input: &Input, resource: u32, amount: Ticks) {
     atomic_add(
         &input.resources,
-        resource as usize * RESOURCE_WORDS + 5,
+        resource as usize * RESOURCE_WORDS + CONSUMED,
         amount,
         &input.control,
     );
@@ -449,12 +615,14 @@ fn quantity(input: &Input, buyer: u32) -> Ticks {
 }
 
 #[cube]
-fn propose(input: &mut Input, index: u32) {
+fn propose(input: &mut Input, invocation: u32) {
     let count = input.parameters.count;
-    if index < markets::active(&input.control, &input.parameters) {
+    if invocation < input.progress[ACTIVE].load() {
+        let index = input.queue[invocation as usize];
         let id = input.scratch[(input.parameters.sort_source + count + index) as usize];
         let buyer = id + input.parameters.offset;
-        if input.bookings[buyer as usize * 2] == comptime!(BookingState::Pending as u32) {
+        let booking = input.bookings[buyer as usize * 2];
+        if booking != comptime!(BookingState::Complete as u32) {
             let seller =
                 input.proposals[buyer as usize * ProposalLayout::WORDS + ProposalLayout::ACTOR];
             let amount = quantity(&*input, buyer);
@@ -464,11 +632,12 @@ fn propose(input: &mut Input, index: u32) {
                 let mut cursor = RegionCursor::new(&preferred);
                 let mut record = cursor.next(&input.config);
                 while record < input.config.railway.region_count {
-                    atomic_add(
+                    claims::add_demand(
                         &input.resources,
-                        (input.config.actors + record) as usize * RESOURCE_WORDS + 7,
+                        (input.config.actors + record) as usize * RESOURCE_WORDS + PREFERRED,
+                        (input.config.actors + record) as usize * RESOURCE_WORDS
+                            + PREFERRED_OVERFLOW,
                         amount,
-                        &input.control,
                     );
                     record = cursor.next(&input.config);
                 }
@@ -479,6 +648,19 @@ fn propose(input: &mut Input, index: u32) {
             if origin < input.config.railway.nodes {
                 start = input.config.railway.station_companies[origin as usize];
                 end = input.config.railway.station_companies[origin as usize + 1];
+            }
+            if booking == comptime!(BookingState::Retrying as u32) {
+                let previous = candidate(
+                    &input.actors,
+                    &input.config,
+                    buyer,
+                    seller,
+                    input.bookings[buyer as usize * 2 + 1],
+                );
+                if fits(&*input, &previous, amount, seller) {
+                    selected.replace(&previous);
+                    start = end;
+                }
             }
             for entry in start..end {
                 let company = input.config.railway.station_companies[entry as usize];
@@ -495,17 +677,11 @@ fn propose(input: &mut Input, index: u32) {
                 input.bookings[buyer as usize * 2] = comptime!(BookingState::Ready as u32);
                 input.bookings[buyer as usize * 2 + 1] = selected.carrier;
                 let cost = multiply(&input.control, amount, selected.fee);
-                claim(&*input, seller, cost, cost, index);
+                claim(&*input, seller, cost);
                 let mut cursor = RegionCursor::new(&selected);
                 let mut record = cursor.next(&input.config);
                 while record < input.config.railway.region_count {
-                    claim(
-                        &*input,
-                        input.config.actors + record,
-                        amount,
-                        multiply(&input.control, amount, input.config.railway.nodes),
-                        index,
-                    );
+                    claim(&*input, input.config.actors + record, amount);
                     record = cursor.next(&input.config);
                 }
             }
@@ -576,9 +752,10 @@ fn credit_tolls(input: &Input, path: &FreightRoute, quantity: Ticks) {
 }
 
 #[cube]
-fn commit(input: &mut Input, index: u32) {
+fn commit(input: &mut Input, invocation: u32) {
     let count = input.parameters.count;
-    if index < markets::active(&input.control, &input.parameters) {
+    if invocation < input.progress[ACTIVE].load() {
+        let index = input.queue[invocation as usize];
         let id = input.scratch[(input.parameters.sort_source + count + index) as usize];
         let buyer = id + input.parameters.offset;
         if input.bookings[buyer as usize * 2] == comptime!(BookingState::Ready as u32) {
@@ -592,14 +769,8 @@ fn commit(input: &mut Input, index: u32) {
                 input.bookings[buyer as usize * 2 + 1],
             );
             let amount = quantity(&*input, buyer);
-            let mut allowed = approved(&*input, seller, index);
-            let mut cursor = RegionCursor::new(&path);
-            let mut record = cursor.next(&input.config);
-            while record < input.config.railway.region_count {
-                allowed = allowed && approved(&*input, input.config.actors + record, index);
-                record = cursor.next(&input.config);
-            }
-            input.bookings[buyer as usize * 2] = comptime!(BookingState::Pending as u32);
+            let allowed = input.accounts[buyer as usize * ACCOUNT_WORDS + DENIED].load() == 0;
+            input.bookings[buyer as usize * 2] = comptime!(BookingState::Retrying as u32);
             if allowed {
                 let good = input.parameters.traded_good();
                 let animal = animal_route(&input.actors, &input.config, buyer, seller);
@@ -648,7 +819,16 @@ fn commit(input: &mut Input, index: u32) {
                 credit_tolls(&*input, &path, amount);
                 input.bookings[buyer as usize * 2] = comptime!(BookingState::Complete as u32);
             } else {
-                input.progress[PENDING].fetch_add(1);
+                match comptime!(input.stage) {
+                    Stage::Commit => {
+                        let next = input.progress[PENDING].fetch_add(1);
+                        input.queue[(input.config.actors + next) as usize] = index;
+                    }
+                    _ => {
+                        input.bookings[buyer as usize * FREIGHT_BOOKING_WORDS] =
+                            comptime!(BookingState::Complete as u32)
+                    }
+                }
             }
         }
     }
@@ -666,6 +846,9 @@ impl GpuPass<Input> for SettleFreight {
         let base = id as usize * RESOURCE_WORDS;
         match comptime!(input.stage) {
             Stage::Snapshot => {
+                if invocation == 0 {
+                    input.progress[PENDING].store(0);
+                }
                 if id < actors {
                     atomic_store(
                         &input.resources,
@@ -707,6 +890,10 @@ impl GpuPass<Input> for SettleFreight {
                         comptime!(BookingState::Pending as u32),
                         comptime!(BookingState::Complete as u32),
                     );
+                    if status.contains(comptime!(EventStatus::Accepted)) {
+                        let next = input.progress[PENDING].fetch_add(1);
+                        input.queue[(actors + next) as usize] = invocation;
+                    }
                 }
                 if id >= actors && id < resources {
                     let stock = regional_value(
@@ -718,22 +905,56 @@ impl GpuPass<Input> for SettleFreight {
                     atomic_store(&input.resources, base, stock);
                 }
             }
+            Stage::Queue | Stage::SortClaims => (),
             Stage::Reset => {
+                if invocation == 0 {
+                    input.progress[CLAIM_COUNT].store(0);
+                    input.progress[CLAIM_COUNT + 1].store(0);
+                    input.progress[CLAIM_CURSOR].store(0);
+                }
+                if invocation < input.progress[ACTIVE].load() {
+                    let priority = input.queue[(actors + invocation) as usize];
+                    input.queue[invocation as usize] = priority;
+                    let buyer = input.scratch[(input.parameters.sort_source
+                        + input.parameters.count
+                        + priority) as usize]
+                        + input.parameters.offset;
+                    input.accounts[buyer as usize * ACCOUNT_WORDS + DENIED].store(0);
+                }
                 if id < resources {
                     for offset in 2..RESOURCE_WORDS {
-                        input.resources[base + offset].store(select(offset == 4, u32::MAX, 0));
+                        input.resources[base + offset].store(0);
                     }
-                }
-                if invocation == 0 {
-                    input.progress[PENDING].store(0);
                 }
             }
             Stage::Propose => propose(&mut input, invocation),
-            Stage::Commit => commit(&mut input, invocation),
+            Stage::CountClaims => {
+                if id < resources {
+                    let count = select(
+                        claims::contested(&input, id),
+                        input.resources[base + RESOURCE_CLAIMS].load(),
+                        0,
+                    );
+                    atomic_add(
+                        &input.progress,
+                        CLAIM_COUNT,
+                        ticks(count, 0),
+                        &input.control,
+                    );
+                }
+            }
+            Stage::EmitClaims => claims::emit(&mut input, invocation),
+            Stage::ClaimOffsets => claims::offset(&mut input, invocation),
+            Stage::Resolve => {
+                if id < resources {
+                    claims::resolve(&mut input, id);
+                }
+            }
+            Stage::Commit | Stage::CommitFinal => commit(&mut input, invocation),
             Stage::Release => {
                 if id < resources {
                     let available = budget(&input, id);
-                    let used = atomic_ticks(&input.resources, base + 5);
+                    let used = atomic_ticks(&input.resources, base + CONSUMED);
                     atomic_store(&input.resources, base, minus(available, used));
                 }
                 if id >= actors && id < resources {
@@ -752,14 +973,22 @@ impl GpuPass<Input> for SettleFreight {
                         region,
                         comptime!(RailCapacityField::Level),
                     );
-                    let before = plus(available, atomic_ticks(&input.resources, base + 5)).value;
+                    let before =
+                        plus(available, atomic_ticks(&input.resources, base + CONSUMED)).value;
                     let used = minus(times32(level, input.config.railway.units_per_level), before);
-                    let wanted = add_checked(
-                        &input.control,
+                    let wanted = claims::saturated_sum(
                         used,
                         maximum(
-                            atomic_ticks(&input.resources, base + 2),
-                            atomic_ticks(&input.resources, base + 7),
+                            claims::demand(
+                                &input.resources,
+                                base + REQUESTED,
+                                base + REQUEST_OVERFLOW,
+                            ),
+                            claims::demand(
+                                &input.resources,
+                                base + PREFERRED,
+                                base + PREFERRED_OVERFLOW,
+                            ),
                         ),
                     );
                     let previous = regional_value(
