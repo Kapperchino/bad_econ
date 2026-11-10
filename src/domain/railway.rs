@@ -17,12 +17,36 @@ impl RailMaterials {
     }
 }
 
+#[derive(Clone, Copy, Debug, Default, Serialize, Deserialize, PartialEq, Eq)]
+pub enum RailSharing {
+    #[default]
+    Shared,
+    Private,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+pub struct RailAgreement {
+    pub owner: u64,
+    pub carrier: u64,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+pub struct RailConnection {
+    pub firm: u64,
+    pub company: u64,
+    pub station: Position,
+}
+
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(deny_unknown_fields)]
 pub struct RailwayCompany {
     pub firm: u64,
     pub freight_rate: u32,
     pub access_fee: u32,
+    #[serde(default)]
+    pub sharing: RailSharing,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
@@ -43,6 +67,8 @@ pub struct RailwayConfig {
     pub maintenance: RailMaterials,
     pub companies: Vec<RailwayCompany>,
     pub segments: Vec<RailSegment>,
+    pub connections: Vec<RailConnection>,
+    pub sharing_agreements: Vec<RailAgreement>,
 }
 
 impl Default for RailwayConfig {
@@ -63,6 +89,8 @@ impl Default for RailwayConfig {
             },
             companies: Vec::new(),
             segments: Vec::new(),
+            connections: Vec::new(),
+            sharing_agreements: Vec::new(),
         }
     }
 }
@@ -91,6 +119,7 @@ impl RailwayConfig {
                 firm: firm.identity,
                 freight_rate: 1,
                 access_fee: 1,
+                sharing: RailSharing::Shared,
             })
             .collect();
         for (index, firm) in firms.iter().enumerate() {
@@ -121,15 +150,74 @@ impl RailwayConfig {
                     to: Position { x, y },
                 }));
         }
+        let stations = config.stations();
+        config.connections = sites
+            .iter()
+            .filter(|firm| firm.capacity >= 20 && firm.kind != Good::Railway as u32)
+            .filter(|firm| !stations.contains(&firm.position))
+            .take(256usize.saturating_sub(stations.len()))
+            .filter_map(|firm| {
+                stations
+                    .iter()
+                    .min_by_key(|station| firm.position.distance(**station))
+                    .and_then(|station| {
+                        config
+                            .segments
+                            .iter()
+                            .find(|segment| segment.from == *station || segment.to == *station)
+                            .map(|segment| RailConnection {
+                                firm: firm.identity,
+                                company: segment.company,
+                                station: *station,
+                            })
+                    })
+            })
+            .collect();
         config
     }
 
-    pub fn new(config: Self, actors: &ActorRows, map_size: u32) -> Result<Self> {
+    pub fn new(mut config: Self, actors: &ActorRows, map_size: u32) -> Result<Self> {
         let identities = config
             .companies
             .iter()
             .map(|company| company.firm)
             .collect::<BTreeSet<_>>();
+        let stations = config.stations();
+        let mut connections = BTreeSet::new();
+        for connection in &config.connections {
+            let firm = actors
+                .iter()
+                .find(|actor| actor.identity == connection.firm && actor.kind > 0)
+                .ok_or_else(|| anyhow!("rail connection requires an existing firm"))?;
+            match identities.contains(&connection.company)
+                && stations.contains(&connection.station)
+                && connections.insert(connection.firm)
+            {
+                true => (),
+                false => Err(anyhow!(
+                    "rail connection requires a known operator, a network station, and a unique firm"
+                ))?,
+            }
+            let existing = config.segments.iter().any(|segment| {
+                segment.company == connection.company
+                    && ((segment.from == firm.position && segment.to == connection.station)
+                        || (segment.to == firm.position && segment.from == connection.station))
+            });
+            if firm.position != connection.station && !existing {
+                config.segments.push(RailSegment {
+                    company: connection.company,
+                    from: firm.position,
+                    to: connection.station,
+                });
+            }
+        }
+        let mut agreements = BTreeSet::new();
+        let sharing = config.sharing_agreements.iter().all(|agreement| {
+            identities.contains(&agreement.owner)
+                && identities.contains(&agreement.carrier)
+                && agreement.owner != agreement.carrier
+                && agreements.insert((agreement.owner, agreement.carrier))
+        });
         let rates = config.companies.iter().all(|company| {
             (1..=1000).contains(&company.freight_rate)
                 && (1..=1000).contains(&company.access_fee)
@@ -166,6 +254,7 @@ impl RailwayConfig {
             .sum::<u64>();
         match identities.len() == config.companies.len()
             && rates
+            && sharing
             && segments
             && materials
             && (2..=100).contains(&config.speed_multiplier)

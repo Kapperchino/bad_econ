@@ -1,5 +1,6 @@
 pub const MATCHING_ROUNDS: usize = 4;
 pub const DISCOVERY_CANDIDATES: u32 = 8;
+pub const HOUSEHOLD_SEARCH_SAMPLES: u32 = 128;
 pub const COMMUTE_LEGS: u32 = 2;
 pub const POLICY_SCALE: u32 = 1000;
 pub const PRICE_SCALE: u32 = 1_000_000;

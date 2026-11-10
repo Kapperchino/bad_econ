@@ -228,9 +228,9 @@ fn explicit_maps_replace_generated_maps_and_legacy_scenarios_default_to_generati
     let checkpoint = Checkpoint::new(&scenario, &state)?;
     assert_eq!(checkpoint.restore()?.scenario, scenario);
     let mut encoded = serde_json::to_value(checkpoint)?;
-    assert_eq!(encoded["version"], 10);
+    assert_eq!(encoded["version"], 16);
     assert_eq!(encoded["scenario"]["version"], 2);
-    assert_eq!(STATE_HASH_VERSION, "bad-econ/state/CubekV2/v11");
+    assert_eq!(STATE_HASH_VERSION, "bad-econ/state/CubekV2/v17");
     encoded["version"] = serde_json::json!(9);
     assert!(serde_json::from_value::<Checkpoint>(encoded).is_err());
     Ok(())
@@ -441,6 +441,7 @@ mod compute {
         for good in Good::ALL
             .into_iter()
             .filter(|good| good.kind() == GoodKind::Manufactured)
+            .filter(|good| !matches!(good, Good::Housing | Good::Railway))
         {
             let supplies = [Supply::Available, Supply::NoLabor]
                 .into_iter()

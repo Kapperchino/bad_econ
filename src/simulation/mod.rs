@@ -265,14 +265,7 @@ impl Simulation {
         let proposals = device.empty(initial.actors.len() * ProposalLayout::WORDS);
         let summary = device.empty((scenario.fields() * TICK_WORDS).max(SummaryLayout::WORDS));
         let feedback = device.tensor(&vec![0; CONTROL_WORDS + initial.actors.len() * TICK_WORDS]);
-        let ownership = match initial
-            .ownership
-            .iter()
-            .any(|ownership| ownership.shares.len() > 1)
-        {
-            true => Some(ownership::OwnershipRuntime::new(&device, &initial)?),
-            false => None,
-        };
+        let ownership = Some(ownership::OwnershipRuntime::new(&device, &initial)?);
         let enterprise_requests = device.tensor(&vec![0; initial.actors.len()]);
         let day = initial.day;
         let audit = economy::audit::AuditBuffers::new(&device, &initial.actors);
@@ -552,7 +545,7 @@ impl Simulation {
                 self.local(phase)?;
                 match &self.ownership {
                     Some(ownership) => {
-                        ownership.distribute(&self.device, &self.state, &self.config)
+                        ownership.distribute(&self.device, &self.state, &self.actors, &self.config)
                     }
                     None => {
                         self.market(Market::Distribution, phase, trace, &mut evidence)?;
@@ -882,14 +875,7 @@ impl Simulation {
         let event_words = event_words
             .max(batch_size * EVENT_WORDS)
             .max(count.div_ceil(SummaryLayout::ACTORS_PER_GROUP as usize) * SummaryLayout::WORDS);
-        let ownership = match metadata
-            .ownership
-            .iter()
-            .any(|ownership| ownership.shares.len() > 1)
-        {
-            true => Some(ownership::OwnershipRuntime::new(&self.device, &metadata)?),
-            false => None,
-        };
+        let ownership = Some(ownership::OwnershipRuntime::new(&self.device, &metadata)?);
         let management = management::EnterpriseManagement::new(&self.device, &metadata);
         let audit = economy::audit::AuditBuffers::new(&self.device, &metadata.actors);
         let mut next = Self {
@@ -1325,9 +1311,7 @@ impl Simulation {
                 EconomyStage::GroupExecute => {
                     markets::dispatch(&self.searches.dispatches, markets::RANGE_DISPATCH)
                 }
-                EconomyStage::RailClassify
-                | EconomyStage::RailDependencies
-                | EconomyStage::GroupPrepare
+                EconomyStage::GroupPrepare
                 | EconomyStage::GroupFinalize
                 | EconomyStage::GroupRadixLocal
                 | EconomyStage::GroupRadixScatter
@@ -1476,22 +1460,21 @@ impl Simulation {
             }
         }
         launch(EconomyStage::MarketBoundary, 1, &parameters);
+        let freight = |stage| {
+            economy::railway::settlement::launch(
+                &self.device,
+                &self.state,
+                &self.actors,
+                &self.config,
+                &self.proposals,
+                &self.scratch,
+                &self.control,
+                &parameters,
+                stage,
+            );
+        };
         if regional_transport {
-            launch(EconomyStage::RailClassify, count, &parameters);
-            launch(EconomyStage::RailDependencies, count, &parameters);
-            #[cfg(test)]
-            if matches!(
-                self.market_execution,
-                MarketExecution::Original | MarketExecution::Reference
-            ) {
-                self.config.railway.serial_settlements(&self.device);
-            }
-        }
-        if matches!(
-            market,
-            Market::Labor | Market::Input(_) | Market::Consumer(_) | Market::Household
-        ) {
-            launch(EconomyStage::GroupPrepare, count, &parameters);
+            freight(economy::railway::settlement::Stage::Snapshot);
         }
         launch(EconomyStage::MarketBoundary, 1, &parameters);
         parameters.sort_source = self.market_sort.run(
@@ -1503,10 +1486,27 @@ impl Simulation {
         )?;
         launch(EconomyStage::GroupRanges, count, &parameters);
         launch(EconomyStage::MarketBoundary, 1, &parameters);
-        if regional_transport {
-            launch(EconomyStage::RailExecute, 1, &parameters);
+        if matches!(
+            market,
+            Market::Labor | Market::Input(_) | Market::Consumer(_) | Market::Household
+        ) {
+            launch(EconomyStage::GroupPrepare, count, &parameters);
         }
         match market {
+            Market::Payroll => economy::batch::payroll::PayrollSettlement::launch(
+                &self.device,
+                markets::dispatch(&self.searches.dispatches, markets::QUEUE_DISPATCH),
+                cubecl::CubeDim::new_1d(self.device.workgroup),
+                economy::batch::payroll::PayrollInputLaunch {
+                    state: self.state.clone().into_buffer_arg(),
+                    actors: self.actors.clone().into_buffer_arg(),
+                    config: self.config.launch(),
+                    proposals: self.proposals.clone().into_buffer_arg(),
+                    scratch: self.scratch.clone().into_buffer_arg(),
+                    control: self.control.clone().into_buffer_arg(),
+                    parameters: parameters.launch(),
+                },
+            ),
             Market::Labor if self.scenario.config().bargaining.is_none() => {
                 economy::batch::labor::LaborSettlement::launch(
                     &self.device,
@@ -1547,6 +1547,34 @@ impl Simulation {
             launch(EconomyStage::GroupFinalize, count, &parameters);
         }
         launch(EconomyStage::MarketBoundary, 1, &parameters);
+        if regional_transport {
+            use economy::railway::settlement::{self, Stage};
+            let freight = |simulation: &Self, stage| {
+                settlement::launch(
+                    &simulation.device,
+                    &simulation.state,
+                    &simulation.actors,
+                    &simulation.config,
+                    &simulation.proposals,
+                    &simulation.scratch,
+                    &simulation.control,
+                    &parameters,
+                    stage,
+                );
+            };
+            freight(self, Stage::Initialize);
+            let mut pending = 1;
+            while pending > 0 {
+                freight(self, Stage::Reset);
+                freight(self, Stage::Propose);
+                freight(self, Stage::Commit);
+                freight(self, Stage::Release);
+                pending = settlement::pending(&self.device, &self.config)?;
+                self.readback_bytes += WORD_BYTES as u64;
+                self.fault_check()?;
+            }
+            freight(self, Stage::Accounts);
+        }
         parameters.status_start = 4 * count as u32;
         if let (Market::Input(_) | Market::Consumer(_) | Market::Household, true) =
             (market, self.matching_round + 1 == MATCHING_ROUNDS)

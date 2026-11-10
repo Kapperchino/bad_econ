@@ -8,16 +8,30 @@ use crate::simulation::{
 use anyhow::Result;
 use burn::tensor::StreamId;
 use burn_wgpu::CubeTensor;
-use cubecl::{client::Graph, prelude::*};
+use cubecl::{
+    client::Graph,
+    config::{CubeClRuntimeConfig, RuntimeConfig, profiling::ProfilingLogLevel},
+    prelude::*,
+};
 
 #[cfg(test)]
 mod tests;
 
-#[derive(Default)]
 pub(in crate::simulation) enum MarketSort {
-    #[default]
+    Profiled,
     Unrecorded,
     Recorded(Box<RecordedSort>),
+}
+
+impl Default for MarketSort {
+    fn default() -> Self {
+        match CubeClRuntimeConfig::get().profiling.logger.level {
+            ProfilingLogLevel::Basic | ProfilingLogLevel::Medium | ProfilingLogLevel::Full => {
+                Self::Profiled
+            }
+            _ => Self::Unrecorded,
+        }
+    }
 }
 
 pub(in crate::simulation) struct RecordedSort {
@@ -117,6 +131,7 @@ impl MarketSort {
     ) -> Result<u32> {
         let plan = SortPlan::new(parameters);
         match self {
+            Self::Profiled => encode(device, scratch, control, dispatches, parameters),
             Self::Recorded(recorded)
                 if recorded.compatible(device, scratch, control, dispatches, plan) =>
             {

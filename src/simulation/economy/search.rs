@@ -19,10 +19,6 @@ pub(super) fn prepare(
     parameters: &EconomyParameters,
     invocation: u32,
 ) {
-    railway::reset_settlements(config, invocation);
-    if invocation == 0 {
-        railway::reset_settlements(config, config.actors);
-    }
     let mut id = invocation;
     let mut searching = false;
     let masks = ceildiv(config.actors, 32);
@@ -345,10 +341,11 @@ pub(super) fn supplier_stride(
     length: u32,
 ) -> u32 {
     let mut stride = 1u32;
-    if comptime!(matches!(parameters.market, MarketFlag::Input(_)))
-        && !kind(actors, buyer).is(comptime!(ActorKind::Household))
-        && length > 1
-    {
+    let sampled =
+        comptime!(parameters.market == MarketFlag::Household) && length > HOUSEHOLD_SEARCH_SAMPLES;
+    let industrial = comptime!(matches!(parameters.market, MarketFlag::Input(_)))
+        && !kind(actors, buyer).is(comptime!(ActorKind::Household));
+    if (sampled || industrial) && length > 1 {
         stride = max(
             length / 2 + (buyer + parameters.settlement_rotation) % max(length / 2, 1),
             1,
@@ -366,6 +363,14 @@ pub(super) fn supplier_stride(
         }
     }
     stride
+}
+
+#[cube]
+pub(super) fn supplier_samples(parameters: &EconomyParameters, length: u32) -> u32 {
+    match comptime!(parameters.market) {
+        MarketFlag::Household => min(length, HOUSEHOLD_SEARCH_SAMPLES),
+        _ => length,
+    }
 }
 
 #[cube]
@@ -711,6 +716,7 @@ fn search(
                 let begin = spatial[cell as usize];
                 let end = spatial[(cell + 1) as usize];
                 let length = end - begin;
+                let limit = begin + supplier_samples(parameters, length);
                 let stride = supplier_stride(actors, parameters, id, length);
                 let mut cursor = (parameters.settlement_rotation + id) % max(length, 1);
                 let mut j = begin;
@@ -720,7 +726,7 @@ fn search(
                 if nearest > radius {
                     j = end;
                 }
-                while j < end && considered < DISCOVERY_CANDIDATES {
+                while j < limit && considered < DISCOVERY_CANDIDATES {
                     let previous = j;
                     let mut skipped = 0u32;
                     if comptime!(matches!(parameters.market, MarketFlag::Consumer(_))) {
@@ -787,7 +793,7 @@ fn search(
                         candidates[lane * 9] = 0;
                         candidates[lane * 9 + 1] = 0;
                         candidates[lane * 9 + 2] = 0;
-                        if UNIT_POS < width && j + UNIT_POS < end {
+                        if UNIT_POS < width && j + UNIT_POS < limit {
                             let rotated = begin + (cursor + UNIT_POS * stride) % max(length, 1);
                             let firm = spatial[(side * side + 1 + rotated) as usize];
                             let offer = candidate(
@@ -828,7 +834,7 @@ fn search(
                                     );
                                 let preceding = plane_exclusive_sum(counted);
                                 let visited = UNIT_POS < width
-                                    && j + UNIT_POS < end
+                                    && j + UNIT_POS < limit
                                     && preceding < DISCOVERY_CANDIDATES - considered;
                                 let included = u32::cast_from(visited);
                                 let total = plane_sum(counted * included);
@@ -896,7 +902,7 @@ fn search(
                         if !cooperative {
                             if UNIT_POS == 0 {
                                 let mut slot = 0usize;
-                                while slot < min(width as usize, (end - j) as usize)
+                                while slot < min(width as usize, (limit - j) as usize)
                                     && considered < DISCOVERY_CANDIDATES
                                 {
                                     if comptime!(parameters.market == MarketFlag::Labor) {

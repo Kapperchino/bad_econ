@@ -145,7 +145,7 @@ fn prepare_counts(
 }
 
 pub(in crate::simulation) fn scratch_words(actors: usize) -> usize {
-    actors * 8 + 512
+    actors * 9 + 512
 }
 
 #[cube]
@@ -194,9 +194,11 @@ pub(in crate::simulation) fn ranges(
         scratch[(7 * count + key) as usize] = low;
         slots = min(length, MAX_RANGE_SPACING);
         if comptime!(
-            matches!(parameters.market, MarketFlag::Consumer(_))
-                || parameters.market == MarketFlag::Labor
-                    && config.bargaining.enabled == Feature::Disabled
+            matches!(
+                parameters.market,
+                MarketFlag::Consumer(_) | MarketFlag::Payroll
+            ) || parameters.market == MarketFlag::Labor
+                && config.bargaining.enabled == Feature::Disabled
         ) {
             slots = 1;
         }

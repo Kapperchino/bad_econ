@@ -462,9 +462,24 @@ fn gpu_parent_estates_preserve_inheritance_without_full_state_readback() -> Resu
             assert!(gpu.download()? == reference.download()?);
             assert_eq!(gpu.actors().at(3000).owner, 2);
             assert_eq!(gpu.actors().at(3001).owner, 32);
-            gpu.advance()?;
-            reference.advance()?;
-            assert!(gpu.download()? == reference.download()?);
+            for phase in Phase::ALL {
+                gpu.phase(phase, Trace::Discard)?;
+                reference.phase(phase, Trace::Discard)?;
+                let actual = gpu.download()?;
+                let expected = reference.download()?;
+                let differences = actual
+                    .values
+                    .iter()
+                    .zip(&expected.values)
+                    .enumerate()
+                    .filter(|(_, (actual, expected))| actual != expected)
+                    .take(12)
+                    .collect::<Vec<_>>();
+                assert!(
+                    actual == expected,
+                    "formation {formation:?}, workgroup {workgroup}, phase {phase:?}: {differences:?}"
+                );
+            }
             gpu.checkpoint()?.restore()?;
         }
     }

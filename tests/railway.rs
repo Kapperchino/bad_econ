@@ -28,6 +28,8 @@ fn network() -> Result<ScenarioConfig> {
     config.demography.mortality.occupational_annual_ppm = [0; Good::COUNT];
     config.demography.mortality.famine_daily_ppm_at_thirty_days = 0;
     config.railway = RailwayConfig {
+        connections: Vec::new(),
+        sharing_agreements: Vec::new(),
         speed_multiplier: 10,
         length_unit: 1000,
         units_per_level: 100,
@@ -46,11 +48,13 @@ fn network() -> Result<ScenarioConfig> {
                 firm: 11,
                 freight_rate: 2,
                 access_fee: 3,
+                sharing: RailSharing::Shared,
             },
             RailwayCompany {
                 firm: 12,
                 freight_rate: 3,
                 access_fee: 5,
+                sharing: RailSharing::Shared,
             },
         ],
         segments: vec![
@@ -584,6 +588,73 @@ fn shared_regions_do_not_oversell_and_replenish_next_day_on_gpu() -> Result<()> 
 }
 
 #[test]
+fn parallel_regional_expansion_preserves_material_priority_and_wide_capacity_on_gpu() -> Result<()>
+{
+    for workgroup in [32, 64, 128, 256] {
+        for upgrades in [0, 1, 31, 33, 51] {
+            let mut config = regional_network()?;
+            config.railway.length_unit = 10;
+            config.railway.units_per_level = 100_000;
+            config.expansion = enterprise::ExpansionPolicy {
+                small_business_per_mille: 1000,
+                industrial_per_mille: 1000,
+            };
+            let maintenance_units = 50 + 51 * 998;
+            for (good, cost) in [Good::Coal, Good::Steel, Good::Locomotives]
+                .into_iter()
+                .zip(config.railway.construction.quantities())
+            {
+                config.population.as_mut().unwrap().firms[1].inventories[good as usize - 1] =
+                    maintenance_units + u64::from(cost) * upgrades;
+            }
+            let scenario = Scenario::new(config)?;
+            let mut initial = scenario.initial()?;
+            initial.set(Field::RailBuilt, 5, 1);
+            for record in 0..51 {
+                for (field, value) in [
+                    (RailCapacityField::Level, 999),
+                    (RailCapacityField::Demand, 100_000_000),
+                ] {
+                    let cell = scenario
+                        .rail_geography()
+                        .coordinate(&scenario, &initial, field, record);
+                    initial.values[cell] = value;
+                }
+            }
+            let mut simulation = Simulation::from_checkpoint(
+                Checkpoint::new(&scenario, &initial)?,
+                support::device(workgroup)?,
+            )?;
+            simulation.phase(Phase::Opening, Trace::Discard)?;
+            let state = simulation.download()?;
+            for record in 0..51 {
+                let level = 999 + u64::from((record as u64) < upgrades);
+                assert_eq!(
+                    regional_value(&scenario, &state, record, RailCapacityField::Level),
+                    level
+                );
+                assert_eq!(
+                    regional_value(&scenario, &state, record, RailCapacityField::Available),
+                    level * 100_000
+                );
+            }
+            assert_eq!(
+                state.get(Field::RailCapacity, 5),
+                (51 * 999 + upgrades) * 100_000
+            );
+            assert_eq!(
+                state.get(Field::Railway, 5),
+                state.get(Field::RailCapacity, 5)
+            );
+            for good in [Good::Coal, Good::Steel, Good::Locomotives] {
+                assert_eq!(state.get(Field::inventory(good), 5), 0);
+            }
+        }
+    }
+    Ok(())
+}
+
+#[test]
 fn only_expanding_owners_with_materials_upgrade_a_busy_region_on_gpu() -> Result<()> {
     for preference in [0, 1000] {
         for materials in [0, 1000] {
@@ -890,6 +961,7 @@ fn every_foreign_operator_is_paid_even_within_one_region_on_gpu() -> Result<()> 
         firm: 13,
         freight_rate: 4,
         access_fee: 7,
+        sharing: RailSharing::Shared,
     });
     config.railway.segments[1].to.x = 600;
     config.railway.segments.push(RailSegment {
@@ -921,6 +993,7 @@ fn competing_companies_produce_separate_capacity_in_the_same_regions_on_gpu() ->
         firm: 12,
         freight_rate: 3,
         access_fee: 5,
+        sharing: RailSharing::Shared,
     });
     config.railway.segments.push(RailSegment {
         company: 12,
@@ -1004,5 +1077,209 @@ fn carriers_prefer_their_own_connected_tracks_over_a_foreign_shortcut_on_gpu() -
     assert_eq!(state.get(Field::Sales, 5), 1);
     assert_eq!(state.get(Field::Sales, 6), 0);
     simulation.checkpoint()?.restore()?;
+    Ok(())
+}
+
+#[test]
+fn private_tracks_require_a_directional_sharing_agreement_on_gpu() -> Result<()> {
+    for agreements in [
+        Vec::new(),
+        vec![RailAgreement {
+            owner: 12,
+            carrier: 11,
+        }],
+        vec![RailAgreement {
+            owner: 11,
+            carrier: 12,
+        }],
+    ] {
+        let shared = agreements
+            .first()
+            .is_some_and(|agreement| agreement.owner == 12);
+        let mut config = network()?;
+        config.railway.companies[1].sharing = RailSharing::Private;
+        config.railway.sharing_agreements = agreements;
+        let scenario = Scenario::new(config)?;
+        let mut simulation = Simulation::new(scenario.clone(), support::device(64)?)?;
+        simulation.advance()?;
+        let state = simulation.download()?;
+        let quantity = state.get(Field::Purchased, 0);
+        assert!(quantity > 0);
+        assert_eq!(
+            delivered(&state, &scenario, 1),
+            if shared { quantity } else { 0 }
+        );
+        assert_eq!(
+            state.get(Field::RailRevenue, 6),
+            if shared { quantity * 5 } else { 0 }
+        );
+        simulation.checkpoint()?.restore()?;
+    }
+    Ok(())
+}
+
+#[test]
+fn industrial_siding_is_built_and_preserved_by_checkpoint_replay_on_gpu() -> Result<()> {
+    let mut config = network()?;
+    config.map_size = 1500;
+    config.search_radius = 1500;
+    config.population.as_mut().unwrap().firms[0].position.y = 200;
+    config.population.as_mut().unwrap().firms[0].capacity = 20;
+    config.railway.connections.push(RailConnection {
+        firm: 10,
+        company: 11,
+        station: Position { x: 0, y: 0 },
+    });
+    let scenario = Scenario::new(config)?;
+    assert_eq!(scenario.config().railway.segments.len(), 3);
+    assert_eq!(
+        Scenario::new(scenario.config().clone())?
+            .config()
+            .railway
+            .segments
+            .len(),
+        3
+    );
+    let mut simulation = Simulation::new(scenario.clone(), support::device(64)?)?;
+    simulation.advance()?;
+    let first = simulation.download()?;
+    assert_eq!(first.get(Field::RailBuilt, 5), 1);
+    assert_eq!(delivered(&first, &scenario, 1), 0);
+    let mut initial = scenario.initial()?;
+    initial.set(Field::RailBuilt, 5, 1);
+    let mut simulation =
+        Simulation::from_checkpoint(Checkpoint::new(&scenario, &initial)?, support::device(64)?)?;
+    simulation.advance()?;
+    let state = simulation.download()?;
+    assert_eq!(state.get(Field::RailBuilt, 5), 2);
+    assert!(delivered(&state, &scenario, 2) > 0);
+    assert!(state.get(Field::RailRevenue, 5) > 0);
+    let mut replay = Simulation::from_checkpoint(simulation.checkpoint()?, support::device(128)?)?;
+    simulation.advance()?;
+    replay.advance()?;
+    assert_eq!(simulation.download()?, replay.download()?);
+    simulation.checkpoint()?.restore()?;
+    Ok(())
+}
+
+#[test]
+fn concurrent_shared_freight_preserves_capacity_payments_and_replay_on_gpu() -> Result<()> {
+    struct FreightLoad {
+        capacity: u32,
+        budget: u64,
+        delivered: u64,
+    }
+    for load in [
+        FreightLoad {
+            capacity: 7,
+            budget: 10_000,
+            delivered: 7,
+        },
+        FreightLoad {
+            capacity: 1000,
+            budget: 10_000,
+            delivered: 261,
+        },
+        FreightLoad {
+            capacity: 1000,
+            budget: 49,
+            delivered: 7,
+        },
+    ] {
+        let mut config = network()?;
+        config.railway.units_per_level = load.capacity;
+        config.population.as_mut().unwrap().firms[0].cash = load.budget;
+        let population = config.population.as_mut().unwrap();
+        let template = population.households[0].clone();
+        for household in &mut population.households {
+            household.cash = 10;
+            household.inventories = [0; Good::COUNT];
+        }
+        population
+            .households
+            .extend((0..257).map(|index| HouseholdSeed {
+                identity: 100 + index,
+                cash: 10,
+                ..template.clone()
+            }));
+        config.households = population.households.len() as u32;
+        let households = config.households as usize;
+        let scenario = Scenario::new(config)?;
+        let mut expected = None;
+        for workgroup in [32, 64, 128, 256] {
+            let mut simulation = Simulation::new(scenario.clone(), support::device(workgroup)?)?;
+            simulation.advance()?;
+            let state = simulation.download()?;
+            let rail_units = (0..households)
+                .map(|buyer| {
+                    state.values[state
+                        .shipment_coordinate(Good::Bread, 1, scenario.ring(), buyer)
+                        .0 as usize]
+                })
+                .sum::<u64>();
+            assert_eq!(rail_units, load.delivered);
+            assert_eq!(
+                state.get(Field::RailRevenue, households + 1),
+                rail_units * 2
+            );
+            assert_eq!(
+                state.get(Field::RailRevenue, households + 2),
+                rail_units * 5
+            );
+            assert_eq!(
+                state.get(Field::Railway, households + 2),
+                u64::from(load.capacity) - rail_units
+            );
+            match &expected {
+                Some(expected) => assert_eq!(&state, expected),
+                None => expected = Some(state),
+            }
+            simulation.checkpoint()?.restore()?;
+        }
+    }
+    Ok(())
+}
+
+#[test]
+fn reentering_a_region_reserves_every_visit_atomically_on_gpu() -> Result<()> {
+    for capacity in [1, 2] {
+        let mut config = regional_network()?;
+        config.railway.units_per_level = capacity;
+        config.population.as_mut().unwrap().households[0].position = Position { x: 500, y: 90 };
+        config.railway.segments = [(0, 0), (150, 0), (50, 50), (180, 90), (500, 90)]
+            .windows(2)
+            .map(|points| RailSegment {
+                company: 11,
+                from: Position {
+                    x: points[0].0,
+                    y: points[0].1,
+                },
+                to: Position {
+                    x: points[1].0,
+                    y: points[1].1,
+                },
+            })
+            .collect();
+        let scenario = Scenario::new(config)?;
+        let mut initial = scenario.initial()?;
+        initial.set(Field::RailBuilt, 5, 4);
+        let mut simulation = Simulation::from_checkpoint(
+            Checkpoint::new(&scenario, &initial)?,
+            support::device(64)?,
+        )?;
+        simulation.advance()?;
+        let state = simulation.download()?;
+        assert_eq!(delivered(&state, &scenario, 1), u64::from(capacity == 2));
+        assert_eq!(delivered(&state, &scenario, 6), u64::from(capacity == 1));
+        assert_eq!(
+            state.get(Field::RailRevenue, 5),
+            if capacity == 2 { 14 } else { 0 }
+        );
+        assert_eq!(
+            regional_value(&scenario, &state, 1, RailCapacityField::Available),
+            u64::from(capacity == 1)
+        );
+        simulation.checkpoint()?.restore()?;
+    }
     Ok(())
 }

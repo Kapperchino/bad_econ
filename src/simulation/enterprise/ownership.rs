@@ -1,5 +1,6 @@
-use crate::domain::{Field, State};
+use crate::domain::{Field, Good, State};
 use crate::simulation::configuration::{Configuration, EconomyConfig};
+use crate::simulation::layout::ActorLayout;
 use crate::simulation::{
     Device,
     flags::FaultFlags,
@@ -122,6 +123,7 @@ impl OwnershipRuntime {
         &self,
         device: &Device,
         state: &CubeTensor,
+        actors: &CubeTensor,
         config: &Configuration,
     ) -> Result<()> {
         let argument = |tensor: &CubeTensor| tensor.clone().into_buffer_arg();
@@ -132,6 +134,7 @@ impl OwnershipRuntime {
             CubeDim::new_1d(device.workgroup),
             PaymentInputLaunch {
                 state: argument(state),
+                actors: argument(actors),
                 config: config.launch(),
                 shares: argument(&self.shares),
                 payments: argument(&self.payments),
@@ -159,6 +162,7 @@ impl OwnershipRuntime {
 #[derive(CubeType, CubeLaunch)]
 struct PaymentInput {
     state: Box<[Ticks]>,
+    actors: Box<[u32]>,
     config: EconomyConfig,
     shares: Box<[Vector<u32, Const<2>>]>,
     payments: Box<[Ticks]>,
@@ -198,6 +202,7 @@ impl GpuPass<PaymentInput> for CalculatePayments {
     fn execute(mut input: PaymentInput) {
         payments(
             &input.state,
+            &input.actors,
             &input.config,
             &input.shares,
             &mut input.payments,
@@ -226,6 +231,7 @@ impl GpuPass<DistributionInput> for DistributePayments {
 #[cube]
 fn payments(
     state: &[Ticks],
+    actor_rows: &[u32],
     config: &EconomyConfig,
     shares: &[Vector<u32, Const<2>>],
     payments: &mut [Ticks],
@@ -238,18 +244,11 @@ fn payments(
         let units = share.extract(1usize);
         let actors = config.actors;
         let cash = state[(comptime!(Field::Cash as u32) * actors + firm) as usize];
-        let labor =
-            state[(comptime!(Field::LaborMinutes as u32) * actors + firm) as usize].extract(0usize);
-        let wage = state[(comptime!(Field::Wage as u32) * actors + firm) as usize].extract(0usize);
-        let plan = state[(comptime!(Field::Plan as u32) * actors + firm) as usize].extract(0usize);
-        let payroll = times32(labor * wage, plan);
+        let kind = actor_rows[comptime!(ActorLayout::KIND) * actors as usize + firm as usize];
         let reserve = maximum(
-            maximum(
-                payroll,
-                state[(comptime!(Field::OperatingReserve as u32) * actors + firm) as usize],
-            ),
+            state[(comptime!(Field::OperatingReserve as u32) * actors + firm) as usize],
             select(
-                labor == 0,
+                kind == comptime!(Good::Housing as u32),
                 zero(),
                 ticks(config.reserve_low, config.reserve_high),
             ),
@@ -314,6 +313,7 @@ fn account_balance(
 #[cube(launch)]
 fn original_distribute(
     state: &mut [u32],
+    actor_rows: &[u32],
     config: &EconomyConfig,
     shares: &[u32],
     control: &[Atomic<u32>],
@@ -326,21 +326,14 @@ fn original_distribute(
             let count = shares[cursor + 1];
             cursor += 2;
             let cash = load(state, comptime!(Field::Cash as u32) * actors + firm);
-            let labor =
-                load(state, comptime!(Field::LaborMinutes as u32) * actors + firm).extract(0usize);
-            let wage = load(state, comptime!(Field::Wage as u32) * actors + firm).extract(0usize);
-            let plan = load(state, comptime!(Field::Plan as u32) * actors + firm).extract(0usize);
-            let payroll = times32(labor * wage, plan);
+            let kind = actor_rows[comptime!(ActorLayout::KIND) * actors as usize + firm as usize];
             let reserve = maximum(
-                maximum(
-                    payroll,
-                    load(
-                        state,
-                        comptime!(Field::OperatingReserve as u32) * actors + firm,
-                    ),
+                load(
+                    state,
+                    comptime!(Field::OperatingReserve as u32) * actors + firm,
                 ),
                 select(
-                    labor == 0,
+                    kind == comptime!(Good::Housing as u32),
                     zero(),
                     ticks(config.reserve_low, config.reserve_high),
                 ),
@@ -382,7 +375,7 @@ mod tests {
         Experiment, Scenario,
         enterprise::{Ownership, OwnershipShare},
     };
-    use crate::simulation::encode;
+    use crate::simulation::{encode, layout::ActorMetadataRows};
     use std::collections::BTreeMap;
 
     #[test]
@@ -454,6 +447,12 @@ mod tests {
             let device = Device::headless(workgroup)?;
             let original = device.tensor(&original);
             let runtime = OwnershipRuntime::new(&device, &initial)?;
+            let rows = initial
+                .actors
+                .iter()
+                .map(|actor| ActorLayout::new(&actor, &scenario))
+                .collect::<ActorMetadataRows>();
+            let actors = device.tensor(&rows.words());
             let mut config = Configuration::new(&device, &scenario, &initial);
             for rate in [0, 333, 1000] {
                 config.distribution_rate = rate;
@@ -468,11 +467,12 @@ mod tests {
                         CubeCount::Static(1, 1, 1),
                         CubeDim::new_1d(workgroup),
                         expected.clone().into_buffer_arg(),
+                        actors.clone().into_buffer_arg(),
                         config.launch(),
                         original.clone().into_buffer_arg(),
                         control.clone().into_buffer_arg(),
                     );
-                    let result = runtime.distribute(&device, &actual, &config);
+                    let result = runtime.distribute(&device, &actual, &actors, &config);
                     let expected_faults = FaultFlags::read(&device.read(&control)?)?;
                     assert_eq!(result.is_ok(), expected_faults.is_empty());
                     assert_eq!(

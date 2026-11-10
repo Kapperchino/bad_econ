@@ -247,12 +247,24 @@ fn a_lost_harvest_changes_output_without_a_recovery_timer_or_asset_grant() -> Re
         .clone();
     config.research = None;
     config.demography.annual_births_per_million_fertile_women = 0;
+    config.expansion = enterprise::ExpansionPolicy {
+        small_business_per_mille: 0,
+        industrial_per_mille: 0,
+    };
+    config.entrepreneurship.interested_per_mille = 0;
+    config.demography.mortality.background_annual_ppm = [0; 5];
+    config.demography.mortality.occupational_annual_ppm = [0; Good::COUNT];
+    config.demography.mortality.famine_daily_ppm_at_thirty_days = 0;
     let scenario = Scenario::new(config)?;
     let mut baseline = Simulation::new(scenario.clone(), support::device(64)?)?;
     for _ in 0..269 {
         baseline.advance()?;
     }
     let mut failed_crop = baseline.download()?;
+    assert!((0..failed_crop.actors.len()).any(|actor| failed_crop.get(Field::CropWork, actor) > 0));
+    let plots = (0..failed_crop.actors.len())
+        .map(|actor| failed_crop.get(Field::LandPlots, actor))
+        .collect::<Vec<_>>();
     for actor in 0..failed_crop.actors.len() {
         failed_crop.set(Field::CropWork, actor, 0);
     }
@@ -264,6 +276,7 @@ fn a_lost_harvest_changes_output_without_a_recovery_timer_or_asset_grant() -> Re
         crisis.advance()?;
     }
     let first_harvest = crisis.snapshot.household_production[Good::Grain as usize - 1];
+    assert!(baseline.snapshot.household_production[Good::Grain as usize - 1] > 0);
     assert!(first_harvest < baseline.snapshot.household_production[Good::Grain as usize - 1]);
     for _ in 0..365 {
         crisis.advance()?;
@@ -271,6 +284,12 @@ fn a_lost_harvest_changes_output_without_a_recovery_timer_or_asset_grant() -> Re
     assert!(crisis.snapshot.household_production[Good::Grain as usize - 1] > first_harvest);
     assert_eq!(crisis.snapshot.cash, failed_crop.initial_cash);
     let state = crisis.download()?;
+    assert_eq!(
+        (0..plots.len())
+            .map(|actor| state.get(Field::LandPlots, actor))
+            .collect::<Vec<_>>(),
+        plots
+    );
     assert_eq!(
         crisis.snapshot.population.living + crisis.snapshot.population.deaths.iter().sum::<u64>(),
         state.initial_population

@@ -948,6 +948,7 @@ fn propose(
                     let mut j = spatial[cell as usize];
                     let begin = j;
                     let length = spatial[(cell + 1) as usize] - begin;
+                    let limit = begin + search::supplier_samples(parameters, length);
                     let stride = search::supplier_stride(actors, parameters, id, length);
                     let mut cursor = (parameters.settlement_rotation + id) % max(length, 1);
                     let nearest = max(px, x * radius) - min(px, (x + 1) * radius - 1)
@@ -956,7 +957,7 @@ fn propose(
                     if nearest > radius {
                         j = spatial[(cell + 1) as usize];
                     }
-                    while j < spatial[(cell + 1) as usize] && considered < DISCOVERY_CANDIDATES {
+                    while j < limit && considered < DISCOVERY_CANDIDATES {
                         let previous = j;
                         let rotated = begin + cursor;
                         let mut skipped = 0u32;
@@ -1365,10 +1366,6 @@ fn construct(
         if comptime!(parameters.market.good().is_some()) && other < config.actors {
             let planned = railway::animal_route(actors, config, actor, other);
             path.replace(&planned);
-            if !railway::parallel_settlement(config, parameters, other) {
-                let planned = railway::route(actors, config, actor, other);
-                path.replace(&planned);
-            }
         }
         construct_route(
             state,
@@ -2290,9 +2287,6 @@ pub enum EconomyStage {
     GroupSort,
     GroupMerge,
     GroupExecute,
-    RailClassify,
-    RailDependencies,
-    RailExecute,
     GroupRemainder,
     GroupPrepare,
     GroupFinalize,
@@ -2436,22 +2430,6 @@ pub fn economy(
             }
             EconomyStage::GroupSort => group_sort(bundles, control, parameters, id),
             EconomyStage::GroupMerge => group_merge(bundles, control, parameters, id),
-            EconomyStage::RailClassify => railway::classify(
-                state,
-                actors,
-                config,
-                &*proposals,
-                &*bundles,
-                control,
-                parameters,
-                id,
-            ),
-            EconomyStage::RailDependencies => {
-                railway::dependencies(config, &*proposals, &*bundles, control, parameters, id)
-            }
-            EconomyStage::RailExecute => railway::dispatch(
-                state, actors, config, proposals, bundles, control, parameters, id,
-            ),
             EconomyStage::GroupExecute => group_execute(
                 state, actors, config, proposals, bundles, control, parameters, id,
             ),
@@ -2675,7 +2653,7 @@ fn group_execute(
         if id > 0 {
             first = scratch[(source + id - 1) as usize] != key;
         }
-        if first && railway::parallel_settlement(config, parameters, key) {
+        if first {
             let low = id;
             let mut cursor = low;
             let mut active = true;
@@ -2755,9 +2733,7 @@ fn group_remainder(
     let count = parameters.count;
     if id < markets::active(control, parameters) {
         let key = scratch[(parameters.sort_source + id) as usize];
-        if id >= scratch[(7 * count + key) as usize]
-            && railway::parallel_settlement(config, parameters, key)
-        {
+        if id >= scratch[(7 * count + key) as usize] {
             let actor = scratch[(parameters.sort_source + count + id) as usize];
             let prior = KernelEventStatus::load(scratch, 4 * count + actor);
             let mut peer = PeerBalances::new(state, actors, config, parameters, key);

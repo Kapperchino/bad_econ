@@ -42,6 +42,12 @@ struct Cli {
     output: Option<PathBuf>,
     #[arg(long)]
     trajectory: Option<PathBuf>,
+    #[cfg(feature = "compute")]
+    #[arg(
+        long,
+        help = "Write CubeCL GPU kernel timings and dispatch details to PATH"
+    )]
+    kernel_profile: Option<PathBuf>,
     #[arg(long, default_value_t = 0)]
     checkpoint_every: u32,
     #[arg(long, value_delimiter = ',', default_value = "10000,100000,1000000")]
@@ -94,6 +100,15 @@ impl From<ExperimentArg> for Experiment {
 }
 fn main() -> Result<()> {
     let args = Cli::parse();
+    #[cfg(feature = "compute")]
+    if let Some(path) = &args.kernel_profile {
+        use cubecl::config::{CubeClRuntimeConfig, RuntimeConfig, profiling::ProfilingLogLevel};
+        let mut config = CubeClRuntimeConfig::from_current_dir().override_from_env();
+        config.profiling.logger.level = ProfilingLogLevel::Full;
+        config.profiling.logger.file = Some(path.clone());
+        config.profiling.logger.append = false;
+        CubeClRuntimeConfig::set(config);
+    }
     match args.mode {
         Mode::Scenario => output(
             &args.output,

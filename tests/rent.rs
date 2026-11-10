@@ -173,7 +173,12 @@ fn daily_rent_conserves_cash_and_replays_arrears_on_gpu() -> Result<()> {
 
 #[test]
 fn industrial_paycheck_households_avoid_startup_famine_at_a_million_on_gpu() -> Result<()> {
-    let scenario = Scenario::industrial(1_000_000, 42, Experiment::Baseline)?;
+    let mut config = Scenario::industrial(1_000_000, 42, Experiment::Baseline)?
+        .config()
+        .clone();
+    config.shipment_speed = config.search_radius;
+    let scenario = Scenario::new(config)?;
+    assert_eq!(scenario.ring(), 2);
     let mut simulation = Simulation::new(scenario, support::device(128)?)?;
     let initial_cash = simulation.snapshot.cash;
     for day in 1..=120 {

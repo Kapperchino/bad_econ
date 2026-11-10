@@ -47,6 +47,39 @@ pub(super) enum Reduction {
     Minimum,
 }
 
+#[derive(CubeType)]
+pub(super) struct WideSum {
+    pub value: u64,
+    pub overflow: u32,
+}
+
+#[cube]
+pub(super) fn sum_wide(value: u64) -> WideSum {
+    let mut values = Shared::<[u64]>::new_slice(256usize);
+    let mut overflows = Shared::<[u32]>::new_slice(256usize);
+    let lane = UNIT_POS as usize;
+    values[lane] = value;
+    overflows[lane] = 0;
+    sync_cube();
+    let mut stride = CUBE_DIM / 2;
+    while stride > 0 {
+        if UNIT_POS < stride {
+            let sum = values[lane] + values[lane + stride as usize];
+            overflows[lane] |=
+                overflows[lane + stride as usize] | u32::cast_from(sum < values[lane]);
+            values[lane] = sum;
+        }
+        sync_cube();
+        stride /= 2;
+    }
+    let result = WideSum {
+        value: values[0],
+        overflow: overflows[0],
+    };
+    sync_cube();
+    result
+}
+
 #[cube]
 pub(super) fn reduce(value: u32, #[comptime] operation: Reduction) -> u32 {
     let mut values = Shared::<[u32]>::new_slice(256usize);

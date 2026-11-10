@@ -367,6 +367,32 @@ fn cooperative_market_search_preserves_serial_search_and_shared_fallback_on_gpu(
 }
 
 #[test]
+fn bounded_household_search_rotates_samples_and_repeats_on_gpu() -> Result<()> {
+    for day in [0, 1] {
+        let mut probe = SearchProbe::new(SupplyCase::Empty, day, Market::Household)?;
+        for firm in 1..=SUPPLIERS as usize {
+            probe.state.set(Field::Price, firm, 0);
+        }
+        probe.state.set(Field::Bread, 10, 100);
+        probe.state.set(Field::Price, 10, 1);
+        let expected = match day {
+            0 => NO_ACTOR,
+            _ => 10,
+        };
+        for execution in [
+            SearchExecution::Serial,
+            SearchExecution::Shared,
+            SearchExecution::Plane,
+        ] {
+            let first = probe.outcome(execution)?;
+            assert_eq!(first.proposal[ProposalLayout::ACTOR], expected);
+            assert_eq!(first, probe.outcome(execution)?);
+        }
+    }
+    Ok(())
+}
+
+#[test]
 fn cooperative_market_search_only_reports_faults_from_the_visited_prefix_on_gpu() -> Result<()> {
     for available in [7, 6] {
         let probe = SearchProbe::new(SupplyCase::LaborPrefix(available), 0, Market::Labor)?;
