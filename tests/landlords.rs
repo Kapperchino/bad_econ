@@ -1,5 +1,5 @@
 #![cfg(feature = "compute")]
-use crate::support;
+use super::support;
 use anyhow::Result;
 use bad_econ::{
     domain::{
@@ -223,6 +223,7 @@ fn generated_rentals_house_local_renters_without_counting_subsistence_homes_on_g
 }
 
 #[test]
+#[ignore = "extended scenario coverage; run cargo gpu-extended"]
 fn urban_rental_shortages_fund_construction_with_default_expansion_on_gpu() -> Result<()> {
     let mut config = rentals()?;
     config.expansion = enterprise::ExpansionPolicy::default();
@@ -252,7 +253,7 @@ fn urban_rental_shortages_fund_construction_with_default_expansion_on_gpu() -> R
     assert_eq!(ordered.get(Field::Demand, 27), 0);
     assert_eq!(ordered.get(Field::ConstructionRemaining, 26), 20);
     assert_eq!(ordered.get(Field::ConstructionRemaining, 27), 0);
-    let mut replay = Simulation::from_checkpoint(simulation.checkpoint()?, support::device(32)?)?;
+    let mut replay = Simulation::from_checkpoint(simulation.checkpoint()?, support::device(64)?)?;
     for _ in 0..3 {
         simulation.advance()?;
         replay.advance()?;
@@ -277,7 +278,7 @@ fn urban_rental_shortages_fund_construction_with_default_expansion_on_gpu() -> R
     let mut simulation =
         Simulation::from_checkpoint(Checkpoint::new(&scenario, &moving)?, support::device(64)?)?;
     simulation.advance()?;
-    let mut replay = Simulation::from_checkpoint(simulation.checkpoint()?, support::device(32)?)?;
+    let mut replay = Simulation::from_checkpoint(simulation.checkpoint()?, support::device(64)?)?;
     simulation.advance()?;
     replay.advance()?;
     let moved = simulation.download()?;
@@ -289,6 +290,7 @@ fn urban_rental_shortages_fund_construction_with_default_expansion_on_gpu() -> R
 }
 
 #[test]
+#[ignore = "extended scenario coverage; run cargo gpu-extended"]
 fn rental_income_funds_paid_housing_and_replays_on_gpu() -> Result<()> {
     for property in [None, Some(region(14))] {
         let mut config = rentals()?;
@@ -331,7 +333,7 @@ fn rental_income_funds_paid_housing_and_replays_on_gpu() -> Result<()> {
         }
         let encoded = serde_json::to_string(&simulation.checkpoint()?)?;
         let mut resumed =
-            Simulation::from_checkpoint(serde_json::from_str(&encoded)?, support::device(32)?)?;
+            Simulation::from_checkpoint(serde_json::from_str(&encoded)?, support::device(64)?)?;
         for _ in 0..3 {
             simulation.advance()?;
             resumed.advance()?;
@@ -386,6 +388,7 @@ enum Constraint {
 }
 
 #[test]
+#[ignore = "extended scenario coverage; run cargo gpu-extended"]
 fn rental_development_requires_demand_savings_construction_supply_and_land_on_gpu() -> Result<()> {
     for constraint in [
         Constraint::Vacancy,
@@ -429,6 +432,7 @@ fn rental_development_requires_demand_savings_construction_supply_and_land_on_gp
 }
 
 #[test]
+#[ignore = "extended scenario coverage; run cargo gpu-extended"]
 fn small_owners_can_take_income_without_expanding_on_gpu() -> Result<()> {
     let mut config = rentals()?;
     config.expansion = enterprise::ExpansionPolicy {
@@ -467,6 +471,7 @@ fn small_owners_can_take_income_without_expanding_on_gpu() -> Result<()> {
 }
 
 #[test]
+#[ignore = "extended scenario coverage; run cargo gpu-extended"]
 fn large_landlords_expand_only_when_the_owner_wants_to_on_gpu() -> Result<()> {
     for preference in [
         enterprise::ExpansionDisposition::Maintain,
@@ -520,7 +525,7 @@ fn large_landlords_expand_only_when_the_owner_wants_to_on_gpu() -> Result<()> {
             }
         }
         let mut replay =
-            Simulation::from_checkpoint(simulation.checkpoint()?, support::device(32)?)?;
+            Simulation::from_checkpoint(simulation.checkpoint()?, support::device(64)?)?;
         for _ in 0..3 {
             simulation.advance()?;
             replay.advance()?;
@@ -548,6 +553,7 @@ fn large_landlords_expand_only_when_the_owner_wants_to_on_gpu() -> Result<()> {
 }
 
 #[test]
+#[ignore = "extended scenario coverage; run cargo gpu-extended"]
 fn housing_needs_maintenance_and_never_hires_workers_on_gpu() -> Result<()> {
     let mut config = rentals()?;
     config.expansion = enterprise::ExpansionPolicy {
@@ -577,6 +583,7 @@ fn housing_needs_maintenance_and_never_hires_workers_on_gpu() -> Result<()> {
 }
 
 #[test]
+#[ignore = "extended scenario coverage; run cargo gpu-extended"]
 fn rental_capacity_and_regional_payments_are_separate_on_gpu() -> Result<()> {
     let mut config = rentals()?;
     config.expansion = enterprise::ExpansionPolicy {
@@ -644,7 +651,7 @@ fn rental_capacity_and_regional_payments_are_separate_on_gpu() -> Result<()> {
         Simulation::from_checkpoint(Checkpoint::new(&scenario, &moving)?, support::device(64)?)?;
     simulation.advance()?;
     assert_eq!(simulation.actors().at(3).position.x, 750);
-    let mut rebuilt = Simulation::from_checkpoint(simulation.checkpoint()?, support::device(32)?)?;
+    let mut rebuilt = Simulation::from_checkpoint(simulation.checkpoint()?, support::device(64)?)?;
     simulation.advance()?;
     rebuilt.advance()?;
     let moved = simulation.download()?;

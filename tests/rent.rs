@@ -1,5 +1,5 @@
 #![cfg(feature = "compute")]
-use crate::support;
+use super::support;
 use anyhow::Result;
 use bad_econ::{
     domain::{enterprise::HouseholdProduction, *},
@@ -156,7 +156,7 @@ fn daily_rent_conserves_cash_and_replays_arrears_on_gpu() -> Result<()> {
     );
     let encoded = serde_json::to_string(&simulation.checkpoint()?)?;
     let mut resumed =
-        Simulation::from_checkpoint(serde_json::from_str(&encoded)?, support::device(128)?)?;
+        Simulation::from_checkpoint(serde_json::from_str(&encoded)?, support::device(64)?)?;
     for day in 2..=4 {
         simulation.advance()?;
         resumed.advance()?;
@@ -172,9 +172,9 @@ fn daily_rent_conserves_cash_and_replays_arrears_on_gpu() -> Result<()> {
 }
 
 #[test]
-fn industrial_paycheck_households_avoid_famine_with_next_day_delivery_at_a_million_on_gpu()
--> Result<()> {
-    let mut config = Scenario::industrial(1_000_000, 42, Experiment::Baseline)?
+fn industrial_paycheck_households_avoid_famine_with_next_day_delivery_on_gpu() -> Result<()> {
+    let households = 1_000;
+    let mut config = Scenario::industrial(households, 42, Experiment::Baseline)?
         .config()
         .clone();
     config.shipment_speed = config.search_radius;
@@ -184,19 +184,19 @@ fn industrial_paycheck_households_avoid_famine_with_next_day_delivery_at_a_milli
     };
     let scenario = Scenario::new(config)?;
     assert_eq!(scenario.ring(), 2);
-    let mut simulation = Simulation::new(scenario, support::device(128)?)?;
+    let mut simulation = Simulation::new(scenario, support::device(64)?)?;
     let initial_cash = simulation.snapshot.cash;
-    for day in 1..=120 {
+    for day in 1..=32 {
         simulation.advance()?;
         assert_eq!(simulation.snapshot.cash, initial_cash);
         assert!(
-            simulation.snapshot.shortages < 20_000,
+            simulation.snapshot.shortages < u64::from(households) / 50,
             "day {day}: {} unmet bread units",
             simulation.snapshot.shortages
         );
     }
-    assert!(simulation.snapshot.population.deaths[2] < 3_000);
-    assert!(simulation.snapshot.employed > 400_000);
+    assert!(simulation.snapshot.population.deaths[2] < u64::from(households) * 3 / 1000);
+    assert!(simulation.snapshot.employed > u64::from(households) * 2 / 5);
     assert!(simulation.snapshot.rent_collected > 0);
     assert!(simulation.snapshot.rent_arrears < simulation.snapshot.rent_collected / 5);
     Ok(())

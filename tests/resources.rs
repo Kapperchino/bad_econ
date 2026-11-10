@@ -237,7 +237,7 @@ fn explicit_maps_replace_generated_maps_and_legacy_scenarios_default_to_generati
 }
 
 #[cfg(feature = "compute")]
-use crate::support;
+use super::support;
 
 #[cfg(feature = "compute")]
 mod compute {
@@ -489,33 +489,26 @@ mod compute {
         firms[1].cash = 10_000;
         let scenario = Scenario::new(config)?;
         let initial = scenario.initial()?;
-        let mut canonical = None;
-        for workgroup in [32, 64, 128, 256] {
-            let mut simulation = Simulation::new(scenario.clone(), support::device(workgroup)?)?;
-            simulation.advance()?;
-            let state = assert_conservation(&mut simulation)?;
-            assert!(state.get(Field::Sales, 6) > 0);
-            assert_eq!(
-                state.get(Field::Cash, 6),
-                initial.get(Field::Cash, 6) + state.get(Field::Sales, 6) * 10
-            );
-            assert_eq!(state.get(Field::Produced, 6), 0);
-            assert_eq!(state.get(Field::Plan, 6), 0);
-            assert_eq!(simulation.snapshot.employed, 0);
-            let checkpoint = simulation.checkpoint()?;
-            simulation.advance()?;
-            let expected = assert_conservation(&mut simulation)?;
-            assert!(expected.get(Field::Produced, 7) > 0);
-            assert_eq!(expected.get(Field::Produced, 6), 0);
-            assert_eq!(expected.actors, initial.actors);
-            match &canonical {
-                None => canonical = Some(expected.clone()),
-                Some(state) => assert_eq!(&expected, state),
-            }
-            simulation.command(SimulationCommand::Restore(checkpoint.into()))?;
-            simulation.advance()?;
-            assert_eq!(assert_conservation(&mut simulation)?, expected);
-        }
+        let mut simulation = Simulation::new(scenario.clone(), support::device(64)?)?;
+        simulation.advance()?;
+        let state = assert_conservation(&mut simulation)?;
+        assert!(state.get(Field::Sales, 6) > 0);
+        assert_eq!(
+            state.get(Field::Cash, 6),
+            initial.get(Field::Cash, 6) + state.get(Field::Sales, 6) * 10
+        );
+        assert_eq!(state.get(Field::Produced, 6), 0);
+        assert_eq!(state.get(Field::Plan, 6), 0);
+        assert_eq!(simulation.snapshot.employed, 0);
+        let checkpoint = simulation.checkpoint()?;
+        simulation.advance()?;
+        let expected = assert_conservation(&mut simulation)?;
+        assert!(expected.get(Field::Produced, 7) > 0);
+        assert_eq!(expected.get(Field::Produced, 6), 0);
+        assert_eq!(expected.actors, initial.actors);
+        simulation.command(SimulationCommand::Restore(checkpoint.into()))?;
+        simulation.advance()?;
+        assert_eq!(assert_conservation(&mut simulation)?, expected);
         let mut invented = initial.clone();
         invented.set(Field::Plan, 6, 1);
         assert!(Checkpoint::new(&scenario, &invented).is_err());

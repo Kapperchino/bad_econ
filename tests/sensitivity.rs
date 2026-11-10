@@ -1,5 +1,5 @@
 #![cfg(feature = "compute")]
-use crate::{estimates, support};
+use super::{estimates, support};
 
 use anyhow::{Result, anyhow};
 use bad_econ::simulation::{Device, analytics::*};

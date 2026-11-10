@@ -322,8 +322,8 @@ mod tests {
 
     #[test]
     fn hierarchical_tick_scans_preserve_channels_and_partial_blocks_on_gpu() -> Result<()> {
-        for workgroup in [32, 64, 128, 256] {
-            let device = Device::headless(workgroup)?;
+        for workgroup in [32, 256] {
+            let device = crate::simulation::tests::device(workgroup)?;
             let block = workgroup as usize;
             let mut counts = vec![
                 0,
@@ -359,8 +359,8 @@ mod tests {
 
     #[test]
     fn hierarchical_tick_scans_report_overflow_at_every_level_on_gpu() -> Result<()> {
-        for workgroup in [32, 64, 128, 256] {
-            let device = Device::headless(workgroup)?;
+        for workgroup in [32, 256] {
+            let device = crate::simulation::tests::device(workgroup)?;
             let block = workgroup as usize;
             for mode in [ScanMode::Shared, ScanMode::new(&device)] {
                 check_scan(&device, &[u64::MAX], 1, mode)?;

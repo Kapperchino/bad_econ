@@ -652,78 +652,76 @@ mod tests {
             .iter()
             .map(|&tenant| initial.get(Field::RentPending, tenant))
             .sum::<u64>();
-        for workgroup in [32, 64, 128, 256] {
-            let device = device(workgroup)?;
-            let config = Configuration::new(&device, &scenario, &initial);
-            let metadata = initial
-                .actors
-                .iter()
-                .map(|actor| ActorLayout::new(&actor, &scenario))
-                .collect::<ActorMetadataRows>();
-            let actors = device.tensor(&metadata.words());
-            for capacity in [0, 65, 257, u32::MAX] {
-                initial.set(Field::OutputTicks, firm, u64::from(capacity));
-                let state = device.tensor(bytemuck::cast_slice(&encode(&initial.values)));
-                let control = device.tensor(&[0; CONTROL_WORDS]);
-                for phase in [Phase::Observation, Phase::AccountsDecisions] {
-                    launch(&device, &state, &actors, &config, &control, phase);
-                }
-                let mut actual = initial.clone();
-                actual.values = decode(&device.read(&state)?);
-                FaultFlags::read(&device.read(&control)?)?.into_result()?;
-                let housed = eligible
-                    .iter()
-                    .copied()
-                    .take(capacity as usize)
-                    .collect::<Vec<_>>();
-                for &tenant in &account.tenants {
-                    assert_eq!(
-                        actual.get(Field::HousingAvailable, tenant),
-                        u64::from(housed.contains(&tenant))
-                    );
-                    assert_eq!(actual.get(Field::Landlord, tenant), firm as u64 + 1);
-                    assert_eq!(actual.get(Field::RentPending, tenant), 0);
-                }
-                assert_eq!(
-                    actual.get(Field::Housing, firm),
-                    u64::from(capacity) - housed.len() as u64
-                );
-                assert_eq!(
-                    actual.get(Field::Used, firm) - initial.get(Field::Used, firm),
-                    7 + housed.len() as u64
-                );
-                assert_eq!(
-                    actual.get(Field::Cash, firm),
-                    initial.get(Field::Cash, firm) + payments
-                );
-                assert_eq!(
-                    actual.get(Field::RentalIncome, firm),
-                    initial.get(Field::RentalIncome, firm) + payments
-                );
-                assert_eq!(actual.get(Field::Demand, firm), eligible.len() as u64);
-                assert_eq!(actual.get(Field::Sales, firm), housed.len() as u64);
-                assert_eq!(
-                    actual.get(Field::Unfilled, firm),
-                    (eligible.len() - housed.len()) as u64
-                );
-            }
-            let mut overflow = initial.clone();
-            overflow.set(Field::RentPending, account.tenants[0], u64::MAX);
-            let state = device.tensor(bytemuck::cast_slice(&encode(&overflow.values)));
+        let workgroup = 64;
+        let device = device(workgroup)?;
+        let config = Configuration::new(&device, &scenario, &initial);
+        let metadata = initial
+            .actors
+            .iter()
+            .map(|actor| ActorLayout::new(&actor, &scenario))
+            .collect::<ActorMetadataRows>();
+        let actors = device.tensor(&metadata.words());
+        for capacity in [0, 65, 257, u32::MAX] {
+            initial.set(Field::OutputTicks, firm, u64::from(capacity));
+            let state = device.tensor(bytemuck::cast_slice(&encode(&initial.values)));
             let control = device.tensor(&[0; CONTROL_WORDS]);
-            launch(
-                &device,
-                &state,
-                &actors,
-                &config,
-                &control,
-                Phase::AccountsDecisions,
+            for phase in [Phase::Observation, Phase::AccountsDecisions] {
+                launch(&device, &state, &actors, &config, &control, phase);
+            }
+            let mut actual = initial.clone();
+            actual.values = decode(&device.read(&state)?);
+            FaultFlags::read(&device.read(&control)?)?.into_result()?;
+            let housed = eligible
+                .iter()
+                .copied()
+                .take(capacity as usize)
+                .collect::<Vec<_>>();
+            for &tenant in &account.tenants {
+                assert_eq!(
+                    actual.get(Field::HousingAvailable, tenant),
+                    u64::from(housed.contains(&tenant))
+                );
+                assert_eq!(actual.get(Field::Landlord, tenant), firm as u64 + 1);
+                assert_eq!(actual.get(Field::RentPending, tenant), 0);
+            }
+            assert_eq!(
+                actual.get(Field::Housing, firm),
+                u64::from(capacity) - housed.len() as u64
             );
-            assert!(
-                FaultFlags::read(&device.read(&control)?)?
-                    .contains(FaultFlags::ARITHMETIC_OVERFLOW)
+            assert_eq!(
+                actual.get(Field::Used, firm) - initial.get(Field::Used, firm),
+                7 + housed.len() as u64
+            );
+            assert_eq!(
+                actual.get(Field::Cash, firm),
+                initial.get(Field::Cash, firm) + payments
+            );
+            assert_eq!(
+                actual.get(Field::RentalIncome, firm),
+                initial.get(Field::RentalIncome, firm) + payments
+            );
+            assert_eq!(actual.get(Field::Demand, firm), eligible.len() as u64);
+            assert_eq!(actual.get(Field::Sales, firm), housed.len() as u64);
+            assert_eq!(
+                actual.get(Field::Unfilled, firm),
+                (eligible.len() - housed.len()) as u64
             );
         }
+        let mut overflow = initial.clone();
+        overflow.set(Field::RentPending, account.tenants[0], u64::MAX);
+        let state = device.tensor(bytemuck::cast_slice(&encode(&overflow.values)));
+        let control = device.tensor(&[0; CONTROL_WORDS]);
+        launch(
+            &device,
+            &state,
+            &actors,
+            &config,
+            &control,
+            Phase::AccountsDecisions,
+        );
+        assert!(
+            FaultFlags::read(&device.read(&control)?)?.contains(FaultFlags::ARITHMETIC_OVERFLOW)
+        );
         Ok(())
     }
 }

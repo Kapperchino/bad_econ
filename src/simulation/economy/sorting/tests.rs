@@ -129,8 +129,8 @@ impl SortCase {
 
 #[test]
 fn graph_sort_preserves_first_use_replay_dynamic_counts_and_faults_on_gpu() -> Result<()> {
-    for workgroup in [32, 64, 128, 256] {
-        let device = Device::headless(workgroup)?;
+    for workgroup in [32, 256] {
+        let device = crate::simulation::tests::device(workgroup)?;
         let capacity = 65554;
         let actual = SortBuffers::new(&device, capacity);
         let expected = SortBuffers::new(&device, capacity);

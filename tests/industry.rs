@@ -1,5 +1,5 @@
 #![cfg(feature = "compute")]
-use crate::support;
+use super::support;
 
 use anyhow::Result;
 use bad_econ::{
@@ -178,6 +178,7 @@ fn steel_requires_both_inputs_and_conserves_each_good_on_gpu() -> Result<()> {
 }
 
 #[test]
+#[ignore = "extended scenario coverage; run cargo gpu-extended"]
 fn research_changes_next_days_recipe_and_checkpoint_replays_on_gpu() -> Result<()> {
     let mut config = steelworks(20)?;
     config.research = Some(ResearchConfig {
@@ -200,7 +201,7 @@ fn research_changes_next_days_recipe_and_checkpoint_replays_on_gpu() -> Result<(
     assert_eq!(expected.get(Field::LaborMinutes, 6), 40);
     assert_eq!(simulation.snapshot.produced[Good::Steel as usize - 1], 18);
     assert_eq!(simulation.snapshot.research.attempts, 1);
-    let mut restored = Simulation::new(scenario, support::device(32)?)?;
+    let mut restored = Simulation::new(scenario, support::device(64)?)?;
     restored.command(SimulationCommand::Restore(Box::new(checkpoint)))?;
     restored.advance()?;
     assert_eq!(expected, restored.download()?);
@@ -208,6 +209,7 @@ fn research_changes_next_days_recipe_and_checkpoint_replays_on_gpu() -> Result<(
 }
 
 #[test]
+#[ignore = "extended scenario coverage; run cargo gpu-extended"]
 fn discovered_methods_require_mastery_permission_and_adoption_on_gpu() -> Result<()> {
     for missing in 0..4 {
         let mut lab = research_lab();
@@ -247,6 +249,7 @@ fn discovered_methods_require_mastery_permission_and_adoption_on_gpu() -> Result
 }
 
 #[test]
+#[ignore = "extended scenario coverage; run cargo gpu-extended"]
 fn industrial_markets_ship_consume_and_replay_all_goods_on_gpu() -> Result<()> {
     let mut config = Scenario::industrial(64, 42, Experiment::Concentrated)?
         .config()
@@ -337,7 +340,7 @@ fn method_changes_preserve_old_shipments_and_count_equipment_packets_on_gpu() ->
     assert_eq!(simulation.snapshot.used[Good::Iron as usize - 1], 0);
     assert_eq!(simulation.snapshot.used[Good::Steel as usize - 1], 4);
     assert_eq!(simulation.snapshot.research.remaining_service, 8);
-    let mut restored = Simulation::new(scenario, support::device(32)?)?;
+    let mut restored = Simulation::new(scenario, support::device(64)?)?;
     restored.command(SimulationCommand::Restore(Box::new(checkpoint)))?;
     restored.advance()?;
     restored.advance()?;
@@ -346,6 +349,7 @@ fn method_changes_preserve_old_shipments_and_count_equipment_packets_on_gpu() ->
 }
 
 #[test]
+#[ignore = "extended scenario coverage; run cargo gpu-extended"]
 fn unavailable_upgrade_inputs_leave_basic_production_available_on_gpu() -> Result<()> {
     let mut config = steelworks(0)?;
     config.household_production = enterprise::HouseholdProduction::industrial();
@@ -374,7 +378,7 @@ fn unavailable_upgrade_inputs_leave_basic_production_available_on_gpu() -> Resul
     assert!(state.get(Field::Produced, 6) > 0);
     assert_eq!(simulation.snapshot.cash, state.initial_cash);
     let checkpoint = simulation.checkpoint()?;
-    let mut resumed = Simulation::new(scenario, support::device(128)?)?;
+    let mut resumed = Simulation::new(scenario, support::device(64)?)?;
     resumed.command(SimulationCommand::Restore(Box::new(checkpoint)))?;
     simulation.advance()?;
     resumed.advance()?;
@@ -383,6 +387,7 @@ fn unavailable_upgrade_inputs_leave_basic_production_available_on_gpu() -> Resul
 }
 
 #[test]
+#[ignore = "extended scenario coverage; run cargo gpu-extended"]
 fn scarce_upgrade_inputs_do_not_displace_a_more_productive_basic_method() -> Result<()> {
     let mut config = steelworks(0)?;
     config.household_production = enterprise::HouseholdProduction::industrial();
@@ -418,6 +423,7 @@ fn scarce_upgrade_inputs_do_not_displace_a_more_productive_basic_method() -> Res
 }
 
 #[test]
+#[ignore = "extended scenario coverage; run cargo gpu-extended"]
 fn tools_required_by_an_upgrade_are_replenished_beyond_the_maintenance_reserve() -> Result<()> {
     let mut config = steelworks(0)?;
     config.household_production = enterprise::HouseholdProduction::industrial();

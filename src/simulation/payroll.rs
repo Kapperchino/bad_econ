@@ -89,7 +89,6 @@ mod tests {
     use super::*;
     use crate::simulation::configuration::{Configuration, TaxBracket};
     use crate::simulation::{
-        Device,
         flags::{CONTROL_WORDS, FAULT_WORD},
         policy::{KernelStarts, proposed_starts},
     };
@@ -127,7 +126,7 @@ mod tests {
 
     #[test]
     fn lean_payroll_and_proposed_starts_teaching_values_on_gpu() -> Result<()> {
-        let device = Device::headless(64)?;
+        let device = crate::simulation::tests::device(64)?;
         let scenario =
             crate::domain::Scenario::baseline(1, 42, crate::domain::Experiment::Baseline)?;
         let mut config = Configuration::new(&device, &scenario, &scenario.initial()?);

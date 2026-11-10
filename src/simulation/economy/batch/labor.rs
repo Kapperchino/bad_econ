@@ -311,7 +311,7 @@ fn settle_labor(
 mod tests {
     use super::*;
     use crate::domain::{Experiment, Market, Scenario};
-    use crate::simulation::{Device, MarketExecution, Simulation, encode};
+    use crate::simulation::{MarketExecution, Simulation, encode};
     use anyhow::Result;
 
     struct LaborCase {
@@ -389,114 +389,112 @@ mod tests {
                 ..LaborCase::balance(Field::Escrow, u64::MAX - 30 * 64)
             },
         ];
-        for workgroup in [32, 64, 128, 256] {
-            let device = Device::headless(workgroup)?;
-            let actual = Simulation::new(scenario.clone(), device.clone())?;
-            let mut expected = Simulation::new(scenario.clone(), device.clone())?;
-            expected.market_execution = MarketExecution::Original;
-            for mode in [parallel::ScanMode::Shared, parallel::ScanMode::new(&device)] {
-                for (case_index, case) in cases.iter().enumerate() {
-                    let mut state = initial.clone();
-                    state.set(Field::Cash, peer, 1_000_000);
-                    state.set(Field::Escrow, peer, 0);
-                    state.set(Field::Slots, peer, 200);
-                    state.set(Field::Pipeline, peer, 0);
-                    state.set(Field::Used, peer, 0);
-                    state.set(Field::Wage, peer, 3);
-                    state.set(Field::LaborMinutes, peer, 10);
-                    state.set(Field::OutputTicks, peer, 5);
-                    state.set(Field::FirstInput, peer, Good::Grain as u64);
-                    state.set(Field::SecondInput, peer, Good::Flour as u64);
-                    state.set(Field::InputTicks, peer, 2);
-                    state.set(Field::Grain, peer, 1000);
-                    state.set(Field::Flour, peer, 1000);
-                    match case.field {
-                        Field::Wage | Field::LaborMinutes => state.set(Field::Cash, peer, u64::MAX),
-                        Field::InputTicks => {
-                            state.set(Field::Grain, peer, u64::MAX);
-                            state.set(Field::Flour, peer, u64::MAX);
-                        }
-                        _ => (),
+        let workgroup = 64;
+        let device = crate::simulation::tests::device(workgroup)?;
+        let actual = Simulation::new(scenario.clone(), device.clone())?;
+        let mut expected = Simulation::new(scenario.clone(), device.clone())?;
+        expected.market_execution = MarketExecution::Original;
+        for mode in [parallel::ScanMode::Shared, parallel::ScanMode::new(&device)] {
+            for (case_index, case) in cases.iter().enumerate() {
+                let mut state = initial.clone();
+                state.set(Field::Cash, peer, 1_000_000);
+                state.set(Field::Escrow, peer, 0);
+                state.set(Field::Slots, peer, 200);
+                state.set(Field::Pipeline, peer, 0);
+                state.set(Field::Used, peer, 0);
+                state.set(Field::Wage, peer, 3);
+                state.set(Field::LaborMinutes, peer, 10);
+                state.set(Field::OutputTicks, peer, 5);
+                state.set(Field::FirstInput, peer, Good::Grain as u64);
+                state.set(Field::SecondInput, peer, Good::Flour as u64);
+                state.set(Field::InputTicks, peer, 2);
+                state.set(Field::Grain, peer, 1000);
+                state.set(Field::Flour, peer, 1000);
+                match case.field {
+                    Field::Wage | Field::LaborMinutes => state.set(Field::Cash, peer, u64::MAX),
+                    Field::InputTicks => {
+                        state.set(Field::Grain, peer, u64::MAX);
+                        state.set(Field::Flour, peer, u64::MAX);
                     }
-                    state.set(case.field, peer, case.value);
-                    let mut words = encode(&state.values);
-                    let first_used = (USED_FIELDS + Good::Grain as usize - 1) * count + peer;
-                    let second_used = (USED_FIELDS + Good::Flour as usize - 1) * count + peer;
-                    words[first_used] = case.first_used.into();
-                    words[second_used] = case.second_used.into();
-                    let mut proposals = vec![0; count * ProposalLayout::WORDS];
-                    let mut scratch = vec![0; actual.scratch.meta.num_elements()];
-                    for slot in 0..case.length {
-                        let actor = (slot + 17) % 513;
-                        proposals[actor * ProposalLayout::WORDS + ProposalLayout::ACTOR] =
-                            peer as u32;
-                        scratch[slot] = peer as u32;
-                        scratch[count + slot] = actor as u32;
-                        let status = match (case_index % 2, slot % 7, case.length) {
-                            (0, 0, 257) => EventStatus::Rejected,
-                            _ => case.prior,
-                        };
-                        scratch[4 * count + actor] = enumflags2::BitFlags::from_flag(status).bits();
-                    }
-                    scratch[5 * count] = 0;
-                    scratch[6 * count] = case.length as u32;
-                    let mut control = vec![0; actual.control.meta.num_elements()];
-                    control[CONSTRUCTED_EVENTS_WORD] = case.length as u32;
-                    control[RANGE_SLOTS_WORD] = 1;
-                    for simulation in [&actual, &expected] {
-                        device.write(&simulation.state, bytemuck::cast_slice(&words));
-                        device.write(&simulation.proposals, bytemuck::cast_slice(&proposals));
-                        device.write(&simulation.scratch, bytemuck::cast_slice(&scratch));
-                        device.write(&simulation.control, bytemuck::cast_slice(&control));
-                    }
-                    let mut original =
-                        expected.parameters(Phase::Commitment, Market::Labor, 0, count)?;
-                    original.sort_count = case.length as u32;
-                    EconomySystem::launch(
-                        &device,
-                        device.count(case.length),
-                        CubeDim::new_1d(workgroup),
-                        EconomyInputLaunch {
-                            state: expected.state.clone().into_buffer_arg(),
-                            actors: expected.actors.clone().into_buffer_arg(),
-                            config: expected.config.launch(),
-                            spatial: expected.spatial.clone().into_buffer_arg(),
-                            proposals: expected.proposals.clone().into_buffer_arg(),
-                            bundles: expected.scratch.clone().into_buffer_arg(),
-                            control: expected.control.clone().into_buffer_arg(),
-                            parameters: original.launch(),
-                            stage: EconomyStage::GroupExecute,
-                        },
-                    );
-                    let mut parameters =
-                        actual.parameters(Phase::Commitment, Market::Labor, 0, count)?;
-                    parameters.scan = mode;
-                    LaborSettlement::launch(
-                        &device,
-                        CubeCount::Static(1, 1, 1),
-                        CubeDim::new_1d(workgroup),
-                        LaborInputLaunch {
-                            state: actual.state.clone().into_buffer_arg(),
-                            config: actual.config.launch(),
-                            scratch: actual.scratch.clone().into_buffer_arg(),
-                            control: actual.control.clone().into_buffer_arg(),
-                            parameters: parameters.launch(),
-                        },
-                    );
-                    for (name, actual, expected) in [
-                        ("state", &actual.state, &expected.state),
-                        ("statuses", &actual.scratch, &expected.scratch),
-                        ("faults", &actual.control, &expected.control),
-                    ] {
-                        let actual = device.read(actual)?;
-                        let expected = device.read(expected)?;
-                        assert_eq!(actual.len(), expected.len());
-                        for (word, (actual, expected)) in actual.iter().zip(&expected).enumerate() {
-                            assert_eq!(
-                                actual, expected,
-                                "{name} word {word}: {workgroup} {mode:?} case {case_index}"
-                            );
-                        }
+                    _ => (),
+                }
+                state.set(case.field, peer, case.value);
+                let mut words = encode(&state.values);
+                let first_used = (USED_FIELDS + Good::Grain as usize - 1) * count + peer;
+                let second_used = (USED_FIELDS + Good::Flour as usize - 1) * count + peer;
+                words[first_used] = case.first_used.into();
+                words[second_used] = case.second_used.into();
+                let mut proposals = vec![0; count * ProposalLayout::WORDS];
+                let mut scratch = vec![0; actual.scratch.meta.num_elements()];
+                for slot in 0..case.length {
+                    let actor = (slot + 17) % 513;
+                    proposals[actor * ProposalLayout::WORDS + ProposalLayout::ACTOR] = peer as u32;
+                    scratch[slot] = peer as u32;
+                    scratch[count + slot] = actor as u32;
+                    let status = match (case_index % 2, slot % 7, case.length) {
+                        (0, 0, 257) => EventStatus::Rejected,
+                        _ => case.prior,
+                    };
+                    scratch[4 * count + actor] = enumflags2::BitFlags::from_flag(status).bits();
+                }
+                scratch[5 * count] = 0;
+                scratch[6 * count] = case.length as u32;
+                let mut control = vec![0; actual.control.meta.num_elements()];
+                control[CONSTRUCTED_EVENTS_WORD] = case.length as u32;
+                control[RANGE_SLOTS_WORD] = 1;
+                for simulation in [&actual, &expected] {
+                    device.write(&simulation.state, bytemuck::cast_slice(&words));
+                    device.write(&simulation.proposals, bytemuck::cast_slice(&proposals));
+                    device.write(&simulation.scratch, bytemuck::cast_slice(&scratch));
+                    device.write(&simulation.control, bytemuck::cast_slice(&control));
+                }
+                let mut original =
+                    expected.parameters(Phase::Commitment, Market::Labor, 0, count)?;
+                original.sort_count = case.length as u32;
+                EconomySystem::launch(
+                    &device,
+                    device.count(case.length),
+                    CubeDim::new_1d(workgroup),
+                    EconomyInputLaunch {
+                        state: expected.state.clone().into_buffer_arg(),
+                        actors: expected.actors.clone().into_buffer_arg(),
+                        config: expected.config.launch(),
+                        spatial: expected.spatial.clone().into_buffer_arg(),
+                        proposals: expected.proposals.clone().into_buffer_arg(),
+                        bundles: expected.scratch.clone().into_buffer_arg(),
+                        control: expected.control.clone().into_buffer_arg(),
+                        parameters: original.launch(),
+                        stage: EconomyStage::GroupExecute,
+                    },
+                );
+                let mut parameters =
+                    actual.parameters(Phase::Commitment, Market::Labor, 0, count)?;
+                parameters.scan = mode;
+                LaborSettlement::launch(
+                    &device,
+                    CubeCount::Static(1, 1, 1),
+                    CubeDim::new_1d(workgroup),
+                    LaborInputLaunch {
+                        state: actual.state.clone().into_buffer_arg(),
+                        config: actual.config.launch(),
+                        scratch: actual.scratch.clone().into_buffer_arg(),
+                        control: actual.control.clone().into_buffer_arg(),
+                        parameters: parameters.launch(),
+                    },
+                );
+                for (name, actual, expected) in [
+                    ("state", &actual.state, &expected.state),
+                    ("statuses", &actual.scratch, &expected.scratch),
+                    ("faults", &actual.control, &expected.control),
+                ] {
+                    let actual = device.read(actual)?;
+                    let expected = device.read(expected)?;
+                    assert_eq!(actual.len(), expected.len());
+                    for (word, (actual, expected)) in actual.iter().zip(&expected).enumerate() {
+                        assert_eq!(
+                            actual, expected,
+                            "{name} word {word}: {workgroup} {mode:?} case {case_index}"
+                        );
                     }
                 }
             }

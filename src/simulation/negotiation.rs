@@ -493,6 +493,6 @@ mod tests {
 
     #[test]
     fn exact_bracket_and_fraction_inversion_on_gpu() -> Result<()> {
-        check(Device::headless(64)?)
+        check(crate::simulation::tests::device(64)?)
     }
 }

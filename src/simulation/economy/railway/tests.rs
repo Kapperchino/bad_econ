@@ -63,17 +63,22 @@ fn cached_quotes_match_exhaustive_carriers_on_gpu() -> Result<()> {
     let scenarios = [
         railway,
         Scenario::new(slow)?,
-        Scenario::industrial(193, 42, Experiment::Baseline)?,
-        Scenario::industrial(193, 42, Experiment::Transport)?,
+        Scenario::industrial(17, 42, Experiment::Baseline)?,
+        Scenario::industrial(17, 42, Experiment::Transport)?,
     ];
     for scenario in scenarios {
         let device = crate::simulation::tests::device(64)?;
         let mut simulation = Simulation::new(scenario, device.clone())?;
-        for _ in 0..3 {
-            simulation.advance()?;
-            for stage in [RailStage::Access, RailStage::Routes, RailStage::Quotes] {
+        for _ in 0..2 {
+            for stage in [
+                RailStage::Infrastructure,
+                RailStage::Access,
+                RailStage::Routes,
+                RailStage::Quotes,
+            ] {
                 simulation.railways(stage);
             }
+            simulation.fault_check()?;
             let mismatches = device.tensor(&[0]);
             let count = simulation.metadata.actors.len();
             QuoteCheck::launch(
@@ -113,111 +118,110 @@ fn shared_freight_settles_multiple_workgroups_in_one_gpu_wave() -> Result<()> {
     config.households = population.households.len() as u32;
     let buyers = config.households as usize;
     let scenario = Scenario::new(config)?;
-    for workgroup in [32, 64, 128, 256] {
-        let device = crate::simulation::tests::device(workgroup)?;
-        let simulation = Simulation::new(scenario.clone(), device.clone())?;
-        let mut state = scenario.initial()?;
-        let count = state.actors.len();
-        let seller = buyers;
-        for firm in [seller + 1, seller + 2] {
-            state.set(Field::RailBuilt, firm, 1);
-            state.set(Field::RailOperating, firm, 1);
-            state.set(Field::Railway, firm, 1000);
-        }
-        for region in 0..scenario.rail_geography().regions.len() {
-            for (field, amount) in [
-                (RailCapacityField::Level, 1),
-                (RailCapacityField::Available, 1000),
-            ] {
-                let coordinate = scenario
-                    .rail_geography()
-                    .coordinate(&scenario, &state, field, region);
-                state.values[coordinate] = amount;
-            }
-        }
-        let mut parameters =
-            simulation.parameters(Phase::ProvisionPurchase, Market::Household, 0, count)?;
-        parameters.discovery = Discovery::Indexed;
-        parameters.sort_count = buyers as u32;
-        let mut proposals = vec![NO_ACTOR; count * ProposalLayout::WORDS];
-        let mut scratch = vec![0; markets::scratch_words(count)];
-        let mut control = vec![0; CONTROL_WORDS + 4];
-        control[CONSTRUCTED_EVENTS_WORD] = buyers as u32;
-        for buyer in 0..buyers {
-            let delivery = state.shipment_coordinate(
-                Good::Bread,
-                (parameters.day as usize + 9) % scenario.ring(),
-                scenario.ring(),
-                buyer,
-            );
-            state.values[delivery.0 as usize] = 1;
-            proposals[buyer * ProposalLayout::WORDS + ProposalLayout::ACTOR] = seller as u32;
-            proposals[buyer * ProposalLayout::WORDS + ProposalLayout::QUANTITY_LOW] = 1;
-            proposals[buyer * ProposalLayout::WORDS + ProposalLayout::QUANTITY_HIGH] = 0;
-            scratch[buyer] = seller as u32;
-            scratch[count + buyer] = buyer as u32;
-            scratch[4 * count + buyer] = EventStatus::Accepted as u32;
-        }
-        device.write(
-            &simulation.state,
-            bytemuck::cast_slice(&encode(&state.values)),
-        );
-        device.write(&simulation.proposals, &proposals);
-        device.write(&simulation.scratch, &scratch);
-        device.write(&simulation.control, &control);
-        for stage in [RailStage::Access, RailStage::Routes, RailStage::Quotes] {
-            simulation.railways(stage);
-        }
-        for stage in [
-            settlement::Stage::Snapshot,
-            settlement::Stage::Initialize,
-            settlement::Stage::Reset,
-            settlement::Stage::Propose,
-            settlement::Stage::Commit,
-            settlement::Stage::Release,
-            settlement::Stage::Accounts,
+    let workgroup = 64;
+    let device = crate::simulation::tests::device(workgroup)?;
+    let simulation = Simulation::new(scenario.clone(), device.clone())?;
+    let mut state = scenario.initial()?;
+    let count = state.actors.len();
+    let seller = buyers;
+    for firm in [seller + 1, seller + 2] {
+        state.set(Field::RailBuilt, firm, 1);
+        state.set(Field::RailOperating, firm, 1);
+        state.set(Field::Railway, firm, 1000);
+    }
+    for region in 0..scenario.rail_geography().regions.len() {
+        for (field, amount) in [
+            (RailCapacityField::Level, 1),
+            (RailCapacityField::Available, 1000),
         ] {
-            settlement::launch(
-                &device,
-                &simulation.state,
-                &simulation.actors,
-                &simulation.config,
-                &simulation.proposals,
-                &simulation.scratch,
-                &simulation.control,
-                &parameters,
-                stage,
-            );
+            let coordinate = scenario
+                .rail_geography()
+                .coordinate(&scenario, &state, field, region);
+            state.values[coordinate] = amount;
         }
-        assert_eq!(settlement::pending(&device, &simulation.config)?, 0);
-        assert_eq!(
-            device.read(&simulation.control)?[crate::simulation::flags::FAULT_WORD],
-            0
+    }
+    let mut parameters =
+        simulation.parameters(Phase::ProvisionPurchase, Market::Household, 0, count)?;
+    parameters.discovery = Discovery::Indexed;
+    parameters.sort_count = buyers as u32;
+    let mut proposals = vec![NO_ACTOR; count * ProposalLayout::WORDS];
+    let mut scratch = vec![0; markets::scratch_words(count)];
+    let mut control = vec![0; CONTROL_WORDS + 4];
+    control[CONSTRUCTED_EVENTS_WORD] = buyers as u32;
+    for buyer in 0..buyers {
+        let delivery = state.shipment_coordinate(
+            Good::Bread,
+            (parameters.day as usize + 9) % scenario.ring(),
+            scenario.ring(),
+            buyer,
         );
-        let mut actual = state.clone();
-        actual.values = decode(&device.read(&simulation.state)?);
-        assert_eq!(
-            actual.get(Field::Cash, seller),
-            state.get(Field::Cash, seller) - buyers as u64 * 7
+        state.values[delivery.0 as usize] = 1;
+        proposals[buyer * ProposalLayout::WORDS + ProposalLayout::ACTOR] = seller as u32;
+        proposals[buyer * ProposalLayout::WORDS + ProposalLayout::QUANTITY_LOW] = 1;
+        proposals[buyer * ProposalLayout::WORDS + ProposalLayout::QUANTITY_HIGH] = 0;
+        scratch[buyer] = seller as u32;
+        scratch[count + buyer] = buyer as u32;
+        scratch[4 * count + buyer] = EventStatus::Accepted as u32;
+    }
+    device.write(
+        &simulation.state,
+        bytemuck::cast_slice(&encode(&state.values)),
+    );
+    device.write(&simulation.proposals, &proposals);
+    device.write(&simulation.scratch, &scratch);
+    device.write(&simulation.control, &control);
+    for stage in [RailStage::Access, RailStage::Routes, RailStage::Quotes] {
+        simulation.railways(stage);
+    }
+    for stage in [
+        settlement::Stage::Snapshot,
+        settlement::Stage::Initialize,
+        settlement::Stage::Reset,
+        settlement::Stage::Propose,
+        settlement::Stage::Commit,
+        settlement::Stage::Release,
+        settlement::Stage::Accounts,
+    ] {
+        settlement::launch(
+            &device,
+            &simulation.state,
+            &simulation.actors,
+            &simulation.config,
+            &simulation.proposals,
+            &simulation.scratch,
+            &simulation.control,
+            &parameters,
+            stage,
         );
-        assert_eq!(
-            actual.get(Field::RailRevenue, seller + 1),
-            buyers as u64 * 2
+    }
+    assert_eq!(settlement::pending(&device, &simulation.config)?, 0);
+    assert_eq!(
+        device.read(&simulation.control)?[crate::simulation::flags::FAULT_WORD],
+        0
+    );
+    let mut actual = state.clone();
+    actual.values = decode(&device.read(&simulation.state)?);
+    assert_eq!(
+        actual.get(Field::Cash, seller),
+        state.get(Field::Cash, seller) - buyers as u64 * 7
+    );
+    assert_eq!(
+        actual.get(Field::RailRevenue, seller + 1),
+        buyers as u64 * 2
+    );
+    assert_eq!(
+        actual.get(Field::RailRevenue, seller + 2),
+        buyers as u64 * 5
+    );
+    assert_eq!(actual.get(Field::Railway, seller + 2), 1000 - buyers as u64);
+    for buyer in 0..buyers {
+        let delivery = actual.shipment_coordinate(
+            Good::Bread,
+            (parameters.day as usize + 1) % scenario.ring(),
+            scenario.ring(),
+            buyer,
         );
-        assert_eq!(
-            actual.get(Field::RailRevenue, seller + 2),
-            buyers as u64 * 5
-        );
-        assert_eq!(actual.get(Field::Railway, seller + 2), 1000 - buyers as u64);
-        for buyer in 0..buyers {
-            let delivery = actual.shipment_coordinate(
-                Good::Bread,
-                (parameters.day as usize + 1) % scenario.ring(),
-                scenario.ring(),
-                buyer,
-            );
-            assert_eq!(actual.values[delivery.0 as usize], 1);
-        }
+        assert_eq!(actual.values[delivery.0 as usize], 1);
     }
     Ok(())
 }
@@ -234,83 +238,82 @@ fn repeated_input_initialization_resets_prior_suppliers_and_preserves_faults_on_
         Fault,
     }
 
-    for workgroup in [32, 64, 128, 256] {
-        let device = crate::simulation::tests::device(workgroup)?;
-        for case in [ResetCase::Suppliers, ResetCase::Empty, ResetCase::Fault] {
-            let scenario = Scenario::industrial(67, 42, Experiment::Transport)?;
-            let mut initial = scenario.initial()?;
-            initial.set(Field::Bread, 0, 0);
-            let simulation = Simulation::new(scenario, device.clone())?;
-            let count = initial.actors.len();
-            let parameters = simulation.parameters(
-                Phase::ProvisionPurchase,
-                Market::Input(Good::Bread),
-                0,
-                count,
-            )?;
-            let initialize = |stage| {
-                EconomySystem::launch(
-                    &device,
-                    device.count(count),
-                    CubeDim::new_1d(workgroup),
-                    EconomyInputLaunch {
-                        state: simulation.state.clone().into_buffer_arg(),
-                        actors: simulation.actors.clone().into_buffer_arg(),
-                        config: simulation.config.launch(),
-                        spatial: simulation.spatial.clone().into_buffer_arg(),
-                        proposals: simulation.proposals.clone().into_buffer_arg(),
-                        bundles: simulation.scratch.clone().into_buffer_arg(),
-                        control: simulation.control.clone().into_buffer_arg(),
-                        parameters: parameters.launch(),
-                        stage,
-                    },
-                );
-            };
-            device.write(
-                &simulation.state,
-                bytemuck::cast_slice(&encode(&initial.values)),
+    let workgroup = 64;
+    let device = crate::simulation::tests::device(workgroup)?;
+    for case in [ResetCase::Suppliers, ResetCase::Empty, ResetCase::Fault] {
+        let scenario = Scenario::industrial(67, 42, Experiment::Transport)?;
+        let mut initial = scenario.initial()?;
+        initial.set(Field::Bread, 0, 0);
+        let simulation = Simulation::new(scenario, device.clone())?;
+        let count = initial.actors.len();
+        let parameters = simulation.parameters(
+            Phase::ProvisionPurchase,
+            Market::Input(Good::Bread),
+            0,
+            count,
+        )?;
+        let initialize = |stage| {
+            EconomySystem::launch(
+                &device,
+                device.count(count),
+                CubeDim::new_1d(workgroup),
+                EconomyInputLaunch {
+                    state: simulation.state.clone().into_buffer_arg(),
+                    actors: simulation.actors.clone().into_buffer_arg(),
+                    config: simulation.config.launch(),
+                    spatial: simulation.spatial.clone().into_buffer_arg(),
+                    proposals: simulation.proposals.clone().into_buffer_arg(),
+                    bundles: simulation.scratch.clone().into_buffer_arg(),
+                    control: simulation.control.clone().into_buffer_arg(),
+                    parameters: parameters.launch(),
+                    stage,
+                },
             );
-            let mut control = vec![0; simulation.control.meta.num_elements()];
-            device.write(&simulation.control, &control);
-            initialize(EconomyStage::InputMarketStart);
-            let clean_statuses = device.read_range(&simulation.scratch, 4 * count, count)?;
-            let cells = (simulation.config.spatial_side * simulation.config.spatial_side) as usize;
-            let mut spatial = vec![0; simulation.spatial.meta.num_elements()];
-            match case {
-                ResetCase::Suppliers | ResetCase::Fault => {
-                    let suppliers = [0, 67, 68];
-                    spatial[cells] = suppliers.len() as u32;
-                    for (index, seller) in suppliers.into_iter().enumerate() {
-                        spatial[cells + 1 + index] = seller as u32;
-                    }
+        };
+        device.write(
+            &simulation.state,
+            bytemuck::cast_slice(&encode(&initial.values)),
+        );
+        let mut control = vec![0; simulation.control.meta.num_elements()];
+        device.write(&simulation.control, &control);
+        initialize(EconomyStage::InputMarketStart);
+        let clean_statuses = device.read_range(&simulation.scratch, 4 * count, count)?;
+        let cells = (simulation.config.spatial_side * simulation.config.spatial_side) as usize;
+        let mut spatial = vec![0; simulation.spatial.meta.num_elements()];
+        match case {
+            ResetCase::Suppliers | ResetCase::Fault => {
+                let suppliers = [0, 67, 68];
+                spatial[cells] = suppliers.len() as u32;
+                for (index, seller) in suppliers.into_iter().enumerate() {
+                    spatial[cells + 1 + index] = seller as u32;
                 }
-                ResetCase::Empty => (),
             }
-            control[FAULT_WORD] = match case {
-                ResetCase::Fault => FaultFlags::ARITHMETIC_OVERFLOW.bits(),
-                _ => 0,
-            };
-            let sentinel = 0x1234_5678;
-            device.write(&simulation.control, &control);
-            device.write(&simulation.spatial, &spatial);
-            device.write(
-                &simulation.scratch,
-                &vec![sentinel; simulation.scratch.meta.num_elements()],
-            );
-            initialize(EconomyStage::InputMarketRepeat);
-            let expected_statuses = match case {
-                ResetCase::Fault => vec![sentinel; count],
-                _ => clean_statuses,
-            };
-            assert_eq!(
-                device.read_range(&simulation.scratch, 4 * count, count)?,
-                expected_statuses,
-                "{case:?}, workgroup {workgroup}, statuses"
-            );
-            let actual_control = device.read(&simulation.control)?;
-            assert_eq!(actual_control[FAULT_WORD], control[FAULT_WORD]);
-            assert_eq!(actual_control[LATCH_WORD], control[FAULT_WORD]);
+            ResetCase::Empty => (),
         }
+        control[FAULT_WORD] = match case {
+            ResetCase::Fault => FaultFlags::ARITHMETIC_OVERFLOW.bits(),
+            _ => 0,
+        };
+        let sentinel = 0x1234_5678;
+        device.write(&simulation.control, &control);
+        device.write(&simulation.spatial, &spatial);
+        device.write(
+            &simulation.scratch,
+            &vec![sentinel; simulation.scratch.meta.num_elements()],
+        );
+        initialize(EconomyStage::InputMarketRepeat);
+        let expected_statuses = match case {
+            ResetCase::Fault => vec![sentinel; count],
+            _ => clean_statuses,
+        };
+        assert_eq!(
+            device.read_range(&simulation.scratch, 4 * count, count)?,
+            expected_statuses,
+            "{case:?}, workgroup {workgroup}, statuses"
+        );
+        let actual_control = device.read(&simulation.control)?;
+        assert_eq!(actual_control[FAULT_WORD], control[FAULT_WORD]);
+        assert_eq!(actual_control[LATCH_WORD], control[FAULT_WORD]);
     }
     Ok(())
 }

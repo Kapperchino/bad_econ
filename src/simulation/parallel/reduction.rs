@@ -498,7 +498,7 @@ mod tests {
 
     #[test]
     fn float_reductions_match_reference_across_layouts_and_tails_on_gpu() -> Result<()> {
-        let device = Device::headless(64)?;
+        let device = crate::simulation::tests::device(64)?;
         let cases = [
             FloatReductionCase {
                 outputs: 1,
@@ -577,7 +577,7 @@ mod tests {
     #[test]
     fn widened_integer_reductions_preserve_carries_and_overflow_on_gpu() -> Result<()> {
         use crate::simulation::flags::CONTROL_WORDS;
-        let device = Device::headless(64)?;
+        let device = crate::simulation::tests::device(64)?;
         let length = 1025;
         let columns = 7;
         let values = (0..length * columns)
@@ -636,7 +636,7 @@ mod tests {
 
     #[test]
     fn strided_all_reductions_observe_tail_flags_on_gpu() -> Result<()> {
-        let device = Device::headless(64)?;
+        let device = crate::simulation::tests::device(64)?;
         for length in [17, 129, 4097] {
             let mut values = vec![1u32; length * 2];
             values[(length - 1) * 2] = 0;
@@ -662,7 +662,7 @@ mod tests {
 
     #[test]
     fn reductions_preserve_empty_identities_and_zero_output_shapes_on_gpu() -> Result<()> {
-        let device = Device::headless(64)?;
+        let device = crate::simulation::tests::device(64)?;
         let input =
             TensorHandle::new_contiguous([0, 3], device.client.empty(4), f32::elem_type_native());
         for operation in [
@@ -700,7 +700,7 @@ mod tests {
     fn summary_reductions_preserve_wide_totals_extrema_and_overflow_on_gpu() -> Result<()> {
         use crate::simulation::flags::CONTROL_WORDS;
         use crate::simulation::layout::SummaryLayout as S;
-        let device = Device::headless(64)?;
+        let device = crate::simulation::tests::device(64)?;
         let groups = 257;
         let values = (0..groups * S::METRICS)
             .map(|index| (1u64 << 40) + index as u64)

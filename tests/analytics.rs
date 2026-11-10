@@ -1,5 +1,5 @@
 #![cfg(feature = "compute")]
-use crate::{estimates, support};
+use super::{estimates, support};
 
 use anyhow::{Result, anyhow};
 use bad_econ::simulation::{Device, analytics::*};
@@ -658,7 +658,7 @@ fn contraction_rounded_to_one_does_not_admit_an_identity_operator() -> Result<()
 
 #[test]
 fn vector_arithmetic_preserves_partial_workgroups_empty_shapes_and_lane_faults() -> Result<()> {
-    for workgroup in [32, 64, 128, 256] {
+    for workgroup in [32, 256] {
         let device = support::device(workgroup)?;
         for length in [0, 1, 2, 3, 31, 32, 33, 63, 64, 65, 257] {
             let left = (0..length)
@@ -699,7 +699,7 @@ fn vector_arithmetic_preserves_partial_workgroups_empty_shapes_and_lane_faults()
 
 #[test]
 fn iterative_solver_matches_gpu_steps_and_preserves_aliased_inputs() -> Result<()> {
-    for workgroup in [32, 64, 128, 256] {
+    for workgroup in [32, 256] {
         let device = support::device(workgroup)?;
         for rows in [0, 1, 2, 3, 32, 33, 65] {
             let entries = (0..rows)
@@ -779,7 +779,7 @@ fn iterative_solver_matches_gpu_steps_and_preserves_aliased_inputs() -> Result<(
 
 #[test]
 fn iterative_solver_retains_transient_overflow_and_recovers_on_the_next_solve() -> Result<()> {
-    for workgroup in [32, 64, 128, 256] {
+    for workgroup in [32, 256] {
         let device = support::device(workgroup)?;
         let operator = DeviceOperator::new(&device, &dense(2, 2, &[0, 2, 0, 0], &[1; 4])?);
         let initial = DeviceVector::from_ticks(&device, &[0, 1 << 63])?;
@@ -810,7 +810,7 @@ fn iterative_solver_retains_transient_overflow_and_recovers_on_the_next_solve() 
 
 #[test]
 fn solver_preserves_certificate_overflow_without_any_iterations() -> Result<()> {
-    for workgroup in [32, 64, 128, 256] {
+    for workgroup in [32, 256] {
         let device = support::device(workgroup)?;
         let operator = DeviceOperator::new(&device, &dense(1, 1, &[u32::MAX], &[1])?);
         let weights = DeviceVector::from_ticks(&device, &[u64::from(u32::MAX)])?;

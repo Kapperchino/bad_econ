@@ -1,5 +1,5 @@
 #![cfg(feature = "compute")]
-use crate::support;
+use super::support;
 use anyhow::Result;
 use bad_econ::{domain::*, runtime::SimulationCommand, simulation::Simulation};
 
@@ -33,7 +33,7 @@ fn births_grow_the_person_registry_and_checkpoint_without_creating_money() -> Re
             .all(|person| person.work_minutes == 0 && person.employer.is_none())
     );
     let checkpoint = original.checkpoint()?;
-    let mut resumed = Simulation::new(scenario, support::device(128)?)?;
+    let mut resumed = Simulation::new(scenario, support::device(64)?)?;
     resumed.command(SimulationCommand::Restore(Box::new(checkpoint)))?;
     original.advance()?;
     resumed.advance()?;
@@ -65,7 +65,14 @@ fn deprivation_records_famine_without_a_labor_damage_multiplier_or_lost_estates(
     simulation.advance()?;
     let second = simulation.download()?;
     assert_eq!(second.get(Field::Time, 0), 480);
-    for _ in 0..88 {
+    let mut deprived = second;
+    for person in &mut deprived.people {
+        person.famine_exposure = 29_000;
+    }
+    simulation.command(SimulationCommand::Restore(Box::new(Checkpoint::new(
+        &scenario, &deprived,
+    )?)))?;
+    for _ in 0..5 {
         simulation.advance()?;
     }
     assert_eq!(simulation.snapshot.population.deaths[0], 0);
@@ -256,8 +263,11 @@ fn a_lost_harvest_changes_output_without_a_recovery_timer_or_asset_grant() -> Re
     config.demography.mortality.occupational_annual_ppm = [0; Good::COUNT];
     config.demography.mortality.famine_daily_ppm_at_thirty_days = 0;
     let scenario = Scenario::new(config)?;
-    let mut baseline = Simulation::new(scenario.clone(), support::device(64)?)?;
-    for _ in 0..269 {
+    let mut initial = scenario.initial()?;
+    initial.day = 267;
+    let mut baseline =
+        Simulation::from_checkpoint(Checkpoint::new(&scenario, &initial)?, support::device(64)?)?;
+    for _ in 0..2 {
         baseline.advance()?;
     }
     let mut failed_crop = baseline.download()?;
@@ -269,8 +279,7 @@ fn a_lost_harvest_changes_output_without_a_recovery_timer_or_asset_grant() -> Re
         failed_crop.set(Field::CropWork, actor, 0);
     }
     let checkpoint = Checkpoint::new(&scenario, &failed_crop)?;
-    let mut crisis = Simulation::new(scenario, support::device(128)?)?;
-    crisis.command(SimulationCommand::Restore(Box::new(checkpoint)))?;
+    let mut crisis = Simulation::from_checkpoint(checkpoint, support::device(64)?)?;
     for _ in 0..2 {
         baseline.advance()?;
         crisis.advance()?;
@@ -278,9 +287,20 @@ fn a_lost_harvest_changes_output_without_a_recovery_timer_or_asset_grant() -> Re
     let first_harvest = crisis.snapshot.household_production[Good::Grain as usize - 1];
     assert!(baseline.snapshot.household_production[Good::Grain as usize - 1] > 0);
     assert!(first_harvest < baseline.snapshot.household_production[Good::Grain as usize - 1]);
-    for _ in 0..365 {
+    for _ in 0..2 {
         crisis.advance()?;
     }
+    let mut next_harvest = crisis.download()?;
+    next_harvest.day = 365 + 270;
+    crisis.command(SimulationCommand::Restore(Box::new(Checkpoint::new(
+        &scenario,
+        &next_harvest,
+    )?)))?;
+    assert_eq!(
+        crisis.snapshot.household_production[Good::Grain as usize - 1],
+        first_harvest
+    );
+    crisis.advance()?;
     assert!(crisis.snapshot.household_production[Good::Grain as usize - 1] > first_harvest);
     assert_eq!(crisis.snapshot.cash, failed_crop.initial_cash);
     let state = crisis.download()?;

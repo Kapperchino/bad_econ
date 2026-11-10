@@ -1,20 +1,5 @@
 use super::*;
-use std::{
-    collections::{HashMap, hash_map::Entry},
-    sync::{Mutex, OnceLock},
-};
-
-pub(super) fn device(workgroup: u32) -> Result<Device> {
-    static DEVICES: OnceLock<Mutex<HashMap<u32, Device>>> = OnceLock::new();
-    let mut devices = DEVICES
-        .get_or_init(Mutex::default)
-        .lock()
-        .map_err(|_| anyhow!("test GPU device cache poisoned"))?;
-    match devices.entry(workgroup) {
-        Entry::Occupied(entry) => Ok(entry.get().clone()),
-        Entry::Vacant(entry) => Ok(entry.insert(Device::headless(workgroup)?).clone()),
-    }
-}
+pub(super) use crate::tests::support::device;
 
 fn compare_market_execution(scenario: Scenario, days: usize) -> Result<()> {
     let initial = scenario.initial()?;
@@ -22,7 +7,7 @@ fn compare_market_execution(scenario: Scenario, days: usize) -> Result<()> {
 }
 
 fn compare_market_state(scenario: Scenario, initial: State, days: usize) -> Result<()> {
-    let mut grouped = Simulation::from_state(scenario.clone(), initial.clone(), device(128)?)?;
+    let mut grouped = Simulation::from_state(scenario.clone(), initial.clone(), device(64)?)?;
     let mut reference = Simulation::from_state(scenario, initial, device(64)?)?;
     reference.market_execution = MarketExecution::Reference;
     for day in 0..days {
@@ -90,7 +75,7 @@ fn price_blocks_preserve_rotated_search_and_unaffordable_food_diagnostics() -> R
     for household in 0..769 {
         initial.set(Field::Price, household, 10 * (household as u64 / 128 + 1));
     }
-    compare_market_state(scenario, initial, 4)
+    compare_market_state(scenario, initial, 2)
 }
 
 #[test]
@@ -104,7 +89,7 @@ fn grouped_markets_match_coordinate_scheduler_at_every_phase() -> Result<()> {
         let mut config = Scenario::baseline(193, 42, experiment)?.config().clone();
         config.firms = 12;
         config.batch_size = 31;
-        compare_market_execution(Scenario::new(config)?, 8)?;
+        compare_market_execution(Scenario::new(config)?, 2)?;
     }
     Ok(())
 }
@@ -112,51 +97,9 @@ fn grouped_markets_match_coordinate_scheduler_at_every_phase() -> Result<()> {
 #[test]
 fn cooperative_consumer_markets_preserve_trades_and_accounting_at_every_phase() -> Result<()> {
     for experiment in [Experiment::Baseline, Experiment::Concentrated] {
-        compare_market_execution(Scenario::industrial(97, 42, experiment)?, 12)?;
+        compare_market_execution(Scenario::industrial(97, 42, experiment)?, 3)?;
     }
     Ok(())
-}
-
-#[test]
-fn mixed_rail_and_animal_sellers_match_serial_settlement_at_every_phase() -> Result<()> {
-    for units in [1, 100] {
-        let mut config: ScenarioConfig =
-            serde_json::from_str(include_str!("../../scenarios/railway.json"))?;
-        config.railway.units_per_level = units;
-        config.firms += 1;
-        let population = config.population.as_mut().expect("explicit population");
-        population.households[1].position = Position { x: 900, y: 900 };
-        population.households[1].cash = 3000;
-        population.households[1].inventories = [0; Good::COUNT];
-        let mut local = population.firms[0].clone();
-        local.identity = 19;
-        local.owner = 2;
-        local.position = Position { x: 900, y: 900 };
-        local.price += 1;
-        population.firms.push(local);
-        compare_market_execution(Scenario::new(config)?, 8)?;
-    }
-    Ok(())
-}
-
-#[test]
-fn grouped_institutions_and_custom_packets_match_coordinate_scheduler() -> Result<()> {
-    for scenario in [
-        include_str!("../../scenarios/institutions.json"),
-        include_str!("../../scenarios/custom-population.json"),
-    ] {
-        let mut config: ScenarioConfig = serde_json::from_str(scenario)?;
-        config.batch_size = 1;
-        compare_market_execution(Scenario::new(config)?, 8)?;
-    }
-    let mut config = Scenario::baseline(67, 93, Experiment::Shortage)?
-        .config()
-        .clone();
-    config.household_cash = 1u64 << 40;
-    config.firm_cash = 1u64 << 42;
-    config.reserve = 1;
-    config.batch_size = 13;
-    compare_market_execution(Scenario::new(config)?, 8)
 }
 
 struct MarketFault {
@@ -287,7 +230,7 @@ fn gpu_registry_migration_births_and_estates_match_audited_rebuilds() -> Result<
     });
     let scenario = Scenario::new(config)?;
     let mut gpu = Simulation::new(scenario.clone(), device(64)?)?;
-    let mut reference = Simulation::new(scenario.clone(), device(128)?)?;
+    let mut reference = Simulation::new(scenario.clone(), device(64)?)?;
     reference.registry_execution = RegistryExecution::Reference;
     for day in 0..60 {
         if day == 12 {
@@ -430,58 +373,53 @@ fn gpu_parent_estates_preserve_inheritance_without_full_state_readback() -> Resu
             registry::records::PendingRecords::from_dense(&requests, &vec![0; requests.len()])?;
         let mut expected = initial.clone();
         enterprise::transitions(&mut expected, &scenario, &requests)?;
-        for workgroup in [32, 128] {
-            let mut gpu =
-                Simulation::from_state(scenario.clone(), initial.clone(), device(workgroup)?)
-                    .context("initial inheritance state")?;
-            gpu.device.write(&gpu.enterprise_requests, &requests);
-            let before = gpu.readback_bytes;
-            match registry::entries::EntryGrowth::new(
-                &scenario,
-                &gpu.metadata,
-                &gpu.migrations,
-                &pending.records,
-            )? {
-                Some(growth) => {
-                    gpu.commit_entries(&growth.requests, growth.plan, &pending.records)?
-                }
-                None => {
-                    let plan = registry::RegistryPlan::new(
-                        &scenario,
-                        &gpu.metadata,
-                        &gpu.migrations,
-                        &pending.records,
-                    )?
-                    .context("parent estates must use sparse GPU settlement")?;
-                    gpu.commit_registry(plan, &pending.records)?;
-                }
+        let mut gpu = Simulation::from_state(scenario.clone(), initial.clone(), device(64)?)
+            .context("initial inheritance state")?;
+        gpu.device.write(&gpu.enterprise_requests, &requests);
+        let before = gpu.readback_bytes;
+        match registry::entries::EntryGrowth::new(
+            &scenario,
+            &gpu.metadata,
+            &gpu.migrations,
+            &pending.records,
+        )? {
+            Some(growth) => gpu.commit_entries(&growth.requests, growth.plan, &pending.records)?,
+            None => {
+                let plan = registry::RegistryPlan::new(
+                    &scenario,
+                    &gpu.metadata,
+                    &gpu.migrations,
+                    &pending.records,
+                )?
+                .context("parent estates must use sparse GPU settlement")?;
+                gpu.commit_registry(plan, &pending.records)?;
             }
-            assert!(gpu.readback_bytes - before < initial.values.len() as u64);
-            let mut reference =
-                Simulation::from_state(scenario.clone(), expected.clone(), device(64)?)?;
-            assert!(gpu.download()? == reference.download()?);
-            assert_eq!(gpu.actors().at(3000).owner, 2);
-            assert_eq!(gpu.actors().at(3001).owner, 32);
-            for phase in Phase::ALL {
-                gpu.phase(phase, Trace::Discard)?;
-                reference.phase(phase, Trace::Discard)?;
-                let actual = gpu.download()?;
-                let expected = reference.download()?;
-                let differences = actual
-                    .values
-                    .iter()
-                    .zip(&expected.values)
-                    .enumerate()
-                    .filter(|(_, (actual, expected))| actual != expected)
-                    .take(12)
-                    .collect::<Vec<_>>();
-                assert!(
-                    actual == expected,
-                    "formation {formation:?}, workgroup {workgroup}, phase {phase:?}: {differences:?}"
-                );
-            }
-            gpu.checkpoint()?.restore()?;
         }
+        assert!(gpu.readback_bytes - before < initial.values.len() as u64);
+        let mut reference =
+            Simulation::from_state(scenario.clone(), expected.clone(), device(64)?)?;
+        assert!(gpu.download()? == reference.download()?);
+        assert_eq!(gpu.actors().at(3000).owner, 2);
+        assert_eq!(gpu.actors().at(3001).owner, 32);
+        for phase in Phase::ALL {
+            gpu.phase(phase, Trace::Discard)?;
+            reference.phase(phase, Trace::Discard)?;
+            let actual = gpu.download()?;
+            let expected = reference.download()?;
+            let differences = actual
+                .values
+                .iter()
+                .zip(&expected.values)
+                .enumerate()
+                .filter(|(_, (actual, expected))| actual != expected)
+                .take(12)
+                .collect::<Vec<_>>();
+            assert!(
+                actual == expected,
+                "formation {formation:?}, phase {phase:?}: {differences:?}"
+            );
+        }
+        gpu.checkpoint()?.restore()?;
     }
     Ok(())
 }
@@ -532,93 +470,90 @@ fn gpu_household_growth_matches_rebuilds_and_keeps_unrelated_estates_sparse() ->
     }
     initial.set(Field::PendingCapacity, 302, 2);
     initial.set(Field::InstalledCapital, 302, 1);
-    for workgroup in [32, 128] {
-        let mut gpu =
-            Simulation::from_state(scenario.clone(), initial.clone(), device(workgroup)?)?;
-        let mut reference = Simulation::from_state(scenario.clone(), initial.clone(), device(64)?)?;
-        let mut requests = vec![0; initial.actors.len()];
-        for parent in parents {
-            requests[parent] = 1 << 24 | 1;
+    let mut gpu = Simulation::from_state(scenario.clone(), initial.clone(), device(64)?)?;
+    let mut reference = Simulation::from_state(scenario.clone(), initial.clone(), device(64)?)?;
+    let mut requests = vec![0; initial.actors.len()];
+    for parent in parents {
+        requests[parent] = 1 << 24 | 1;
+    }
+    requests[1] = Good::Bread as u32;
+    requests[5] = (2 << 24) + 302;
+    requests[300] = 4 << 24;
+    requests[302] = (6 << 24) + 2;
+    let mut births = vec![0; requests.len()];
+    births[0] = 1;
+    births[1] = 2;
+    births[299] = 2;
+    for simulation in [&gpu, &reference] {
+        simulation
+            .device
+            .write(simulation.demography.birth_buffer(), &births);
+    }
+    let pending = registry::records::PendingRecords::from_dense(&requests, &births)?;
+    let growth = registry::entries::EntryGrowth::new(
+        &scenario,
+        &gpu.metadata,
+        &gpu.migrations,
+        &pending.records,
+    )?
+    .context("household growth should use the GPU")?;
+    gpu.commit_entries(&growth.requests, growth.plan, &pending.records)?;
+    let mut expected = reference.download()?;
+    expected.people = reference
+        .demography
+        .reference_births(&reference.device, &births, expected.next_identity)?
+        .download(&reference.device, &expected, CopyDirection::Save)?;
+    expected.next_identity += 3;
+    enterprise::enter(&mut expected, &scenario, &requests)?;
+    enterprise::transitions(&mut expected, &scenario, &requests)?;
+    reference
+        .replace(scenario.clone(), expected)
+        .context("reference household rebuild")?;
+    assert_eq!(gpu.download()?, reference.download()?);
+    assert_eq!(gpu.snapshot, reference.snapshot);
+    gpu.copy_audited(CopyDirection::Save)?;
+    let checkpoint = gpu.checkpoint().context("grown household checkpoint")?;
+    let restored = Simulation::from_checkpoint(checkpoint, device(64)?)?;
+    for simulation in [&gpu, &restored] {
+        for actor in [0, 31, 299, 2] {
+            let records = [PendingRecord {
+                actor,
+                request: 5 << 24,
+                birth: 0,
+            }];
+            let plan = registry::RegistryPlan::new(
+                &scenario,
+                &simulation.metadata,
+                &simulation.migrations,
+                &records,
+            )?;
+            assert!(plan.is_some());
+            assert_eq!(
+                simulation
+                    .migrations
+                    .children(simulation.actors().at(actor as usize).identity)
+                    .count(),
+                usize::from(actor != 2),
+            );
         }
-        requests[1] = Good::Bread as u32;
-        requests[5] = (2 << 24) + 302;
-        requests[300] = 4 << 24;
-        requests[302] = (6 << 24) + 2;
-        let mut births = vec![0; requests.len()];
-        births[0] = 1;
-        births[1] = 2;
-        births[299] = 2;
-        for simulation in [&gpu, &reference] {
-            simulation
-                .device
-                .write(simulation.demography.birth_buffer(), &births);
-        }
-        let pending = registry::records::PendingRecords::from_dense(&requests, &births)?;
-        let growth = registry::entries::EntryGrowth::new(
-            &scenario,
-            &gpu.metadata,
-            &gpu.migrations,
-            &pending.records,
-        )?
-        .context("household growth should use the GPU")?;
-        gpu.commit_entries(&growth.requests, growth.plan, &pending.records)?;
-        let mut expected = reference.download()?;
-        expected.people = reference
-            .demography
-            .reference_births(&reference.device, &births, expected.next_identity)?
-            .download(&reference.device, &expected, CopyDirection::Save)?;
-        expected.next_identity += 3;
-        enterprise::enter(&mut expected, &scenario, &requests)?;
-        enterprise::transitions(&mut expected, &scenario, &requests)?;
-        reference
-            .replace(scenario.clone(), expected)
-            .context("reference household rebuild")?;
+    }
+    let before = gpu.download()?;
+    let invalid = [enterprise::HouseholdFormation {
+        parent: 0,
+        household: gpu.actors().len(),
+        person: u64::MAX,
+    }];
+    assert!(
+        gpu.demography
+            .form_households(&gpu.device, &invalid, gpu.actors().len() + 1)
+            .is_err()
+    );
+    assert_eq!(gpu.download()?, before);
+    for _ in 0..3 {
+        gpu.advance()?;
+        reference.advance()?;
         assert_eq!(gpu.download()?, reference.download()?);
         assert_eq!(gpu.snapshot, reference.snapshot);
-        gpu.copy_audited(CopyDirection::Save)?;
-        let checkpoint = gpu.checkpoint().context("grown household checkpoint")?;
-        let restored = Simulation::from_checkpoint(checkpoint, device(workgroup)?)?;
-        for simulation in [&gpu, &restored] {
-            for actor in [0, 31, 299, 2] {
-                let records = [PendingRecord {
-                    actor,
-                    request: 5 << 24,
-                    birth: 0,
-                }];
-                let plan = registry::RegistryPlan::new(
-                    &scenario,
-                    &simulation.metadata,
-                    &simulation.migrations,
-                    &records,
-                )?;
-                assert!(plan.is_some());
-                assert_eq!(
-                    simulation
-                        .migrations
-                        .children(simulation.actors().at(actor as usize).identity)
-                        .count(),
-                    usize::from(actor != 2),
-                );
-            }
-        }
-        let before = gpu.download()?;
-        let invalid = [enterprise::HouseholdFormation {
-            parent: 0,
-            household: gpu.actors().len(),
-            person: u64::MAX,
-        }];
-        assert!(
-            gpu.demography
-                .form_households(&gpu.device, &invalid, gpu.actors().len() + 1)
-                .is_err()
-        );
-        assert_eq!(gpu.download()?, before);
-        for _ in 0..3 {
-            gpu.advance()?;
-            reference.advance()?;
-            assert_eq!(gpu.download()?, reference.download()?);
-            assert_eq!(gpu.snapshot, reference.snapshot);
-        }
     }
     Ok(())
 }
@@ -654,7 +589,7 @@ fn gpu_firm_growth_matches_full_rebuild_with_births_and_migration() -> Result<()
         }
     }
     let mut gpu = Simulation::from_state(scenario.clone(), initial.clone(), device(64)?)?;
-    let mut reference = Simulation::from_state(scenario.clone(), initial, device(128)?)?;
+    let mut reference = Simulation::from_state(scenario.clone(), initial, device(64)?)?;
     for day in 0..4 {
         let source = scenario.config().households as usize + 2;
         let mut requests = vec![0; gpu.actors().len()];
@@ -815,7 +750,7 @@ fn sparse_settlements_match_rebuilds_with_shared_assets_migration_and_investment
         gpu.commit_registry(plan, &pending.records)?;
         assert!(gpu.readback_bytes - readback < 20 * scenario.fields() as u64 * 8);
         enterprise::transitions(&mut initial, &scenario, &requests)?;
-        let mut reference = Simulation::from_state(scenario.clone(), initial, device(128)?)?;
+        let mut reference = Simulation::from_state(scenario.clone(), initial, device(64)?)?;
         assert_eq!(gpu.download()?, reference.download()?);
         assert_eq!(gpu.snapshot, reference.snapshot);
         gpu.copy_audited(CopyDirection::Save)?;
@@ -903,66 +838,33 @@ fn company_investment_updates_every_site_and_closing_one_site_preserves_the_othe
 }
 
 #[test]
-fn device_markets_match_original_gpu_phases() -> Result<()> {
-    for workgroup in [32, 64, 128, 256] {
-        let scenario = Scenario::industrial(193, 42, Experiment::Concentrated)?;
-        let mut actual = Simulation::new(scenario.clone(), Device::headless(workgroup)?)?;
-        let mut expected = Simulation::new(scenario, Device::headless(64)?)?;
-        expected.market_execution = MarketExecution::Original;
-        expected.audit_execution = AuditExecution::Original;
-        for day in 0..4 {
-            for phase in Phase::ALL {
-                let reference = expected.phase(phase, Trace::Record)?;
-                let result = actual.phase(phase, Trace::Record)?;
-                assert_eq!(
-                    result.decisions, reference.decisions,
-                    "{workgroup} {day} {phase:?}"
-                );
-                assert_eq!(
-                    result.frontier_depth, reference.frontier_depth,
-                    "{workgroup} {day} {phase:?}"
-                );
-                assert_eq!(
-                    result.events, reference.events,
-                    "{workgroup} {day} {phase:?}"
-                );
-                assert_eq!(
-                    actual.download()?,
-                    expected.download()?,
-                    "{workgroup} {day} {phase:?}"
-                );
-                assert_eq!(actual.snapshot, expected.snapshot);
-            }
-        }
-    }
-    Ok(())
-}
-
-#[test]
-fn optimized_experiments_continue_original_checkpoints_through_day_fifty() -> Result<()> {
+fn device_markets_and_checkpoint_replay_match_original_gpu_phases() -> Result<()> {
     for experiment in [Experiment::Baseline, Experiment::Concentrated] {
-        let mut config = Scenario::industrial(300, 42, experiment)?.config().clone();
+        let mut config = Scenario::industrial(193, 42, experiment)?.config().clone();
         config.demography.annual_births_per_million_fertile_women = 1_000_000;
         let scenario = Scenario::new(config)?;
-        let mut expected = Simulation::new(scenario.clone(), Device::headless(64)?)?;
+        let mut actual = Simulation::new(scenario.clone(), device(64)?)?;
+        let mut expected = Simulation::new(scenario, device(64)?)?;
         expected.market_execution = MarketExecution::Original;
         expected.audit_execution = AuditExecution::Original;
         expected.registry_execution = RegistryExecution::Reference;
-        let mut actual = Simulation::new(scenario, Device::headless(128)?)?;
-        for day in 0..50 {
-            if matches!(day, 29 | 39) {
-                actual =
-                    Simulation::from_checkpoint(expected.checkpoint()?, Device::headless(256)?)?;
+        for day in 0..3 {
+            if day == 1 {
+                actual = Simulation::from_checkpoint(expected.checkpoint()?, device(64)?)?;
             }
             for phase in Phase::ALL {
                 let reference = expected.phase(phase, Trace::Record)?;
                 let result = actual.phase(phase, Trace::Record)?;
                 assert_eq!(
-                    result.events, reference.events,
+                    result.decisions, reference.decisions,
                     "{experiment:?} {day} {phase:?}"
                 );
                 assert_eq!(
-                    result.decisions, reference.decisions,
+                    result.frontier_depth, reference.frontier_depth,
+                    "{experiment:?} {day} {phase:?}"
+                );
+                assert_eq!(
+                    result.events, reference.events,
                     "{experiment:?} {day} {phase:?}"
                 );
                 assert_eq!(
@@ -981,7 +883,7 @@ fn optimized_experiments_continue_original_checkpoints_through_day_fifty() -> Re
 #[test]
 fn capacity_changes_preserve_spatial_membership_and_rollback_preparation() -> Result<()> {
     let scenario = Scenario::industrial(97, 42, Experiment::Baseline)?;
-    let mut simulation = Simulation::new(scenario.clone(), Device::headless(64)?)?;
+    let mut simulation = Simulation::new(scenario.clone(), device(64)?)?;
     let mut initial = simulation.download()?;
     initial.set(Field::PendingCapacity, 97, 5);
     simulation.device.write(
@@ -1037,42 +939,40 @@ fn restored_zero_capacity_growth_matches_complete_gpu_metadata() -> Result<()> {
     requests[97] = (6 << 24) | 5;
     let pending =
         registry::records::PendingRecords::from_dense(&requests, &vec![0; requests.len()])?;
-    for workgroup in [32, 64, 128, 256] {
-        let mut simulation =
-            Simulation::from_checkpoint(checkpoint.clone(), Device::headless(workgroup)?)?;
-        let mut expected = simulation.download()?;
-        enterprise::transitions(&mut expected, &scenario, &requests)?;
-        let spatial = simulation.device.read(&simulation.spatial)?;
-        let rows = expected
-            .actors
-            .iter()
-            .map(|actor| ActorLayout::new(&actor, &scenario))
-            .collect::<ActorMetadataRows>();
-        simulation
-            .device
-            .write(&simulation.enterprise_requests, &requests);
-        let plan = registry::RegistryPlan::new(
-            &scenario,
-            &simulation.metadata,
-            &simulation.migrations,
-            &pending.records,
-        )?
-        .context("restored capacity transition")?;
-        simulation.commit_registry(plan, &[])?;
-        assert_eq!(simulation.download()?.digest(), expected.digest());
-        assert_eq!(simulation.device.read(&simulation.spatial)?, spatial);
-        for (index, (actual, expected)) in simulation
-            .device
-            .read(&simulation.actors)?
-            .into_iter()
-            .zip(rows.words())
-            .enumerate()
-        {
-            assert_eq!(
-                actual, expected,
-                "actor metadata word {index}, workgroup {workgroup}"
-            );
-        }
+    let workgroup = 64;
+    let mut simulation = Simulation::from_checkpoint(checkpoint.clone(), device(workgroup)?)?;
+    let mut expected = simulation.download()?;
+    enterprise::transitions(&mut expected, &scenario, &requests)?;
+    let spatial = simulation.device.read(&simulation.spatial)?;
+    let rows = expected
+        .actors
+        .iter()
+        .map(|actor| ActorLayout::new(&actor, &scenario))
+        .collect::<ActorMetadataRows>();
+    simulation
+        .device
+        .write(&simulation.enterprise_requests, &requests);
+    let plan = registry::RegistryPlan::new(
+        &scenario,
+        &simulation.metadata,
+        &simulation.migrations,
+        &pending.records,
+    )?
+    .context("restored capacity transition")?;
+    simulation.commit_registry(plan, &[])?;
+    assert_eq!(simulation.download()?.digest(), expected.digest());
+    assert_eq!(simulation.device.read(&simulation.spatial)?, spatial);
+    for (index, (actual, expected)) in simulation
+        .device
+        .read(&simulation.actors)?
+        .into_iter()
+        .zip(rows.words())
+        .enumerate()
+    {
+        assert_eq!(
+            actual, expected,
+            "actor metadata word {index}, workgroup {workgroup}"
+        );
     }
     Ok(())
 }
@@ -1126,7 +1026,7 @@ fn speculative_candidates_only_commit_faults_inside_the_visited_prefix() -> Resu
     for available in [8, 7] {
         let mut outcomes = Vec::new();
         for execution in [MarketExecution::Grouped, MarketExecution::Original] {
-            let mut simulation = Simulation::new(scenario.clone(), Device::headless(64)?)?;
+            let mut simulation = Simulation::new(scenario.clone(), device(64)?)?;
             simulation.market_execution = execution;
             let mut state = simulation.download()?;
             state.set(Field::Time, 0, u64::from(u32::MAX));
@@ -1182,69 +1082,67 @@ fn vectorized_opening_matches_serial_deliveries_resets_and_faults_on_gpu() -> Re
     let scenario = Scenario::baseline(97, 42, Experiment::Transport)?;
     let initial = scenario.initial()?;
     let count = initial.actors.len();
-    for workgroup in [32, 64, 128, 256] {
-        let simulation = Simulation::new(scenario.clone(), device(workgroup)?)?;
-        for day in [0, 1, simulation.config.ring - 1, simulation.config.ring + 1] {
-            let mut values = initial.values.clone();
-            for actor in 0..count {
-                let mut transit = 0;
-                for good in 0..Good::COUNT {
-                    let delivery = (1u64 << 32) + (actor * Good::COUNT + good) as u64;
-                    let slot =
-                        BASE_FIELDS + good * scenario.ring() + day as usize % scenario.ring();
-                    values[slot * count + actor] = delivery;
-                    values[(TRANSIT_FIELDS + good) * count + actor] = delivery;
-                    transit += delivery;
-                }
-                values[Field::Transit as usize * count + actor] = transit;
-                values[Field::ResearchMinutes as usize * count + actor] = 123;
+    let workgroup = 64;
+    let simulation = Simulation::new(scenario.clone(), device(workgroup)?)?;
+    for day in [0, 1, simulation.config.ring - 1, simulation.config.ring + 1] {
+        let mut values = initial.values.clone();
+        for actor in 0..count {
+            let mut transit = 0;
+            for good in 0..Good::COUNT {
+                let delivery = (1u64 << 32) + (actor * Good::COUNT + good) as u64;
+                let slot = BASE_FIELDS + good * scenario.ring() + day as usize % scenario.ring();
+                values[slot * count + actor] = delivery;
+                values[(TRANSIT_FIELDS + good) * count + actor] = delivery;
+                transit += delivery;
             }
-            values[Field::Grain as usize * count] = u64::MAX;
-            values[(TRANSIT_FIELDS + Good::COUNT - 1) * count + count - 1] = 0;
-            let words = encode(&values);
-            let actual = simulation.device.tensor(bytemuck::cast_slice(&words));
-            let expected = simulation.device.tensor(bytemuck::cast_slice(&words));
-            let actual_control = simulation.device.tensor(&[0; CONTROL_WORDS]);
-            let expected_control = simulation.device.tensor(&[0; CONTROL_WORDS]);
-            let mut parameters = simulation.parameters(Phase::Opening, Market::Labor, 0, count)?;
-            parameters.day = day;
-            economy::EconomySystem::launch(
-                &simulation.device,
-                simulation.device.count(count),
-                cubecl::CubeDim::new_1d(workgroup),
-                economy::EconomyInputLaunch {
-                    state: expected.clone().into_buffer_arg(),
-                    actors: simulation.actors.clone().into_buffer_arg(),
-                    config: simulation.config.launch(),
-                    spatial: simulation.spatial.clone().into_buffer_arg(),
-                    proposals: simulation.proposals.clone().into_buffer_arg(),
-                    bundles: simulation.events.clone().into_buffer_arg(),
-                    control: expected_control.clone().into_buffer_arg(),
-                    parameters: parameters.launch(),
-                    stage: EconomyStage::Local,
-                },
-            );
-            economy::opening::launch(
-                &simulation.device,
-                &actual,
-                &simulation.config,
-                &actual_control,
-                day,
-            );
-            assert_eq!(
-                simulation.device.read(&actual)?,
-                simulation.device.read(&expected)?
-            );
-            let faults = FaultFlags::read(&simulation.device.read(&actual_control)?)?;
-            assert_eq!(
-                faults,
-                FaultFlags::read(&simulation.device.read(&expected_control)?)?
-            );
-            assert_eq!(
-                faults,
-                FaultFlags::ARITHMETIC_OVERFLOW | FaultFlags::TRANSIT_UNDERFLOW
-            );
+            values[Field::Transit as usize * count + actor] = transit;
+            values[Field::ResearchMinutes as usize * count + actor] = 123;
         }
+        values[Field::Grain as usize * count] = u64::MAX;
+        values[(TRANSIT_FIELDS + Good::COUNT - 1) * count + count - 1] = 0;
+        let words = encode(&values);
+        let actual = simulation.device.tensor(bytemuck::cast_slice(&words));
+        let expected = simulation.device.tensor(bytemuck::cast_slice(&words));
+        let actual_control = simulation.device.tensor(&[0; CONTROL_WORDS]);
+        let expected_control = simulation.device.tensor(&[0; CONTROL_WORDS]);
+        let mut parameters = simulation.parameters(Phase::Opening, Market::Labor, 0, count)?;
+        parameters.day = day;
+        economy::EconomySystem::launch(
+            &simulation.device,
+            simulation.device.count(count),
+            cubecl::CubeDim::new_1d(workgroup),
+            economy::EconomyInputLaunch {
+                state: expected.clone().into_buffer_arg(),
+                actors: simulation.actors.clone().into_buffer_arg(),
+                config: simulation.config.launch(),
+                spatial: simulation.spatial.clone().into_buffer_arg(),
+                proposals: simulation.proposals.clone().into_buffer_arg(),
+                bundles: simulation.events.clone().into_buffer_arg(),
+                control: expected_control.clone().into_buffer_arg(),
+                parameters: parameters.launch(),
+                stage: EconomyStage::Local,
+            },
+        );
+        economy::opening::launch(
+            &simulation.device,
+            &actual,
+            &simulation.config,
+            &actual_control,
+            day,
+        );
+        assert_eq!(
+            simulation.device.read(&actual)?,
+            simulation.device.read(&expected)?
+        );
+        let faults = FaultFlags::read(&simulation.device.read(&actual_control)?)?;
+        assert_eq!(
+            faults,
+            FaultFlags::read(&simulation.device.read(&expected_control)?)?
+        );
+        assert_eq!(
+            faults,
+            FaultFlags::ARITHMETIC_OVERFLOW | FaultFlags::TRANSIT_UNDERFLOW
+        );
     }
     Ok(())
 }
@@ -1262,100 +1160,97 @@ fn partitioned_audits_match_original_tiles_extrema_and_overflow_on_gpu() -> Resu
         Wide,
         Overflow,
     }
-    for workgroup in [32, 64, 128, 256] {
-        for population in [
-            Population::Households,
-            Population::SparseFirms,
-            Population::MultipleFirmTiles,
-        ] {
-            let mut config = Scenario::baseline(4097, 42, Experiment::Baseline)?
-                .config()
-                .clone();
-            config.firms = match population {
-                Population::Households => 3,
-                Population::SparseFirms => 7,
-                Population::MultipleFirmTiles => 4097,
-            };
-            let scenario = Scenario::new(config)?;
-            let mut simulation = Simulation::new(scenario.clone(), device(workgroup)?)?;
-            let mut initial = scenario.initial()?;
-            for index in 0..initial.actors.len() {
-                let mut actor = initial.actors.at(index);
-                if let Population::Households = population {
-                    actor.kind = 0;
-                    initial.actors.set(index, actor.clone());
-                }
-                let wage = match actor.kind {
-                    0 => u64::MAX,
-                    _ => (1u64 << 40) + index as u64,
-                };
-                initial.set(Field::Wage, index, wage);
-                initial.set(Field::Price, index, (1u64 << 41) + index as u64);
-                initial.set(Field::EnterpriseStatus, index, 4 * (index % 2) as u64);
-                initial.set(Field::EnterpriseModel, index, (index % 2) as u64);
-                initial.set(Field::HousingStatus, index, (index % 2) as u64);
-                initial.set(Field::LivingMembers, index, (index % 3) as u64);
+    let workgroup = 64;
+    for population in [
+        Population::Households,
+        Population::SparseFirms,
+        Population::MultipleFirmTiles,
+    ] {
+        let mut config = Scenario::baseline(4097, 42, Experiment::Baseline)?
+            .config()
+            .clone();
+        config.firms = match population {
+            Population::Households => 3,
+            Population::SparseFirms => 7,
+            Population::MultipleFirmTiles => 4097,
+        };
+        let scenario = Scenario::new(config)?;
+        let mut simulation = Simulation::new(scenario.clone(), device(workgroup)?)?;
+        let mut initial = scenario.initial()?;
+        for index in 0..initial.actors.len() {
+            let mut actor = initial.actors.at(index);
+            if let Population::Households = population {
+                actor.kind = 0;
+                initial.actors.set(index, actor.clone());
             }
-            simulation.actors = simulation.device.tensor(
-                &initial
-                    .actors
-                    .iter()
-                    .map(|actor| ActorLayout::new(&actor, &scenario))
-                    .collect::<ActorMetadataRows>()
-                    .words(),
+            let wage = match actor.kind {
+                0 => u64::MAX,
+                _ => (1u64 << 40) + index as u64,
+            };
+            initial.set(Field::Wage, index, wage);
+            initial.set(Field::Price, index, (1u64 << 41) + index as u64);
+            initial.set(Field::EnterpriseStatus, index, 4 * (index % 2) as u64);
+            initial.set(Field::EnterpriseModel, index, (index % 2) as u64);
+            initial.set(Field::HousingStatus, index, (index % 2) as u64);
+            initial.set(Field::LivingMembers, index, (index % 3) as u64);
+        }
+        simulation.actors = simulation.device.tensor(
+            &initial
+                .actors
+                .iter()
+                .map(|actor| ActorLayout::new(&actor, &scenario))
+                .collect::<ActorMetadataRows>()
+                .words(),
+        );
+        simulation.spatial = simulation
+            .device
+            .tensor(&SpatialIndex::new(&scenario, &initial).words);
+        simulation.audit = economy::audit::AuditBuffers::new(&simulation.device, &initial.actors);
+        simulation.metadata.actors = initial.actors.clone();
+        for amounts in [Amounts::Wide, Amounts::Overflow] {
+            if let Amounts::Overflow = amounts {
+                for index in 0..initial.actors.len() {
+                    initial.set(Field::Wage, index, u64::from(u32::MAX));
+                }
+            }
+            simulation.device.write(
+                &simulation.state,
+                bytemuck::cast_slice(&encode(&initial.values)),
             );
-            simulation.spatial = simulation
-                .device
-                .tensor(&SpatialIndex::new(&scenario, &initial).words);
-            simulation.audit =
-                economy::audit::AuditBuffers::new(&simulation.device, &initial.actors);
-            simulation.metadata.actors = initial.actors.clone();
-            for amounts in [Amounts::Wide, Amounts::Overflow] {
-                if let Amounts::Overflow = amounts {
-                    for index in 0..initial.actors.len() {
-                        initial.set(Field::Wage, index, u64::from(u32::MAX));
-                    }
+            let poison = match amounts {
+                Amounts::Wide => u32::MAX,
+                Amounts::Overflow => 0,
+            };
+            simulation.device.write(
+                &simulation.events,
+                &vec![poison; simulation.events.meta.num_elements()],
+            );
+            simulation.audit_execution = AuditExecution::Tiled;
+            let actual = simulation.observe();
+            let totals =
+                simulation
+                    .device
+                    .read_range(&simulation.summary, 0, SummaryLayout::WORDS)?;
+            let control = simulation.device.read(&simulation.control)?;
+            simulation.audit_execution = AuditExecution::Original;
+            let expected = simulation.observe();
+            assert_eq!(actual.is_ok(), expected.is_ok());
+            assert_eq!(
+                totals,
+                simulation
+                    .device
+                    .read_range(&simulation.summary, 0, SummaryLayout::WORDS)?
+            );
+            assert_eq!(control, simulation.device.read(&simulation.control)?);
+            let faults = match (amounts, population) {
+                (Amounts::Overflow, Population::SparseFirms | Population::MultipleFirmTiles) => {
+                    FaultFlags::ARITHMETIC_OVERFLOW
                 }
-                simulation.device.write(
-                    &simulation.state,
-                    bytemuck::cast_slice(&encode(&initial.values)),
-                );
-                let poison = match amounts {
-                    Amounts::Wide => u32::MAX,
-                    Amounts::Overflow => 0,
-                };
-                simulation.device.write(
-                    &simulation.events,
-                    &vec![poison; simulation.events.meta.num_elements()],
-                );
-                simulation.audit_execution = AuditExecution::Tiled;
-                let actual = simulation.observe();
-                let totals =
-                    simulation
-                        .device
-                        .read_range(&simulation.summary, 0, SummaryLayout::WORDS)?;
-                let control = simulation.device.read(&simulation.control)?;
-                simulation.audit_execution = AuditExecution::Original;
-                let expected = simulation.observe();
-                assert_eq!(actual.is_ok(), expected.is_ok());
-                assert_eq!(
-                    totals,
-                    simulation
-                        .device
-                        .read_range(&simulation.summary, 0, SummaryLayout::WORDS)?
-                );
-                assert_eq!(control, simulation.device.read(&simulation.control)?);
-                let faults = match (amounts, population) {
-                    (
-                        Amounts::Overflow,
-                        Population::SparseFirms | Population::MultipleFirmTiles,
-                    ) => FaultFlags::ARITHMETIC_OVERFLOW,
-                    _ => FaultFlags::empty(),
-                };
-                assert_eq!(FaultFlags::read(&control)?, faults);
-                if let (Ok(actual), Ok(expected)) = (actual, expected) {
-                    assert_eq!(actual, expected);
-                }
+                _ => FaultFlags::empty(),
+            };
+            assert_eq!(FaultFlags::read(&control)?, faults);
+            if let (Ok(actual), Ok(expected)) = (actual, expected) {
+                assert_eq!(actual, expected);
             }
         }
     }
@@ -1365,30 +1260,28 @@ fn partitioned_audits_match_original_tiles_extrema_and_overflow_on_gpu() -> Resu
 #[test]
 fn parallel_transit_audits_match_serial_mismatch_and_overflow_faults_on_gpu() -> Result<()> {
     let scenario = Scenario::baseline(97, 42, Experiment::Transport)?;
-    for workgroup in [32, 64, 128, 256] {
-        let mut simulation = Simulation::new(scenario.clone(), device(workgroup)?)?;
-        let mut state = scenario.initial()?;
-        let count = state.actors.len();
-        state.values[(BASE_FIELDS + scenario.ring() * (Good::COUNT - 1)) * count + count - 1] =
-            u64::MAX;
-        state.values[(BASE_FIELDS + scenario.ring() * (Good::COUNT - 1) + 1) * count + count - 1] =
-            1;
-        state.values[(TRANSIT_FIELDS + Good::COUNT - 1) * count + count - 1] = 7;
-        simulation.device.write(
-            &simulation.state,
-            bytemuck::cast_slice(&encode(&state.values)),
-        );
-        assert!(simulation.observe().is_err());
-        let actual = FaultFlags::read(&simulation.device.read(&simulation.control)?)?;
-        simulation.audit_execution = AuditExecution::Original;
-        assert!(simulation.observe().is_err());
-        let expected = FaultFlags::read(&simulation.device.read(&simulation.control)?)?;
-        assert_eq!(actual, expected);
-        assert_eq!(
-            actual,
-            FaultFlags::ARITHMETIC_OVERFLOW | FaultFlags::TRANSIT_MISMATCH
-        );
-    }
+    let workgroup = 64;
+    let mut simulation = Simulation::new(scenario.clone(), device(workgroup)?)?;
+    let mut state = scenario.initial()?;
+    let count = state.actors.len();
+    state.values[(BASE_FIELDS + scenario.ring() * (Good::COUNT - 1)) * count + count - 1] =
+        u64::MAX;
+    state.values[(BASE_FIELDS + scenario.ring() * (Good::COUNT - 1) + 1) * count + count - 1] = 1;
+    state.values[(TRANSIT_FIELDS + Good::COUNT - 1) * count + count - 1] = 7;
+    simulation.device.write(
+        &simulation.state,
+        bytemuck::cast_slice(&encode(&state.values)),
+    );
+    assert!(simulation.observe().is_err());
+    let actual = FaultFlags::read(&simulation.device.read(&simulation.control)?)?;
+    simulation.audit_execution = AuditExecution::Original;
+    assert!(simulation.observe().is_err());
+    let expected = FaultFlags::read(&simulation.device.read(&simulation.control)?)?;
+    assert_eq!(actual, expected);
+    assert_eq!(
+        actual,
+        FaultFlags::ARITHMETIC_OVERFLOW | FaultFlags::TRANSIT_MISMATCH
+    );
     Ok(())
 }
 

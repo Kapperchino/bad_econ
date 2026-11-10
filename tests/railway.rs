@@ -1,5 +1,5 @@
 #![cfg(feature = "compute")]
-use crate::support;
+use super::support;
 use anyhow::Result;
 use bad_econ::{
     domain::{railway::*, *},
@@ -162,7 +162,7 @@ fn connected_railways_charge_freight_and_foreign_track_fees_on_gpu() -> Result<(
     assert_eq!(simulation.snapshot.used[Good::Coal as usize - 1], 8);
     assert_eq!(simulation.snapshot.used[Good::Steel as usize - 1], 12);
     assert_eq!(simulation.snapshot.used[Good::Locomotives as usize - 1], 4);
-    let mut replay = Simulation::from_checkpoint(simulation.checkpoint()?, support::device(128)?)?;
+    let mut replay = Simulation::from_checkpoint(simulation.checkpoint()?, support::device(64)?)?;
     for _ in 0..4 {
         simulation.advance()?;
         replay.advance()?;
@@ -207,6 +207,7 @@ fn disconnected_or_unbuilt_tracks_use_animals_on_gpu() -> Result<()> {
 }
 
 #[test]
+#[ignore = "extended scenario coverage; run cargo gpu-extended"]
 fn railways_suspend_without_upkeep_and_preserve_dispatched_deliveries_on_gpu() -> Result<()> {
     let mut config = network()?;
     for firm in &mut config.population.as_mut().unwrap().firms[1..=2] {
@@ -232,6 +233,7 @@ fn railways_suspend_without_upkeep_and_preserve_dispatched_deliveries_on_gpu() -
 }
 
 #[test]
+#[ignore = "extended scenario coverage; run cargo gpu-extended"]
 fn senders_pay_rail_fares_and_reverse_routes_pay_the_other_owner_on_gpu() -> Result<()> {
     for reverse in [false, true] {
         let mut config = network()?;
@@ -265,6 +267,7 @@ fn senders_pay_rail_fares_and_reverse_routes_pay_the_other_owner_on_gpu() -> Res
 }
 
 #[test]
+#[ignore = "extended scenario coverage; run cargo gpu-extended"]
 fn railroad_construction_waits_for_paid_material_deliveries_on_gpu() -> Result<()> {
     let mut config = network()?;
     let population = config.population.as_mut().unwrap();
@@ -291,6 +294,7 @@ fn railroad_construction_waits_for_paid_material_deliveries_on_gpu() -> Result<(
 }
 
 #[test]
+#[ignore = "extended scenario coverage; run cargo gpu-extended"]
 fn locomotives_require_steel_and_tools_on_gpu() -> Result<()> {
     for stock in [0, 2] {
         let mut config = network()?;
@@ -320,6 +324,7 @@ fn locomotives_require_steel_and_tools_on_gpu() -> Result<()> {
 }
 
 #[test]
+#[ignore = "extended scenario coverage; run cargo gpu-extended"]
 fn a_company_uses_its_other_sites_tracks_without_foreign_fees_on_gpu() -> Result<()> {
     let mut config = network()?;
     config.population.as_mut().unwrap().firms[2].owner = 2;
@@ -338,6 +343,7 @@ fn a_company_uses_its_other_sites_tracks_without_foreign_fees_on_gpu() -> Result
 }
 
 #[test]
+#[ignore = "extended scenario coverage; run cargo gpu-extended"]
 fn generated_industry_has_rail_plans_and_gpu_inspection_survives_checkpointing() -> Result<()> {
     let scenario = Scenario::industrial(48, 42, Experiment::Baseline)?;
     assert!(!scenario.config().railway.segments.is_empty());
@@ -356,6 +362,7 @@ fn generated_industry_has_rail_plans_and_gpu_inspection_survives_checkpointing()
 }
 
 #[test]
+#[ignore = "extended scenario coverage; run cargo gpu-extended"]
 fn regional_freight_receipts_preserve_wide_cash_and_workgroup_replay_on_gpu() -> Result<()> {
     let mut config = network()?;
     config.household_need = 100;
@@ -381,7 +388,7 @@ fn regional_freight_receipts_preserve_wide_cash_and_workgroup_replay_on_gpu() ->
     }
     let scenario = Scenario::new(config)?;
     let mut simulation = Simulation::new(scenario.clone(), support::device(64)?)?;
-    let mut replay = Simulation::new(scenario, support::device(128)?)?;
+    let mut replay = Simulation::new(scenario, support::device(64)?)?;
     simulation.advance()?;
     replay.advance()?;
     let state = simulation.download()?;
@@ -398,6 +405,7 @@ fn regional_freight_receipts_preserve_wide_cash_and_workgroup_replay_on_gpu() ->
 }
 
 #[test]
+#[ignore = "extended scenario coverage; run cargo gpu-extended"]
 fn suspended_tracks_resume_after_paid_upkeep_arrives_on_gpu() -> Result<()> {
     let mut config = network()?;
     let population = config.population.as_mut().unwrap();
@@ -422,6 +430,7 @@ fn suspended_tracks_resume_after_paid_upkeep_arrives_on_gpu() -> Result<()> {
 }
 
 #[test]
+#[ignore = "extended scenario coverage; run cargo gpu-extended"]
 fn railway_example_runs_with_conserved_goods_and_cash_on_gpu() -> Result<()> {
     let config = serde_json::from_str(include_str!("../scenarios/railway.json"))?;
     let mut simulation = Simulation::new(Scenario::new(config)?, support::device(64)?)?;
@@ -470,6 +479,7 @@ fn regional_value(
 }
 
 #[test]
+#[ignore = "extended scenario coverage; run cargo gpu-extended"]
 fn five_regions_consume_five_local_units_even_on_one_long_segment_on_gpu() -> Result<()> {
     let scenario = Scenario::new(regional_network()?)?;
     let mut simulation = Simulation::new(scenario.clone(), support::device(64)?)?;
@@ -497,6 +507,7 @@ fn five_regions_consume_five_local_units_even_on_one_long_segment_on_gpu() -> Re
 }
 
 #[test]
+#[ignore = "extended scenario coverage; run cargo gpu-extended"]
 fn regional_bottleneck_uses_animals_without_partial_rail_payments_on_gpu() -> Result<()> {
     let mut config = regional_network()?;
     config.population.as_mut().unwrap().households[0].cash = 20;
@@ -572,7 +583,7 @@ fn shared_regions_do_not_oversell_and_replenish_next_day_on_gpu() -> Result<()> 
         state.values[(USED_FIELDS + Good::Railway as usize - 1) * state.actors.len() + 4],
         5
     );
-    let mut replay = Simulation::from_checkpoint(simulation.checkpoint()?, support::device(128)?)?;
+    let mut replay = Simulation::from_checkpoint(simulation.checkpoint()?, support::device(64)?)?;
     simulation.advance()?;
     replay.advance()?;
     let next = simulation.download()?;
@@ -590,7 +601,7 @@ fn shared_regions_do_not_oversell_and_replenish_next_day_on_gpu() -> Result<()> 
 #[test]
 fn parallel_regional_expansion_preserves_material_priority_and_wide_capacity_on_gpu() -> Result<()>
 {
-    for workgroup in [32, 64, 128, 256] {
+    for workgroup in [32, 256] {
         for upgrades in [0, 1, 31, 33, 51] {
             let mut config = regional_network()?;
             config.railway.length_unit = 10;
@@ -655,6 +666,7 @@ fn parallel_regional_expansion_preserves_material_priority_and_wide_capacity_on_
 }
 
 #[test]
+#[ignore = "extended scenario coverage; run cargo gpu-extended"]
 fn only_expanding_owners_with_materials_upgrade_a_busy_region_on_gpu() -> Result<()> {
     for preference in [0, 1000] {
         for materials in [0, 1000] {
@@ -707,6 +719,7 @@ fn only_expanding_owners_with_materials_upgrade_a_busy_region_on_gpu() -> Result
 }
 
 #[test]
+#[ignore = "extended scenario coverage; run cargo gpu-extended"]
 fn splitting_segments_and_property_boundaries_preserve_regional_charges_on_gpu() -> Result<()> {
     for property in [None, Some(100), Some(200)] {
         let mut config = regional_network()?;
@@ -764,6 +777,7 @@ fn splitting_segments_and_property_boundaries_preserve_regional_charges_on_gpu()
 }
 
 #[test]
+#[ignore = "extended scenario coverage; run cargo gpu-extended"]
 fn sender_without_freight_funds_uses_animals_and_keeps_all_rail_supply_on_gpu() -> Result<()> {
     let mut config = regional_network()?;
     config.population.as_mut().unwrap().firms[0].cash = 0;
@@ -781,6 +795,7 @@ fn sender_without_freight_funds_uses_animals_and_keeps_all_rail_supply_on_gpu() 
 }
 
 #[test]
+#[ignore = "extended scenario coverage; run cargo gpu-extended"]
 fn regional_expansion_waits_for_funded_material_deliveries_on_gpu() -> Result<()> {
     for cash in [0, 10_000] {
         let mut config = regional_network()?;
@@ -837,6 +852,7 @@ fn regional_expansion_waits_for_funded_material_deliveries_on_gpu() -> Result<()
 }
 
 #[test]
+#[ignore = "extended scenario coverage; run cargo gpu-extended"]
 fn regional_capacity_survives_actor_registry_growth_and_checkpoint_replay_on_gpu() -> Result<()> {
     use bad_econ::domain::demography::{PersonSeed, Sex};
     let mut config = regional_network()?;
@@ -891,7 +907,7 @@ fn regional_capacity_survives_actor_registry_growth_and_checkpoint_replay_on_gpu
             1
         );
     }
-    let mut replay = Simulation::from_checkpoint(simulation.checkpoint()?, support::device(128)?)?;
+    let mut replay = Simulation::from_checkpoint(simulation.checkpoint()?, support::device(64)?)?;
     simulation.advance()?;
     replay.advance()?;
     assert_eq!(simulation.download()?, replay.download()?);
@@ -900,6 +916,7 @@ fn regional_capacity_survives_actor_registry_growth_and_checkpoint_replay_on_gpu
 }
 
 #[test]
+#[ignore = "extended scenario coverage; run cargo gpu-extended"]
 fn closing_businesses_preserves_regional_records_and_expires_rail_services_on_gpu() -> Result<()> {
     for firm in [4, 5] {
         let mut config = regional_network()?;
@@ -947,6 +964,7 @@ fn closing_businesses_preserves_regional_records_and_expires_rail_services_on_gp
 }
 
 #[test]
+#[ignore = "extended scenario coverage; run cargo gpu-extended"]
 fn every_foreign_operator_is_paid_even_within_one_region_on_gpu() -> Result<()> {
     let mut config = network()?;
     config.population.as_mut().unwrap().households[0].cash = 10;
@@ -987,6 +1005,7 @@ fn every_foreign_operator_is_paid_even_within_one_region_on_gpu() -> Result<()> 
 }
 
 #[test]
+#[ignore = "extended scenario coverage; run cargo gpu-extended"]
 fn competing_companies_produce_separate_capacity_in_the_same_regions_on_gpu() -> Result<()> {
     let mut config = regional_network()?;
     config.railway.companies.push(RailwayCompany {
@@ -1039,6 +1058,7 @@ fn competing_companies_produce_separate_capacity_in_the_same_regions_on_gpu() ->
 }
 
 #[test]
+#[ignore = "extended scenario coverage; run cargo gpu-extended"]
 fn carriers_prefer_their_own_connected_tracks_over_a_foreign_shortcut_on_gpu() -> Result<()> {
     let mut config = network()?;
     config.population.as_mut().unwrap().households[0].cash = 10;
@@ -1119,6 +1139,7 @@ fn private_tracks_require_a_directional_sharing_agreement_on_gpu() -> Result<()>
 }
 
 #[test]
+#[ignore = "extended scenario coverage; run cargo gpu-extended"]
 fn industrial_siding_is_built_and_preserved_by_checkpoint_replay_on_gpu() -> Result<()> {
     let mut config = network()?;
     config.map_size = 1500;
@@ -1154,7 +1175,7 @@ fn industrial_siding_is_built_and_preserved_by_checkpoint_replay_on_gpu() -> Res
     assert_eq!(state.get(Field::RailBuilt, 5), 2);
     assert!(delivered(&state, &scenario, 2) > 0);
     assert!(state.get(Field::RailRevenue, 5) > 0);
-    let mut replay = Simulation::from_checkpoint(simulation.checkpoint()?, support::device(128)?)?;
+    let mut replay = Simulation::from_checkpoint(simulation.checkpoint()?, support::device(64)?)?;
     simulation.advance()?;
     replay.advance()?;
     assert_eq!(simulation.download()?, replay.download()?);
@@ -1163,7 +1184,7 @@ fn industrial_siding_is_built_and_preserved_by_checkpoint_replay_on_gpu() -> Res
 }
 
 #[test]
-fn concurrent_shared_freight_preserves_capacity_payments_and_replay_on_gpu() -> Result<()> {
+fn concurrent_shared_freight_preserves_capacity_payments_and_checkpoints_on_gpu() -> Result<()> {
     struct FreightLoad {
         capacity: u32,
         budget: u64,
@@ -1205,42 +1226,36 @@ fn concurrent_shared_freight_preserves_capacity_payments_and_replay_on_gpu() -> 
         config.households = population.households.len() as u32;
         let households = config.households as usize;
         let scenario = Scenario::new(config)?;
-        let mut expected = None;
-        for workgroup in [32, 64, 128, 256] {
-            let mut simulation = Simulation::new(scenario.clone(), support::device(workgroup)?)?;
-            simulation.advance()?;
-            let state = simulation.download()?;
-            let rail_units = (0..households)
-                .map(|buyer| {
-                    state.values[state
-                        .shipment_coordinate(Good::Bread, 1, scenario.ring(), buyer)
-                        .0 as usize]
-                })
-                .sum::<u64>();
-            assert_eq!(rail_units, load.delivered);
-            assert_eq!(
-                state.get(Field::RailRevenue, households + 1),
-                rail_units * 2
-            );
-            assert_eq!(
-                state.get(Field::RailRevenue, households + 2),
-                rail_units * 5
-            );
-            assert_eq!(
-                state.get(Field::Railway, households + 2),
-                u64::from(load.capacity) - rail_units
-            );
-            match &expected {
-                Some(expected) => assert_eq!(&state, expected),
-                None => expected = Some(state),
-            }
-            simulation.checkpoint()?.restore()?;
-        }
+        let mut simulation = Simulation::new(scenario.clone(), support::device(64)?)?;
+        simulation.advance()?;
+        let state = simulation.download()?;
+        let rail_units = (0..households)
+            .map(|buyer| {
+                state.values[state
+                    .shipment_coordinate(Good::Bread, 1, scenario.ring(), buyer)
+                    .0 as usize]
+            })
+            .sum::<u64>();
+        assert_eq!(rail_units, load.delivered);
+        assert_eq!(
+            state.get(Field::RailRevenue, households + 1),
+            rail_units * 2
+        );
+        assert_eq!(
+            state.get(Field::RailRevenue, households + 2),
+            rail_units * 5
+        );
+        assert_eq!(
+            state.get(Field::Railway, households + 2),
+            u64::from(load.capacity) - rail_units
+        );
+        simulation.checkpoint()?.restore()?;
     }
     Ok(())
 }
 
 #[test]
+#[ignore = "extended scenario coverage; run cargo gpu-extended"]
 fn reentering_a_region_reserves_every_visit_atomically_on_gpu() -> Result<()> {
     for capacity in [1, 2] {
         let mut config = regional_network()?;

@@ -25,5 +25,5 @@ mod resources;
 mod retained;
 mod sensitivity;
 #[cfg(feature = "compute")]
-mod support;
+pub(crate) mod support;
 mod valuation;

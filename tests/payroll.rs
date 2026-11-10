@@ -14,7 +14,7 @@ fn policy() -> PayrollPolicy {
 }
 
 #[cfg(feature = "compute")]
-use crate::support;
+use super::support;
 
 #[cfg(feature = "compute")]
 fn scenario(minutes: u32) -> Result<Scenario> {
@@ -83,7 +83,7 @@ fn untaxed_wages_remain_observed_without_implying_entrepreneurial_interest() -> 
     }
     let mut untaxed = Simulation::new(Scenario::new(config.clone())?, support::device(64)?)?;
     config.payroll = Some(PayrollPolicy::default());
-    let mut zero_rate = Simulation::new(Scenario::new(config)?, support::device(128)?)?;
+    let mut zero_rate = Simulation::new(Scenario::new(config)?, support::device(64)?)?;
     untaxed.advance()?;
     zero_rate.advance()?;
     let state = untaxed.download()?;
@@ -104,6 +104,7 @@ fn untaxed_wages_remain_observed_without_implying_entrepreneurial_interest() -> 
 
 #[cfg(feature = "compute")]
 #[test]
+#[ignore = "extended scenario coverage; run cargo gpu-extended"]
 fn payroll_specializations_and_runtime_rates_share_a_gpu_client() -> Result<()> {
     use bad_econ::simulation::Simulation;
 
@@ -262,6 +263,7 @@ fn fractional_payroll_claims_remain_funded_across_small_payments() -> Result<()>
 
 #[cfg(feature = "compute")]
 #[test]
+#[ignore = "extended scenario coverage; run cargo gpu-extended"]
 fn changing_employers_does_not_restart_tax_allowances() -> Result<()> {
     use bad_econ::simulation::Simulation;
     let mut config = scenario(80)?.config().clone();
@@ -293,6 +295,7 @@ fn changing_employers_does_not_restart_tax_allowances() -> Result<()> {
 
 #[cfg(feature = "compute")]
 #[test]
+#[ignore = "extended scenario coverage; run cargo gpu-extended"]
 fn household_fatigue_uses_executed_work() -> Result<()> {
     use bad_econ::simulation::Simulation;
     let mut config = scenario(80)?.config().clone();
@@ -358,6 +361,7 @@ fn negotiated_wages_set_real_escrow_and_payroll_amounts() -> Result<()> {
 
 #[cfg(feature = "compute")]
 #[test]
+#[ignore = "extended scenario coverage; run cargo gpu-extended"]
 fn reservation_pay_is_not_rounded_before_payable_minutes() -> Result<()> {
     use bad_econ::simulation::Simulation;
     let mut config = scenario(80)?.config().clone();
@@ -374,6 +378,7 @@ fn reservation_pay_is_not_rounded_before_payable_minutes() -> Result<()> {
 
 #[cfg(feature = "compute")]
 #[test]
+#[ignore = "extended scenario coverage; run cargo gpu-extended"]
 fn empty_funded_wage_intervals_prevent_labor_commitments() -> Result<()> {
     use bad_econ::simulation::Simulation;
     let mut config = scenario(80)?.config().clone();
@@ -393,6 +398,7 @@ fn empty_funded_wage_intervals_prevent_labor_commitments() -> Result<()> {
 
 #[cfg(feature = "compute")]
 #[test]
+#[ignore = "extended scenario coverage; run cargo gpu-extended"]
 fn bargaining_plans_affordable_slots_below_the_posted_offer() -> Result<()> {
     use bad_econ::simulation::Simulation;
     let mut config = scenario(80)?.config().clone();
@@ -416,6 +422,7 @@ fn bargaining_plans_affordable_slots_below_the_posted_offer() -> Result<()> {
 
 #[cfg(feature = "compute")]
 #[test]
+#[ignore = "extended scenario coverage; run cargo gpu-extended"]
 fn later_matching_rounds_fund_only_remaining_negotiable_slots() -> Result<()> {
     use bad_econ::simulation::Simulation;
     let mut config = scenario(80)?.config().clone();

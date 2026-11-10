@@ -1,5 +1,5 @@
 #![cfg(feature = "compute")]
-use crate::support;
+use super::support;
 
 use anyhow::Result;
 use bad_econ::simulation::bargaining::*;

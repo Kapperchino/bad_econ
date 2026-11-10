@@ -463,7 +463,6 @@ pub fn observation_totals(sums: &[u64], output: &mut [u32]) {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::simulation::Device;
     use anyhow::Result;
     use burn_wgpu::CubeTensor;
 
@@ -513,7 +512,7 @@ mod tests {
 
     #[test]
     fn famine_duration_feeding_age_and_single_cause_boundaries_on_gpu() -> Result<()> {
-        let device = Device::headless(64)?;
+        let device = crate::simulation::tests::device(64)?;
         let cases = [
             [0, 0, 1000, 0],
             [30_000, 0, 1000, 9],
@@ -556,7 +555,7 @@ mod tests {
 
     #[test]
     fn occupational_units_rare_risks_safety_and_cubek_draws_on_gpu() -> Result<()> {
-        let device = Device::headless(64)?;
+        let device = crate::simulation::tests::device(64)?;
         let cases = [
             [100, 0, 1000, 0, 0, 0, 0, 0],
             [100, 1, 1000, 0, 0, 0, u32::MAX, u32::MAX],

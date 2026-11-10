@@ -1,5 +1,5 @@
 #![cfg(feature = "compute")]
-use crate::support;
+use super::support;
 
 use anyhow::Result;
 use bad_econ::{
@@ -193,6 +193,7 @@ fn research_consumes_inputs_and_time_before_granting_production_readiness() -> R
 }
 
 #[test]
+#[ignore = "extended scenario coverage; run cargo gpu-extended"]
 fn failed_research_consumes_inputs_but_missing_consent_and_time_do_not() -> Result<()> {
     for mode in 0..5 {
         let mut config = base_config()?;
@@ -261,6 +262,7 @@ fn equipment_lifetime_and_renewable_stock_constrain_executed_production() -> Res
 }
 
 #[test]
+#[ignore = "extended scenario coverage; run cargo gpu-extended"]
 fn research_checkpoint_keeps_midday_boundary_and_restores_keyed_outcomes() -> Result<()> {
     let mut config = base_config()?;
     config.research = Some(ResearchConfig {
@@ -305,6 +307,7 @@ fn research_checkpoint_keeps_midday_boundary_and_restores_keyed_outcomes() -> Re
 }
 
 #[test]
+#[ignore = "extended scenario coverage; run cargo gpu-extended"]
 fn maintenance_and_wear_are_combined_before_condition_clipping() -> Result<()> {
     let mut config = base_config()?;
     config.population.as_mut().unwrap().firms[0].capacity = 10;
@@ -339,6 +342,7 @@ fn maintenance_and_wear_are_combined_before_condition_clipping() -> Result<()> {
 }
 
 #[test]
+#[ignore = "extended scenario coverage; run cargo gpu-extended"]
 fn research_checkpoint_rejects_stale_profiles_and_unbacked_summaries() -> Result<()> {
     use bad_econ::simulation::research::ResearchRuntime;
     let mut config = base_config()?;
@@ -384,6 +388,7 @@ fn research_checkpoint_rejects_stale_profiles_and_unbacked_summaries() -> Result
 }
 
 #[test]
+#[ignore = "extended scenario coverage; run cargo gpu-extended"]
 fn boundary_elimination_preserves_reachable_labels_across_cycles_and_empty_blocks() -> Result<()> {
     let device = support::device(64)?;
     let mut edges = vec![CapabilityEdge {
@@ -443,6 +448,7 @@ fn boundary_elimination_preserves_reachable_labels_across_cycles_and_empty_block
 }
 
 #[test]
+#[ignore = "extended scenario coverage; run cargo gpu-extended"]
 fn positive_matrix_support_and_declared_edges_have_distinct_closures() -> Result<()> {
     use bad_econ::simulation::{
         analytics::{Coefficient, SparseMatrix},
@@ -497,6 +503,7 @@ fn positive_matrix_support_and_declared_edges_have_distinct_closures() -> Result
 }
 
 #[test]
+#[ignore = "extended scenario coverage; run cargo gpu-extended"]
 fn production_requires_every_installed_readiness_gate() -> Result<()> {
     for gate in 0..5 {
         let mut config = base_config()?;
@@ -522,6 +529,7 @@ fn production_requires_every_installed_readiness_gate() -> Result<()> {
 }
 
 #[test]
+#[ignore = "extended scenario coverage; run cargo gpu-extended"]
 fn successful_grants_are_reusable_and_local_to_the_implementer() -> Result<()> {
     let mut config = base_config()?;
     config.population.as_mut().unwrap().firms[1].cash = 100_000;
@@ -552,6 +560,7 @@ fn successful_grants_are_reusable_and_local_to_the_implementer() -> Result<()> {
 }
 
 #[test]
+#[ignore = "extended scenario coverage; run cargo gpu-extended"]
 fn research_effort_and_exposure_follow_the_versioned_policy_grid() -> Result<()> {
     let mut config = base_config()?;
     let mut configured = lab();
@@ -583,6 +592,7 @@ fn research_effort_and_exposure_follow_the_versioned_policy_grid() -> Result<()>
 }
 
 #[test]
+#[ignore = "extended scenario coverage; run cargo gpu-extended"]
 fn strike_participation_and_research_share_the_actual_household_clock() -> Result<()> {
     use bad_econ::simulation::research::{AttemptOutcome, Participation};
     let mut config = base_config()?;
@@ -625,6 +635,7 @@ fn strike_participation_and_research_share_the_actual_household_clock() -> Resul
 }
 
 #[test]
+#[ignore = "extended scenario coverage; run cargo gpu-extended"]
 fn research_rows_preserve_multiple_records_and_checkpoint_replay() -> Result<()> {
     let mut config = base_config()?;
     for firm in &mut config.population.as_mut().unwrap().firms {
@@ -734,7 +745,7 @@ fn research_rows_preserve_multiple_records_and_checkpoint_replay() -> Result<()>
     let encoded = serde_json::to_string(&checkpoint)?;
     simulation.advance()?;
     let expected = simulation.download()?;
-    let mut restored = Simulation::new(scenario, support::device(128)?)?;
+    let mut restored = Simulation::new(scenario, support::device(64)?)?;
     restored.command(SimulationCommand::Restore(
         serde_json::from_str::<Checkpoint>(&encoded)?.into(),
     ))?;

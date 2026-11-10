@@ -100,6 +100,6 @@ mod tests {
 
     #[test]
     fn nonlinear_table_bounds_on_gpu() -> Result<()> {
-        check(Device::headless(64)?)
+        check(crate::simulation::tests::device(64)?)
     }
 }

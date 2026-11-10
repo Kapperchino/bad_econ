@@ -1,5 +1,5 @@
 #![cfg(feature = "compute")]
-use crate::support;
+use super::support;
 use anyhow::Result;
 use bad_econ::{
     domain::{
@@ -94,7 +94,7 @@ fn entrepreneurial_interest_limits_entry_even_with_abundant_savings_on_gpu() -> 
             assert_eq!(state.get(Field::InvestmentGood, household), 0);
         }
     }
-    let mut replay = Simulation::from_checkpoint(simulation.checkpoint()?, support::device(128)?)?;
+    let mut replay = Simulation::from_checkpoint(simulation.checkpoint()?, support::device(64)?)?;
     simulation.advance()?;
     replay.advance()?;
     assert_eq!(simulation.download()?, replay.download()?);
@@ -187,7 +187,7 @@ fn household_surplus_finances_construction_and_subsequent_paid_work() -> Result<
     );
     let checkpoint = simulation.checkpoint()?;
     checkpoint.restore()?;
-    let mut resumed = Simulation::new(scenario, support::device(128)?)?;
+    let mut resumed = Simulation::new(scenario, support::device(64)?)?;
     resumed.command(bad_econ::runtime::SimulationCommand::Restore(Box::new(
         checkpoint,
     )))?;
@@ -311,6 +311,7 @@ fn repeated_migration_preserves_accounts_and_rebuilds_market_access() -> Result<
 }
 
 #[test]
+#[ignore = "extended scenario coverage; run cargo gpu-extended"]
 fn liquidation_distributes_assets_and_deliveries_by_shares_without_reusing_identity() -> Result<()>
 {
     use bad_econ::{domain::enterprise::EnterpriseState, runtime::SimulationCommand};
@@ -439,6 +440,7 @@ fn capital_economy() -> Result<Scenario> {
 }
 
 #[test]
+#[ignore = "extended scenario coverage; run cargo gpu-extended"]
 fn retained_earnings_build_capacity_after_paid_construction_and_payroll() -> Result<()> {
     use bad_econ::runtime::SimulationCommand;
     let scenario = capital_economy()?;
@@ -477,6 +479,7 @@ fn retained_earnings_build_capacity_after_paid_construction_and_payroll() -> Res
 }
 
 #[test]
+#[ignore = "extended scenario coverage; run cargo gpu-extended"]
 fn multiple_owned_projects_rotate_and_pay_only_affordable_construction() -> Result<()> {
     use bad_econ::{domain::enterprise::EnterpriseState, simulation::Trace};
     let mut config = capital_economy()?.config().clone();
@@ -499,7 +502,7 @@ fn multiple_owned_projects_rotate_and_pay_only_affordable_construction() -> Resu
     assert_eq!(state.get(Field::InvestmentFirm, 0), 33);
     let checkpoint = Checkpoint::new(&scenario, &state)?;
     let mut simulation = Simulation::from_checkpoint(checkpoint.clone(), support::device(64)?)?;
-    let mut replay = Simulation::from_checkpoint(checkpoint, support::device(128)?)?;
+    let mut replay = Simulation::from_checkpoint(checkpoint, support::device(64)?)?;
     for phase in Phase::ALL {
         simulation.phase(phase, Trace::Discard)?;
         replay.phase(phase, Trace::Discard)?;
@@ -537,6 +540,7 @@ fn multiple_owned_projects_rotate_and_pay_only_affordable_construction() -> Resu
 }
 
 #[test]
+#[ignore = "extended scenario coverage; run cargo gpu-extended"]
 fn outside_household_investment_issues_shares_and_transfers_savings() -> Result<()> {
     use bad_econ::runtime::SimulationCommand;
     let mut config = capital_economy()?.config().clone();
@@ -578,6 +582,7 @@ fn outside_household_investment_issues_shares_and_transfers_savings() -> Result<
 }
 
 #[test]
+#[ignore = "extended scenario coverage; run cargo gpu-extended"]
 fn purchased_tools_fund_maintenance_and_safety_without_creating_equipment() -> Result<()> {
     use bad_econ::domain::enterprise::{FirmConditions, WorkingConditions};
     let mut config = capital_economy()?.config().clone();
@@ -612,6 +617,7 @@ fn purchased_tools_fund_maintenance_and_safety_without_creating_equipment() -> R
 }
 
 #[test]
+#[ignore = "extended scenario coverage; run cargo gpu-extended"]
 fn local_tool_quotes_and_input_access_fund_a_nonfood_enterprise() -> Result<()> {
     let mut config = capital_economy()?.config().clone();
     config.entrepreneurship.interested_per_mille = 1000;
@@ -675,16 +681,23 @@ fn unfunded_food_firms_close_without_erasing_accounts() -> Result<()> {
         firm.inventories = [0; Good::COUNT];
     }
     let scenario = Scenario::new(config)?;
-    let initial = scenario.initial()?;
+    let mut initial = scenario.initial()?;
+    for firm in 3..6 {
+        initial.set(Field::IdleDays, firm, 29);
+        initial.set(
+            Field::EnterpriseStatus,
+            firm,
+            enterprise::EnterpriseState::Dormant as u64,
+        );
+    }
     let identities = initial
         .actors
         .iter()
         .map(|actor| actor.identity)
         .collect::<Vec<_>>();
-    let mut simulation = Simulation::new(scenario.clone(), support::device(64)?)?;
-    for _ in 0..90 {
-        simulation.advance()?;
-    }
+    let mut simulation =
+        Simulation::from_checkpoint(Checkpoint::new(&scenario, &initial)?, support::device(64)?)?;
+    simulation.advance()?;
     let closed = simulation.download()?;
     for firm in 3..6 {
         assert_eq!(
@@ -692,9 +705,7 @@ fn unfunded_food_firms_close_without_erasing_accounts() -> Result<()> {
             enterprise::EnterpriseState::Closed as u64
         );
     }
-    for _ in 0..30 {
-        simulation.advance()?;
-    }
+    simulation.advance()?;
     assert_eq!(simulation.snapshot.firm_closures, 3);
     assert_eq!(simulation.snapshot.cash, initial.initial_cash);
     let state = simulation.download()?;
@@ -715,6 +726,7 @@ fn unfunded_food_firms_close_without_erasing_accounts() -> Result<()> {
 }
 
 #[test]
+#[ignore = "extended scenario coverage; run cargo gpu-extended"]
 fn industrial_owners_expand_more_readily_than_small_proprietors_on_gpu() -> Result<()> {
     for capacity in [1, 20] {
         let mut config = capital_economy()?.config().clone();

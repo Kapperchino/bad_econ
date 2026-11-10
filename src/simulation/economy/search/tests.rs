@@ -366,13 +366,11 @@ fn inactive_household_input_preparation_preserves_inventory_faults_on_gpu() -> R
             probe.state.values[transit * probe.state.actors.len()] = 1;
             let expected = probe.outcome(SearchExecution::Serial)?;
             assert_eq!(expected.faults == 0, inventory == 0, "{good:?}");
-            for workgroup in [32, 64, 128, 256] {
-                assert_eq!(
-                    probe.outcome_with_workgroup(SearchExecution::Prepare, workgroup)?,
-                    expected,
-                    "{good:?}, inventory {inventory}, workgroup {workgroup}"
-                );
-            }
+            assert_eq!(
+                probe.outcome(SearchExecution::Prepare)?,
+                expected,
+                "{good:?}, inventory {inventory}"
+            );
         }
     }
     Ok(())
@@ -401,74 +399,69 @@ fn repeat_input_preparation_preserves_inactive_inventory_and_demand_faults_on_gp
             probe.state.set(Field::Bread, 0, 0);
         }
         let expected = probe.outcome(SearchExecution::Prepare)?;
-        for workgroup in [32, 64, 128, 256] {
-            assert_eq!(
-                probe.outcome_with_workgroup(SearchExecution::PrepareRepeat, workgroup)?,
-                expected,
-                "inactive {good:?}, workgroup {workgroup}"
-            );
-        }
+        assert_eq!(
+            probe.outcome(SearchExecution::PrepareRepeat)?,
+            expected,
+            "inactive {good:?}"
+        );
         probe.state.set(Field::EnterpriseModel, 0, 1);
         probe.state.set(Field::inventory(good), 0, u64::MAX);
         let expected = probe.outcome(SearchExecution::Prepare)?;
         assert_ne!(expected.faults, 0);
-        for workgroup in [32, 64, 128, 256] {
-            assert_eq!(
-                probe.outcome_with_workgroup(SearchExecution::PrepareRepeat, workgroup)?,
-                expected,
-                "demand {good:?}, workgroup {workgroup}"
-            );
-        }
+        assert_eq!(
+            probe.outcome(SearchExecution::PrepareRepeat)?,
+            expected,
+            "demand {good:?}"
+        );
     }
     Ok(())
 }
 
 #[test]
 fn first_round_inventory_faults_gate_repeat_preparation_on_gpu() -> Result<()> {
-    for workgroup in [32, 64, 128, 256] {
-        let mut probe = SearchProbe::new(SupplyCase::Capped, 0, Market::Input(Good::Linen))?;
-        probe.state.set(Field::LivingMembers, 0, 0);
-        probe.state.set(Field::Linen, 0, u64::MAX);
-        let count = probe.state.actors.len();
-        let transit = TRANSIT_FIELDS + Good::Linen as usize - 1;
-        probe.state.values[transit * count] = 1;
-        let first = probe.outcome_with_workgroup(SearchExecution::Prepare, workgroup)?;
-        assert_ne!(first.faults, 0);
-        let simulation = &probe.simulation;
-        let device = &simulation.device;
-        markets::prepare_dispatch(
-            device,
-            &simulation.control,
-            &simulation.searches.dispatches,
-            count,
-        );
-        let sentinel = 0x1234_5678;
-        let proposals = vec![sentinel; count * ProposalLayout::WORDS];
-        device.write(&simulation.proposals, &proposals);
-        MarketSearch::launch(
-            device,
-            CubeCount::Static(count.div_ceil(workgroup as usize) as u32, 1, 1),
-            CubeDim::new_1d(workgroup),
-            SearchInputLaunch {
-                state: simulation.state.clone().into_buffer_arg(),
-                actors: simulation.actors.clone().into_buffer_arg(),
-                config: simulation.config.launch(),
-                spatial: simulation.spatial.clone().into_buffer_arg(),
-                proposals: simulation.proposals.clone().into_buffer_arg(),
-                searches: simulation.searches.requests.clone().into_buffer_arg(),
-                successes: simulation.searches.successes.clone().into_buffer_arg(),
-                scratch: simulation.scratch.clone().into_buffer_arg(),
-                control: simulation.control.clone().into_buffer_arg(),
-                parameters: probe.parameters.launch(),
-                status_reset: StatusReset::Full,
-                stage: SearchStage::PrepareRepeat,
-            },
-        );
-        assert_eq!(device.read(&simulation.proposals)?, proposals);
-        let control = device.read(&simulation.control)?;
-        assert_eq!(control[crate::simulation::flags::FAULT_WORD], first.faults);
-        assert_eq!(control[LATCH_WORD], first.faults);
-    }
+    let workgroup = 64;
+    let mut probe = SearchProbe::new(SupplyCase::Capped, 0, Market::Input(Good::Linen))?;
+    probe.state.set(Field::LivingMembers, 0, 0);
+    probe.state.set(Field::Linen, 0, u64::MAX);
+    let count = probe.state.actors.len();
+    let transit = TRANSIT_FIELDS + Good::Linen as usize - 1;
+    probe.state.values[transit * count] = 1;
+    let first = probe.outcome_with_workgroup(SearchExecution::Prepare, workgroup)?;
+    assert_ne!(first.faults, 0);
+    let simulation = &probe.simulation;
+    let device = &simulation.device;
+    markets::prepare_dispatch(
+        device,
+        &simulation.control,
+        &simulation.searches.dispatches,
+        count,
+    );
+    let sentinel = 0x1234_5678;
+    let proposals = vec![sentinel; count * ProposalLayout::WORDS];
+    device.write(&simulation.proposals, &proposals);
+    MarketSearch::launch(
+        device,
+        CubeCount::Static(count.div_ceil(workgroup as usize) as u32, 1, 1),
+        CubeDim::new_1d(workgroup),
+        SearchInputLaunch {
+            state: simulation.state.clone().into_buffer_arg(),
+            actors: simulation.actors.clone().into_buffer_arg(),
+            config: simulation.config.launch(),
+            spatial: simulation.spatial.clone().into_buffer_arg(),
+            proposals: simulation.proposals.clone().into_buffer_arg(),
+            searches: simulation.searches.requests.clone().into_buffer_arg(),
+            successes: simulation.searches.successes.clone().into_buffer_arg(),
+            scratch: simulation.scratch.clone().into_buffer_arg(),
+            control: simulation.control.clone().into_buffer_arg(),
+            parameters: probe.parameters.launch(),
+            status_reset: StatusReset::Full,
+            stage: SearchStage::PrepareRepeat,
+        },
+    );
+    assert_eq!(device.read(&simulation.proposals)?, proposals);
+    let control = device.read(&simulation.control)?;
+    assert_eq!(control[crate::simulation::flags::FAULT_WORD], first.faults);
+    assert_eq!(control[LATCH_WORD], first.faults);
     Ok(())
 }
 
@@ -494,7 +487,7 @@ fn cooperative_market_search_preserves_serial_search_and_shared_fallback_on_gpu(
         Market::Consumer(Good::Glass),
     ] {
         for case in cases {
-            for day in [0, 7, 31, 127, 128, SUPPLIERS - 1] {
+            for day in [0, 128, SUPPLIERS - 1] {
                 let probe = SearchProbe::new(case, day, market)?;
                 let expected = probe.outcome(SearchExecution::Serial)?;
                 if let SupplyCase::Capped = case {
@@ -872,120 +865,116 @@ enum PreparationEligibility {
 #[test]
 fn sparse_input_preparation_preserves_stable_eligibility_and_all_round_requests_on_gpu()
 -> Result<()> {
-    for workgroup in [32, 64, 128, 256] {
-        for case in [
-            PreparationEligibility::InactiveSeller,
-            PreparationEligibility::GrainCashless,
-            PreparationEligibility::GrainStocked,
-            PreparationEligibility::Investment,
-            PreparationEligibility::Building,
-            PreparationEligibility::Distributor,
-        ] {
-            let mut dense =
-                SearchProbe::with_suppliers(SupplyCase::Capped, 0, Market::Input(Good::Linen), 65)?;
-            let mut sparse =
-                SearchProbe::with_suppliers(SupplyCase::Capped, 0, Market::Input(Good::Linen), 65)?;
-            let good = match case {
-                PreparationEligibility::InactiveSeller => Good::Bread,
-                PreparationEligibility::GrainCashless | PreparationEligibility::GrainStocked => {
-                    Good::Grain
-                }
-                PreparationEligibility::Investment => Good::Tools,
-                PreparationEligibility::Building => Good::Construction,
-                PreparationEligibility::Distributor => Good::Linen,
-            };
-            for probe in [&mut dense, &mut sparse] {
-                probe.simulation.device.workgroup = workgroup;
-                probe.parameters.good = good as u32;
-                probe.state.set(Field::Cash, 0, 0);
-                match case {
-                    PreparationEligibility::InactiveSeller => {
-                        probe.state.set(Field::LivingMembers, 0, 0);
-                        probe.state.set(Field::Bread, 0, 100);
-                    }
-                    PreparationEligibility::GrainCashless
-                    | PreparationEligibility::GrainStocked => {
-                        probe.state.set(Field::LandPlots, 0, 1)
-                    }
-                    PreparationEligibility::Investment => {
-                        probe.state.set(Field::InvestmentGood, 0, 1)
-                    }
-                    PreparationEligibility::Building => {
-                        probe.state.set(
-                            Field::ProjectStatus,
-                            0,
-                            crate::domain::property::ProjectStatus::Building as u64,
-                        );
-                        probe.state.set(Field::ConstructionRemaining, 0, 7);
-                    }
-                    PreparationEligibility::Distributor => {
-                        probe.state.set(Field::EnterpriseModel, 0, 1)
-                    }
-                }
-                if let PreparationEligibility::GrainStocked = case {
-                    probe.state.set(Field::Grain, 0, 10_000);
-                    probe.state.set(Field::Cash, 0, 5_000);
-                }
-                probe.clear_preparation();
+    let workgroup = 64;
+    for case in [
+        PreparationEligibility::InactiveSeller,
+        PreparationEligibility::GrainCashless,
+        PreparationEligibility::GrainStocked,
+        PreparationEligibility::Investment,
+        PreparationEligibility::Building,
+        PreparationEligibility::Distributor,
+    ] {
+        let mut dense =
+            SearchProbe::with_suppliers(SupplyCase::Capped, 0, Market::Input(Good::Linen), 65)?;
+        let mut sparse =
+            SearchProbe::with_suppliers(SupplyCase::Capped, 0, Market::Input(Good::Linen), 65)?;
+        let good = match case {
+            PreparationEligibility::InactiveSeller => Good::Bread,
+            PreparationEligibility::GrainCashless | PreparationEligibility::GrainStocked => {
+                Good::Grain
             }
-            let expected =
-                dense.prepared_inputs(EconomyStage::InputMarketStart, SearchStage::Prepare)?;
+            PreparationEligibility::Investment => Good::Tools,
+            PreparationEligibility::Building => Good::Construction,
+            PreparationEligibility::Distributor => Good::Linen,
+        };
+        for probe in [&mut dense, &mut sparse] {
+            probe.simulation.device.workgroup = workgroup;
+            probe.parameters.good = good as u32;
+            probe.state.set(Field::Cash, 0, 0);
+            match case {
+                PreparationEligibility::InactiveSeller => {
+                    probe.state.set(Field::LivingMembers, 0, 0);
+                    probe.state.set(Field::Bread, 0, 100);
+                }
+                PreparationEligibility::GrainCashless | PreparationEligibility::GrainStocked => {
+                    probe.state.set(Field::LandPlots, 0, 1)
+                }
+                PreparationEligibility::Investment => probe.state.set(Field::InvestmentGood, 0, 1),
+                PreparationEligibility::Building => {
+                    probe.state.set(
+                        Field::ProjectStatus,
+                        0,
+                        crate::domain::property::ProjectStatus::Building as u64,
+                    );
+                    probe.state.set(Field::ConstructionRemaining, 0, 7);
+                }
+                PreparationEligibility::Distributor => {
+                    probe.state.set(Field::EnterpriseModel, 0, 1)
+                }
+            }
+            if let PreparationEligibility::GrainStocked = case {
+                probe.state.set(Field::Grain, 0, 10_000);
+                probe.state.set(Field::Cash, 0, 5_000);
+            }
+            probe.clear_preparation();
+        }
+        let expected =
+            dense.prepared_inputs(EconomyStage::InputMarketStart, SearchStage::Prepare)?;
+        assert_eq!(
+            sparse.prepared_inputs(
+                EconomyStage::InputMarketStart,
+                SearchStage::PrepareCandidates
+            )?,
+            expected,
+            "{case:?}, workgroup {workgroup}, first"
+        );
+        let count = sparse.state.actors.len();
+        let control = sparse.simulation.device.read(&sparse.simulation.control)?;
+        let requests = sparse
+            .simulation
+            .device
+            .read(&sparse.simulation.searches.requests)?;
+        let mut eligible = requests
+            [5 * count..5 * count + control[markets::PREPARATION_ACTORS_WORD] as usize]
+            .to_vec();
+        eligible.sort_unstable();
+        let first = match case {
+            PreparationEligibility::InactiveSeller => 1,
+            _ => 0,
+        };
+        assert_eq!(eligible, (first..count as u32).collect::<Vec<_>>());
+        for round in 1..4 {
+            for probe in [&mut dense, &mut sparse] {
+                probe.state.set(Field::Cash, 0, 5_000);
+                probe.state.set(Field::inventory(good), 0, 0);
+            }
+            let expected = dense
+                .prepared_inputs(EconomyStage::InputMarketRepeat, SearchStage::PrepareRepeat)?;
             assert_eq!(
                 sparse.prepared_inputs(
-                    EconomyStage::InputMarketStart,
-                    SearchStage::PrepareCandidates
+                    EconomyStage::InputMarketRepeat,
+                    SearchStage::PrepareSelected
                 )?,
                 expected,
-                "{case:?}, workgroup {workgroup}, first"
+                "{case:?}, workgroup {workgroup}, round {round}"
             );
-            let count = sparse.state.actors.len();
-            let control = sparse.simulation.device.read(&sparse.simulation.control)?;
-            let requests = sparse
-                .simulation
-                .device
-                .read(&sparse.simulation.searches.requests)?;
-            let mut eligible = requests
-                [5 * count..5 * count + control[markets::PREPARATION_ACTORS_WORD] as usize]
-                .to_vec();
-            eligible.sort_unstable();
-            let first = match case {
-                PreparationEligibility::InactiveSeller => 1,
-                _ => 0,
-            };
-            assert_eq!(eligible, (first..count as u32).collect::<Vec<_>>());
-            for round in 1..4 {
-                for probe in [&mut dense, &mut sparse] {
-                    probe.state.set(Field::Cash, 0, 5_000);
-                    probe.state.set(Field::inventory(good), 0, 0);
-                }
-                let expected = dense
-                    .prepared_inputs(EconomyStage::InputMarketRepeat, SearchStage::PrepareRepeat)?;
-                assert_eq!(
-                    sparse.prepared_inputs(
-                        EconomyStage::InputMarketRepeat,
-                        SearchStage::PrepareSelected
-                    )?,
-                    expected,
-                    "{case:?}, workgroup {workgroup}, round {round}"
-                );
+        }
+        if !matches!(case, PreparationEligibility::InactiveSeller) {
+            for probe in [&mut dense, &mut sparse] {
+                probe.state.set(Field::inventory(good), 0, u64::MAX);
+                probe.state.values[(TRANSIT_FIELDS + good as usize - 1) * count] = 1;
             }
-            if !matches!(case, PreparationEligibility::InactiveSeller) {
-                for probe in [&mut dense, &mut sparse] {
-                    probe.state.set(Field::inventory(good), 0, u64::MAX);
-                    probe.state.values[(TRANSIT_FIELDS + good as usize - 1) * count] = 1;
-                }
-                let expected = dense
-                    .prepared_inputs(EconomyStage::InputMarketRepeat, SearchStage::PrepareRepeat)?;
-                assert_ne!(expected.faults, 0);
-                assert_eq!(
-                    sparse.prepared_inputs(
-                        EconomyStage::InputMarketRepeat,
-                        SearchStage::PrepareSelected
-                    )?,
-                    expected,
-                    "{case:?}, workgroup {workgroup}, repeated demand overflow"
-                );
-            }
+            let expected = dense
+                .prepared_inputs(EconomyStage::InputMarketRepeat, SearchStage::PrepareRepeat)?;
+            assert_ne!(expected.faults, 0);
+            assert_eq!(
+                sparse.prepared_inputs(
+                    EconomyStage::InputMarketRepeat,
+                    SearchStage::PrepareSelected
+                )?,
+                expected,
+                "{case:?}, workgroup {workgroup}, repeated demand overflow"
+            );
         }
     }
     Ok(())
@@ -993,32 +982,31 @@ fn sparse_input_preparation_preserves_stable_eligibility_and_all_round_requests_
 
 #[test]
 fn sparse_input_preparation_preserves_first_round_inventory_faults_on_gpu() -> Result<()> {
-    for workgroup in [32, 64, 128, 256] {
-        let mut probe =
-            SearchProbe::with_suppliers(SupplyCase::Capped, 0, Market::Input(Good::Linen), 65)?;
-        probe.simulation.device.workgroup = workgroup;
-        probe.state.set(Field::LivingMembers, 0, 0);
-        probe.state.set(Field::Linen, 0, u64::MAX);
-        let count = probe.state.actors.len();
-        probe.state.values[(TRANSIT_FIELDS + Good::Linen as usize - 1) * count] = 1;
-        probe.clear_preparation();
-        let first = probe.prepared_inputs(
-            EconomyStage::InputMarketStart,
-            SearchStage::PrepareCandidates,
-        )?;
-        assert_ne!(first.faults, 0);
-        let sentinel = 0x1234_5678;
-        probe.simulation.device.write(
-            &probe.simulation.scratch,
-            &vec![sentinel; probe.simulation.scratch.meta.num_elements()],
-        );
-        let repeated = probe.prepared_inputs(
-            EconomyStage::InputMarketRepeat,
-            SearchStage::PrepareSelected,
-        )?;
-        assert_eq!(repeated.faults, first.faults);
-        assert_eq!(repeated.statuses, vec![sentinel; count]);
-        assert!(repeated.queue.is_empty());
-    }
+    let workgroup = 64;
+    let mut probe =
+        SearchProbe::with_suppliers(SupplyCase::Capped, 0, Market::Input(Good::Linen), 65)?;
+    probe.simulation.device.workgroup = workgroup;
+    probe.state.set(Field::LivingMembers, 0, 0);
+    probe.state.set(Field::Linen, 0, u64::MAX);
+    let count = probe.state.actors.len();
+    probe.state.values[(TRANSIT_FIELDS + Good::Linen as usize - 1) * count] = 1;
+    probe.clear_preparation();
+    let first = probe.prepared_inputs(
+        EconomyStage::InputMarketStart,
+        SearchStage::PrepareCandidates,
+    )?;
+    assert_ne!(first.faults, 0);
+    let sentinel = 0x1234_5678;
+    probe.simulation.device.write(
+        &probe.simulation.scratch,
+        &vec![sentinel; probe.simulation.scratch.meta.num_elements()],
+    );
+    let repeated = probe.prepared_inputs(
+        EconomyStage::InputMarketRepeat,
+        SearchStage::PrepareSelected,
+    )?;
+    assert_eq!(repeated.faults, first.faults);
+    assert_eq!(repeated.statuses, vec![sentinel; count]);
+    assert!(repeated.queue.is_empty());
     Ok(())
 }

@@ -43,11 +43,16 @@ mod tests {
 
     #[test]
     fn gpu_random_streams_replay_across_workgroups_and_concurrent_launches() -> Result<()> {
-        let device = Device::headless(64)?;
+        let device = crate::simulation::tests::device(64)?;
         let expected = draws(&device, 42, 9, Stream::Research)?;
         assert_eq!(
             expected,
-            draws(&Device::headless(128)?, 42, 9, Stream::Research)?
+            draws(
+                &crate::simulation::tests::device(128)?,
+                42,
+                9,
+                Stream::Research
+            )?
         );
         assert_ne!(expected, draws(&device, 43, 9, Stream::Research)?);
         assert_ne!(expected, draws(&device, 42, 10, Stream::Research)?);

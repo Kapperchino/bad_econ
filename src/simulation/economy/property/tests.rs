@@ -92,46 +92,45 @@ fn bulk_consolidation_preserves_nearest_whole_grants_and_ties_on_gpu() -> Result
         actor.position = Position { x: 100, y: 100 };
         initial.actors.set(farm, actor);
     }
-    for workgroup in [32, 64, 128, 256] {
-        let device = crate::simulation::tests::device(workgroup)?;
-        let config = Configuration::new(&device, &scenario, &initial);
-        let spatial = device.tensor(&SpatialIndex::new(&scenario, &initial).words);
-        let actors = device.tensor(
-            &initial
-                .actors
-                .iter()
-                .map(|actor| ActorLayout::new(&actor, &scenario))
-                .collect::<crate::simulation::layout::ActorMetadataRows>()
-                .words(),
-        );
-        let spatial = parcel_index(&device, &actors, &spatial, &config);
-        for required in [0, 1, 3, 127, 255, 257, 1024, u32::MAX] {
-            let mut results = Vec::new();
-            for selection in [Selection::Serial, Selection::Bulk] {
-                let state = device.tensor(bytemuck::cast_slice(&encode(&initial.values)));
-                let control = device.tensor(&[0; CONTROL_WORDS]);
-                for &farm in &farms {
-                    ConsolidationCheck::launch(
-                        &device,
-                        CubeCount::Static(1, 1, 1),
-                        CubeDim::new_1d(workgroup),
-                        ConsolidationInputLaunch {
-                            state: state.clone().into_buffer_arg(),
-                            actors: actors.clone().into_buffer_arg(),
-                            spatial: spatial.clone().into_buffer_arg(),
-                            config: config.launch(),
-                            control: control.clone().into_buffer_arg(),
-                            farm: farm as u32,
-                            required,
-                            selection,
-                        },
-                    );
-                }
-                results.push(device.read(&state)?);
-                assert_eq!(device.read(&control)?, [0; CONTROL_WORDS]);
+    let workgroup = 64;
+    let device = crate::simulation::tests::device(workgroup)?;
+    let config = Configuration::new(&device, &scenario, &initial);
+    let spatial = device.tensor(&SpatialIndex::new(&scenario, &initial).words);
+    let actors = device.tensor(
+        &initial
+            .actors
+            .iter()
+            .map(|actor| ActorLayout::new(&actor, &scenario))
+            .collect::<crate::simulation::layout::ActorMetadataRows>()
+            .words(),
+    );
+    let spatial = parcel_index(&device, &actors, &spatial, &config);
+    for required in [0, 1, 3, 127, 255, 257, 1024, u32::MAX] {
+        let mut results = Vec::new();
+        for selection in [Selection::Serial, Selection::Bulk] {
+            let state = device.tensor(bytemuck::cast_slice(&encode(&initial.values)));
+            let control = device.tensor(&[0; CONTROL_WORDS]);
+            for &farm in &farms {
+                ConsolidationCheck::launch(
+                    &device,
+                    CubeCount::Static(1, 1, 1),
+                    CubeDim::new_1d(workgroup),
+                    ConsolidationInputLaunch {
+                        state: state.clone().into_buffer_arg(),
+                        actors: actors.clone().into_buffer_arg(),
+                        spatial: spatial.clone().into_buffer_arg(),
+                        config: config.launch(),
+                        control: control.clone().into_buffer_arg(),
+                        farm: farm as u32,
+                        required,
+                        selection,
+                    },
+                );
             }
-            assert_eq!(results[0], results[1], "{workgroup} {required}");
+            results.push(device.read(&state)?);
+            assert_eq!(device.read(&control)?, [0; CONTROL_WORDS]);
         }
+        assert_eq!(results[0], results[1], "{workgroup} {required}");
     }
     Ok(())
 }

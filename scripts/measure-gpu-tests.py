@@ -9,7 +9,10 @@ parser = argparse.ArgumentParser()
 parser.add_argument('manifest', type=Path)
 parser.add_argument('output', type=Path)
 parser.add_argument('--target', action='append', default=[])
+parser.add_argument('--max-seconds', type=int, default=120)
 args = parser.parse_args()
+if args.max_seconds <= 0:
+    parser.error('--max-seconds must be positive')
 args.output.mkdir(parents=True, exist_ok=True)
 artifacts = {}
 for line in args.manifest.read_text(encoding='utf-8-sig').splitlines():
@@ -50,5 +53,7 @@ for executable, target in artifacts.items():
             (args.output / 'summary.json').write_text(json.dumps(results, indent=2), encoding='utf-8')
 if not results:
     parser.error('the manifest contains no selected executable tests')
-print(json.dumps(dict(targets=len(results), tests=sum(r['tests'] for r in results), seconds=sum(r['seconds'] for r in results), failures=sum(r['exit_code'] != 0 for r in results))), flush=True)
-raise SystemExit(int(any(r['exit_code'] != 0 for r in results)))
+seconds = sum(r['seconds'] for r in results)
+failures = sum(r['exit_code'] != 0 for r in results)
+print(json.dumps(dict(targets=len(results), tests=sum(r['tests'] for r in results), seconds=seconds, failures=failures, max_seconds=args.max_seconds, within_budget=seconds < args.max_seconds)), flush=True)
+raise SystemExit(int(failures != 0 or seconds >= args.max_seconds))

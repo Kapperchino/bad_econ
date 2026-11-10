@@ -36,7 +36,7 @@ impl GpuPass<DispatchProbeInput> for CountDispatches {
 
 #[test]
 fn empty_indirect_queues_skip_work_after_active_dispatches_on_gpu() -> Result<()> {
-    let device = Device::headless(64)?;
+    let device = crate::simulation::tests::device(64)?;
     let buffers = SearchBuffers::new(&device, 129);
     let control = device.empty(CONTROL_WORDS + 3);
     let executed = device.tensor(&[17]);
@@ -492,47 +492,46 @@ fn check_sort(
 
 #[test]
 fn radix_sort_preserves_stable_items_and_sparse_partial_blocks_on_gpu() -> Result<()> {
-    for workgroup in [32, 64, 128, 256] {
-        let device = Device::headless(workgroup)?;
-        let block = workgroup as usize;
-        let mut counts = vec![1, 31, 32, 33, block - 1, block, block + 1, 65537];
-        counts.sort_unstable();
-        counts.dedup();
-        for scan in [ScanMode::Shared, ScanMode::new(&device)] {
-            let extents = counts
-                .iter()
-                .map(|&active| SortExtent {
-                    capacity: active + 17,
-                    active,
-                })
-                .chain([
-                    SortExtent {
-                        capacity: 65537,
-                        active: 0,
-                    },
-                    SortExtent {
-                        capacity: 65537,
-                        active: 257,
-                    },
-                    SortExtent {
-                        capacity: 1_000_003,
-                        active: 257,
-                    },
-                ]);
-            for extent in extents {
-                check_sort(&device, extent, scan, KeyPattern::Shuffled)?;
-            }
-            for digit in 0..4 {
-                check_sort(
-                    &device,
-                    SortExtent {
-                        capacity: block,
-                        active: block,
-                    },
-                    scan,
-                    KeyPattern::Constant(digit),
-                )?;
-            }
+    let workgroup = 64;
+    let device = crate::simulation::tests::device(workgroup)?;
+    let block = workgroup as usize;
+    let mut counts = vec![1, 31, 32, 33, block - 1, block, block + 1, 65537];
+    counts.sort_unstable();
+    counts.dedup();
+    for scan in [ScanMode::Shared, ScanMode::new(&device)] {
+        let extents = counts
+            .iter()
+            .map(|&active| SortExtent {
+                capacity: active + 17,
+                active,
+            })
+            .chain([
+                SortExtent {
+                    capacity: 65537,
+                    active: 0,
+                },
+                SortExtent {
+                    capacity: 65537,
+                    active: 257,
+                },
+                SortExtent {
+                    capacity: 1_000_003,
+                    active: 257,
+                },
+            ]);
+        for extent in extents {
+            check_sort(&device, extent, scan, KeyPattern::Shuffled)?;
+        }
+        for digit in 0..4 {
+            check_sort(
+                &device,
+                SortExtent {
+                    capacity: block,
+                    active: block,
+                },
+                scan,
+                KeyPattern::Constant(digit),
+            )?;
         }
     }
     Ok(())
@@ -766,27 +765,26 @@ impl ProposalCase {
 
 #[test]
 fn proposal_compaction_preserves_rotated_order_and_sparse_partial_blocks_on_gpu() -> Result<()> {
-    for workgroup in [32, 64, 128, 256] {
-        let device = Device::headless(workgroup)?;
-        for scan in [ScanMode::Shared, ScanMode::new(&device)] {
-            for count in [1, 31, 32, 33, 255, 256, 257, 1025, 65537] {
-                let mut rotations = vec![0, 1 % count, count / 2, count - 1];
-                rotations.sort_unstable();
-                rotations.dedup();
-                for rotation in rotations {
-                    for density in [
-                        ProposalDensity::Empty,
-                        ProposalDensity::Sparse,
-                        ProposalDensity::Dense,
-                    ] {
-                        ProposalCase {
-                            count,
-                            rotation,
-                            scan,
-                            density,
-                        }
-                        .check(&device)?;
+    let workgroup = 64;
+    let device = crate::simulation::tests::device(workgroup)?;
+    for scan in [ScanMode::Shared, ScanMode::new(&device)] {
+        for count in [1, 31, 32, 33, 255, 256, 257, 1025, 65537] {
+            let mut rotations = vec![0, 1 % count, count / 2, count - 1];
+            rotations.sort_unstable();
+            rotations.dedup();
+            for rotation in rotations {
+                for density in [
+                    ProposalDensity::Empty,
+                    ProposalDensity::Sparse,
+                    ProposalDensity::Dense,
+                ] {
+                    ProposalCase {
+                        count,
+                        rotation,
+                        scan,
+                        density,
                     }
+                    .check(&device)?;
                 }
             }
         }

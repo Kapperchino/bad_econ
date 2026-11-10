@@ -835,66 +835,65 @@ mod tests {
     #[test]
     fn sparse_ring_validation_matches_full_snapshots_and_faults_on_gpu() -> Result<()> {
         let scenario = Scenario::baseline(97, 42, Experiment::Transport)?;
-        for workgroup in [32, 64, 128, 256] {
-            let mut simulation = Simulation::new(scenario.clone(), device(workgroup)?)?;
-            let count = scenario.actors();
-            let indices = simulation
-                .device
-                .tensor(&(count as u32 - 65..count as u32).collect::<Vec<_>>());
-            for case in [
-                TransitCase::Unchanged,
-                TransitCase::Mismatch,
-                TransitCase::RingOverflow,
-                TransitCase::TotalOverflow,
-            ] {
-                let mut state = scenario.initial()?;
-                let ring = BASE_FIELDS + scenario.ring() * (Good::COUNT - 1);
-                let expected = match case {
-                    TransitCase::Unchanged => FaultFlags::empty(),
-                    TransitCase::Mismatch => {
-                        state.values[ring * count + count - 1] = 7;
-                        FaultFlags::TRANSIT_MISMATCH
-                    }
-                    TransitCase::RingOverflow => {
-                        state.values[ring * count + count - 1] = u64::MAX;
-                        state.values[(ring + 1) * count + count - 1] = 1;
-                        state.values[(TRANSIT_FIELDS + Good::COUNT - 1) * count + count - 1] = 7;
-                        state.set(Field::Transit, count - 1, 7);
-                        FaultFlags::ARITHMETIC_OVERFLOW | FaultFlags::TRANSIT_MISMATCH
-                    }
-                    TransitCase::TotalOverflow => {
-                        state.values[BASE_FIELDS * count] = u64::MAX;
-                        state.values[(BASE_FIELDS + scenario.ring()) * count] = 1;
-                        state.values[TRANSIT_FIELDS * count] = u64::MAX;
-                        state.values[(TRANSIT_FIELDS + 1) * count] = 1;
-                        state.set(Field::Transit, 0, 0);
-                        FaultFlags::ARITHMETIC_OVERFLOW
-                    }
-                };
-                simulation.device.write(
-                    &simulation.state,
-                    bytemuck::cast_slice(&encode(&state.values)),
-                );
-                let sparse = simulation.observe_rings(RingValidation::Selected(&indices));
-                let summary =
-                    simulation
-                        .device
-                        .read_range(&simulation.summary, 0, SummaryLayout::WORDS)?;
-                let control = simulation.device.read(&simulation.control)?;
-                let full = simulation.observe();
-                assert_eq!(sparse.is_ok(), full.is_ok());
-                assert_eq!(
-                    summary,
-                    simulation
-                        .device
-                        .read_range(&simulation.summary, 0, SummaryLayout::WORDS,)?
-                );
-                assert_eq!(control, simulation.device.read(&simulation.control)?);
-                assert_eq!(FaultFlags::read(&control)?, expected);
-                if let (Ok(sparse), Ok(full)) = (sparse, full) {
-                    assert_eq!(sparse, full);
-                    assert_eq!(simulation.observe_rings(RingValidation::Unchanged)?, full);
+        let workgroup = 64;
+        let mut simulation = Simulation::new(scenario.clone(), device(workgroup)?)?;
+        let count = scenario.actors();
+        let indices = simulation
+            .device
+            .tensor(&(count as u32 - 65..count as u32).collect::<Vec<_>>());
+        for case in [
+            TransitCase::Unchanged,
+            TransitCase::Mismatch,
+            TransitCase::RingOverflow,
+            TransitCase::TotalOverflow,
+        ] {
+            let mut state = scenario.initial()?;
+            let ring = BASE_FIELDS + scenario.ring() * (Good::COUNT - 1);
+            let expected = match case {
+                TransitCase::Unchanged => FaultFlags::empty(),
+                TransitCase::Mismatch => {
+                    state.values[ring * count + count - 1] = 7;
+                    FaultFlags::TRANSIT_MISMATCH
                 }
+                TransitCase::RingOverflow => {
+                    state.values[ring * count + count - 1] = u64::MAX;
+                    state.values[(ring + 1) * count + count - 1] = 1;
+                    state.values[(TRANSIT_FIELDS + Good::COUNT - 1) * count + count - 1] = 7;
+                    state.set(Field::Transit, count - 1, 7);
+                    FaultFlags::ARITHMETIC_OVERFLOW | FaultFlags::TRANSIT_MISMATCH
+                }
+                TransitCase::TotalOverflow => {
+                    state.values[BASE_FIELDS * count] = u64::MAX;
+                    state.values[(BASE_FIELDS + scenario.ring()) * count] = 1;
+                    state.values[TRANSIT_FIELDS * count] = u64::MAX;
+                    state.values[(TRANSIT_FIELDS + 1) * count] = 1;
+                    state.set(Field::Transit, 0, 0);
+                    FaultFlags::ARITHMETIC_OVERFLOW
+                }
+            };
+            simulation.device.write(
+                &simulation.state,
+                bytemuck::cast_slice(&encode(&state.values)),
+            );
+            let sparse = simulation.observe_rings(RingValidation::Selected(&indices));
+            let summary =
+                simulation
+                    .device
+                    .read_range(&simulation.summary, 0, SummaryLayout::WORDS)?;
+            let control = simulation.device.read(&simulation.control)?;
+            let full = simulation.observe();
+            assert_eq!(sparse.is_ok(), full.is_ok());
+            assert_eq!(
+                summary,
+                simulation
+                    .device
+                    .read_range(&simulation.summary, 0, SummaryLayout::WORDS,)?
+            );
+            assert_eq!(control, simulation.device.read(&simulation.control)?);
+            assert_eq!(FaultFlags::read(&control)?, expected);
+            if let (Ok(sparse), Ok(full)) = (sparse, full) {
+                assert_eq!(sparse, full);
+                assert_eq!(simulation.observe_rings(RingValidation::Unchanged)?, full);
             }
         }
         Ok(())

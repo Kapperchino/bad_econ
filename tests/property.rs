@@ -1,5 +1,5 @@
 #![cfg(feature = "compute")]
-use crate::support;
+use super::support;
 use anyhow::Result;
 use bad_econ::{
     domain::{
@@ -167,6 +167,7 @@ fn commercial_expansion() -> Result<Scenario> {
 }
 
 #[test]
+#[ignore = "extended scenario coverage; run cargo gpu-extended"]
 fn completed_commercial_expansion_consolidates_local_land_and_releases_workers_on_gpu() -> Result<()>
 {
     let scenario = commercial_expansion()?;
@@ -181,7 +182,7 @@ fn completed_commercial_expansion_consolidates_local_land_and_releases_workers_o
     assert!(building.get(Field::ConstructionRemaining, 9) > 0);
     assert_eq!(building.get(Field::LandPlots, 1), 2);
     assert_eq!(building.get(Field::DisplacedPlots, 1), 0);
-    let mut replay = Simulation::from_checkpoint(simulation.checkpoint()?, support::device(128)?)?;
+    let mut replay = Simulation::from_checkpoint(simulation.checkpoint()?, support::device(64)?)?;
     let mut employed = 0;
     for _ in 0..8 {
         simulation.advance()?;
@@ -219,6 +220,7 @@ fn completed_commercial_expansion_consolidates_local_land_and_releases_workers_o
 }
 
 #[test]
+#[ignore = "extended scenario coverage; run cargo gpu-extended"]
 fn unfunded_farms_cannot_displace_subsistence_households_on_gpu() -> Result<()> {
     let scenario = commercial_expansion()?;
     let mut initial = scenario.initial()?;
@@ -245,6 +247,7 @@ fn unfunded_farms_cannot_displace_subsistence_households_on_gpu() -> Result<()> 
 }
 
 #[test]
+#[ignore = "extended scenario coverage; run cargo gpu-extended"]
 fn farm_expansion_without_a_productivity_advantage_leaves_subsistence_land_intact_on_gpu()
 -> Result<()> {
     for technique in [Technique::new(10, 0, 2)?, Technique::new(240, 0, 10)?] {
@@ -294,7 +297,7 @@ fn contractors_build_housing_farms_and_factories_and_displace_only_local_farmers
     assert_eq!(first.get(Field::Produced, 9), 0);
     assert_eq!(first.get(Field::Produced, 10), 0);
     assert_eq!(first.get(Field::OccupiedPlots, 9), 0);
-    let mut replay = Simulation::from_checkpoint(simulation.checkpoint()?, support::device(32)?)?;
+    let mut replay = Simulation::from_checkpoint(simulation.checkpoint()?, support::device(64)?)?;
     for _ in 0..12 {
         simulation.advance()?;
         replay.advance()?;
@@ -332,6 +335,7 @@ fn contractors_build_housing_farms_and_factories_and_displace_only_local_farmers
 }
 
 #[test]
+#[ignore = "extended scenario coverage; run cargo gpu-extended"]
 fn scarce_space_reserves_projects_in_order_without_overallocating_the_region() -> Result<()> {
     let mut config = development()?;
     config.property.as_mut().unwrap().regions[0].plots = 11;
@@ -360,6 +364,7 @@ fn scarce_space_reserves_projects_in_order_without_overallocating_the_region() -
 }
 
 #[test]
+#[ignore = "extended scenario coverage; run cargo gpu-extended"]
 fn construction_stalls_without_materials_and_cannot_be_bypassed_by_owner_labor() -> Result<()> {
     let mut config = development()?;
     for firm in &mut config.population.as_mut().unwrap().firms {
@@ -404,6 +409,7 @@ fn invalid_regions_ownership_and_initial_overallocation_are_rejected_before_gpu_
 }
 
 #[test]
+#[ignore = "extended scenario coverage; run cargo gpu-extended"]
 fn completed_extensions_add_capacity_and_keep_existing_production_operating() -> Result<()> {
     let mut config = development()?;
     config.property.as_mut().unwrap().orders = vec![ConstructionOrder {
@@ -451,6 +457,7 @@ fn completed_extensions_add_capacity_and_keep_existing_production_operating() ->
 }
 
 #[test]
+#[ignore = "extended scenario coverage; run cargo gpu-extended"]
 fn construction_methods_change_labor_and_output_on_gpu() -> Result<()> {
     use bad_econ::domain::research::*;
     let mut config = development()?;

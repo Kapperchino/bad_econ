@@ -410,6 +410,6 @@ mod tests {
 
     #[test]
     fn portable_words_match_wide_oracle_on_gpu() -> Result<()> {
-        check(Device::headless(TEST_WORKGROUP)?)
+        check(crate::simulation::tests::device(TEST_WORKGROUP)?)
     }
 }

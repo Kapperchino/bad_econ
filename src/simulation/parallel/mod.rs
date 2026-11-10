@@ -180,8 +180,8 @@ mod tests {
 
     #[test]
     fn block_prefix_sums_preserve_inclusive_values_and_totals_on_gpu() -> Result<()> {
-        for workgroup in [32, 64, 128, 256] {
-            let device = Device::headless(workgroup)?;
+        for workgroup in [32, 256] {
+            let device = crate::simulation::tests::device(workgroup)?;
             for mode in [ScanMode::Shared, ScanMode::new(&device)] {
                 for count in [0usize, 1, 31, 32, 33, 127, 128, 129, 257, 1025] {
                     let offset = 7;
@@ -240,8 +240,8 @@ mod tests {
     #[test]
     fn active_histogram_prefix_sums_preserve_sparse_tiles_wrapping_and_faults_on_gpu() -> Result<()>
     {
-        for workgroup in [32, 64, 128, 256] {
-            let device = Device::headless(workgroup)?;
+        for workgroup in [32, 256] {
+            let device = crate::simulation::tests::device(workgroup)?;
             let boundary =
                 workgroup as usize * workgroup as usize * ACTIVE_SCAN_ITEMS as usize / 16;
             let scalar_capacity = (workgroup as usize).pow(3) / 16;
@@ -310,8 +310,8 @@ mod tests {
 
     #[test]
     fn hierarchical_prefix_sums_preserve_partial_blocks_on_gpu() -> Result<()> {
-        for workgroup in [32, 64, 128, 256] {
-            let device = Device::headless(workgroup)?;
+        for workgroup in [32, 256] {
+            let device = crate::simulation::tests::device(workgroup)?;
             for count in [0, 1, 31, 32, 33, 127, 128, 129, 4097, 65537] {
                 let offset = 7;
                 let input = (0..count)

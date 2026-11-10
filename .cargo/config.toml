@@ -1,20 +1,27 @@
 [alias]
 gpu-fast = [
-    "test", "--locked", "--features", "viewer", "--test", "integration", "--jobs", "2",
-    "--", "--test-threads=4", "--exact",
-    "contracts::authorization_reads_create_dependencies",
-    "contracts::gross_affordability_repeated_legs_and_atomic_overflow",
-    "contracts::transport_ownership_time_budgets_and_checkpoint_replay",
-    "demography::births_grow_the_person_registry_and_checkpoint_without_creating_money",
-    "demography::exhausted_person_growth_budget_restores_the_complete_audited_day",
-    "execution::arithmetic_fault_rolls_back_and_reset_recovers",
-    "execution::authorization_flags_preserve_wide_guards_and_empty_events",
-    "execution::branched_graph_and_grouped_debits_match_serial_ledger",
-    "execution::phase_machine_rejects_out_of_order_and_checkpoints_completed_days",
-    "industry::steel_requires_both_inputs_and_conserves_each_good_on_gpu",
-    "population::actor_rows_round_trip_on_gpu_and_reject_mismatched_lengths",
+    "test", "--locked", "--features", "viewer", "--lib", "--jobs", "2",
+    "--", "--test-threads=1", "--exact",
+    "tests::contracts::authorization_reads_create_dependencies",
+    "tests::contracts::gross_affordability_repeated_legs_and_atomic_overflow",
+    "tests::contracts::transport_ownership_time_budgets_and_checkpoint_replay",
+    "tests::demography::births_grow_the_person_registry_and_checkpoint_without_creating_money",
+    "tests::demography::exhausted_person_growth_budget_restores_the_complete_audited_day",
+    "tests::execution::arithmetic_fault_rolls_back_and_reset_recovers",
+    "tests::execution::authorization_flags_preserve_wide_guards_and_empty_events",
+    "tests::execution::branched_graph_and_grouped_debits_match_serial_ledger",
+    "tests::execution::phase_machine_rejects_out_of_order_and_checkpoints_completed_days",
+    "tests::industry::steel_requires_both_inputs_and_conserves_each_good_on_gpu",
+    "tests::population::actor_rows_round_trip_on_gpu_and_reject_mismatched_lengths",
 ]
 gpu-full = [
     "test", "--locked", "--features", "viewer", "--lib", "--tests", "--jobs", "2",
     "--", "--test-threads=1",
 ]
+gpu-extended = [
+    "test", "--locked", "--features", "viewer", "--lib", "--jobs", "2",
+    "--", "--test-threads=1", "--ignored", "--skip", "profile_",
+]
+
+[env]
+RUST_TEST_THREADS = "1"

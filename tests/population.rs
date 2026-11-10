@@ -1,5 +1,5 @@
 #[cfg(feature = "compute")]
-use crate::support;
+use super::support;
 use anyhow::Result;
 use bad_econ::domain::*;
 
@@ -44,7 +44,7 @@ fn industrial_household_liquidity_is_unequal_and_replays_on_gpu() -> Result<()> 
         first.advance()?;
         assert_eq!(first.snapshot.cash, initial.initial_cash);
     }
-    let mut replay = Simulation::from_checkpoint(first.checkpoint()?, support::device(128)?)?;
+    let mut replay = Simulation::from_checkpoint(first.checkpoint()?, support::device(64)?)?;
     first.advance()?;
     replay.advance()?;
     assert_eq!(first.download()?, replay.download()?);

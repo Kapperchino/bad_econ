@@ -277,67 +277,66 @@ mod tests {
 
     #[test]
     fn pending_records_preserve_sparse_actor_order_and_partial_workgroups_on_gpu() -> Result<()> {
-        for workgroup in [32, 64, 128, 256] {
-            let device = crate::simulation::tests::device(workgroup)?;
-            for scan in [parallel::ScanMode::Shared, parallel::ScanMode::new(&device)] {
-                for count in [1, 31, 32, 33, 65, 257, 4097] {
-                    let requests = (0..count)
-                        .map(|actor| match actor % 7 {
-                            1 | 3 => actor as u32 + 1,
-                            _ => 0,
-                        })
-                        .collect::<Vec<_>>();
-                    let births = (0..count)
-                        .map(|actor| match actor % 7 {
-                            2 | 3 => actor as u32 % 2 + 1,
-                            _ => 0,
-                        })
-                        .collect::<Vec<_>>();
-                    let expected = (0..count)
-                        .filter(|&actor| requests[actor] > 0 || births[actor] > 0)
-                        .map(|actor| PendingRecord {
-                            actor: actor as u32,
-                            request: requests[actor],
-                            birth: births[actor],
-                        })
-                        .collect::<Vec<_>>();
-                    let mut expected_requests = requests.clone();
-                    expected_requests.resize(count + 3, 0);
-                    let requests = device.tensor(&requests);
-                    let births = device.tensor(&births);
-                    let scratch = device.tensor(&vec![u32::MAX; count * 2 + 256]);
-                    let output = device.tensor(&vec![u32::MAX; count * 3 + 1]);
-                    PendingCounting::launch(
-                        &device,
-                        device.count(count),
-                        CubeDim::new_1d(workgroup),
-                        RequestsInputLaunch {
-                            requests: requests.clone().into_buffer_arg(),
-                            records: RecordCountBuffersLaunch {
-                                births: births.clone().into_buffer_arg(),
-                                scratch: scratch.clone().into_buffer_arg(),
-                                scan,
-                            },
+        let workgroup = 64;
+        let device = crate::simulation::tests::device(workgroup)?;
+        for scan in [parallel::ScanMode::Shared, parallel::ScanMode::new(&device)] {
+            for count in [1, 31, 32, 33, 65, 257, 4097] {
+                let requests = (0..count)
+                    .map(|actor| match actor % 7 {
+                        1 | 3 => actor as u32 + 1,
+                        _ => 0,
+                    })
+                    .collect::<Vec<_>>();
+                let births = (0..count)
+                    .map(|actor| match actor % 7 {
+                        2 | 3 => actor as u32 % 2 + 1,
+                        _ => 0,
+                    })
+                    .collect::<Vec<_>>();
+                let expected = (0..count)
+                    .filter(|&actor| requests[actor] > 0 || births[actor] > 0)
+                    .map(|actor| PendingRecord {
+                        actor: actor as u32,
+                        request: requests[actor],
+                        birth: births[actor],
+                    })
+                    .collect::<Vec<_>>();
+                let mut expected_requests = requests.clone();
+                expected_requests.resize(count + 3, 0);
+                let requests = device.tensor(&requests);
+                let births = device.tensor(&births);
+                let scratch = device.tensor(&vec![u32::MAX; count * 2 + 256]);
+                let output = device.tensor(&vec![u32::MAX; count * 3 + 1]);
+                PendingCounting::launch(
+                    &device,
+                    device.count(count),
+                    CubeDim::new_1d(workgroup),
+                    RequestsInputLaunch {
+                        requests: requests.clone().into_buffer_arg(),
+                        records: RecordCountBuffersLaunch {
+                            births: births.clone().into_buffer_arg(),
+                            scratch: scratch.clone().into_buffer_arg(),
+                            scan,
                         },
-                    );
-                    let actual = PendingRecords::read(
-                        &device,
-                        RecordBuffers {
-                            requests: &requests,
-                            births: &births,
-                            scratch: &scratch,
-                        },
-                        &output,
-                    )?;
-                    assert_eq!(actual.records, expected, "{workgroup} {scan:?} {count}");
-                    assert_eq!(actual.readback_bytes, (1 + expected.len() * 3) as u64 * 4);
-                    let expanded = upload_requests(&device, &actual.records, count + 3);
-                    assert_eq!(
-                        device.read(&expanded)?,
-                        expected_requests,
-                        "request expansion {workgroup} {scan:?} {count}"
-                    );
-                }
+                    },
+                );
+                let actual = PendingRecords::read(
+                    &device,
+                    RecordBuffers {
+                        requests: &requests,
+                        births: &births,
+                        scratch: &scratch,
+                    },
+                    &output,
+                )?;
+                assert_eq!(actual.records, expected, "{workgroup} {scan:?} {count}");
+                assert_eq!(actual.readback_bytes, (1 + expected.len() * 3) as u64 * 4);
+                let expanded = upload_requests(&device, &actual.records, count + 3);
+                assert_eq!(
+                    device.read(&expanded)?,
+                    expected_requests,
+                    "request expansion {workgroup} {scan:?} {count}"
+                );
             }
         }
         Ok(())

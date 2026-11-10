@@ -1,5 +1,5 @@
 #![cfg(feature = "compute")]
-use crate::support;
+use super::support;
 use anyhow::Result;
 use bad_econ::{
     arithmetic::DrawKey,
@@ -105,7 +105,7 @@ fn branched_graph_and_grouped_debits_match_serial_ledger() -> Result<()> {
 #[test]
 fn dispatch_is_buyer_owned_and_output_matures_at_close() -> Result<()> {
     let scenario = Scenario::baseline(1, 42, Experiment::Concentrated)?;
-    let mut simulation = Simulation::new(scenario.clone(), support::device(32)?)?;
+    let mut simulation = Simulation::new(scenario.clone(), support::device(64)?)?;
     simulation.command(SimulationCommand::AdvanceDay)?;
     simulation.command(SimulationCommand::AdvanceDay)?;
     for phase in [

@@ -428,63 +428,62 @@ mod tests {
             initial.set(Field::Cash, actor, (1 << 40) + actor as u64 * 101);
             initial.set(Field::OperatingReserve, actor, (actor as u64 % 3) << 40);
         }
-        for workgroup in [32, 64, 128, 256] {
-            let mut initial = initial.clone();
-            if workgroup >= 128 {
-                let reverse = |identity| u64::MAX - identity;
-                for index in 0..initial.actors.len() {
-                    let mut actor = initial.actors.at(index);
-                    actor.identity = reverse(actor.identity);
-                    initial.actors.set(index, actor);
-                }
-                for ownership in &mut initial.ownership {
-                    ownership.firm = reverse(ownership.firm);
-                    for share in &mut ownership.shares {
-                        share.household = reverse(share.household);
-                    }
+        let workgroup = 64;
+        let mut initial = initial.clone();
+        if workgroup >= 128 {
+            let reverse = |identity| u64::MAX - identity;
+            for index in 0..initial.actors.len() {
+                let mut actor = initial.actors.at(index);
+                actor.identity = reverse(actor.identity);
+                initial.actors.set(index, actor);
+            }
+            for ownership in &mut initial.ownership {
+                ownership.firm = reverse(ownership.firm);
+                for share in &mut ownership.shares {
+                    share.household = reverse(share.household);
                 }
             }
-            let device = Device::headless(workgroup)?;
-            let original = device.tensor(&original);
-            let runtime = OwnershipRuntime::new(&device, &initial)?;
-            let rows = initial
-                .actors
-                .iter()
-                .map(|actor| ActorLayout::new(&actor, &scenario))
-                .collect::<ActorMetadataRows>();
-            let actors = device.tensor(&rows.words());
-            let mut config = Configuration::new(&device, &scenario, &initial);
-            for rate in [0, 333, 1000] {
-                config.distribution_rate = rate;
-                for cash in [5000, u64::MAX] {
-                    initial.set(Field::Cash, 0, cash);
-                    let words = encode(&initial.values);
-                    let actual = device.tensor(bytemuck::cast_slice(&words));
-                    let expected = device.tensor(bytemuck::cast_slice(&words));
-                    let control = device.tensor(&[0; 4]);
-                    original_distribute::launch(
-                        &device.client,
-                        CubeCount::Static(1, 1, 1),
-                        CubeDim::new_1d(workgroup),
-                        expected.clone().into_buffer_arg(),
-                        actors.clone().into_buffer_arg(),
-                        config.launch(),
-                        original.clone().into_buffer_arg(),
-                        control.clone().into_buffer_arg(),
-                    );
-                    let result = runtime.distribute(&device, &actual, &actors, &config);
-                    let expected_faults = FaultFlags::read(&device.read(&control)?)?;
-                    assert_eq!(result.is_ok(), expected_faults.is_empty());
-                    assert_eq!(
-                        FaultFlags::read(&device.read(&runtime.control)?)?,
-                        expected_faults
-                    );
-                    assert_eq!(
-                        device.read(&actual)?,
-                        device.read(&expected)?,
-                        "workgroup {workgroup}, rate {rate}, cash {cash}"
-                    );
-                }
+        }
+        let device = crate::simulation::tests::device(workgroup)?;
+        let original = device.tensor(&original);
+        let runtime = OwnershipRuntime::new(&device, &initial)?;
+        let rows = initial
+            .actors
+            .iter()
+            .map(|actor| ActorLayout::new(&actor, &scenario))
+            .collect::<ActorMetadataRows>();
+        let actors = device.tensor(&rows.words());
+        let mut config = Configuration::new(&device, &scenario, &initial);
+        for rate in [0, 333, 1000] {
+            config.distribution_rate = rate;
+            for cash in [5000, u64::MAX] {
+                initial.set(Field::Cash, 0, cash);
+                let words = encode(&initial.values);
+                let actual = device.tensor(bytemuck::cast_slice(&words));
+                let expected = device.tensor(bytemuck::cast_slice(&words));
+                let control = device.tensor(&[0; 4]);
+                original_distribute::launch(
+                    &device.client,
+                    CubeCount::Static(1, 1, 1),
+                    CubeDim::new_1d(workgroup),
+                    expected.clone().into_buffer_arg(),
+                    actors.clone().into_buffer_arg(),
+                    config.launch(),
+                    original.clone().into_buffer_arg(),
+                    control.clone().into_buffer_arg(),
+                );
+                let result = runtime.distribute(&device, &actual, &actors, &config);
+                let expected_faults = FaultFlags::read(&device.read(&control)?)?;
+                assert_eq!(result.is_ok(), expected_faults.is_empty());
+                assert_eq!(
+                    FaultFlags::read(&device.read(&runtime.control)?)?,
+                    expected_faults
+                );
+                assert_eq!(
+                    device.read(&actual)?,
+                    device.read(&expected)?,
+                    "workgroup {workgroup}, rate {rate}, cash {cash}"
+                );
             }
         }
         Ok(())

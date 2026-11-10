@@ -69,10 +69,20 @@ Keyboard shortcuts remain available: **Space** runs/pauses, **N** steps one day,
 ```sh
 cargo gpu-fast
 cargo gpu-full
+cargo gpu-extended
 cargo run --release -- benchmark --sizes 100000,1000000 --seed 42 --warmup 0 --days 1000 --output /tmp/benchmark.json
 ```
 
-Both test aliases use the GPU. Benchmarks report daily phase timings, memory use, and final state hashes. Add integration modules to `tests/integration.rs`; automatic test discovery is disabled.
+All test aliases use the GPU. `gpu-fast` runs 11 smoke tests; `gpu-full` runs the core regression suite, including the viewer unit tests. `gpu-extended` runs the additional scenario checks marked with an explicit ignore reason, excluding profiling benchmarks. Tests run serially to avoid GPU contention. Unit and integration tests share one library test binary and a cached GPU device; memory-budget tests use a separate binary. Add integration modules to `tests/integration.rs`; automatic test discovery is disabled. Run a single module with, for example, `cargo test --lib tests::railway`.
+
+The core regression runtime budget is two minutes, excluding compilation. The extended scenarios have no two-minute limit. Measure the core suite and fail if it exceeds the budget:
+
+```sh
+cargo test --locked --features viewer --lib --tests --no-run --message-format=json > /tmp/bad-econ-tests.jsonl
+python3 scripts/measure-gpu-tests.py /tmp/bad-econ-tests.jsonl /tmp/bad-econ-test-timings
+```
+
+Parallel scan, sorting, and copy tests exercise the minimum and maximum workgroup sizes. Scenario tests use a common workgroup; dedicated replay and sort-cache tests also cover the intermediate sizes. Long overlapping replays are consolidated, and lifecycle fixtures start near the transition being checked. Benchmarks report daily phase timings, memory use, and final state hashes.
 
 Measure initialization and the first simulated days, including GPU compilation on first use:
 

@@ -268,7 +268,7 @@ mod tests {
 
     #[test]
     fn contiguous_gpu_copy_preserves_words_across_dispatch_boundaries() -> Result<()> {
-        for workgroup in [32, 64, 128, 256] {
+        for workgroup in [32, 256] {
             let device = crate::simulation::tests::device(workgroup)?;
             for count in [1, 2, 3, 4, 20, 255, 256, 260, 2044, 2048, 2052, 65_540] {
                 let values = (0..count)

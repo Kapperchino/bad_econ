@@ -1,5 +1,5 @@
 #![cfg(feature = "compute")]
-use crate::support;
+use super::support;
 use anyhow::Result;
 use bad_econ::{
     domain::{enterprise::Distributor, *},
@@ -197,7 +197,7 @@ fn larger_competitor_drives_a_funded_warehouse_out_of_business() -> Result<()> {
     assert_eq!(struggling.get(Field::RentArrears, 31), 0);
     assert_eq!(struggling.get(Field::Sales, 31), 0);
     assert!(struggling.get(Field::Sales, 32) > 0);
-    let mut replay = Simulation::from_checkpoint(simulation.checkpoint()?, support::device(128)?)?;
+    let mut replay = Simulation::from_checkpoint(simulation.checkpoint()?, support::device(64)?)?;
     for _ in 0..6 {
         simulation.advance()?;
         replay.advance()?;
@@ -225,6 +225,7 @@ fn larger_competitor_drives_a_funded_warehouse_out_of_business() -> Result<()> {
 }
 
 #[test]
+#[ignore = "extended scenario coverage; run cargo gpu-extended"]
 fn profitable_small_warehouse_survives_and_recovers_from_a_sales_slump() -> Result<()> {
     use bad_econ::domain::enterprise::EnterpriseState;
     let mut config = competing_warehouses()?;
@@ -263,6 +264,7 @@ fn profitable_small_warehouse_survives_and_recovers_from_a_sales_slump() -> Resu
 }
 
 #[test]
+#[ignore = "extended scenario coverage; run cargo gpu-extended"]
 fn occasional_sales_do_not_save_a_warehouse_that_cannot_cover_costs() -> Result<()> {
     use bad_econ::domain::enterprise::EnterpriseState;
     let mut config = economy()?.config().clone();
@@ -378,6 +380,7 @@ fn grocery_restock_delivery_staffing_and_resale_conserve_food_and_cash() -> Resu
 }
 
 #[test]
+#[ignore = "extended scenario coverage; run cargo gpu-extended"]
 fn grocery_restocking_keeps_the_next_shift_funded() -> Result<()> {
     let mut config = economy()?.config().clone();
     config.population.as_mut().unwrap().firms[1].cash = 300;
@@ -399,6 +402,7 @@ fn grocery_restocking_keeps_the_next_shift_funded() -> Result<()> {
 }
 
 #[test]
+#[ignore = "extended scenario coverage; run cargo gpu-extended"]
 fn grocery_distributions_preserve_stock_replacement_and_payroll_funds() -> Result<()> {
     let mut config = economy()?.config().clone();
     config.reserve = 0;
@@ -427,12 +431,13 @@ fn grocery_distributions_preserve_stock_replacement_and_payroll_funds() -> Resul
 }
 
 #[test]
+#[ignore = "extended scenario coverage; run cargo gpu-extended"]
 fn grocery_staffing_scales_with_demand_stock_and_site_capacity() -> Result<()> {
     let mut config = economy()?.config().clone();
     config.population.as_mut().unwrap().firms[1].capacity = 3;
     config.distributors[0].units_per_shift = 4;
     let scenario = Scenario::new(config)?;
-    let mut simulation = Simulation::new(scenario.clone(), support::device(128)?)?;
+    let mut simulation = Simulation::new(scenario.clone(), support::device(64)?)?;
     simulation.advance()?;
     simulation.advance()?;
     let state = simulation.download()?;
@@ -450,6 +455,7 @@ fn grocery_staffing_scales_with_demand_stock_and_site_capacity() -> Result<()> {
 }
 
 #[test]
+#[ignore = "extended scenario coverage; run cargo gpu-extended"]
 fn generated_groceries_stock_retail_goods_and_leave_production_capacity_to_bakeries() -> Result<()>
 {
     let scenario = Scenario::industrial(1000, 42, Experiment::Baseline)?;
@@ -486,6 +492,7 @@ fn generated_groceries_stock_retail_goods_and_leave_production_capacity_to_baker
 }
 
 #[test]
+#[ignore = "extended scenario coverage; run cargo gpu-extended"]
 fn grain_distributor_can_operate_outside_agricultural_land() -> Result<()> {
     let mut config = economy()?.config().clone();
     config.resources = ResourceMap::Explicit {
@@ -511,6 +518,7 @@ fn grain_distributor_can_operate_outside_agricultural_land() -> Result<()> {
 }
 
 #[test]
+#[ignore = "extended scenario coverage; run cargo gpu-extended"]
 fn producer_input_orders_keep_a_production_shift_funded() -> Result<()> {
     let mut config = economy()?.config().clone();
     config.distributors.clear();
@@ -542,6 +550,7 @@ fn producer_input_orders_keep_a_production_shift_funded() -> Result<()> {
 }
 
 #[test]
+#[ignore = "extended scenario coverage; run cargo gpu-extended"]
 fn entrepreneurial_household_can_open_a_grocery_without_guaranteed_customers() -> Result<()> {
     let mut config = economy()?.config().clone();
     config.entrepreneurship.interested_per_mille = 1000;
@@ -630,7 +639,7 @@ fn entrepreneurial_household_can_open_a_grocery_without_guaranteed_customers() -
         simulation.snapshot,
         ObservationSnapshot::from_state(&scenario, &state)?
     );
-    let mut resumed = Simulation::from_checkpoint(simulation.checkpoint()?, support::device(128)?)?;
+    let mut resumed = Simulation::from_checkpoint(simulation.checkpoint()?, support::device(64)?)?;
     for _ in 0..3 {
         simulation.advance()?;
         resumed.advance()?;
@@ -640,6 +649,7 @@ fn entrepreneurial_household_can_open_a_grocery_without_guaranteed_customers() -
 }
 
 #[test]
+#[ignore = "extended scenario coverage; run cargo gpu-extended"]
 fn affordable_missing_supply_reaches_producers_once_and_restarts_the_chain() -> Result<()> {
     let mut config = Scenario::baseline(30, 29, Experiment::Concentrated)?
         .config()

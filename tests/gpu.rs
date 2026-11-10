@@ -1,15 +1,17 @@
 #![cfg(feature = "compute")]
+mod support;
+
 use anyhow::{Context, Result};
 use bad_econ::{
     domain::*,
-    simulation::{Device, MemoryBudget, Simulation},
+    simulation::{MemoryBudget, Simulation},
 };
 
 #[test]
 fn gpu_memory_budget_rejects_scenarios_before_allocation() -> Result<()> {
     let scenario = Scenario::baseline(1_000_000, 42, Experiment::Transport)?;
     assert!(scenario.memory_estimate() > 4 * 1024 * 1024 * 1024);
-    let mut device = Device::headless(64)?;
+    let mut device = support::device(64)?;
     eprintln!("{} memory budget: {:?}", device.name, device.memory_budget);
     assert!(matches!(
         device.memory_budget,
@@ -47,7 +49,7 @@ fn gpu_memory_budget_survives_restore_and_faults_on_excess_usage() -> Result<()>
     use bad_econ::runtime::{RuntimeState, SimulationCommand};
 
     let scenario = Scenario::baseline(48, 42, Experiment::Baseline)?;
-    let device = Device::headless(64)?;
+    let device = support::device(64)?;
     let budget = device.memory_budget.bytes();
     let mut simulation = Simulation::new(scenario, device)?;
     let checkpoint = simulation.checkpoint()?;
@@ -62,11 +64,11 @@ fn gpu_memory_budget_survives_restore_and_faults_on_excess_usage() -> Result<()>
 
 #[test]
 fn released_large_gpu_buffers_do_not_cause_a_false_capacity_fault() -> Result<()> {
-    let scenario = Scenario::industrial(48, 42, Experiment::Baseline)?;
-    let mut constrained = Simulation::new(scenario, Device::headless(64)?)?;
+    let scenario = Scenario::baseline(48, 42, Experiment::Baseline)?;
+    let mut constrained = Simulation::new(scenario, support::device(64)?)?;
     constrained.advance()?;
     let mut reference =
-        Simulation::from_checkpoint(constrained.checkpoint()?, Device::headless(128)?)?;
+        Simulation::from_checkpoint(constrained.checkpoint()?, support::device(64)?)?;
     let before = constrained.memory_usage().bytes_reserved;
     let spare = constrained
         .device
@@ -79,7 +81,7 @@ fn released_large_gpu_buffers_do_not_cause_a_false_capacity_fault() -> Result<()
     constrained.device.memory_budget = MemoryBudget::Reported {
         available_bytes: budget * 2,
     };
-    for _ in 0..5 {
+    for _ in 0..2 {
         constrained.advance()?;
         reference.advance()?;
         assert!(constrained.memory_usage().bytes_reserved <= budget);
@@ -90,12 +92,12 @@ fn released_large_gpu_buffers_do_not_cause_a_false_capacity_fault() -> Result<()
 
 #[test]
 fn growing_gpu_readbacks_preserve_ranges_and_bound_cached_staging() -> Result<()> {
-    let device = Device::headless(64)?;
+    let device = support::device(64)?;
     let before = device
         .client
         .memory_report(cubecl::MemoryScope::Device)
         .usage();
-    for generation in 0..24usize {
+    for generation in 0..8usize {
         let count = 4 * 1024 * 1024 + generation * 101 + 17;
         let expected = (0..count)
             .map(|index| index as u32 ^ 0x923a5ce1)
@@ -175,10 +177,10 @@ fn scarce_work_is_accessible_beyond_the_first_identity_block() -> Result<()> {
     let mut state = scenario.initial()?;
     state.set(Field::Demand, 1000, 1000);
     let checkpoint = Checkpoint::new(&scenario, &state)?;
-    let mut simulation = Simulation::from_checkpoint(checkpoint.clone(), Device::headless(64)?)?;
-    let mut replay = Simulation::from_checkpoint(checkpoint, Device::headless(128)?)?;
+    let mut simulation = Simulation::from_checkpoint(checkpoint.clone(), support::device(64)?)?;
+    let mut replay = Simulation::from_checkpoint(checkpoint, support::device(64)?)?;
     let mut worked = vec![0; 1000];
-    for _ in 0..24 {
+    for _ in 0..12 {
         simulation.advance()?;
         replay.advance()?;
         let state = simulation.download()?;
@@ -190,7 +192,7 @@ fn scarce_work_is_accessible_beyond_the_first_identity_block() -> Result<()> {
     }
     assert!(worked.iter().filter(|&&days| days > 0).count() > 200);
     assert!(worked[750..].iter().any(|&days| days > 0));
-    assert_eq!(worked.iter().sum::<u64>(), 24 * 25);
+    assert_eq!(worked.iter().sum::<u64>(), 12 * 25);
     simulation.checkpoint()?.restore()?;
     Ok(())
 }

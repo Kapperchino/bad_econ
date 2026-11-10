@@ -336,6 +336,6 @@ mod tests {
 
     #[test]
     fn concurrent_flag_sets_survive_gpu_readback() -> Result<()> {
-        check_atomic_flags(Device::headless(TEST_WORKGROUP)?)
+        check_atomic_flags(crate::simulation::tests::device(TEST_WORKGROUP)?)
     }
 }

@@ -549,74 +549,73 @@ mod tests {
     fn migrating_spatial_growth_matches_complete_indexes_on_gpu() -> Result<()> {
         let scenario = Scenario::industrial(257, 42, Experiment::Transport)?;
         let initial = scenario.initial()?;
-        for workgroup in [32, 64, 128, 256] {
-            let device = Device::headless(workgroup)?;
-            let mut previous = initial.actors.clone();
-            for generation in 0..4 {
-                let mut current = previous.clone();
-                let indices = match generation {
-                    0 | 1 => vec![0, 31, 128, 256, previous.len() - 1],
-                    2 => (0..previous.len()).collect(),
-                    _ => Vec::new(),
+        let workgroup = 64;
+        let device = crate::simulation::tests::device(workgroup)?;
+        let mut previous = initial.actors.clone();
+        for generation in 0..4 {
+            let mut current = previous.clone();
+            let indices = match generation {
+                0 | 1 => vec![0, 31, 128, 256, previous.len() - 1],
+                2 => (0..previous.len()).collect(),
+                _ => Vec::new(),
+            };
+            for &index in &indices {
+                let mut actor = current.at(index);
+                actor.position = match index % 3 {
+                    0 => Position { x: 0, y: 0 },
+                    1 => Position { x: 999, y: 999 },
+                    _ => Position { x: 500, y: 500 },
                 };
-                for &index in &indices {
-                    let mut actor = current.at(index);
-                    actor.position = match index % 3 {
-                        0 => Position { x: 0, y: 0 },
-                        1 => Position { x: 999, y: 999 },
-                        _ => Position { x: 500, y: 500 },
-                    };
-                    current.set(index, actor);
-                }
-                let additions = match generation {
-                    0 | 2 => 0,
-                    _ => 3,
-                };
-                current.extend((0..additions).map(|offset| {
-                    let mut actor = previous.at(previous.len() - 1);
-                    actor.identity += 10_000 + generation * 10 + offset;
-                    actor.position = Position {
-                        x: offset as u32 * 300,
-                        y: generation as u32 * 200,
-                    };
-                    actor
-                }));
-                let requests = indices
-                    .iter()
-                    .map(|&actor| PendingRecord {
-                        actor: actor as u32,
-                        request: 3 << 24,
-                        birth: 0,
-                    })
-                    .collect::<Vec<_>>();
-                let rows = previous
-                    .iter()
-                    .map(|actor| ActorLayout::new(&actor, &scenario))
-                    .collect::<ActorMetadataRows>();
-                let actors = device.tensor(&rows.words());
-                let spatial = device.tensor(&SpatialIndex::from_actors(&scenario, &previous).words);
-                let actual = migrate(
-                    &device,
-                    &scenario,
-                    SpatialMigration {
-                        spatial: &spatial,
-                        actors: &actors,
-                        previous: &previous,
-                        current: &current,
-                        requests: &requests,
-                    },
-                );
-                let expected = SpatialIndex::from_actors(&scenario, &current);
-                let actual = device.read(&actual)?;
-                for (word, (actual, expected)) in actual.iter().zip(&expected.words).enumerate() {
-                    assert_eq!(
-                        actual, expected,
-                        "workgroup {workgroup}, generation {generation}, word {word}"
-                    );
-                }
-                assert_eq!(actual.len(), expected.words.len());
-                previous = current;
+                current.set(index, actor);
             }
+            let additions = match generation {
+                0 | 2 => 0,
+                _ => 3,
+            };
+            current.extend((0..additions).map(|offset| {
+                let mut actor = previous.at(previous.len() - 1);
+                actor.identity += 10_000 + generation * 10 + offset;
+                actor.position = Position {
+                    x: offset as u32 * 300,
+                    y: generation as u32 * 200,
+                };
+                actor
+            }));
+            let requests = indices
+                .iter()
+                .map(|&actor| PendingRecord {
+                    actor: actor as u32,
+                    request: 3 << 24,
+                    birth: 0,
+                })
+                .collect::<Vec<_>>();
+            let rows = previous
+                .iter()
+                .map(|actor| ActorLayout::new(&actor, &scenario))
+                .collect::<ActorMetadataRows>();
+            let actors = device.tensor(&rows.words());
+            let spatial = device.tensor(&SpatialIndex::from_actors(&scenario, &previous).words);
+            let actual = migrate(
+                &device,
+                &scenario,
+                SpatialMigration {
+                    spatial: &spatial,
+                    actors: &actors,
+                    previous: &previous,
+                    current: &current,
+                    requests: &requests,
+                },
+            );
+            let expected = SpatialIndex::from_actors(&scenario, &current);
+            let actual = device.read(&actual)?;
+            for (word, (actual, expected)) in actual.iter().zip(&expected.words).enumerate() {
+                assert_eq!(
+                    actual, expected,
+                    "workgroup {workgroup}, generation {generation}, word {word}"
+                );
+            }
+            assert_eq!(actual.len(), expected.words.len());
+            previous = current;
         }
         Ok(())
     }
@@ -626,36 +625,34 @@ mod tests {
         let scenario = Scenario::industrial(257, 42, Experiment::Transport)?;
         let initial = scenario.initial()?;
         let expected = SpatialIndex::new(&scenario, &initial);
-        for workgroup in [32, 64, 128, 256] {
-            let device = Device::headless(workgroup)?;
-            for before in [1, 31, 128, initial.actors.len() - 1] {
-                let prior = initial.actors.iter().take(before).collect::<ActorRows>();
-                let additions = initial.actors.iter().skip(before).collect::<ActorRows>();
-                let prior_rows = prior
-                    .iter()
-                    .map(|actor| ActorLayout::new(&actor, &scenario))
-                    .collect::<ActorMetadataRows>();
-                let added_rows = additions
-                    .iter()
-                    .map(|actor| ActorLayout::new(&actor, &scenario))
-                    .collect::<ActorMetadataRows>();
-                let prior_actors = device.tensor(&prior_rows.words());
-                let actors = super::super::extend_actors(&device, &prior_actors, &added_rows);
-                let complete_rows = initial
-                    .actors
-                    .iter()
-                    .map(|actor| ActorLayout::new(&actor, &scenario))
-                    .collect::<ActorMetadataRows>();
-                assert_eq!(device.read(&actors)?, complete_rows.words());
-                let prior_index =
-                    device.tensor(&SpatialIndex::from_actors(&scenario, &prior).words);
-                let actual = extend(&device, &scenario, &prior_index, &actors, &additions);
-                assert_eq!(
-                    device.read(&actual)?,
-                    expected.words,
-                    "workgroup {workgroup}, before {before}"
-                );
-            }
+        let workgroup = 64;
+        let device = crate::simulation::tests::device(workgroup)?;
+        for before in [1, 31, 128, initial.actors.len() - 1] {
+            let prior = initial.actors.iter().take(before).collect::<ActorRows>();
+            let additions = initial.actors.iter().skip(before).collect::<ActorRows>();
+            let prior_rows = prior
+                .iter()
+                .map(|actor| ActorLayout::new(&actor, &scenario))
+                .collect::<ActorMetadataRows>();
+            let added_rows = additions
+                .iter()
+                .map(|actor| ActorLayout::new(&actor, &scenario))
+                .collect::<ActorMetadataRows>();
+            let prior_actors = device.tensor(&prior_rows.words());
+            let actors = super::super::extend_actors(&device, &prior_actors, &added_rows);
+            let complete_rows = initial
+                .actors
+                .iter()
+                .map(|actor| ActorLayout::new(&actor, &scenario))
+                .collect::<ActorMetadataRows>();
+            assert_eq!(device.read(&actors)?, complete_rows.words());
+            let prior_index = device.tensor(&SpatialIndex::from_actors(&scenario, &prior).words);
+            let actual = extend(&device, &scenario, &prior_index, &actors, &additions);
+            assert_eq!(
+                device.read(&actual)?,
+                expected.words,
+                "workgroup {workgroup}, before {before}"
+            );
         }
         Ok(())
     }

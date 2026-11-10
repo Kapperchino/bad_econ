@@ -6,3 +6,9 @@ pub mod runtime;
 pub mod simulation;
 #[cfg(feature = "viewer")]
 pub mod viewer;
+
+#[cfg(test)]
+extern crate self as bad_econ;
+#[cfg(test)]
+#[path = "../tests/integration.rs"]
+mod tests;

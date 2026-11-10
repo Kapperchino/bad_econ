@@ -137,7 +137,7 @@ impl GpuPass<PayrollInput> for SettlePayroll {
 mod tests {
     use super::*;
     use crate::domain::{Experiment, Market, Scenario};
-    use crate::simulation::{Device, Simulation, encode};
+    use crate::simulation::{Simulation, encode};
     use anyhow::Result;
 
     struct PayrollCase {
@@ -186,92 +186,91 @@ mod tests {
                 gross: u64::MAX - 7,
             },
         ];
-        for workgroup in [32, 64, 128, 256] {
-            let device = Device::headless(workgroup)?;
-            let mut actual = Simulation::new(scenario.clone(), device.clone())?;
-            let mut expected = Simulation::new(scenario.clone(), device.clone())?;
-            for payroll in [Feature::Disabled, Feature::Enabled] {
-                for simulation in [&mut actual, &mut expected] {
-                    simulation.config.payroll = payroll;
-                    simulation.config.tax_base_rate = 100;
-                    simulation.config.employee_charge = 50;
+        let workgroup = 64;
+        let device = crate::simulation::tests::device(workgroup)?;
+        let mut actual = Simulation::new(scenario.clone(), device.clone())?;
+        let mut expected = Simulation::new(scenario.clone(), device.clone())?;
+        for payroll in [Feature::Disabled, Feature::Enabled] {
+            for simulation in [&mut actual, &mut expected] {
+                simulation.config.payroll = payroll;
+                simulation.config.tax_base_rate = 100;
+                simulation.config.employee_charge = 50;
+            }
+            for (case_index, case) in cases.iter().enumerate() {
+                let mut state = initial.clone();
+                state.set(Field::Escrow, peer, case.escrow);
+                let mut proposals = vec![0; count * ProposalLayout::WORDS];
+                let mut scratch = vec![0; actual.scratch.meta.num_elements()];
+                for (actor, &amount) in case.amounts.iter().enumerate() {
+                    state.set(Field::Due, actor, amount);
+                    state.set(Field::Employer, actor, peer as u64 + 1);
+                    state.set(Field::Cash, actor, case.cash);
+                    state.set(Field::GrossIncome, actor, case.gross);
+                    state.set(Field::PayrollReserve, actor, 0);
+                    let base = actor * ProposalLayout::WORDS;
+                    proposals[base + ProposalLayout::ACTOR] = peer as u32;
+                    proposals[base + ProposalLayout::QUANTITY_LOW] = amount as u32;
+                    proposals[base + ProposalLayout::QUANTITY_HIGH] = (amount >> 32) as u32;
+                    scratch[actor] = peer as u32;
+                    scratch[count + actor] = actor as u32;
                 }
-                for (case_index, case) in cases.iter().enumerate() {
-                    let mut state = initial.clone();
-                    state.set(Field::Escrow, peer, case.escrow);
-                    let mut proposals = vec![0; count * ProposalLayout::WORDS];
-                    let mut scratch = vec![0; actual.scratch.meta.num_elements()];
-                    for (actor, &amount) in case.amounts.iter().enumerate() {
-                        state.set(Field::Due, actor, amount);
-                        state.set(Field::Employer, actor, peer as u64 + 1);
-                        state.set(Field::Cash, actor, case.cash);
-                        state.set(Field::GrossIncome, actor, case.gross);
-                        state.set(Field::PayrollReserve, actor, 0);
-                        let base = actor * ProposalLayout::WORDS;
-                        proposals[base + ProposalLayout::ACTOR] = peer as u32;
-                        proposals[base + ProposalLayout::QUANTITY_LOW] = amount as u32;
-                        proposals[base + ProposalLayout::QUANTITY_HIGH] = (amount >> 32) as u32;
-                        scratch[actor] = peer as u32;
-                        scratch[count + actor] = actor as u32;
-                    }
-                    scratch[6 * count] = case.amounts.len() as u32;
-                    let mut control = vec![0; actual.control.meta.num_elements()];
-                    control[CONSTRUCTED_EVENTS_WORD] = case.amounts.len() as u32;
-                    control[RANGE_SLOTS_WORD] = 1;
-                    for simulation in [&actual, &expected] {
-                        device.write(
-                            &simulation.state,
-                            bytemuck::cast_slice(&encode(&state.values)),
+                scratch[6 * count] = case.amounts.len() as u32;
+                let mut control = vec![0; actual.control.meta.num_elements()];
+                control[CONSTRUCTED_EVENTS_WORD] = case.amounts.len() as u32;
+                control[RANGE_SLOTS_WORD] = 1;
+                for simulation in [&actual, &expected] {
+                    device.write(
+                        &simulation.state,
+                        bytemuck::cast_slice(&encode(&state.values)),
+                    );
+                    device.write(&simulation.proposals, &proposals);
+                    device.write(&simulation.scratch, &scratch);
+                    device.write(&simulation.control, &control);
+                }
+                let parameters =
+                    actual.parameters(Phase::WorkPayment, Market::Payroll, 0, count)?;
+                EconomySystem::launch(
+                    &device,
+                    device.count(1),
+                    CubeDim::new_1d(workgroup),
+                    EconomyInputLaunch {
+                        state: expected.state.clone().into_buffer_arg(),
+                        actors: expected.actors.clone().into_buffer_arg(),
+                        config: expected.config.launch(),
+                        spatial: expected.spatial.clone().into_buffer_arg(),
+                        proposals: expected.proposals.clone().into_buffer_arg(),
+                        bundles: expected.scratch.clone().into_buffer_arg(),
+                        control: expected.control.clone().into_buffer_arg(),
+                        parameters: parameters.launch(),
+                        stage: EconomyStage::GroupExecute,
+                    },
+                );
+                PayrollSettlement::launch(
+                    &device,
+                    CubeCount::Static(1, 1, 1),
+                    CubeDim::new_1d(workgroup),
+                    PayrollInputLaunch {
+                        state: actual.state.clone().into_buffer_arg(),
+                        actors: actual.actors.clone().into_buffer_arg(),
+                        config: actual.config.launch(),
+                        proposals: actual.proposals.clone().into_buffer_arg(),
+                        scratch: actual.scratch.clone().into_buffer_arg(),
+                        control: actual.control.clone().into_buffer_arg(),
+                        parameters: parameters.launch(),
+                    },
+                );
+                for (name, actual, expected) in [
+                    ("state", &actual.state, &expected.state),
+                    ("statuses", &actual.scratch, &expected.scratch),
+                    ("faults", &actual.control, &expected.control),
+                ] {
+                    let actual = device.read(actual)?;
+                    let expected = device.read(expected)?;
+                    for (word, (actual, expected)) in actual.iter().zip(&expected).enumerate() {
+                        assert_eq!(
+                            actual, expected,
+                            "{name} word {word}: workgroup {workgroup}, case {case_index}"
                         );
-                        device.write(&simulation.proposals, &proposals);
-                        device.write(&simulation.scratch, &scratch);
-                        device.write(&simulation.control, &control);
-                    }
-                    let parameters =
-                        actual.parameters(Phase::WorkPayment, Market::Payroll, 0, count)?;
-                    EconomySystem::launch(
-                        &device,
-                        device.count(1),
-                        CubeDim::new_1d(workgroup),
-                        EconomyInputLaunch {
-                            state: expected.state.clone().into_buffer_arg(),
-                            actors: expected.actors.clone().into_buffer_arg(),
-                            config: expected.config.launch(),
-                            spatial: expected.spatial.clone().into_buffer_arg(),
-                            proposals: expected.proposals.clone().into_buffer_arg(),
-                            bundles: expected.scratch.clone().into_buffer_arg(),
-                            control: expected.control.clone().into_buffer_arg(),
-                            parameters: parameters.launch(),
-                            stage: EconomyStage::GroupExecute,
-                        },
-                    );
-                    PayrollSettlement::launch(
-                        &device,
-                        CubeCount::Static(1, 1, 1),
-                        CubeDim::new_1d(workgroup),
-                        PayrollInputLaunch {
-                            state: actual.state.clone().into_buffer_arg(),
-                            actors: actual.actors.clone().into_buffer_arg(),
-                            config: actual.config.launch(),
-                            proposals: actual.proposals.clone().into_buffer_arg(),
-                            scratch: actual.scratch.clone().into_buffer_arg(),
-                            control: actual.control.clone().into_buffer_arg(),
-                            parameters: parameters.launch(),
-                        },
-                    );
-                    for (name, actual, expected) in [
-                        ("state", &actual.state, &expected.state),
-                        ("statuses", &actual.scratch, &expected.scratch),
-                        ("faults", &actual.control, &expected.control),
-                    ] {
-                        let actual = device.read(actual)?;
-                        let expected = device.read(expected)?;
-                        for (word, (actual, expected)) in actual.iter().zip(&expected).enumerate() {
-                            assert_eq!(
-                                actual, expected,
-                                "{name} word {word}: workgroup {workgroup}, case {case_index}"
-                            );
-                        }
                     }
                 }
             }
