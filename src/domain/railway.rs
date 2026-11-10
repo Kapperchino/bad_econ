@@ -3,6 +3,13 @@ use anyhow::{Result, anyhow};
 use serde::{Deserialize, Serialize};
 use std::collections::{BTreeMap, BTreeSet};
 
+pub(crate) const BUYER_CACHE_WORDS: usize = 16;
+pub(crate) const SETTLEMENT_PLAN_WORDS: usize = 20;
+pub(crate) const CAPACITY_CACHE_WORDS: usize = 7;
+pub(crate) const REQUEST_PATH_ENTRIES: usize = 256;
+pub(crate) const REQUEST_PATH_WORDS: usize = 2 + 2 * REQUEST_PATH_ENTRIES;
+pub(crate) const REQUEST_PATH_WORDS_LIMIT: usize = 32 * 1024 * 1024;
+
 #[derive(Clone, Copy, Debug, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(deny_unknown_fields)]
 pub struct RailMaterials {

@@ -924,7 +924,7 @@ fn device_markets_match_original_gpu_phases() -> Result<()> {
 }
 
 #[test]
-fn optimized_experiments_continue_original_checkpoints_across_day_thirty() -> Result<()> {
+fn optimized_experiments_continue_original_checkpoints_through_day_fifty() -> Result<()> {
     for experiment in [Experiment::Baseline, Experiment::Concentrated] {
         let mut config = Scenario::industrial(300, 42, experiment)?.config().clone();
         config.demography.annual_births_per_million_fertile_women = 1_000_000;
@@ -934,8 +934,8 @@ fn optimized_experiments_continue_original_checkpoints_across_day_thirty() -> Re
         expected.audit_execution = AuditExecution::Original;
         expected.registry_execution = RegistryExecution::Reference;
         let mut actual = Simulation::new(scenario, Device::headless(128)?)?;
-        for day in 0..33 {
-            if day == 29 {
+        for day in 0..50 {
+            if matches!(day, 29 | 39) {
                 actual =
                     Simulation::from_checkpoint(expected.checkpoint()?, Device::headless(256)?)?;
             }

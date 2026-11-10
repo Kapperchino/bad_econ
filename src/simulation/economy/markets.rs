@@ -15,6 +15,8 @@ mod tests;
 pub(in crate::simulation) const LATCH_WORD: usize = CONTROL_WORDS;
 pub(in crate::simulation) const RANGE_SLOTS_WORD: usize = CONTROL_WORDS + 1;
 pub(in crate::simulation) const SEARCHES_WORD: usize = CONTROL_WORDS + 2;
+pub(in crate::simulation) const PREPARATION_ACTORS_WORD: usize = CONTROL_WORDS + 3;
+pub(in crate::simulation) const FEEDBACK_EVENTS_WORD: usize = PROGRESS_WORD;
 const MAX_RANGE_SPACING: u32 = 32;
 pub(in crate::simulation) const SEARCH_DISPATCH: usize = 0;
 pub(in crate::simulation) const SORT_DISPATCH: usize = 3;
@@ -22,7 +24,13 @@ pub(in crate::simulation) const RANGE_DISPATCH: usize = 6;
 pub(in crate::simulation) const HISTOGRAM_DISPATCH: usize = 9;
 pub(in crate::simulation) const QUEUE_DISPATCH: usize = 27;
 pub(in crate::simulation) const SEARCH_COMPACT_DISPATCH: usize = 30;
+pub(in crate::simulation) const PREPARATION_DISPATCH: usize = 33;
 pub(in crate::simulation) const COMPACTION_BLOCK: u32 = 256;
+
+#[cube]
+pub(in crate::simulation) fn faults_clear(control: &[Atomic<u32>]) -> bool {
+    (control[LATCH_WORD].load() | control[FAULT_WORD].load()) == 0
+}
 
 pub(in crate::simulation) struct SearchBuffers {
     pub requests: burn_wgpu::CubeTensor,
@@ -33,11 +41,11 @@ pub(in crate::simulation) struct SearchBuffers {
 impl SearchBuffers {
     pub fn new(device: &crate::simulation::Device, actors: usize) -> Self {
         Self {
-            requests: device.empty(actors * 5),
+            requests: device.empty(actors * 6),
             successes: device.empty(search_counts_offset(actors) + 2 * search_blocks(actors) + 512),
             dispatches: device
                 .client
-                .memory_dedicated_allocation(132, |_| device.empty(33)),
+                .memory_dedicated_allocation(144, |_| device.empty(36)),
         }
     }
 }
@@ -84,6 +92,7 @@ pub(in crate::simulation) fn prepare_dispatch(
                     16 * capacity.div_ceil(device.workgroup as usize),
                 )
                 .items(),
+            preparation_resets: (search_counts_offset(capacity) + search_blocks(capacity)) as u32,
         },
     );
 }
@@ -94,6 +103,7 @@ struct DispatchInput {
     dispatches: Box<[u32]>,
     workgroup: u32,
     histogram_span: u32,
+    preparation_resets: u32,
 }
 
 struct DispatchPreparation;
@@ -114,6 +124,7 @@ impl GpuPass<DispatchInput> for PrepareCounts {
             &mut input.dispatches,
             input.workgroup,
             input.histogram_span,
+            input.preparation_resets,
         );
     }
 }
@@ -124,9 +135,10 @@ fn prepare_counts(
     dispatches: &mut [u32],
     workgroup: u32,
     histogram_span: u32,
+    preparation_resets: u32,
 ) {
     control[LATCH_WORD].store(control[crate::simulation::flags::FAULT_WORD].load());
-    let mut counts = Array::<u32>::new(11usize);
+    let mut counts = Array::<u32>::new(12usize);
     counts[0usize] = control[SEARCHES_WORD].load();
     counts[1usize] = ceildiv(control[CONSTRUCTED_EVENTS_WORD].load(), workgroup);
     counts[2usize] = ceildiv(control[RANGE_SLOTS_WORD].load(), workgroup);
@@ -136,9 +148,14 @@ fn prepare_counts(
     }
     counts[9usize] = control[RANGE_SLOTS_WORD].load();
     counts[10usize] = ceildiv(counts[0usize], workgroup);
-    for index in 0..11usize {
+    let mut preparation_actors = 0u32;
+    if control.len() > PREPARATION_ACTORS_WORD {
+        preparation_actors = control[PREPARATION_ACTORS_WORD].load();
+    }
+    counts[11usize] = ceildiv(max(preparation_actors, preparation_resets), workgroup);
+    for index in 0..12usize {
         let count = counts[index];
-        dispatches[index * 3] = min(max(count, 1), 65535);
+        dispatches[index * 3] = min(count, 65535);
         dispatches[index * 3 + 1] = ceildiv(max(count, 1), 65535);
         dispatches[index * 3 + 2] = 1;
     }
@@ -203,7 +220,7 @@ pub(in crate::simulation) fn ranges(
     }
     let prefix = parallel::scan_prefix(slots, comptime!(parameters.scan));
     let mut base = Shared::<u32>::new();
-    if UNIT_POS == 0 {
+    if UNIT_POS == 0 && prefix.total > 0 {
         *base = control[RANGE_SLOTS_WORD].fetch_add(prefix.total);
     }
     sync_cube();
@@ -211,6 +228,9 @@ pub(in crate::simulation) fn ranges(
         let slot = *base + prefix.inclusive - slots;
         scratch[(5 * count + slot) as usize] = id;
         scratch[(6 * count + slot) as usize] = length;
+        for gap in 1..slots {
+            scratch[(5 * count + slot + gap) as usize] = u32::MAX;
+        }
     }
 }
 
@@ -404,5 +424,6 @@ impl GpuPass<FeedbackInput> for LatchFeedback {
 
 #[cube]
 fn latch_feedback(control: &[Atomic<u32>], feedback: &[Atomic<u32>]) {
-    feedback[CONSTRUCTED_EVENTS_WORD].store(control[LATCH_WORD].load());
+    feedback[CONSTRUCTED_EVENTS_WORD].store(control[FAULT_WORD].load());
+    feedback[FEEDBACK_EVENTS_WORD].store(control[CONSTRUCTED_EVENTS_WORD].load());
 }

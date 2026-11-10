@@ -114,6 +114,14 @@ pub fn times(a: Ticks, b: u32) -> CheckedTicks {
 }
 #[cube]
 pub fn divide(a: Ticks, b: u32) -> Ticks {
+    match b {
+        1 => a,
+        _ => divide_nonunit(a, b),
+    }
+}
+
+#[cube]
+fn divide_nonunit(a: Ticks, b: u32) -> Ticks {
     let mut quotient = zero();
     if a.extract(HIGH_WORD) == 0 && b != 0 {
         quotient = ticks(a.extract(LOW_WORD) / b, 0);

@@ -1030,6 +1030,7 @@ impl Scenario {
         let actors = self.actors() as u64;
         let batch = u64::from(self.config.batch_size).min(actors);
         self.state_len() as u64 * 8 * 2
+            + (self.state_len() as u64 * 2).div_ceil(1024) * 4
             + self
                 .config
                 .finance
@@ -1047,7 +1048,26 @@ impl Scenario {
                     * self.config.demography.initial_household_members as usize,
             ) as u64
                 * 164
-            + actors * 28
+            + actors * 32
+            + 12
+            + match self.config.railway.companies.is_empty() {
+                true => 0,
+                false => {
+                    actors
+                        * (railway::BUYER_CACHE_WORDS + railway::SETTLEMENT_PLAN_WORDS) as u64
+                        * 4
+                        + self.config.railway.companies.len() as u64
+                            * (self.config.railway.stations().len() as u64).pow(2)
+                            * railway::CAPACITY_CACHE_WORDS as u64
+                            * 4
+                        + (self.config.railway.segments.len() as u64)
+                            .saturating_mul(2)
+                            .saturating_mul(self.config.railway.stations().len() as u64)
+                            .saturating_mul(railway::REQUEST_PATH_WORDS as u64)
+                            .min(railway::REQUEST_PATH_WORDS_LIMIT as u64)
+                            * 4
+                }
+            }
             + batch * (16 * 8 * 4 + 16 * 4 * 3 + 28)
             + 128 * 1024 * 1024
     }

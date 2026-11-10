@@ -7,6 +7,17 @@ use bytemuck::{Pod, Zeroable};
 
 pub(in crate::simulation) const TILE_ACTORS: usize = 4096;
 
+fn dispatch(device: &Device, groups: usize, tasks: usize) -> CubeCount {
+    let width = groups
+        .max(1)
+        .min(device.client.properties().hardware.max_cube_count.0 as usize);
+    CubeCount::Static(
+        width as u32,
+        tasks as u32,
+        groups.max(1).div_ceil(width) as u32,
+    )
+}
+
 #[repr(C)]
 #[derive(Clone, Copy, Pod, Zeroable)]
 struct Metric {
@@ -71,6 +82,13 @@ pub(in crate::simulation) struct AuditInput<'a> {
     pub partials: &'a CubeTensor,
     pub summary: &'a CubeTensor,
     pub control: &'a CubeTensor,
+    pub rings: RingValidation<'a>,
+}
+
+pub(in crate::simulation) enum RingValidation<'a> {
+    All,
+    Unchanged,
+    Selected(&'a CubeTensor),
 }
 
 #[derive(Clone, Copy)]
@@ -270,7 +288,14 @@ impl AuditBuffers {
         let argument = |tensor: &CubeTensor| tensor.clone().into_buffer_arg();
         ActorValidation::launch(
             device,
-            device.count(count * (Good::COUNT + 1)),
+            dispatch(
+                device,
+                count.div_ceil(device.workgroup as usize),
+                match input.rings {
+                    RingValidation::All => Good::COUNT + 1,
+                    RingValidation::Unchanged | RingValidation::Selected(_) => 1,
+                },
+            ),
             CubeDim::new_1d(device.workgroup),
             ValidationInputLaunch {
                 state: argument(input.state),
@@ -279,10 +304,30 @@ impl AuditBuffers {
                 control: argument(input.control),
             },
         );
+        if let RingValidation::Selected(indices) = input.rings {
+            SelectedValidation::launch(
+                device,
+                dispatch(
+                    device,
+                    indices
+                        .meta
+                        .num_elements()
+                        .div_ceil(device.workgroup as usize),
+                    Good::COUNT,
+                ),
+                CubeDim::new_1d(device.workgroup),
+                SelectedValidationInputLaunch {
+                    state: argument(input.state),
+                    indices: argument(indices),
+                    config: input.config.launch(),
+                    control: argument(input.control),
+                },
+            );
+        }
         for set in &self.sets {
             MetricSummary::launch(
                 device,
-                device.count(set.groups * set.ids.meta.num_elements() * device.workgroup as usize),
+                dispatch(device, set.groups, set.ids.meta.num_elements()),
                 CubeDim::new_1d(device.workgroup),
                 SummaryInputLaunch {
                     state: argument(input.state),
@@ -370,10 +415,9 @@ fn summarize_metrics(input: &mut SummaryInput) {
     let actors = &input.actors;
     let config = &input.config;
     let control = &input.control;
-    let block = CUBE_POS as u32;
-    let index = block / input.groups;
-    let group = block % input.groups;
-    if (index as usize) < input.ids.len() {
+    let index = CUBE_POS_Y;
+    let group = CUBE_POS_X + CUBE_POS_Z * CUBE_COUNT_X;
+    if group < input.groups {
         let metric = input.ids[index as usize];
         let definition = input.metrics[metric as usize];
         let field = definition.extract(0usize);
@@ -592,6 +636,40 @@ struct ValidationInput {
 struct ActorValidation;
 struct ValidateActors;
 
+#[derive(CubeType, CubeLaunch)]
+struct SelectedValidationInput {
+    state: Box<[Ticks]>,
+    indices: Box<[u32]>,
+    config: EconomyConfig,
+    control: Box<[Atomic<u32>]>,
+}
+
+struct SelectedValidation;
+struct ValidateSelected;
+
+impl System for SelectedValidation {
+    type Input = SelectedValidationInput;
+    type Passes = gpu_passes![ValidateSelected];
+}
+
+#[cube]
+impl GpuPass<SelectedValidationInput> for ValidateSelected {
+    type Output = ();
+
+    fn execute(input: SelectedValidationInput) {
+        let index = (CUBE_POS_X + CUBE_POS_Z * CUBE_COUNT_X) * CUBE_DIM + UNIT_POS;
+        if index < input.indices.len() as u32 {
+            validate_ring(
+                &input.state,
+                &input.config,
+                &input.control,
+                input.indices[index as usize],
+                CUBE_POS_Y,
+            );
+        }
+    }
+}
+
 impl System for ActorValidation {
     type Input = ValidationInput;
     type Passes = gpu_passes![ValidateActors];
@@ -613,33 +691,42 @@ fn validate_actors(
     config: &EconomyConfig,
     control: &[Atomic<u32>],
 ) {
-    let index = ABSOLUTE_POS as u32;
-    let actor = index % config.actors;
-    let task = index / config.actors;
+    let actor = (CUBE_POS_X + CUBE_POS_Z * CUBE_COUNT_X) * CUBE_DIM + UNIT_POS;
+    let task = CUBE_POS_Y;
     match task {
         0 => validate_actor(state, actors, config, control, actor),
         _ => {
-            if task <= Good::COUNT as u32 {
-                let good = task - 1;
-                let held = value(state, config, TRANSIT_FIELDS as u32 + good, actor);
-                let mut in_ring = zero();
-                for slot in 0u32..config.ring {
-                    in_ring = add_checked(
-                        control,
-                        in_ring,
-                        value(
-                            state,
-                            config,
-                            BASE_FIELDS as u32 + good * config.ring + slot,
-                            actor,
-                        ),
-                    );
-                }
-                if !equal(in_ring, held) {
-                    KernelFaults::new(comptime!(FaultFlags::TRANSIT_MISMATCH)).record(control);
-                }
+            if actor < config.actors {
+                validate_ring(state, config, control, actor, task - 1);
             }
         }
+    }
+}
+
+#[cube]
+fn validate_ring(
+    state: &[Ticks],
+    config: &EconomyConfig,
+    control: &[Atomic<u32>],
+    actor: u32,
+    good: u32,
+) {
+    let held = value(state, config, TRANSIT_FIELDS as u32 + good, actor);
+    let mut in_ring = zero();
+    for slot in 0u32..config.ring {
+        in_ring = add_checked(
+            control,
+            in_ring,
+            value(
+                state,
+                config,
+                BASE_FIELDS as u32 + good * config.ring + slot,
+                actor,
+            ),
+        );
+    }
+    if !equal(in_ring, held) {
+        KernelFaults::new(comptime!(FaultFlags::TRANSIT_MISMATCH)).record(control);
     }
 }
 
@@ -726,5 +813,125 @@ fn validate_actor(
         ) {
             KernelFaults::new(comptime!(FaultFlags::TRANSIT_MISMATCH)).record(control);
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::{
+        domain::{Experiment, Scenario},
+        simulation::{Simulation, encode, registry, tests::device},
+    };
+
+    #[derive(Clone, Copy)]
+    enum TransitCase {
+        Unchanged,
+        Mismatch,
+        RingOverflow,
+        TotalOverflow,
+    }
+
+    #[test]
+    fn sparse_ring_validation_matches_full_snapshots_and_faults_on_gpu() -> Result<()> {
+        let scenario = Scenario::baseline(97, 42, Experiment::Transport)?;
+        for workgroup in [32, 64, 128, 256] {
+            let mut simulation = Simulation::new(scenario.clone(), device(workgroup)?)?;
+            let count = scenario.actors();
+            let indices = simulation
+                .device
+                .tensor(&(count as u32 - 65..count as u32).collect::<Vec<_>>());
+            for case in [
+                TransitCase::Unchanged,
+                TransitCase::Mismatch,
+                TransitCase::RingOverflow,
+                TransitCase::TotalOverflow,
+            ] {
+                let mut state = scenario.initial()?;
+                let ring = BASE_FIELDS + scenario.ring() * (Good::COUNT - 1);
+                let expected = match case {
+                    TransitCase::Unchanged => FaultFlags::empty(),
+                    TransitCase::Mismatch => {
+                        state.values[ring * count + count - 1] = 7;
+                        FaultFlags::TRANSIT_MISMATCH
+                    }
+                    TransitCase::RingOverflow => {
+                        state.values[ring * count + count - 1] = u64::MAX;
+                        state.values[(ring + 1) * count + count - 1] = 1;
+                        state.values[(TRANSIT_FIELDS + Good::COUNT - 1) * count + count - 1] = 7;
+                        state.set(Field::Transit, count - 1, 7);
+                        FaultFlags::ARITHMETIC_OVERFLOW | FaultFlags::TRANSIT_MISMATCH
+                    }
+                    TransitCase::TotalOverflow => {
+                        state.values[BASE_FIELDS * count] = u64::MAX;
+                        state.values[(BASE_FIELDS + scenario.ring()) * count] = 1;
+                        state.values[TRANSIT_FIELDS * count] = u64::MAX;
+                        state.values[(TRANSIT_FIELDS + 1) * count] = 1;
+                        state.set(Field::Transit, 0, 0);
+                        FaultFlags::ARITHMETIC_OVERFLOW
+                    }
+                };
+                simulation.device.write(
+                    &simulation.state,
+                    bytemuck::cast_slice(&encode(&state.values)),
+                );
+                let sparse = simulation.observe_rings(RingValidation::Selected(&indices));
+                let summary =
+                    simulation
+                        .device
+                        .read_range(&simulation.summary, 0, SummaryLayout::WORDS)?;
+                let control = simulation.device.read(&simulation.control)?;
+                let full = simulation.observe();
+                assert_eq!(sparse.is_ok(), full.is_ok());
+                assert_eq!(
+                    summary,
+                    simulation
+                        .device
+                        .read_range(&simulation.summary, 0, SummaryLayout::WORDS,)?
+                );
+                assert_eq!(control, simulation.device.read(&simulation.control)?);
+                assert_eq!(FaultFlags::read(&control)?, expected);
+                if let (Ok(sparse), Ok(full)) = (sparse, full) {
+                    assert_eq!(sparse, full);
+                    assert_eq!(simulation.observe_rings(RingValidation::Unchanged)?, full);
+                }
+            }
+        }
+        Ok(())
+    }
+
+    #[test]
+    fn direct_registry_commit_revalidates_rings_after_a_previous_audit_on_gpu() -> Result<()> {
+        let scenario = Scenario::baseline(97, 42, Experiment::Transport)?;
+        let mut simulation = Simulation::new(scenario.clone(), device(64)?)?;
+        let _ = simulation.observe()?;
+        let mut state = scenario.initial()?;
+        let firm = scenario.config().households as usize;
+        state.set(Field::PendingCapacity, firm, 1);
+        state.values[BASE_FIELDS * state.actors.len()] = 7;
+        simulation.device.write(
+            &simulation.state,
+            bytemuck::cast_slice(&encode(&state.values)),
+        );
+        let mut requests = vec![0; state.actors.len()];
+        requests[firm] = (6 << 24) | 1;
+        simulation
+            .device
+            .write(&simulation.enterprise_requests, &requests);
+        let pending =
+            registry::records::PendingRecords::from_dense(&requests, &vec![0; requests.len()])?;
+        let plan = registry::RegistryPlan::new(
+            &scenario,
+            &simulation.metadata,
+            &simulation.migrations,
+            &pending.records,
+        )?
+        .expect("capacity registry plan");
+        assert!(simulation.commit_registry(plan, &pending.records).is_err());
+        assert_eq!(
+            FaultFlags::read(&simulation.device.read(&simulation.control)?)?,
+            FaultFlags::TRANSIT_MISMATCH,
+        );
+        Ok(())
     }
 }

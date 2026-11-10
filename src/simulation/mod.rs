@@ -16,6 +16,7 @@ mod parameters;
 pub mod pass;
 mod payroll;
 mod policy;
+mod profiling;
 mod random;
 mod registry;
 pub mod research;
@@ -51,6 +52,18 @@ use system::System;
 
 const MILLISECONDS_PER_SECOND: f64 = 1000.0;
 
+fn profiling_day() -> u64 {
+    static DAY: std::sync::OnceLock<u64> = std::sync::OnceLock::new();
+    *DAY.get_or_init(|| match std::env::var("BAD_ECON_PROFILE_DAY") {
+        Ok(day) => day
+            .parse::<std::num::NonZeroU64>()
+            .expect("BAD_ECON_PROFILE_DAY must be a positive day number")
+            .get(),
+        Err(std::env::VarError::NotPresent) => 30,
+        Err(error) => panic!("BAD_ECON_PROFILE_DAY: {error}"),
+    })
+}
+
 #[derive(Clone, Copy)]
 enum MarketExecution {
     Grouped,
@@ -58,6 +71,13 @@ enum MarketExecution {
     Original,
     #[cfg(test)]
     Reference,
+}
+
+#[derive(Clone, Copy)]
+enum RegistryAudit {
+    #[cfg(test)]
+    Full,
+    Validated,
 }
 
 #[cfg(test)]
@@ -96,6 +116,7 @@ pub struct Simulation {
     next_phase: Phase,
     state: CubeTensor,
     audited: CubeTensor,
+    snapshot_copy: tensor::SnapshotCopy,
     actors: CubeTensor,
     config: configuration::Configuration,
     spatial: CubeTensor,
@@ -198,6 +219,7 @@ impl Simulation {
         let spatial = device.tensor(&SpatialIndex::new(&scenario, &initial).words);
         let state = device.tensor(bytemuck::cast_slice(&encode(&initial.values)));
         let audited = device.empty(initial.values.len() * TICK_WORDS);
+        let snapshot_copy = tensor::SnapshotCopy::new(&device, initial.values.len() * TICK_WORDS);
         let research = scenario
             .config()
             .research
@@ -290,6 +312,7 @@ impl Simulation {
             next_phase: Phase::Opening,
             state,
             audited,
+            snapshot_copy,
             actors,
             config,
             spatial,
@@ -561,15 +584,25 @@ impl Simulation {
                 }
             }
             Phase::Audit => {
+                let started = Instant::now();
                 self.railways(economy::railway::RailStage::Close);
                 self.fault_check()?;
                 if let Some(research) = &self.research {
                     research.phase(&self.device, &self.state, phase, self.day)?;
                 }
                 self.snapshot = self.observe()?;
+                if self.day + 1 == profiling_day()
+                    && std::env::var_os("BAD_ECON_PROFILE_STAGES").is_some()
+                {
+                    eprintln!(
+                        "AUDIT {} InitialObservation {:.3}",
+                        self.day + 1,
+                        started.elapsed().as_secs_f64() * 1000.0
+                    );
+                }
                 self.day = add(self.day, 1)?;
                 self.snapshot.day = self.day;
-                self.commit_enterprises()?;
+                self.commit_enterprises(RegistryAudit::Validated)?;
                 Ok(())
             }
             _ => self.local(phase),
@@ -616,7 +649,24 @@ impl Simulation {
         );
         grown
     }
-    fn commit_enterprises(&mut self) -> Result<()> {
+    fn commit_enterprises(&mut self, audit: RegistryAudit) -> Result<()> {
+        let profile_device = self.device.clone();
+        let profile_day = self.day;
+        let profile =
+            profile_day == profiling_day() && std::env::var_os("BAD_ECON_PROFILE_STAGES").is_some();
+        let profile_time = std::cell::Cell::new(Instant::now());
+        let checkpoint = |label: &str| {
+            if profile {
+                profile_device
+                    .sync()
+                    .expect("audit profile synchronization");
+                let now = Instant::now();
+                eprintln!(
+                    "AUDIT {profile_day} {label} {:.3}",
+                    now.duration_since(profile_time.replace(now)).as_secs_f64() * 1000.0
+                );
+            }
+        };
         let records = registry::records::RecordBuffers {
             requests: &self.enterprise_requests,
             births: self.demography.birth_buffer(),
@@ -645,6 +695,7 @@ impl Simulation {
                 &self.device.read(self.demography.birth_buffer())?,
             )?,
         };
+        checkpoint("PendingRecords");
         let records = &pending.records;
         let count = records.iter().filter(|record| record.request > 0).count();
         let newborns = records.iter().filter(|record| record.birth > 0).count();
@@ -669,6 +720,7 @@ impl Simulation {
         }
         let plan =
             registry::RegistryPlan::new(&self.scenario, &self.metadata, &self.migrations, records)?;
+        checkpoint("RegistryPlan");
         #[cfg(test)]
         let plan = match self.registry_execution {
             RegistryExecution::Gpu => plan,
@@ -680,6 +732,7 @@ impl Simulation {
             &self.migrations,
             records,
         )?;
+        checkpoint("EntryGrowth");
         #[cfg(test)]
         let entries = match self.registry_execution {
             RegistryExecution::Gpu => entries,
@@ -687,7 +740,7 @@ impl Simulation {
         };
         match (count, plan, entries) {
             (0, _, _) => (),
-            (_, Some(plan), _) => self.commit_registry(plan, records)?,
+            (_, Some(plan), _) => self.commit_registry_audited(plan, records, audit)?,
             (_, None, Some(growth)) => {
                 self.commit_entries(&growth.requests, growth.plan, records)?
             }
@@ -744,6 +797,23 @@ impl Simulation {
         mut plan: registry::RegistryPlan,
         births: &[PendingRecord],
     ) -> Result<()> {
+        let profile_device = self.device.clone();
+        let profile_day = self.day;
+        let profile =
+            profile_day == profiling_day() && std::env::var_os("BAD_ECON_PROFILE_STAGES").is_some();
+        let profile_time = std::cell::Cell::new(Instant::now());
+        let checkpoint = |label: &str| {
+            if profile {
+                profile_device
+                    .sync()
+                    .expect("audit profile synchronization");
+                let now = Instant::now();
+                eprintln!(
+                    "AUDIT {profile_day} {label} {:.3}",
+                    now.duration_since(profile_time.replace(now)).as_secs_f64() * 1000.0
+                );
+            }
+        };
         let newborns = births.iter().filter(|record| record.birth > 0).count();
         let next_identity = self
             .metadata
@@ -758,6 +828,7 @@ impl Simulation {
             entries,
             next_identity,
         )?;
+        checkpoint("EntryBatch");
         let count = batch.metadata.actors.len();
         let additional = count as u64 * self.scenario.fields() as u64 * 16 + count as u64 * 192;
         self.device.reclaim_memory(additional)?;
@@ -776,6 +847,7 @@ impl Simulation {
             self.metadata.actors.len(),
             self.scenario.fields(),
         );
+        checkpoint("GrowState");
         plan.migrations
             .extend_households(&batch.metadata.actors, &batch.formations);
         let settlement = registry::settlement::SettlementBatch::new(
@@ -787,6 +859,7 @@ impl Simulation {
             self.day,
             &plan.migrations,
         )?;
+        checkpoint("SettlementBatch");
         let mut metadata = batch.metadata;
         if let Some(mut actors) = plan.actors {
             actors.extend(metadata.actors.iter_from(actors.len()));
@@ -801,7 +874,21 @@ impl Simulation {
         {
             metadata.ownership = ownership.clone();
         }
-        let config = configuration::Configuration::new(&self.device, &self.scenario, &metadata);
+        let started = Instant::now();
+        let config = self.config.updated(
+            &self.device,
+            &self.scenario,
+            &self.metadata.actors,
+            &metadata,
+        );
+        if std::env::var_os("BAD_ECON_PROFILE_STAGES").is_some() {
+            eprintln!(
+                "CONFIG {} {:.3}",
+                self.day,
+                started.elapsed().as_secs_f64() * 1000.0
+            );
+        }
+        checkpoint("Configuration");
         let additions = metadata
             .actors
             .iter_from(self.metadata.actors.len())
@@ -837,6 +924,7 @@ impl Simulation {
             ),
             None => actors,
         };
+        checkpoint("ActorMetadata");
         let spatial = match plan.transition {
             registry::RegistryTransition::Migration => registry::spatial::migrate(
                 &self.device,
@@ -857,6 +945,7 @@ impl Simulation {
                 &additions,
             ),
         };
+        checkpoint("Spatial");
         let mut demography = match newborns {
             0 => self.demography.clone(),
             _ => self.grow_births(births)?,
@@ -867,6 +956,7 @@ impl Simulation {
                 demography = demography.form_households(&self.device, &batch.formations, count)?;
             }
         }
+        checkpoint("Demography");
         let research = self
             .research
             .as_ref()
@@ -892,6 +982,7 @@ impl Simulation {
         };
         let management = management::EnterpriseManagement::new(&self.device, &metadata);
         let audit = economy::audit::AuditBuffers::new(&self.device, &metadata.actors);
+        checkpoint("Miscellaneous");
         let mut next = Self {
             scenario: self.scenario.clone(),
             device: self.device.clone(),
@@ -909,6 +1000,10 @@ impl Simulation {
             audited: self
                 .device
                 .empty(count * self.scenario.fields() * TICK_WORDS),
+            snapshot_copy: tensor::SnapshotCopy::new(
+                &self.device,
+                count * self.scenario.fields() * TICK_WORDS,
+            ),
             actors,
             config,
             spatial,
@@ -940,6 +1035,7 @@ impl Simulation {
             registry_execution: self.registry_execution,
             matching_round: self.matching_round,
         };
+        checkpoint("Buffers");
         match settlement {
             Some(batch) => batch.apply(&next.device, &next.state, count),
             None => registry::apply(
@@ -952,7 +1048,9 @@ impl Simulation {
                 next.day as u32,
             ),
         }
+        checkpoint("Apply");
         next.snapshot = next.observe()?;
+        checkpoint("Observe");
         next.device.reclaim_memory(0)?;
         match next.memory_usage().bytes_reserved <= next.device.memory_budget.bytes() {
             true => *self = next,
@@ -962,11 +1060,37 @@ impl Simulation {
         }
         Ok(())
     }
+    #[cfg(test)]
     fn commit_registry(
+        &mut self,
+        plan: registry::RegistryPlan,
+        births: &[PendingRecord],
+    ) -> Result<()> {
+        self.commit_registry_audited(plan, births, RegistryAudit::Full)
+    }
+    fn commit_registry_audited(
         &mut self,
         mut plan: registry::RegistryPlan,
         births: &[PendingRecord],
+        audit: RegistryAudit,
     ) -> Result<()> {
+        let profile_device = self.device.clone();
+        let profile_day = self.day;
+        let profile =
+            profile_day == profiling_day() && std::env::var_os("BAD_ECON_PROFILE_STAGES").is_some();
+        let profile_time = std::cell::Cell::new(Instant::now());
+        let checkpoint = |label: &str| {
+            if profile {
+                profile_device
+                    .sync()
+                    .expect("audit profile synchronization");
+                let now = Instant::now();
+                eprintln!(
+                    "AUDIT {profile_day} {label} {:.3}",
+                    now.duration_since(profile_time.replace(now)).as_secs_f64() * 1000.0
+                );
+            }
+        };
         let settlement = registry::settlement::SettlementBatch::new(
             &self.device,
             &self.scenario,
@@ -976,6 +1100,7 @@ impl Simulation {
             self.day,
             &plan.migrations,
         )?;
+        checkpoint("RegistrySettlement");
         let management = settlement
             .as_ref()
             .filter(|batch| !batch.owners.is_empty())
@@ -997,6 +1122,7 @@ impl Simulation {
                 ownership::OwnershipRuntime::new(&self.device, &metadata)
             })
             .transpose()?;
+        checkpoint("RegistryOwnership");
         let newborns = births.iter().filter(|record| record.birth > 0).count();
         let next_identity = self
             .metadata
@@ -1007,10 +1133,12 @@ impl Simulation {
             0 => None,
             _ => Some(self.grow_births(births)?),
         };
+        checkpoint("RegistryBirths");
         let population = grown
             .as_ref()
             .map(|grown| grown.observation(&self.device, &self.state, &self.config))
             .transpose()?;
+        checkpoint("RegistryPopulation");
         let previous_actor_buffer = self.actors.clone();
         let previous_spatial = self.spatial.clone();
         let next_buffers = match plan.transition {
@@ -1072,6 +1200,7 @@ impl Simulation {
             }),
             None => next_buffers,
         };
+        checkpoint("RegistryBuffers");
         self.device.reclaim_memory(0)?;
         match self.memory_usage().bytes_reserved <= self.device.memory_budget.bytes() {
             true => (),
@@ -1094,6 +1223,7 @@ impl Simulation {
                 self.day as u32,
             ),
         }
+        checkpoint("RegistryApply");
         let previous_actors = plan
             .actors
             .map(|actors| std::mem::replace(&mut self.metadata.actors, actors));
@@ -1101,7 +1231,15 @@ impl Simulation {
             self.actors = buffers.actors;
             self.spatial = buffers.spatial;
         }
-        let observation = self.observe().and_then(|snapshot| {
+        let rings = match (audit, &settlement) {
+            #[cfg(test)]
+            (RegistryAudit::Full, _) => economy::audit::RingValidation::All,
+            (RegistryAudit::Validated, Some(batch)) => {
+                economy::audit::RingValidation::Selected(batch.indices())
+            }
+            (RegistryAudit::Validated, None) => economy::audit::RingValidation::Unchanged,
+        };
+        let observation = self.observe_rings(rings).and_then(|snapshot| {
             self.device.reclaim_memory(0)?;
             match self.memory_usage().bytes_reserved <= self.device.memory_budget.bytes() {
                 true => Ok(snapshot),
@@ -1110,6 +1248,7 @@ impl Simulation {
                 )),
             }
         });
+        checkpoint("RegistryObservation");
         match observation {
             Ok(mut snapshot) => {
                 match (
@@ -1126,11 +1265,26 @@ impl Simulation {
                         _,
                     )
                     | (_, registry::RegistryTransition::Migration, _, 1..) => {
-                        self.config = configuration::Configuration::new(
+                        let started = Instant::now();
+                        self.config.update_rentals(
                             &self.device,
                             &self.scenario,
                             &self.metadata,
+                            plan.changes
+                                .iter()
+                                .filter(|record| record.request >> 24 == 3)
+                                .map(|record| record.actor as usize)
+                                .chain(settlement.iter().flat_map(|batch| {
+                                    batch.owners.iter().map(|change| change.firm)
+                                })),
                         );
+                        if std::env::var_os("BAD_ECON_PROFILE_STAGES").is_some() {
+                            eprintln!(
+                                "CONFIG {} {:.3}",
+                                self.day,
+                                started.elapsed().as_secs_f64() * 1000.0
+                            );
+                        }
                     }
                     _ => (),
                 }
@@ -1312,6 +1466,7 @@ impl Simulation {
         trace: Trace,
         evidence: &mut PhaseEvidence,
     ) -> Result<()> {
+        let submission_started = Instant::now();
         let regional_transport = !self.scenario.config().railway.companies.is_empty()
             && matches!(
                 market,
@@ -1320,8 +1475,14 @@ impl Simulation {
         let count = self.metadata.actors.len();
         let mut parameters = self.parameters(phase, market, 0, count)?;
         parameters.discovery = Discovery::Indexed;
+        let profile = self.day + 1 == profiling_day()
+            && std::env::var_os("BAD_ECON_PROFILE_STAGES").is_some();
+        let device_profile = profiling::MarketProfile::new(self.day + 1);
         let launch = |stage, invocations, parameters: &EconomyParameters| {
+            let started = Instant::now();
+            let window = device_profile.start(&self.device);
             let dispatch = match stage {
+                EconomyStage::RailExecute => cubecl::CubeCount::Static(1, 1, 1),
                 EconomyStage::GroupExecute => {
                     markets::dispatch(&self.searches.dispatches, markets::RANGE_DISPATCH)
                 }
@@ -1363,8 +1524,31 @@ impl Simulation {
                     },
                 ),
             }
+            device_profile.end(&self.device, window, "MARKET", stage);
+            if profile {
+                self.device.sync().expect("stage profiling synchronization");
+                if stage == EconomyStage::RailClassify {
+                    self.config
+                        .railway
+                        .profile_capacity(&self.device, &self.state, count);
+                }
+                eprintln!(
+                    "MARKET {market:?} {} {stage:?} {:.3}",
+                    self.matching_round,
+                    started.elapsed().as_secs_f64() * 1000.0
+                );
+            }
         };
-        launch(EconomyStage::MarketStart, 1, &parameters);
+        let initialization = match (market, self.matching_round) {
+            (Market::Input(_), 0) => EconomyStage::InputMarketStart,
+            (Market::Input(_), _) => EconomyStage::InputMarketRepeat,
+            _ => EconomyStage::MarketStart,
+        };
+        let initialization_count = match market {
+            Market::Input(_) => count,
+            _ => 1,
+        };
+        launch(initialization, initialization_count, &parameters);
         if matches!(
             market,
             Market::Labor | Market::Input(_) | Market::Consumer(_) | Market::Household
@@ -1411,21 +1595,28 @@ impl Simulation {
             }
         }
         let search = |stage| {
+            let started = Instant::now();
+            let window = device_profile.start(&self.device);
+            let workgroup = match stage {
+                economy::search::SearchStage::Search => 32,
+                _ => self.device.workgroup,
+            };
             let dispatch = match stage {
                 economy::search::SearchStage::Index => self.device.count(
                     count.div_ceil(DISCOVERY_BLOCK as usize) * self.device.workgroup as usize,
                 ),
-                economy::search::SearchStage::Prepare => self.device.count(count),
+                economy::search::SearchStage::Prepare
+                | economy::search::SearchStage::PrepareRepeat
+                | economy::search::SearchStage::PrepareCandidates => self.device.count(count),
+                economy::search::SearchStage::PrepareSelected => {
+                    markets::dispatch(&self.searches.dispatches, markets::PREPARATION_DISPATCH)
+                }
                 economy::search::SearchStage::Search => {
                     markets::dispatch(&self.searches.dispatches, markets::SEARCH_DISPATCH)
                 }
                 economy::search::SearchStage::Compact => {
                     markets::dispatch(&self.searches.dispatches, markets::SEARCH_COMPACT_DISPATCH)
                 }
-            };
-            let workgroup = match stage {
-                economy::search::SearchStage::Search => 32,
-                _ => self.device.workgroup,
             };
             economy::search::MarketSearch::launch(
                 &self.device,
@@ -1442,17 +1633,32 @@ impl Simulation {
                     scratch: self.scratch.clone().into_buffer_arg(),
                     control: self.control.clone().into_buffer_arg(),
                     parameters: parameters.launch(),
+                    status_reset: match (market, trace) {
+                        (Market::Input(_), _) => economy::search::StatusReset::Active,
+                        (_, Trace::Record) => economy::search::StatusReset::Full,
+                        (_, Trace::Discard) => economy::search::StatusReset::Active,
+                    },
                     stage,
                 },
             );
+            device_profile.end(&self.device, window, "SEARCH", stage);
+            if profile {
+                self.device
+                    .sync()
+                    .expect("search profiling synchronization");
+                eprintln!(
+                    "SEARCH {market:?} {} {stage:?} {:.3}",
+                    self.matching_round,
+                    started.elapsed().as_secs_f64() * 1000.0
+                );
+            }
         };
-        if let Market::Consumer(_) = market {
+        if matches!(market, Market::Consumer(_) | Market::Household) {
             search(economy::search::SearchStage::Index);
         }
         match market {
             Market::Labor | Market::Payroll | Market::Distribution => {
                 launch(EconomyStage::ProposeCompact, count, &parameters);
-                launch(EconomyStage::MarketBoundary, 1, &parameters);
                 parallel::scan(
                     &self.device,
                     &self.scratch,
@@ -1462,10 +1668,14 @@ impl Simulation {
                 launch(EconomyStage::GroupCompactFill, count, &parameters);
             }
             _ => {
-                search(economy::search::SearchStage::Prepare);
+                let stage = match (market, self.matching_round) {
+                    (Market::Input(_), 0) => economy::search::SearchStage::PrepareCandidates,
+                    (Market::Input(_), _) => economy::search::SearchStage::PrepareSelected,
+                    _ => economy::search::SearchStage::Prepare,
+                };
+                search(stage);
                 launch(EconomyStage::MarketBoundary, 1, &parameters);
                 search(economy::search::SearchStage::Search);
-                launch(EconomyStage::MarketBoundary, 1, &parameters);
                 parallel::scan(
                     &self.device,
                     &self.searches.successes,
@@ -1493,7 +1703,6 @@ impl Simulation {
         ) {
             launch(EconomyStage::GroupPrepare, count, &parameters);
         }
-        launch(EconomyStage::MarketBoundary, 1, &parameters);
         parameters.sort_source = self.market_sort.run(
             &self.device,
             &self.scratch,
@@ -1504,7 +1713,76 @@ impl Simulation {
         launch(EconomyStage::GroupRanges, count, &parameters);
         launch(EconomyStage::MarketBoundary, 1, &parameters);
         if regional_transport {
+            let started = Instant::now();
+            let window = device_profile.start(&self.device);
+            economy::railway::planning::launch(
+                &self.device,
+                &self.state,
+                &self.actors,
+                &self.config,
+                &self.proposals,
+                &self.scratch,
+                &self.control,
+                &self.searches.dispatches,
+                &parameters,
+                economy::railway::planning::PlanningStage::Prepare,
+            );
+            device_profile.end(
+                &self.device,
+                window,
+                "PLANNING",
+                economy::railway::planning::PlanningStage::Prepare,
+            );
+            if profile {
+                self.device
+                    .sync()
+                    .expect("planning profile synchronization");
+                eprintln!(
+                    "PLANNING {market:?} {} Prepare {:.3}",
+                    self.matching_round,
+                    started.elapsed().as_secs_f64() * 1000.0
+                );
+            }
+            if self.matching_round == 0 {
+                economy::railway::planning::profile_plan(
+                    &self.device,
+                    &self.config,
+                    &self.scratch,
+                    &self.control,
+                    &parameters,
+                )?;
+            }
             launch(EconomyStage::RailExecute, 1, &parameters);
+            let started = Instant::now();
+            let window = device_profile.start(&self.device);
+            economy::railway::planning::launch(
+                &self.device,
+                &self.state,
+                &self.actors,
+                &self.config,
+                &self.proposals,
+                &self.scratch,
+                &self.control,
+                &self.searches.dispatches,
+                &parameters,
+                economy::railway::planning::PlanningStage::Finish,
+            );
+            device_profile.end(
+                &self.device,
+                window,
+                "PLANNING",
+                economy::railway::planning::PlanningStage::Finish,
+            );
+            if profile {
+                self.device
+                    .sync()
+                    .expect("planning profile synchronization");
+                eprintln!(
+                    "PLANNING {market:?} {} Finish {:.3}",
+                    self.matching_round,
+                    started.elapsed().as_secs_f64() * 1000.0
+                );
+            }
         }
         match market {
             Market::Labor if self.scenario.config().bargaining.is_none() => {
@@ -1546,7 +1824,6 @@ impl Simulation {
         ) {
             launch(EconomyStage::GroupFinalize, count, &parameters);
         }
-        launch(EconomyStage::MarketBoundary, 1, &parameters);
         parameters.status_start = 4 * count as u32;
         if let (Market::Input(_) | Market::Consumer(_) | Market::Household, true) =
             (market, self.matching_round + 1 == MATCHING_ROUNDS)
@@ -1567,6 +1844,16 @@ impl Simulation {
                     .flatten(),
             );
         }
+        if self.day + 1 == profiling_day()
+            && std::env::var_os("BAD_ECON_PROFILE_SUBMISSION").is_some()
+        {
+            eprintln!(
+                "SUBMISSION {market:?} {} {:.3}",
+                self.matching_round,
+                submission_started.elapsed().as_secs_f64() * 1000.0
+            );
+        }
+        device_profile.resolve(market, self.matching_round);
         Ok(())
     }
     #[cfg(test)]
@@ -1823,6 +2110,12 @@ impl Simulation {
         Ok(())
     }
     pub fn observe(&mut self) -> Result<ObservationSnapshot> {
+        self.observe_rings(economy::audit::RingValidation::All)
+    }
+    fn observe_rings(
+        &mut self,
+        rings: economy::audit::RingValidation<'_>,
+    ) -> Result<ObservationSnapshot> {
         self.device.write(
             &self.control,
             bytemuck::cast_slice(&[ObservationControlLayout::zeroed()]),
@@ -1835,6 +2128,7 @@ impl Simulation {
             partials: &self.events,
             summary: &self.summary,
             control: &self.control,
+            rings,
         };
         #[cfg(test)]
         match self.audit_execution {
@@ -1998,11 +2292,25 @@ impl Simulation {
         })
     }
     fn copy_audited(&mut self, direction: CopyDirection) -> Result<()> {
-        let (source, target) = match direction {
-            CopyDirection::Save => (&self.state, &self.audited),
-            CopyDirection::Restore => (&self.audited, &self.state),
-        };
-        tensor::copy(&self.device, source, target);
+        let started = Instant::now();
+        if self.day == profiling_day() && std::env::var_os("BAD_ECON_PROFILE_STAGES").is_some() {
+            eprintln!(
+                "COPYSHAPE words={} modulo={}",
+                self.state.meta.num_elements(),
+                self.state.meta.num_elements() % 4
+            );
+            self.device.sync()?;
+            eprintln!("COPYWAIT {:.3}", started.elapsed().as_secs_f64() * 1000.0);
+        }
+        match direction {
+            CopyDirection::Save => {
+                self.snapshot_copy
+                    .save(&self.device, &self.state, &self.audited)
+            }
+            CopyDirection::Restore => {
+                tensor::copy_contiguous(&self.device, &self.audited, &self.state)
+            }
+        }
         if let Some(research) = &self.research {
             match direction {
                 CopyDirection::Save => research.save_audited(&self.device)?,
@@ -2011,7 +2319,15 @@ impl Simulation {
         }
         self.account_research_readbacks();
         self.demography.copy(&self.device, direction);
-        self.device.sync()
+        self.device.sync()?;
+        if self.day == profiling_day() && std::env::var_os("BAD_ECON_PROFILE_STAGES").is_some() {
+            eprintln!(
+                "AUDIT {} Copy {:.3}",
+                self.day,
+                started.elapsed().as_secs_f64() * 1000.0
+            );
+        }
+        Ok(())
     }
     pub fn advance(&mut self) -> Result<()> {
         match (&self.status, self.next_phase) {
@@ -2070,13 +2386,7 @@ impl Simulation {
         }
     }
     fn replace(&mut self, scenario: Scenario, state: State) -> Result<()> {
-        let device = Device {
-            client: self.device.client.clone(),
-            cube: self.device.cube.clone(),
-            name: self.device.name.clone(),
-            workgroup: self.device.workgroup,
-            memory_budget: self.device.memory_budget,
-        };
+        let device = self.device.clone();
         #[cfg(test)]
         let registry_execution = self.registry_execution;
         *self = Self::from_state(scenario, state, device)?;

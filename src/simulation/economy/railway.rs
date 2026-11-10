@@ -1,7 +1,17 @@
 use super::*;
-use crate::domain::railway::RailCapacityField;
+use crate::domain::railway::{
+    BUYER_CACHE_WORDS, CAPACITY_CACHE_WORDS, REQUEST_PATH_ENTRIES, REQUEST_PATH_WORDS,
+    REQUEST_PATH_WORDS_LIMIT, RailCapacityField, SETTLEMENT_PLAN_WORDS,
+};
 use crate::simulation::{Device, configuration::Configuration};
 use burn_wgpu::CubeTensor;
+
+mod paths;
+pub(in crate::simulation) mod planning;
+mod requests;
+mod settlement;
+
+use requests::{RegionField, RequestLists, RequestStorage};
 
 #[cfg(test)]
 mod tests;
@@ -9,15 +19,38 @@ mod tests;
 const COMPANY_WORDS: usize = 4;
 const SEGMENT_WORDS: usize = 7;
 const ROUTE_WORDS: usize = 6;
-const CAPACITY_WORDS: usize = 5;
+const CAPACITY_WORDS: usize = CAPACITY_CACHE_WORDS;
 const SELECTION_WORDS: usize = 4;
 const REJECTION_WORDS: usize = 7;
+const PREPARED_REQUEST_WORDS: usize = 3;
 const UNREACHABLE: u32 = u32::MAX / 4;
+
+#[derive(Clone, Copy)]
+#[repr(usize)]
+enum PreparedRequestWord {
+    Carrier,
+    Origin,
+    Destination,
+}
+
+#[derive(Clone, Copy)]
+#[repr(usize)]
+enum CapacityWord {
+    Epoch,
+    Available,
+    Demand = 3,
+    Terminal = 5,
+    StableDemand = 6,
+}
 
 #[derive(CubeType, CubeLaunch)]
 pub struct RailNetwork {
     #[cube(comptime)]
     pub enabled: Feature,
+    #[cube(comptime)]
+    pub request_storage: RequestStorage,
+    #[cube(comptime)]
+    pub path_cache: Feature,
     pub nodes: u32,
     pub company_count: u32,
     pub segment_count: u32,
@@ -44,6 +77,8 @@ pub struct RailNetwork {
 }
 
 pub struct Network {
+    request_storage: RequestStorage,
+    path_cache: Feature,
     nodes: u32,
     company_count: u32,
     segment_count: u32,
@@ -145,8 +180,25 @@ impl Network {
             carriers.extend(companies);
             offsets.push((stations.len() + 1 + carriers.len()) as u32);
         }
+        let request_storage =
+            RequestStorage::new(device, geography.regions.len(), config.companies.len());
+        let path_words = match request_storage {
+            RequestStorage::Global => 0,
+            RequestStorage::Shared | RequestStorage::Cached { .. } => carriers
+                .len()
+                .checked_mul(stations.len())
+                .and_then(|count| count.checked_mul(REQUEST_PATH_WORDS))
+                .filter(|words| *words <= REQUEST_PATH_WORDS_LIMIT)
+                .unwrap_or(0),
+        };
+        let request_storage = request_storage.cached(device, geography.regions.len(), path_words);
         offsets.extend(carriers);
         Self {
+            request_storage,
+            path_cache: match path_words {
+                0 => Feature::Disabled,
+                _ => Feature::Enabled,
+            },
             nodes: stations.len() as u32,
             company_count: config.companies.len() as u32,
             segment_count: config.segments.len() as u32,
@@ -159,7 +211,17 @@ impl Network {
                     .collect::<Vec<_>>(),
             ),
             access: device.empty(state.actors.len() * 2),
-            settlements: device.tensor(&vec![0; state.actors.len() * (REJECTION_WORDS + 1) + 1]),
+            settlements: device.tensor(&vec![
+                0;
+                state.actors.len()
+                    * (REJECTION_WORDS
+                        + 1
+                        + match config.companies.is_empty() {
+                            true => 0,
+                            false => BUYER_CACHE_WORDS + SETTLEMENT_PLAN_WORDS,
+                        })
+                    + 1
+            ]),
             companies: device.tensor(&companies),
             station_companies: device.tensor(&offsets),
             segments: device.tensor(&segments),
@@ -172,7 +234,9 @@ impl Network {
                     .collect::<Vec<_>>(),
             ),
             routes: device.empty(
-                (config.companies.len() * stations.len() * stations.len() * ROUTE_WORDS).max(1),
+                (config.companies.len() * stations.len() * stations.len() * ROUTE_WORDS
+                    + path_words)
+                    .max(1),
             ),
             quotes: device.empty((stations.len() * stations.len() * scenario.ring() * 2).max(1)),
             regions: device.tensor(
@@ -196,7 +260,12 @@ impl Network {
                         * scenario.ring()
                         * SELECTION_WORDS
             ]),
-            access_requests: device.tensor(&vec![0; 2 * config.companies.len() + 1]),
+            access_requests: device.tensor(&vec![
+                0;
+                2 * config.companies.len()
+                    + 1
+                    + PREPARED_REQUEST_WORDS
+            ]),
             region_count: geography.regions.len() as u32,
             region_base: (BASE_FIELDS + scenario.ring() * Good::COUNT) as u32,
             region_blocks: geography.blocks(scenario.actors()) as u32,
@@ -205,15 +274,39 @@ impl Network {
         }
     }
 
+    pub fn profile_capacity(&self, device: &Device, state: &CubeTensor, actors: usize) {
+        let row = self.region_base + RailCapacityField::Available as u32 * self.region_blocks;
+        let values = device
+            .read_range(
+                state,
+                row as usize * actors * 2,
+                self.region_count as usize * 2,
+            )
+            .expect("profile capacities");
+        let values = crate::simulation::decode(&values);
+        eprintln!(
+            "CAPACITIES nodes={} carriers={} regions={} positive={} total={}",
+            self.nodes,
+            self.company_count,
+            self.region_count,
+            values.iter().filter(|value| **value > 0).count(),
+            values.iter().sum::<u64>()
+        );
+    }
+
     #[cfg(test)]
     pub fn serial_settlements(&self, device: &Device) {
-        let mut settlements = vec![0; self.settlements.meta.num_elements()];
+        let mut settlements = device
+            .read(&self.settlements)
+            .expect("settlement classification");
         settlements[self.access.meta.num_elements() / 2] = Settlement::Serial as u32;
         device.write(&self.settlements, &settlements);
     }
 
     pub fn launch(&self) -> RailNetworkLaunch {
         RailNetworkLaunch {
+            request_storage: self.request_storage,
+            path_cache: self.path_cache,
             enabled: match self.company_count {
                 0 => Feature::Disabled,
                 _ => Feature::Enabled,
@@ -299,6 +392,9 @@ pub fn launch(
     stage: RailStage,
 ) {
     if config.railway.company_count > 0 {
+        if stage == RailStage::Quotes {
+            paths::launch(device, config);
+        }
         let count = match stage {
             RailStage::Infrastructure | RailStage::Close => config.railway.company_count,
             RailStage::Access => config.actors,
@@ -537,6 +633,9 @@ pub(super) fn demand(
     let mut wanted = zero();
     if comptime!(config.railway.enabled == Feature::Enabled)
         && kind(actors, firm).bits() == comptime!(Good::Railway as u32)
+        && (good == comptime!(Good::Coal as u32)
+            || good == comptime!(Good::Steel as u32)
+            || good == comptime!(Good::Locomotives as u32))
     {
         for company in 0..config.railway.company_count {
             if config.railway.companies[company as usize * COMPANY_WORDS] == firm {
@@ -598,6 +697,9 @@ pub(super) fn demand(
 fn routes(state: &mut [u32], config: &mut EconomyConfig) {
     let invocation = ABSOLUTE_POS as u32;
     let nodes = config.railway.nodes;
+    if invocation == 0 {
+        config.railway.access_requests[(2 * config.railway.company_count + 1) as usize].store(0);
+    }
     if invocation < nodes * config.railway.company_count {
         let origin = invocation % nodes;
         let carrier = invocation / nodes;
@@ -669,6 +771,7 @@ fn routes(state: &mut [u32], config: &mut EconomyConfig) {
         }
         for node in 0..nodes {
             let base = (row + node * ROUTE_WORDS as u32) as usize;
+            config.railway.routes[base + 4] = 0;
             if config.railway.routes[base + 2] < config.railway.company_count {
                 let fee = traverse(
                     &*config,
@@ -684,6 +787,13 @@ fn routes(state: &mut [u32], config: &mut EconomyConfig) {
                 );
                 config.railway.routes[base + 3] = fee;
             }
+            config.railway.routes[base] = max(
+                ceildiv(
+                    config.railway.routes[base],
+                    config.shipment_speed * config.railway.speed_multiplier,
+                ),
+                1,
+            );
         }
     }
 }
@@ -779,6 +889,78 @@ impl FreightRoute {
     }
 }
 
+#[derive(CubeType)]
+struct RouteContext {
+    animal_days: u32,
+    access_days: u32,
+    origin: u32,
+    destination: u32,
+}
+
+#[cube]
+impl RouteContext {
+    fn new(actors: &[u32], config: &EconomyConfig, buyer: u32, seller: u32) -> Self {
+        let animal = animal_route(actors, config, buyer, seller);
+        let mut context = RouteContext {
+            animal_days: animal.days,
+            access_days: 0,
+            origin: 0,
+            destination: 0,
+        };
+        if comptime!(config.railway.enabled == Feature::Enabled) && config.railway.nodes > 0 {
+            context.origin = config.railway.access[seller as usize * 2];
+            context.destination = config.railway.access[buyer as usize * 2];
+            context.access_days = ceildiv(
+                config.railway.access[seller as usize * 2 + 1]
+                    + config.railway.access[buyer as usize * 2 + 1],
+                config.shipment_speed,
+            );
+        }
+        context
+    }
+
+    fn animal(&self) -> FreightRoute {
+        FreightRoute {
+            days: self.animal_days,
+            fee: 0,
+            origin: 0,
+            destination: 0,
+            carrier: u32::MAX,
+            foreign_distance: u32::MAX,
+        }
+    }
+
+    fn limit(&self, config: &EconomyConfig) -> u32 {
+        min(
+            max(self.animal_days, self.access_days + 1) - self.access_days - 1,
+            config.ring - 1,
+        )
+    }
+
+    fn candidate(&self, config: &EconomyConfig, company: u32) -> FreightRoute {
+        let mut result = self.animal();
+        if comptime!(config.railway.enabled == Feature::Enabled)
+            && config.railway.nodes > 0
+            && company < config.railway.company_count
+        {
+            let base = (((company * config.railway.nodes + self.origin) * config.railway.nodes
+                + self.destination)
+                * ROUTE_WORDS as u32) as usize;
+            let carrier = config.railway.routes[base + 2];
+            let days = self.access_days + config.railway.routes[base];
+            let faster = carrier < config.railway.company_count && days < self.animal_days;
+            result.days = select(faster, days, self.animal_days);
+            result.fee = select(faster, config.railway.routes[base + 3], 0);
+            result.origin = self.origin;
+            result.destination = self.destination;
+            result.carrier = select(faster, carrier, u32::MAX);
+            result.foreign_distance = select(faster, config.railway.routes[base + 5], u32::MAX);
+        }
+        result
+    }
+}
+
+#[cfg(test)]
 #[cube]
 fn candidate(
     actors: &[u32],
@@ -787,37 +969,7 @@ fn candidate(
     seller: u32,
     company: u32,
 ) -> FreightRoute {
-    let mut result = animal_route(actors, config, buyer, seller);
-    if comptime!(config.railway.enabled == Feature::Enabled)
-        && config.railway.nodes > 0
-        && company < config.railway.company_count
-    {
-        let origin = config.railway.access[seller as usize * 2];
-        let destination = config.railway.access[buyer as usize * 2];
-        let base = (((company * config.railway.nodes + origin) * config.railway.nodes
-            + destination)
-            * ROUTE_WORDS as u32) as usize;
-        let rail_distance = config.railway.routes[base];
-        let carrier = config.railway.routes[base + 2];
-        let access = config.railway.access[seller as usize * 2 + 1]
-            + config.railway.access[buyer as usize * 2 + 1];
-        let days = ceildiv(access, config.shipment_speed)
-            + max(
-                ceildiv(
-                    rail_distance,
-                    config.shipment_speed * config.railway.speed_multiplier,
-                ),
-                1,
-            );
-        let faster = carrier < config.railway.company_count && days < result.days;
-        result.days = select(faster, days, result.days);
-        result.fee = select(faster, config.railway.routes[base + 3], 0);
-        result.origin = origin;
-        result.destination = destination;
-        result.carrier = select(faster, carrier, u32::MAX);
-        result.foreign_distance = select(faster, config.railway.routes[base + 5], u32::MAX);
-    }
-    result
+    RouteContext::new(actors, config, buyer, seller).candidate(config, company)
 }
 
 #[cube]
@@ -842,13 +994,7 @@ fn quotes(config: &mut EconomyConfig) {
             let company = config.railway.station_companies[entry as usize];
             let base = ((company * nodes * nodes + pair) * ROUTE_WORDS as u32) as usize;
             let path = FreightRoute {
-                days: max(
-                    ceildiv(
-                        config.railway.routes[base],
-                        config.shipment_speed * config.railway.speed_multiplier,
-                    ),
-                    1,
-                ),
+                days: config.railway.routes[base],
                 fee: config.railway.routes[base + 3],
                 origin: selected.origin,
                 destination: selected.destination,
@@ -888,13 +1034,35 @@ fn available_route(
     quantity: Ticks,
     preferred: &FreightRoute,
 ) -> FreightRoute {
-    let mut selected = animal_route(actors, config, buyer, seller);
-    let access = ceildiv(
-        config.railway.access[seller as usize * 2 + 1]
-            + config.railway.access[buyer as usize * 2 + 1],
-        config.shipment_speed,
-    );
-    let limit = min(max(selected.days, access + 1) - access - 1, config.ring - 1);
+    let mut requests = RequestLists::new(comptime!(RequestStorage::Global));
+    available_route_with_requests(
+        state,
+        actors,
+        config,
+        control,
+        buyer,
+        seller,
+        quantity,
+        preferred,
+        &mut requests,
+    )
+}
+
+#[cube]
+fn available_route_with_requests(
+    state: &mut [u32],
+    actors: &[u32],
+    config: &EconomyConfig,
+    control: &[Atomic<u32>],
+    buyer: u32,
+    seller: u32,
+    quantity: Ticks,
+    preferred: &FreightRoute,
+    requests: &mut RequestLists,
+) -> FreightRoute {
+    let context = RouteContext::new(actors, config, buyer, seller);
+    let mut selected = context.animal();
+    let limit = context.limit(config);
     let quote =
         (preferred.origin * config.railway.nodes + preferred.destination) * config.ring + limit;
     let maximum_fee = config.railway.quotes
@@ -911,35 +1079,63 @@ fn available_route(
     let prior_company = config.railway.requests[cache + 3].load();
     let exhausted = recorded > 0
         && prior_company >= config.railway.company_count
+        && quantity.extract(HIGH_WORD) == 0
         && !lt(quantity, prior_quantity);
     let current = recorded == epoch && equal(quantity, prior_quantity);
-    if funded && (current || exhausted) {
-        let path = candidate(actors, config, buyer, seller, prior_company);
+    if exhausted || funded && current {
+        let path = context.candidate(config, prior_company);
         selected.replace(&path);
     } else {
         let start = config.railway.station_companies[preferred.origin as usize];
         let end = config.railway.station_companies[preferred.origin as usize + 1];
+        let mut capacity_exhausted =
+            quantity.extract(HIGH_WORD) == 0 && quantity.extract(LOW_WORD) > 0;
+        let mut maximum_available = zero();
         for entry in start..end {
             let company = config.railway.station_companies[entry as usize];
-            let path = candidate(actors, config, buyer, seller, company);
+            let path = context.candidate(config, company);
             let affordable = !lt(cash, multiply(control, quantity, path.fee));
             if path.carrier < config.railway.company_count
                 && path.preferred_to(&selected)
-                && affordable
+                && (affordable || capacity_exhausted)
             {
-                if route_capacity(
+                let capacity = route_capacity_with_requests(
                     state,
                     config,
                     control,
                     &path,
                     quantity,
                     comptime!(DemandSignal::Ignore),
-                ) {
+                    requests,
+                );
+                maximum_available = maximum(maximum_available, capacity);
+                let available = !lt(capacity, quantity);
+                capacity_exhausted = capacity_exhausted && !available;
+                if affordable && available {
                     selected.replace(&path);
                 }
             }
         }
-        if funded {
+        if capacity_exhausted {
+            let threshold = ticks(maximum_available.extract(LOW_WORD) + 1, 0);
+            for stricter in 0..limit + 1 {
+                let destination = selection_cache(config, quote - limit + stricter);
+                let previous = ticks(
+                    config.railway.requests[destination + 1].load(),
+                    config.railway.requests[destination + 2].load(),
+                );
+                let improves = config.railway.requests[destination].load() == 0
+                    || config.railway.requests[destination + 3].load()
+                        < config.railway.company_count
+                    || lt(threshold, previous);
+                if improves {
+                    config.railway.requests[destination].store(epoch);
+                    config.railway.requests[destination + 1].store(threshold.extract(LOW_WORD));
+                    config.railway.requests[destination + 2].store(0);
+                    config.railway.requests[destination + 3].store(selected.carrier);
+                }
+            }
+        } else if funded {
             config.railway.requests[cache].store(epoch);
             config.railway.requests[cache + 1].store(quantity.extract(LOW_WORD));
             config.railway.requests[cache + 2].store(quantity.extract(HIGH_WORD));
@@ -956,19 +1152,15 @@ pub(super) fn route(
     buyer: u32,
     seller: u32,
 ) -> FreightRoute {
-    let mut result = animal_route(actors, config, buyer, seller);
+    let context = RouteContext::new(actors, config, buyer, seller);
+    let mut result = context.animal();
     if comptime!(config.railway.enabled == Feature::Enabled) && config.railway.nodes > 0 {
-        let origin = config.railway.access[seller as usize * 2];
-        let destination = config.railway.access[buyer as usize * 2];
-        let access = ceildiv(
-            config.railway.access[seller as usize * 2 + 1]
-                + config.railway.access[buyer as usize * 2 + 1],
-            config.shipment_speed,
-        );
-        let limit = min(max(result.days, access + 1) - access - 1, config.ring - 1);
-        let company = config.railway.quotes
-            [((origin * config.railway.nodes + destination) * config.ring + limit) as usize];
-        let path = candidate(actors, config, buyer, seller, company);
+        let limit = context.limit(config);
+        let company = config.railway.quotes[((context.origin * config.railway.nodes
+            + context.destination)
+            * config.ring
+            + limit) as usize];
+        let path = context.candidate(config, company);
         result.replace(&path);
     }
     result
@@ -976,10 +1168,13 @@ pub(super) fn route(
 
 #[cube]
 fn regional_cell(config: &EconomyConfig, region: u32, #[comptime] field: RailCapacityField) -> u32 {
-    let row = config.railway.region_base
-        + comptime!(field as u32) * config.railway.region_blocks
-        + region / config.railway.initial_actors;
-    row * config.actors + region % config.railway.initial_actors
+    let row = config.railway.region_base + comptime!(field as u32) * config.railway.region_blocks;
+    let mut cell = row * config.actors + region;
+    if region >= config.railway.initial_actors {
+        cell = (row + region / config.railway.initial_actors) * config.actors
+            + region % config.railway.initial_actors;
+    }
+    cell
 }
 
 #[cube]
@@ -1030,6 +1225,7 @@ fn access_fare(
     carrier: u32,
     regions: u32,
     #[comptime] traversal: Traversal,
+    requests: &mut RequestLists,
 ) -> u32 {
     let mut fee = 0;
     if owner < config.railway.company_count {
@@ -1038,11 +1234,11 @@ fn access_fare(
         let units = select(foreign, max(regions, 1), 0);
         fee = units * config.railway.companies[owner as usize * COMPANY_WORDS + 2];
         if comptime!(traversal == Traversal::Request) && units > 0 {
-            let previous = config.railway.access_requests[owner as usize].fetch_add(units);
+            let previous = requests.add_access(config, owner as usize, units);
             if previous == 0 {
                 let count = config.railway.company_count;
-                let index = config.railway.access_requests[(2 * count) as usize].fetch_add(1);
-                config.railway.access_requests[(count + index) as usize].store(owner);
+                let index = requests.add_access(config, (2 * count) as usize, 1);
+                requests.set_access(config, (count + index) as usize, owner);
             }
         }
     }
@@ -1050,17 +1246,28 @@ fn access_fare(
 }
 
 #[cube]
-fn request_region(config: &EconomyConfig, region: u32) {
-    let previous = config.railway.requests[region as usize].fetch_add(1);
+fn request_region(config: &EconomyConfig, region: u32, requests: &mut RequestLists) {
+    let previous = requests.add_region(config, region as usize, 1);
     if previous == 0 {
         let count = config.railway.region_count;
-        let index = config.railway.requests[(2 * count) as usize].fetch_add(1);
-        config.railway.requests[(count + index) as usize].store(region);
+        let index = requests.add_region(config, (2 * count) as usize, 1);
+        requests.set_region(config, (count + index) as usize, region);
     }
 }
 
 #[cube]
 fn traverse(config: &EconomyConfig, path: &FreightRoute, #[comptime] traversal: Traversal) -> u32 {
+    let mut requests = RequestLists::new(comptime!(RequestStorage::Global));
+    traverse_with_requests(config, path, comptime!(traversal), &mut requests)
+}
+
+#[cube]
+fn traverse_with_requests(
+    config: &EconomyConfig,
+    path: &FreightRoute,
+    #[comptime] traversal: Traversal,
+    requests: &mut RequestLists,
+) -> u32 {
     let mut cursor = path.destination;
     let mut previous = u32::new(comptime!(i64::from(u32::MAX)));
     let mut first = u32::new(comptime!(i64::from(u32::MAX)));
@@ -1088,6 +1295,7 @@ fn traverse(config: &EconomyConfig, path: &FreightRoute, #[comptime] traversal: 
                     path.carrier,
                     access_units,
                     comptime!(traversal),
+                    requests,
                 );
                 access_owner = owner;
                 access_region = u32::MAX;
@@ -1113,7 +1321,7 @@ fn traverse(config: &EconomyConfig, path: &FreightRoute, #[comptime] traversal: 
                 if entered {
                     fee += rate;
                     if comptime!(traversal == Traversal::Request) {
-                        request_region(config, pending);
+                        request_region(config, pending, requests);
                     }
                 }
                 pending = record;
@@ -1126,7 +1334,7 @@ fn traverse(config: &EconomyConfig, path: &FreightRoute, #[comptime] traversal: 
     if fee == 0 && first < config.railway.region_count {
         fee = rate;
         if comptime!(traversal == Traversal::Request) {
-            request_region(config, first);
+            request_region(config, first, requests);
         }
     }
     fee + toll
@@ -1136,6 +1344,7 @@ fn traverse(config: &EconomyConfig, path: &FreightRoute, #[comptime] traversal: 
             path.carrier,
             access_units,
             comptime!(traversal),
+            requests,
         )
 }
 
@@ -1201,25 +1410,43 @@ fn purchase(
     path: &FreightRoute,
     quantity: Ticks,
 ) {
+    let mut requests = RequestLists::new(comptime!(RequestStorage::Global));
+    purchase_with_requests(
+        state,
+        config,
+        control,
+        sender,
+        path,
+        quantity,
+        &mut requests,
+    );
+}
+
+#[cube]
+fn purchase_with_requests(
+    state: &mut [u32],
+    config: &EconomyConfig,
+    control: &[Atomic<u32>],
+    sender: u32,
+    path: &FreightRoute,
+    quantity: Ticks,
+    requests: &mut RequestLists,
+) {
     let mut total = zero();
-    let regions = config.railway.region_count;
-    for index in 0..config.railway.requests[(2 * regions) as usize].load() {
-        let record = config.railway.requests[(regions + index) as usize].load();
-        let visits = config.railway.requests[record as usize].load();
+    for index in 0..requests.region_count(config) {
+        let request = requests.region_entry(config, index);
+        let record = request.record;
+        let visits = request.visits;
         if visits > 0 {
-            let units = multiply(control, quantity, visits);
-            let stock = regional_value(
-                state,
-                config,
-                record,
-                comptime!(RailCapacityField::Available),
-            );
-            regional_set(
+            let units = repeated_quantity(control, quantity, visits);
+            let stock =
+                requests.capacity_value(state, config, record, comptime!(RegionField::Available));
+            requests.set_capacity_value(
                 state,
                 config,
                 record,
                 minus(stock, units),
-                comptime!(RailCapacityField::Available),
+                comptime!(RegionField::Available),
             );
             let owner = config.railway.regions[record as usize * 2];
             let firm = config.railway.companies[owner as usize * COMPANY_WORDS];
@@ -1242,11 +1469,10 @@ fn purchase(
             total = add_checked(control, total, units);
         }
     }
-    let companies = config.railway.company_count;
-    for index in 0..config.railway.access_requests[(2 * companies) as usize].load() {
-        let owner = config.railway.access_requests[(companies + index) as usize].load();
-        let accesses = config.railway.access_requests[owner as usize].load();
-        let units = multiply(control, quantity, accesses);
+    for index in 0..requests.access_count(config) {
+        let request = requests.access_entry(config, index);
+        let owner = request.owner;
+        let units = repeated_quantity(control, quantity, request.units);
         let toll = multiply(
             control,
             units,
@@ -1265,26 +1491,120 @@ fn purchase(
 }
 
 #[cube]
+fn repeated_quantity(control: &[Atomic<u32>], quantity: Ticks, count: u32) -> Ticks {
+    match count {
+        1 => quantity,
+        _ => multiply(control, quantity, count),
+    }
+}
+
+#[cube]
 fn prepare_request(config: &EconomyConfig, path: &FreightRoute) {
-    let regions = config.railway.region_count;
-    for index in 0..config.railway.requests[(2 * regions) as usize].load() {
-        let record = config.railway.requests[(regions + index) as usize].load();
-        config.railway.requests[record as usize].store(0);
-    }
-    config.railway.requests[(2 * regions) as usize].store(0);
+    let mut requests = RequestLists::new(comptime!(RequestStorage::Global));
+    prepare_request_with_lists(config, path, &mut requests);
+}
+
+#[cube]
+fn prepare_request_with_lists(
+    config: &EconomyConfig,
+    path: &FreightRoute,
+    requests: &mut RequestLists,
+) {
     let companies = config.railway.company_count;
-    for index in 0..config.railway.access_requests[(2 * companies) as usize].load() {
-        let company = config.railway.access_requests[(companies + index) as usize].load();
-        config.railway.access_requests[company as usize].store(0);
+    let prepared = requests.prepared_word(config, comptime!(PreparedRequestWord::Carrier))
+        == path.carrier + 1
+        && requests.prepared_word(config, comptime!(PreparedRequestWord::Origin)) == path.origin
+        && requests.prepared_word(config, comptime!(PreparedRequestWord::Destination))
+            == path.destination;
+    if !prepared {
+        let mut cached = requests.restore_cached_path(config, path);
+        if !cached {
+            requests.clear_path(config);
+            let regions = config.railway.region_count;
+            for index in 0..requests.region(config, (2 * regions) as usize) {
+                let record = requests.region(config, (regions + index) as usize);
+                requests.set_region(config, record as usize, 0);
+            }
+            requests.set_region(config, (2 * regions) as usize, 0);
+            for index in 0..requests.access(config, (2 * companies) as usize) {
+                let company = requests.access(config, (companies + index) as usize);
+                requests.set_access(config, company as usize, 0);
+            }
+            requests.set_access(config, (2 * companies) as usize, 0);
+            if comptime!(
+                config.railway.path_cache == Feature::Enabled
+                    && config.railway.request_storage != RequestStorage::Global
+            ) {
+                cached = paths::restore(config, path, requests);
+            }
+            if !cached {
+                traverse_with_requests(config, path, comptime!(Traversal::Request), requests);
+            }
+        }
+        requests.set_prepared_word(
+            config,
+            comptime!(PreparedRequestWord::Carrier),
+            path.carrier + 1,
+        );
+        requests.set_prepared_word(config, comptime!(PreparedRequestWord::Origin), path.origin);
+        requests.set_prepared_word(
+            config,
+            comptime!(PreparedRequestWord::Destination),
+            path.destination,
+        );
     }
-    config.railway.access_requests[(2 * companies) as usize].store(0);
-    traverse(config, path, comptime!(Traversal::Request));
 }
 
 #[derive(Clone, Copy)]
 enum DemandSignal {
     Record,
     Ignore,
+}
+
+#[derive(CubeType)]
+struct CapacitySnapshot {
+    available: Ticks,
+    terminal: u32,
+    stable_demand: u32,
+}
+
+#[cube]
+fn capacity_terminal(config: &EconomyConfig, index: usize, quantity: Ticks) -> bool {
+    config.railway.requests[index + comptime!(CapacityWord::Epoch as usize)].load() > 0
+        && quantity.extract(HIGH_WORD) == 0
+        && quantity.extract(LOW_WORD) > 0
+        && config.railway.requests[index + comptime!(CapacityWord::Terminal as usize)].load() > 0
+}
+
+#[cube]
+fn capacity_stable_demand_recorded(config: &EconomyConfig, index: usize, quantity: Ticks) -> bool {
+    config.railway.requests[index + comptime!(CapacityWord::Epoch as usize)].load() > 0
+        && quantity.extract(HIGH_WORD) == 0
+        && quantity.extract(LOW_WORD) > 0
+        && quantity.extract(LOW_WORD)
+            <= config.railway.requests[index + comptime!(CapacityWord::StableDemand as usize)]
+                .load()
+}
+
+#[cube]
+fn capacity_demand_recorded(
+    config: &EconomyConfig,
+    index: usize,
+    quantity: Ticks,
+    epoch: u32,
+) -> bool {
+    let recorded = config.railway.requests[index + comptime!(CapacityWord::Epoch as usize)].load();
+    let stable = recorded > 0
+        && quantity.extract(HIGH_WORD) == 0
+        && quantity.extract(LOW_WORD) > 0
+        && quantity.extract(LOW_WORD)
+            <= config.railway.requests[index + comptime!(CapacityWord::StableDemand as usize)]
+                .load();
+    let demand = ticks(
+        config.railway.requests[index + comptime!(CapacityWord::Demand as usize)].load(),
+        config.railway.requests[index + comptime!(CapacityWord::Demand as usize) + 1].load(),
+    );
+    recorded == epoch && !lt(demand, quantity) || stable
 }
 
 #[cube]
@@ -1294,42 +1614,95 @@ fn capacity(
     control: &[Atomic<u32>],
     quantity: Ticks,
     #[comptime] signal: DemandSignal,
-) -> Ticks {
+    requests: &mut RequestLists,
+) -> CapacitySnapshot {
     let mut available = ticks(u32::MAX, u32::MAX);
-    let regions = config.railway.region_count;
-    for index in 0..config.railway.requests[(2 * regions) as usize].load() {
-        let record = config.railway.requests[(regions + index) as usize].load();
-        let visits = config.railway.requests[record as usize].load();
+    let mut terminal = 1u32;
+    let mut stable_demand = ticks(u32::MAX, 0);
+    for index in 0..requests.region_count(config) {
+        let request = requests.region_entry(config, index);
+        let record = request.record;
+        let visits = request.visits;
         if visits > 0 {
-            let required = multiply(control, quantity, visits);
-            let stock = regional_value(
-                state,
-                config,
-                record,
-                comptime!(RailCapacityField::Available),
-            );
+            let required = repeated_quantity(control, quantity, visits);
+            let stock =
+                requests.capacity_value(state, config, record, comptime!(RegionField::Available));
+            terminal &= u32::cast_from(equal(stock, zero()));
             if comptime!(matches!(signal, DemandSignal::Record)) {
-                let level =
-                    regional_number(state, config, record, comptime!(RailCapacityField::Level));
-                let used = minus(times32(level, config.railway.units_per_level), stock);
+                let level = requests.capacity_level(state, config, record);
+                let total = times32(level, config.railway.units_per_level);
+                let used = minus(total, stock);
                 let wanted = maximum(
-                    regional_value(state, config, record, comptime!(RailCapacityField::Demand)),
+                    requests.capacity_value(state, config, record, comptime!(RegionField::Demand)),
                     add_checked(control, used, required),
                 );
-                regional_set(
+                requests.set_capacity_value(
                     state,
                     config,
                     record,
                     wanted,
-                    comptime!(RailCapacityField::Demand),
+                    comptime!(RegionField::Demand),
                 );
+                let bound = divide(positive(wanted, total), visits);
+                stable_demand = minimum(stable_demand, select(lt(total, stock), zero(), bound));
             }
             available = minimum(available, divide(stock, visits));
         }
     }
-    available
+    CapacitySnapshot {
+        available,
+        terminal,
+        stable_demand: match comptime!(signal) {
+            DemandSignal::Record => stable_demand.extract(LOW_WORD),
+            DemandSignal::Ignore => 0,
+        },
+    }
 }
 
+#[cube]
+fn capacity_cache_index(config: &EconomyConfig, path: &FreightRoute) -> usize {
+    (2 * config.railway.region_count + 2) as usize
+        + ((path.carrier * config.railway.nodes + path.origin) * config.railway.nodes
+            + path.destination) as usize
+            * CAPACITY_WORDS
+}
+
+#[cube]
+fn record_route_demand(
+    state: &mut [u32],
+    config: &EconomyConfig,
+    control: &[Atomic<u32>],
+    path: &FreightRoute,
+    quantity: Ticks,
+) {
+    let mut requests = RequestLists::new(comptime!(RequestStorage::Global));
+    record_route_demand_with_requests(state, config, control, path, quantity, &mut requests);
+}
+
+#[cube]
+fn record_route_demand_with_requests(
+    state: &mut [u32],
+    config: &EconomyConfig,
+    control: &[Atomic<u32>],
+    path: &FreightRoute,
+    quantity: Ticks,
+    requests: &mut RequestLists,
+) {
+    let epoch = config.railway.requests[(2 * config.railway.region_count + 1) as usize].load();
+    if !capacity_demand_recorded(config, capacity_cache_index(config, path), quantity, epoch) {
+        route_capacity_with_requests(
+            state,
+            config,
+            control,
+            path,
+            quantity,
+            comptime!(DemandSignal::Record),
+            requests,
+        );
+    }
+}
+
+#[cfg(test)]
 #[cube]
 fn route_capacity(
     state: &mut [u32],
@@ -1338,37 +1711,85 @@ fn route_capacity(
     path: &FreightRoute,
     quantity: Ticks,
     #[comptime] signal: DemandSignal,
-) -> bool {
+) -> Ticks {
+    let mut requests = RequestLists::new(comptime!(RequestStorage::Global));
+    route_capacity_with_requests(
+        state,
+        config,
+        control,
+        path,
+        quantity,
+        comptime!(signal),
+        &mut requests,
+    )
+}
+
+#[cube]
+fn route_capacity_with_requests(
+    state: &mut [u32],
+    config: &EconomyConfig,
+    control: &[Atomic<u32>],
+    path: &FreightRoute,
+    quantity: Ticks,
+    #[comptime] signal: DemandSignal,
+    requests: &mut RequestLists,
+) -> Ticks {
     let base = (2 * config.railway.region_count + 1) as usize;
-    let index = base
-        + 1
-        + ((path.carrier * config.railway.nodes + path.origin) * config.railway.nodes
-            + path.destination) as usize
-            * CAPACITY_WORDS;
+    let index = capacity_cache_index(config, path);
     let epoch = config.railway.requests[base].load();
-    let current = config.railway.requests[index].load() == epoch;
-    let previous = ticks(
-        config.railway.requests[index + 3].load(),
-        config.railway.requests[index + 4].load(),
+    let recorded = config.railway.requests[index + comptime!(CapacityWord::Epoch as usize)].load();
+    let terminal = capacity_terminal(config, index, quantity);
+    let current = recorded == epoch || terminal;
+    let mut available = ticks(
+        config.railway.requests[index + comptime!(CapacityWord::Available as usize)].load(),
+        config.railway.requests[index + comptime!(CapacityWord::Available as usize) + 1].load(),
     );
-    if !current || comptime!(matches!(signal, DemandSignal::Record)) && lt(previous, quantity) {
-        prepare_request(config, path);
-        let available = capacity(state, config, control, quantity, comptime!(signal));
+    let previous = ticks(
+        config.railway.requests[index + comptime!(CapacityWord::Demand as usize)].load(),
+        config.railway.requests[index + comptime!(CapacityWord::Demand as usize) + 1].load(),
+    );
+    let exhausted = comptime!(matches!(signal, DemandSignal::Ignore))
+        && recorded > 0
+        && quantity.extract(HIGH_WORD) == 0
+        && quantity.extract(LOW_WORD) > 0
+        && lt(available, quantity);
+    if !current && !exhausted
+        || comptime!(matches!(signal, DemandSignal::Record)) && lt(previous, quantity)
+    {
+        prepare_request_with_lists(config, path, requests);
+        let snapshot = capacity(
+            state,
+            config,
+            control,
+            quantity,
+            comptime!(signal),
+            requests,
+        );
+        available = snapshot.available;
+        let stable_demand = select(
+            recorded > 0,
+            config.railway.requests[index + comptime!(CapacityWord::StableDemand as usize)].load(),
+            0,
+        );
         let mut demand = select(current, previous, zero());
         if comptime!(matches!(signal, DemandSignal::Record)) {
             demand = maximum(demand, quantity);
         }
-        config.railway.requests[index].store(epoch);
-        config.railway.requests[index + 1].store(available.extract(LOW_WORD));
-        config.railway.requests[index + 2].store(available.extract(HIGH_WORD));
-        config.railway.requests[index + 3].store(demand.extract(LOW_WORD));
-        config.railway.requests[index + 4].store(demand.extract(HIGH_WORD));
+        config.railway.requests[index + comptime!(CapacityWord::Epoch as usize)].store(epoch);
+        config.railway.requests[index + comptime!(CapacityWord::Available as usize)]
+            .store(available.extract(LOW_WORD));
+        config.railway.requests[index + comptime!(CapacityWord::Available as usize) + 1]
+            .store(available.extract(HIGH_WORD));
+        config.railway.requests[index + comptime!(CapacityWord::Demand as usize)]
+            .store(demand.extract(LOW_WORD));
+        config.railway.requests[index + comptime!(CapacityWord::Demand as usize) + 1]
+            .store(demand.extract(HIGH_WORD));
+        config.railway.requests[index + comptime!(CapacityWord::Terminal as usize)]
+            .store(snapshot.terminal);
+        config.railway.requests[index + comptime!(CapacityWord::StableDemand as usize)]
+            .store(max(stable_demand, snapshot.stable_demand));
     }
-    let available = ticks(
-        config.railway.requests[index + 1].load(),
-        config.railway.requests[index + 2].load(),
-    );
-    !lt(available, quantity)
+    available
 }
 
 #[derive(Clone, Copy)]
@@ -1377,6 +1798,7 @@ enum Settlement {
     Absent,
     Parallel,
     Serial,
+    Dependent,
     Unbatched,
 }
 
@@ -1415,6 +1837,16 @@ pub(super) fn classify(
             proposals[buyer as usize * ProposalLayout::WORDS + ProposalLayout::QUANTITY_LOW],
             proposals[buyer as usize * ProposalLayout::WORDS + ProposalLayout::QUANTITY_HIGH],
         );
+        if quantity.extract(HIGH_WORD) == 0 && quantity.extract(LOW_WORD) > 0 {
+            settlement::prepare_buyer(state, actors, config, parameters, buyer, seller, quantity);
+            let unsupported = planning::cache_candidate(
+                state, actors, config, parameters, buyer, seller, quantity, &path,
+            );
+            if unsupported > 0 {
+                config.railway.settlements[seller as usize]
+                    .fetch_max(comptime!(Settlement::Unbatched as u32));
+            }
+        }
         let settlement = select(
             path.carrier < config.railway.company_count && !lt(available, quantity),
             comptime!(Settlement::Serial as u32),
@@ -1427,9 +1859,10 @@ pub(super) fn classify(
         }
         if kind(actors, buyer).bits() == comptime!(Good::Railway as u32)
             || kind(actors, seller).bits() == comptime!(Good::Railway as u32)
+            || buyer == seller
         {
             config.railway.settlements[seller as usize]
-                .fetch_max(comptime!(Settlement::Serial as u32));
+                .fetch_max(comptime!(Settlement::Unbatched as u32));
         }
     }
 }
@@ -1450,9 +1883,9 @@ pub(super) fn dependencies(
         {
             let seller = proposals[buyer as usize * ProposalLayout::WORDS + ProposalLayout::ACTOR];
             config.railway.settlements[buyer as usize]
-                .fetch_max(comptime!(Settlement::Serial as u32));
+                .fetch_max(comptime!(Settlement::Dependent as u32));
             config.railway.settlements[seller as usize]
-                .fetch_max(comptime!(Settlement::Serial as u32));
+                .fetch_max(comptime!(Settlement::Dependent as u32));
         }
     }
 }
@@ -1467,10 +1900,8 @@ pub(super) fn parallel_settlement(
     if comptime!(config.railway.enabled == Feature::Enabled && parameters.market.good().is_some())
         && seller < config.actors
     {
-        parallel = config.railway.settlements[config.actors as usize].load()
-            != comptime!(Settlement::Serial as u32)
-            && config.railway.settlements[seller as usize].load()
-                < comptime!(Settlement::Serial as u32);
+        parallel = config.railway.settlements[seller as usize].load()
+            < comptime!(Settlement::Serial as u32);
     }
     parallel
 }
@@ -1517,10 +1948,7 @@ pub(super) fn finalize_rejection(
     index: u32,
 ) {
     let base = rejection_record(config, seller);
-    if config.railway.settlements[config.actors as usize].load()
-        != comptime!(Settlement::Serial as u32)
-        && index >= config.railway.settlements[base].load()
-    {
+    if index >= config.railway.settlements[base].load() {
         let quantity = ticks(
             proposals[buyer as usize * ProposalLayout::WORDS + ProposalLayout::QUANTITY_LOW],
             proposals[buyer as usize * ProposalLayout::WORDS + ProposalLayout::QUANTITY_HIGH],
@@ -1583,6 +2011,82 @@ pub(super) fn finalize_rejection(
 }
 
 #[derive(CubeType)]
+struct GoodsSeller {
+    cash: Ticks,
+    stock: Ticks,
+    sales: Ticks,
+    reserve: Ticks,
+    capacity: Ticks,
+    model: u32,
+    quote: u32,
+}
+
+#[cube]
+impl GoodsSeller {
+    fn empty() -> Self {
+        GoodsSeller {
+            cash: zero(),
+            stock: zero(),
+            sales: zero(),
+            reserve: zero(),
+            capacity: zero(),
+            model: 0,
+            quote: 0,
+        }
+    }
+
+    fn new(
+        state: &mut [u32],
+        actors: &[u32],
+        config: &EconomyConfig,
+        parameters: &EconomyParameters,
+        seller: u32,
+    ) -> Self {
+        let good = comptime!(parameters.market.good().expect("goods market") as u32);
+        GoodsSeller {
+            cash: value(state, config, comptime!(Field::Cash as u32), seller),
+            stock: value(state, config, good, seller),
+            sales: value(state, config, comptime!(Field::Sales as u32), seller),
+            reserve: household_production::reserve(state, actors, config, seller, good),
+            capacity: value(state, config, comptime!(Field::RetailOpen as u32), seller),
+            model: number(
+                state,
+                config,
+                comptime!(Field::EnterpriseModel as u32),
+                seller,
+            ),
+            quote: number(state, config, comptime!(Field::Price as u32), seller),
+        }
+    }
+
+    fn replace(&mut self, other: &GoodsSeller) {
+        self.cash = other.cash;
+        self.stock = other.stock;
+        self.sales = other.sales;
+        self.reserve = other.reserve;
+        self.capacity = other.capacity;
+        self.model = other.model;
+        self.quote = other.quote;
+    }
+
+    fn reserved(&self) -> Ticks {
+        select(
+            self.model == 1,
+            positive(self.stock, positive(self.capacity, self.sales)),
+            self.reserve,
+        )
+    }
+
+    fn apply(&mut self, settlement: &GoodsSettlement) {
+        if settlement.status.contains(comptime!(EventStatus::Accepted)) {
+            self.cash = settlement.seller_cash;
+            self.stock = settlement.stock;
+            self.sales = settlement.sales;
+        }
+    }
+}
+
+#[derive(CubeType)]
 struct GoodsSettlement {
     buyer_cash: Ticks,
     seller_cash: Ticks,
@@ -1598,6 +2102,7 @@ struct GoodsSettlement {
 
 #[cube]
 impl GoodsSettlement {
+    #[cfg(test)]
     fn new(
         state: &mut [u32],
         actors: &[u32],
@@ -1608,70 +2113,69 @@ impl GoodsSettlement {
         seller: u32,
         quantity: Ticks,
     ) -> Self {
-        let good = comptime!(parameters.market.good().expect("goods market") as u32);
-        let cost = multiply(
+        let balances = GoodsSeller::new(state, actors, config, parameters, seller);
+        Self::from_seller(
+            state, actors, config, control, parameters, buyer, seller, quantity, &balances,
+        )
+    }
+
+    fn from_seller(
+        state: &mut [u32],
+        actors: &[u32],
+        config: &EconomyConfig,
+        control: &[Atomic<u32>],
+        parameters: &EconomyParameters,
+        buyer: u32,
+        seller: u32,
+        quantity: Ticks,
+        balances: &GoodsSeller,
+    ) -> Self {
+        let prepared = settlement::GoodsBuyer::new(
+            state,
+            actors,
+            config,
             control,
+            parameters,
+            buyer,
+            seller,
             quantity,
-            number(state, config, comptime!(Field::Price as u32), seller),
+            balances.quote,
         );
-        let cash = value(state, config, comptime!(Field::Cash as u32), buyer);
-        let seller_cash = plus(
-            value(state, config, comptime!(Field::Cash as u32), seller),
-            cost,
-        );
-        let stock = value(state, config, good, seller);
-        let required = add_checked(
-            control,
-            household_production::reserve(state, actors, config, seller, good),
-            quantity,
-        );
-        let path = animal_route(actors, config, buyer, seller);
-        let arrival_field = BASE_FIELDS as u32
-            + (good - 1) * config.ring
-            + (parameters.day + path.days) % config.ring;
-        let arrival = plus(value(state, config, arrival_field, buyer), quantity);
-        let transit_good = plus(
-            value(state, config, TRANSIT_FIELDS as u32 + good - 1, buyer),
-            quantity,
-        );
-        let transit = plus(
-            value(state, config, comptime!(Field::Transit as u32), buyer),
-            quantity,
-        );
-        let sales = plus(
-            value(state, config, comptime!(Field::Sales as u32), seller),
-            quantity,
-        );
-        let purchased = plus(
-            value(state, config, comptime!(Field::Purchased as u32), buyer),
-            quantity,
-        );
-        let valid = !lt(cash, cost) && !lt(stock, quantity) && !lt(stock, required);
-        let faults = seller_cash
-            .faults
-            .union(arrival.faults)
-            .union(transit_good.faults)
-            .union(transit.faults)
-            .union(sales.faults)
-            .union(purchased.faults);
+        Self::from_buyer(control, &prepared, balances)
+    }
+
+    fn from_buyer(
+        control: &[Atomic<u32>],
+        buyer: &settlement::GoodsBuyer,
+        balances: &GoodsSeller,
+    ) -> Self {
+        let quantity = buyer.quantity;
+        let seller_cash = plus(balances.cash, buyer.cost);
+        let stock = balances.stock;
+        let required = add_checked(control, balances.reserved(), quantity);
+        let sales = plus(balances.sales, quantity);
+        let valid = buyer.status.contains(comptime!(EventStatus::Accepted))
+            && !lt(stock, quantity)
+            && !lt(stock, required);
+        let faults = seller_cash.faults.union(sales.faults);
         let mut status = KernelEventStatus::new(comptime!(EventStatus::Rejected));
         if valid {
             status.set(comptime!(EventStatus::Accepted));
         }
-        if !faults.is_empty() {
+        if !faults.is_empty() || buyer.status.contains(comptime!(EventStatus::Faulted)) {
             status.set(comptime!(EventStatus::Faulted));
             faults.record(control);
         }
         GoodsSettlement {
-            buyer_cash: minus(cash, cost),
+            buyer_cash: minus(buyer.cash, buyer.cost),
             seller_cash: seller_cash.value,
             stock: minus(stock, quantity),
-            arrival: arrival.value,
-            transit_good: transit_good.value,
-            transit: transit.value,
+            arrival: buyer.arrival,
+            transit_good: buyer.transit_good,
+            transit: buyer.transit,
             sales: sales.value,
-            purchased: purchased.value,
-            arrival_field,
+            purchased: buyer.purchased,
+            arrival_field: buyer.arrival_field,
             status,
         }
     }
@@ -1707,6 +2211,45 @@ impl GoodsSettlement {
         buyer: u32,
         seller: u32,
     ) {
+        self.apply_buyer(state, config, parameters, buyer, seller);
+        self.apply_seller(state, config, parameters, seller);
+    }
+
+    fn apply_seller(
+        &self,
+        state: &mut [u32],
+        config: &EconomyConfig,
+        parameters: &EconomyParameters,
+        seller: u32,
+    ) {
+        if self.status.contains(comptime!(EventStatus::Accepted)) {
+            let good = comptime!(parameters.market.good().expect("goods market") as u32);
+            set(
+                state,
+                config,
+                comptime!(Field::Cash as u32),
+                seller,
+                self.seller_cash,
+            );
+            set(
+                state,
+                config,
+                comptime!(Field::Sales as u32),
+                seller,
+                self.sales,
+            );
+            set(state, config, good, seller, self.stock);
+        }
+    }
+
+    fn apply_buyer(
+        &self,
+        state: &mut [u32],
+        config: &EconomyConfig,
+        parameters: &EconomyParameters,
+        buyer: u32,
+        seller: u32,
+    ) {
         if self.status.contains(comptime!(EventStatus::Accepted)) {
             let good = comptime!(parameters.market.good().expect("goods market") as u32);
             set(
@@ -1716,14 +2259,6 @@ impl GoodsSettlement {
                 buyer,
                 self.buyer_cash,
             );
-            set(
-                state,
-                config,
-                comptime!(Field::Cash as u32),
-                seller,
-                self.seller_cash,
-            );
-            set(state, config, good, seller, self.stock);
             set(state, config, self.arrival_field, buyer, self.arrival);
             set(
                 state,
@@ -1738,13 +2273,6 @@ impl GoodsSettlement {
                 comptime!(Field::Transit as u32),
                 buyer,
                 self.transit,
-            );
-            set(
-                state,
-                config,
-                comptime!(Field::Sales as u32),
-                seller,
-                self.sales,
             );
             set(
                 state,
@@ -1799,21 +2327,45 @@ pub(super) fn dispatch(
     scratch: &mut [u32],
     control: &[Atomic<u32>],
     parameters: &EconomyParameters,
+    _id: u32,
+) {
+    settlement::dispatch(
+        state, actors, config, proposals, scratch, control, parameters,
+    );
+}
+
+#[cube]
+fn serial_dispatch(
+    state: &mut [u32],
+    actors: &[u32],
+    config: &EconomyConfig,
+    proposals: &mut [u32],
+    scratch: &mut [u32],
+    control: &[Atomic<u32>],
+    parameters: &EconomyParameters,
     id: u32,
+    start: u32,
+    end: u32,
 ) {
     if id == 0 {
         let count = parameters.count;
         let active = markets::active(control, parameters);
-        let mut index = 0;
+        let mut index = start;
         let mut completed = 0;
-        while index < active {
+        let mut cached_seller = u32::new(comptime!(i64::from(u32::MAX)));
+        let mut balances = GoodsSeller::empty();
+        while index < end {
             let seller = scratch[(parameters.sort_source + index) as usize];
             if parallel_settlement(config, parameters, seller) {
                 index = scratch[(7 * count + seller) as usize];
             } else {
-                let good = comptime!(parameters.market.good().expect("goods market") as u32);
-                let reserve = household_production::reserve(state, actors, config, seller, good);
-                let exhausted = !lt(reserve, value(state, config, good, seller))
+                if cached_seller != seller {
+                    let current = GoodsSeller::new(state, actors, config, parameters, seller);
+                    balances.replace(&current);
+                    cached_seller = seller;
+                }
+                let reserve = balances.reserved();
+                let exhausted = !lt(reserve, balances.stock)
                     && reserve.extract(HIGH_WORD) == 0
                     && config.railway.settlements[seller as usize].load()
                         != comptime!(Settlement::Unbatched as u32)
@@ -1836,20 +2388,14 @@ pub(super) fn dispatch(
                             + ProposalLayout::QUANTITY_HIGH],
                     );
                     let mut selected = animal_route(actors, config, buyer, seller);
-                    let mut settlement = GoodsSettlement::new(
+                    let mut settlement = GoodsSettlement::from_seller(
                         state, actors, config, control, parameters, buyer, seller, quantity,
+                        &balances,
                     );
                     if settlement.status.contains(comptime!(EventStatus::Accepted)) {
                         let preferred = route(actors, config, buyer, seller);
                         if preferred.carrier < config.railway.company_count {
-                            route_capacity(
-                                state,
-                                config,
-                                control,
-                                &preferred,
-                                quantity,
-                                comptime!(DemandSignal::Record),
-                            );
+                            record_route_demand(state, config, control, &preferred, quantity);
                             let path = available_route(
                                 state, actors, config, control, buyer, seller, quantity, &preferred,
                             );
@@ -1857,14 +2403,7 @@ pub(super) fn dispatch(
                         }
                     }
                     if selected.carrier < config.railway.company_count {
-                        route_capacity(
-                            state,
-                            config,
-                            control,
-                            &selected,
-                            quantity,
-                            comptime!(DemandSignal::Record),
-                        );
+                        record_route_demand(state, config, control, &selected, quantity);
                         prepare_request(config, &selected);
                         settlement.reroute(
                             state, config, control, parameters, buyer, quantity, &selected,
@@ -1875,6 +2414,10 @@ pub(super) fn dispatch(
                         && settlement.status.contains(comptime!(EventStatus::Accepted))
                     {
                         purchase(state, config, control, seller, &selected, quantity);
+                    }
+                    balances.apply(&settlement);
+                    if kind(actors, seller).bits() == comptime!(Good::Railway as u32) {
+                        cached_seller = u32::MAX;
                     }
                     settlement.status.store(scratch, 4 * count + id);
                     index += 1;

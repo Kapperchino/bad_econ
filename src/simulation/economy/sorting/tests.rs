@@ -20,7 +20,7 @@ impl SortBuffers {
             control: device.empty(CONTROL_WORDS + 3),
             dispatches: device
                 .client
-                .memory_dedicated_allocation(132, |_| device.empty(33)),
+                .memory_dedicated_allocation(144, |_| device.empty(36)),
         }
     }
 
@@ -36,12 +36,16 @@ impl SortBuffers {
         let mut control = vec![0; CONTROL_WORDS + 3];
         control[CONSTRUCTED_EVENTS_WORD] = case.active as u32;
         control[FAULT_WORD] = match case.fault {
-            Fault::Clear => 0,
+            Fault::Clear | Fault::Pending => 0,
             Fault::Latched => 1,
         };
         device.write(&self.scratch, &words);
         device.write(&self.control, &control);
         markets::prepare_dispatch(device, &self.control, &self.dispatches, case.capacity);
+        if let Fault::Pending = case.fault {
+            control[FAULT_WORD] = 1;
+            device.write(&self.control, &control);
+        }
         words
     }
 }
@@ -50,6 +54,7 @@ impl SortBuffers {
 enum Fault {
     Clear,
     Latched,
+    Pending,
 }
 
 struct SortCase {
@@ -115,7 +120,7 @@ impl SortCase {
                     expected_items
                 );
             }
-            Fault::Latched => assert_eq!(actual, input),
+            Fault::Latched | Fault::Pending => assert_eq!(actual, input),
         }
         Ok(())
     }
@@ -139,13 +144,17 @@ fn graph_sort_preserves_first_use_replay_dynamic_counts_and_faults_on_gpu() -> R
                 }
                 .check(&device, &mut cache, &actual, &expected)?;
             }
-            SortCase {
-                capacity,
-                active: 257,
-                scan,
-                fault: Fault::Latched,
+            for fault in [Fault::Latched, Fault::Pending] {
+                for active in [0, 257] {
+                    SortCase {
+                        capacity,
+                        active,
+                        scan,
+                        fault,
+                    }
+                    .check(&device, &mut cache, &actual, &expected)?;
+                }
             }
-            .check(&device, &mut cache, &actual, &expected)?;
         }
     }
     Ok(())
