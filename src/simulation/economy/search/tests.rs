@@ -257,11 +257,13 @@ impl SearchProbe {
         );
         let mut searches = vec![0; count * 5];
         let coverage = match parameters.market {
-            MarketFlag::Input(Good::Grain) => simulation.config.coverage + simulation.config.ring,
+            MarketFlag::Input(_) if parameters.good == Good::Grain as u32 => {
+                simulation.config.coverage + simulation.config.ring
+            }
             _ => simulation.config.coverage + simulation.config.ring - 1,
         };
         searches[count] = match parameters.market {
-            MarketFlag::Consumer(_) => 1,
+            MarketFlag::Consumer => 1,
             _ => (self.state.get(Field::FoodNeed, 0) * u64::from(coverage)) as u32,
         };
         searches[3 * count] = self.state.get(Field::Cash, 0) as u32;
@@ -276,7 +278,7 @@ impl SearchProbe {
         );
         if matches!(
             parameters.market,
-            MarketFlag::Consumer(_) | MarketFlag::Household
+            MarketFlag::Consumer | MarketFlag::Household
         ) {
             MarketSearch::launch(
                 device,
@@ -356,7 +358,7 @@ impl SearchProbe {
 fn inactive_household_input_preparation_preserves_inventory_faults_on_gpu() -> Result<()> {
     for good in Good::ALL {
         let mut probe = SearchProbe::new(SupplyCase::Capped, 0, Market::Input(Good::Linen))?;
-        probe.parameters.market = MarketFlag::Input(good);
+        probe.parameters.good = good as u32;
         probe.state.set(Field::LivingMembers, 0, 0);
         for inventory in [0, u64::MAX] {
             probe.state.set(Field::inventory(good), 0, inventory);
@@ -388,7 +390,7 @@ fn repeat_input_preparation_preserves_inactive_inventory_and_demand_faults_on_gp
         Good::Linen,
     ] {
         let mut probe = SearchProbe::new(SupplyCase::Capped, 0, Market::Input(Good::Linen))?;
-        probe.parameters.market = MarketFlag::Input(good);
+        probe.parameters.good = good as u32;
         probe.state.set(Field::LivingMembers, 0, 0);
         probe.state.set(Field::inventory(good), 0, 100);
         let transit = TRANSIT_FIELDS + good as usize - 1;
@@ -894,7 +896,7 @@ fn sparse_input_preparation_preserves_stable_eligibility_and_all_round_requests_
             };
             for probe in [&mut dense, &mut sparse] {
                 probe.simulation.device.workgroup = workgroup;
-                probe.parameters.market = MarketFlag::Input(good);
+                probe.parameters.good = good as u32;
                 probe.state.set(Field::Cash, 0, 0);
                 match case {
                     PreparationEligibility::InactiveSeller => {

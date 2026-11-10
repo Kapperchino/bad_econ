@@ -79,24 +79,25 @@ fn prepare(
         let seen_supply = false;
         let missing_supply = false;
         let household_demand = match comptime!(parameters.market) {
-            MarketFlag::Input(Good::Grain) => u32::cast_from(
-                comptime!(config.home_mode == Feature::Enabled)
+            MarketFlag::Input(_) => {
+                let grain = parameters.traded_good() == Good::Grain as u32
+                    && comptime!(config.home_mode == Feature::Enabled)
                     && (comptime!(config.economy == crate::domain::Economy::Agrarian)
                         || number(state, config, comptime!(Field::LandPlots as u32), id) > 0)
-                    && number(state, config, comptime!(Field::LivingMembers as u32), id) > 0,
-            ),
-            MarketFlag::Input(Good::Tools | Good::Wood) => u32::cast_from(
-                comptime!(
-                    config.home_mode == Feature::Enabled
-                        && config.property_mode == Feature::Disabled
-                ) && number(state, config, comptime!(Field::InvestmentGood as u32), id) > 0
-                    && number(state, config, comptime!(Field::LivingMembers as u32), id) > 0,
-            ),
-            MarketFlag::Input(Good::Construction) => u32::cast_from(
-                number(state, config, comptime!(Field::ProjectStatus as u32), id)
-                    == comptime!(crate::domain::property::ProjectStatus::Building as u32),
-            ),
-            MarketFlag::Input(_) => u32::new(0),
+                    && number(state, config, comptime!(Field::LivingMembers as u32), id) > 0;
+                let investment = (parameters.traded_good() == Good::Tools as u32
+                    || parameters.traded_good() == Good::Wood as u32)
+                    && comptime!(
+                        config.home_mode == Feature::Enabled
+                            && config.property_mode == Feature::Disabled
+                    )
+                    && number(state, config, comptime!(Field::InvestmentGood as u32), id) > 0
+                    && number(state, config, comptime!(Field::LivingMembers as u32), id) > 0;
+                let construction = parameters.traded_good() == Good::Construction as u32
+                    && number(state, config, comptime!(Field::ProjectStatus as u32), id)
+                        == comptime!(crate::domain::property::ProjectStatus::Building as u32);
+                u32::cast_from(grain || investment || construction)
+            }
             _ => u32::new(1),
         };
         let preparation = match comptime!(round) {
@@ -130,7 +131,7 @@ fn prepare(
                                     == 0);
                     }
                     MarketFlag::Input(_) => {
-                        good = comptime!(market.good().expect("input market") as u32);
+                        good = parameters.traded_good();
                         search = !k.is(comptime!(ActorKind::Household))
                             && (number(state, config, comptime!(Field::FirstInput as u32), id)
                                 == good
@@ -276,8 +277,8 @@ fn prepare(
                             }
                         }
                     }
-                    MarketFlag::Consumer(_) => {
-                        good = comptime!(market.good().expect("consumer market") as u32);
+                    MarketFlag::Consumer => {
+                        good = parameters.traded_good();
                         let interval = config.consumption_intervals[good as usize - 1];
                         let until_due = (interval - (parameters.day + id) % max(interval, 1))
                             % max(interval, 1);
@@ -410,8 +411,7 @@ fn prepare(
                     round,
                     PreparationRound::First | PreparationRound::Capture
                 )) {
-                    let inactive_good =
-                        comptime!(parameters.market.good().map_or(0, |good| good as u32));
+                    let inactive_good = parameters.traded_good();
                     add_checked(
                         control,
                         value(state, config, inactive_good, id),
@@ -566,13 +566,7 @@ pub(super) fn candidate(
     wanted: Ticks,
     purchasing_power: Ticks,
 ) -> Candidate {
-    let supply = index::Supply::new(
-        state,
-        actors,
-        config,
-        firm,
-        comptime!(parameters.market.good().map_or(0, |good| good as u32)),
-    );
+    let supply = index::Supply::new(state, actors, config, firm, parameters.traded_good());
     candidate_supply(
         state,
         actors,
@@ -929,7 +923,7 @@ fn search(
                     let mut skipped = 0u32;
                     if comptime!(matches!(
                         parameters.market,
-                        MarketFlag::Consumer(_) | MarketFlag::Household
+                        MarketFlag::Consumer | MarketFlag::Household
                     )) && stride == 1
                     {
                         let rotated = begin + cursor;
@@ -954,7 +948,7 @@ fn search(
                             0,
                         );
                     }
-                    if comptime!(parameters.market.good() == Some(Good::Bread)) && stride == 1 {
+                    if parameters.traded_good() == Good::Bread as u32 && stride == 1 {
                         let rotated = begin + cursor;
                         let block = rotated / DISCOVERY_BLOCK;
                         let quote =
@@ -973,7 +967,7 @@ fn search(
                                 let seller = spatial
                                     [(side * side + 1 + rotated + offset + UNIT_POS) as usize];
                                 let supply = match comptime!(parameters.market) {
-                                    MarketFlag::Consumer(_) | MarketFlag::Household => {
+                                    MarketFlag::Consumer | MarketFlag::Household => {
                                         index::Supply::load(
                                             scratch,
                                             config,
@@ -997,10 +991,12 @@ fn search(
                         }
                     }
                     if skipped == 0 {
-                        let initial_width = comptime!(match parameters.market {
-                            MarketFlag::Input(Good::Grain) => 32u32,
-                            _ => 8u32,
-                        });
+                        let initial_width = select(
+                            comptime!(matches!(parameters.market, MarketFlag::Input(_)))
+                                && parameters.traded_good() == Good::Grain as u32,
+                            32u32,
+                            8u32,
+                        );
                         let width = select(j == begin, initial_width, 32u32);
                         let lane = UNIT_POS as usize;
                         let fault_start = lane * CONTROL_WORDS;
@@ -1015,7 +1011,7 @@ fn search(
                             let rotated = begin + (cursor + UNIT_POS * stride) % max(length, 1);
                             let firm = spatial[(side * side + 1 + rotated) as usize];
                             let supply = match comptime!(parameters.market) {
-                                MarketFlag::Consumer(_) | MarketFlag::Household => {
+                                MarketFlag::Consumer | MarketFlag::Household => {
                                     index::Supply::load(scratch, config, rotated)
                                 }
                                 _ => index::Supply::new(
@@ -1023,15 +1019,13 @@ fn search(
                                     actors,
                                     config,
                                     firm,
-                                    comptime!(
-                                        parameters.market.good().map_or(0, |good| good as u32)
-                                    ),
+                                    parameters.traded_good(),
                                 ),
                             };
                             let mut relevant = true;
                             if comptime!(matches!(
                                 parameters.market,
-                                MarketFlag::Household | MarketFlag::Consumer(_)
+                                MarketFlag::Household | MarketFlag::Consumer
                             )) {
                                 let quote = supply.quote;
                                 let trip = distance(actors, id, firm);

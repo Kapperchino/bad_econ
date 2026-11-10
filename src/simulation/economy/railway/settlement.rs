@@ -486,7 +486,7 @@ fn commit(input: &mut Input, index: u32) {
             }
             input.bookings[buyer as usize * 2] = comptime!(BookingState::Pending as u32);
             if allowed {
-                let good = comptime!(input.parameters.market.good().expect("freight good") as u32);
+                let good = input.parameters.traded_good();
                 let animal = animal_route(&input.actors, &input.config, buyer, seller);
                 let base = BASE_FIELDS as u32 + (good - 1) * input.config.ring;
                 let old_field = base + (input.parameters.day + animal.days) % input.config.ring;

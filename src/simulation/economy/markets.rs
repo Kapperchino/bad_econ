@@ -213,7 +213,7 @@ pub(in crate::simulation) fn ranges(
         if comptime!(
             matches!(
                 parameters.market,
-                MarketFlag::Consumer(_) | MarketFlag::Payroll
+                MarketFlag::Consumer | MarketFlag::Payroll
             ) || parameters.market == MarketFlag::Labor
                 && config.bargaining.enabled == Feature::Disabled
         ) {

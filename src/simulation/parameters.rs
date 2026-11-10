@@ -1,5 +1,5 @@
-use super::flags::MarketFlag;
-use crate::domain::Phase;
+use super::flags::{InputMarket, MarketFlag};
+use crate::domain::{Good, Phase};
 use cubecl::prelude::*;
 
 #[derive(Clone, Copy, Debug, Hash, PartialEq, Eq)]
@@ -31,6 +31,7 @@ pub struct EconomyParameters {
     pub phase: Phase,
     #[cube(comptime)]
     pub market: MarketFlag,
+    pub good: u32,
     #[cube(comptime)]
     pub discovery: Discovery,
     pub offset: u32,
@@ -48,6 +49,7 @@ impl EconomyParameters {
             settlement_rotation: self.settlement_rotation,
             phase: self.phase,
             market: self.market,
+            good: self.good,
             discovery: self.discovery,
             offset: self.offset,
             count: self.count,
@@ -55,6 +57,18 @@ impl EconomyParameters {
             sort_source: self.sort_source,
             sort_width: self.sort_width,
             sort_count: self.sort_count,
+        }
+    }
+}
+
+#[cube]
+impl EconomyParameters {
+    pub fn traded_good(&self) -> u32 {
+        match comptime!(self.market) {
+            MarketFlag::Input(InputMarket::Grain) => u32::new(Good::Grain as i64),
+            MarketFlag::Input(InputMarket::Other) | MarketFlag::Consumer => self.good,
+            MarketFlag::Household => u32::new(Good::Bread as i64),
+            _ => u32::new(0),
         }
     }
 }

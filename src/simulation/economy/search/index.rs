@@ -157,7 +157,7 @@ fn build_blocks(
         let mut min_y = u32::new(comptime!(i64::from(u32::MAX)));
         let mut max_y = 0u32;
         let mut stocked = 0u32;
-        let good = comptime!(parameters.market.good().expect("consumer good") as u32);
+        let good = parameters.traded_good();
         let mut member = block * BLOCK + lane;
         while member < min((block + 1) * BLOCK, count) {
             let actor = spatial[(cells + 1 + member) as usize];

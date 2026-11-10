@@ -684,7 +684,7 @@ fn propose(
                         || number(state, config, comptime!(Field::LandPlots as u32), id) == 0);
             }
             MarketFlag::Input(_) => {
-                good = comptime!(market.good().expect("input market") as u32);
+                good = parameters.traded_good();
                 search = !k.is(comptime!(ActorKind::Household))
                     && (number(state, config, comptime!(Field::FirstInput as u32), id) == good
                         || number(state, config, comptime!(Field::SecondInput as u32), id) == good);
@@ -813,8 +813,8 @@ fn propose(
                     }
                 }
             }
-            MarketFlag::Consumer(_) => {
-                good = comptime!(market.good().expect("consumer market") as u32);
+            MarketFlag::Consumer => {
+                good = parameters.traded_good();
                 let interval = config.consumption_intervals[good as usize - 1];
                 let until_due =
                     (interval - (parameters.day + id) % max(interval, 1)) % max(interval, 1);
@@ -961,9 +961,9 @@ fn propose(
                         let previous = j;
                         let rotated = begin + cursor;
                         let mut skipped = 0u32;
-                        if comptime!(
-                            market.good() == Some(Good::Bread) && parameters.discovery.indexed()
-                        ) && stride == 1
+                        if parameters.traded_good() == Good::Bread as u32
+                            && comptime!(parameters.discovery.indexed())
+                            && stride == 1
                         {
                             let block = rotated / DISCOVERY_BLOCK;
                             let base = 3 * (side * side + 1 + config.actors);
@@ -1363,7 +1363,7 @@ fn construct(
         let actor = id + parameters.offset;
         let other = proposals[actor as usize * ProposalLayout::WORDS + ProposalLayout::ACTOR];
         let mut path = railway::animal_route(actors, config, actor, actor);
-        if comptime!(parameters.market.good().is_some()) && other < config.actors {
+        if parameters.traded_good() > 0 && other < config.actors {
             let planned = railway::animal_route(actors, config, actor, other);
             path.replace(&planned);
         }
@@ -1675,7 +1675,7 @@ fn construct_route(
                     );
                 }
                 _ => {
-                    let good = comptime!(parameters.market.good().expect("goods market") as u32);
+                    let good = parameters.traded_good();
                     let cost = multiply(
                         control,
                         quantity,
@@ -2499,8 +2499,8 @@ fn discoverable(
     let market = comptime!(parameters.market);
     match market {
         MarketFlag::Labor => number(state, config, comptime!(Field::Slots as u32), firm) > 0,
-        MarketFlag::Input(_) | MarketFlag::Consumer(_) | MarketFlag::Household => {
-            let good = comptime!(market.good().expect("goods market") as u32);
+        MarketFlag::Input(_) | MarketFlag::Consumer | MarketFlag::Household => {
+            let good = parameters.traded_good();
             let distributor = number(
                 state,
                 config,
@@ -2808,12 +2808,7 @@ fn index_count(
 #[cube]
 fn index_segment(config: &EconomyConfig, parameters: &EconomyParameters) -> u32 {
     let cells = config.spatial_side * config.spatial_side;
-    (cells + 1 + config.actors)
-        * comptime!(if parameters.market.good() == Some(Good::Bread) {
-            1u32
-        } else {
-            2u32
-        })
+    (cells + 1 + config.actors) * select(parameters.traded_good() == Good::Bread as u32, 1u32, 2u32)
 }
 
 #[cube]

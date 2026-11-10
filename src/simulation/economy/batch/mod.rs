@@ -198,7 +198,7 @@ fn settle_units(
         let length = scratch[(6 * count + job) as usize];
         let end = start + length;
         let peer = scratch[(parameters.sort_source + start) as usize];
-        let good = comptime!(parameters.market.good().expect("consumer good") as u32);
+        let good = parameters.traded_good();
         let mut balances = UnitBalances::new(state, actors, config, peer, good, length);
         let mut cursor = start;
         let mut faulted = 0u32;

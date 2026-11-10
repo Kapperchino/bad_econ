@@ -74,6 +74,14 @@ cargo run --release -- benchmark --sizes 100000,1000000 --seed 42 --warmup 0 --d
 
 Both test aliases use the GPU. Benchmarks report daily phase timings, memory use, and final state hashes. Add integration modules to `tests/integration.rs`; automatic test discovery is disabled.
 
+Measure initialization and the first simulated days, including GPU compilation on first use:
+
+```sh
+cargo run --release --example startup_throughput -- --sizes 1000000 --days 3 --output /tmp/startup.json
+```
+
+This reports scenario generation, device setup, simulation initialization, and each day's phase timings separately, plus a final state hash. Use a separate process for each size when comparing startup; later sizes in the same process can reuse compiled kernels. GPU driver caches can also make subsequent launches faster. Input and consumer markets share compiled kernels across goods; grain and household bread retain dedicated kernels.
+
 Use the GPU timestamp profiler to attribute time to individual kernels:
 
 ```sh

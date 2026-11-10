@@ -535,11 +535,17 @@ impl Scenario {
             labs,
             ..Default::default()
         });
-        let scenario = Self::new(config)?;
-        let mut config = scenario.config.clone();
-        config.railway =
-            railway::RailwayConfig::generated(&scenario.initial_actors, config.map_size);
-        Self::new(config)
+        let mut scenario = Self::new(config)?;
+        scenario.config.railway = railway::RailwayConfig::new(
+            railway::RailwayConfig::generated(&scenario.initial_actors, scenario.config.map_size),
+            &scenario.initial_actors,
+            scenario.config.map_size,
+        )?;
+        scenario.rail_geography = railway::RailGeography::new(
+            &scenario.config.railway,
+            scenario.config.property.as_ref(),
+        )?;
+        Ok(scenario)
     }
 
     pub fn goods_markets(&self) -> Vec<Market> {
@@ -826,14 +832,12 @@ impl Scenario {
                         .collect(),
                 );
                 if scenario.config.finance.is_some() || scenario.config.research.is_some() {
-                    let actors = (0..scenario.actors())
-                        .map(|index| scenario.actor(index))
-                        .collect::<ActorRows>();
+                    let actors = &scenario.initial_actors;
                     scenario.config.research = scenario
                         .config
                         .research
                         .take()
-                        .map(|config| research::ResearchConfig::new(config, &actors))
+                        .map(|config| research::ResearchConfig::new(config, actors))
                         .transpose()?;
                     let identities = actors
                         .iter()

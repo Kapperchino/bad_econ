@@ -125,7 +125,7 @@ impl PeerBalances {
             }
             MarketFlag::Payroll | MarketFlag::Distribution => (),
             _ => {
-                let good = comptime!(parameters.market.good().expect("goods market") as u32);
+                let good = parameters.traded_good();
                 balances.cash = value(state, config, comptime!(Field::Cash as u32), peer);
                 balances.stock = value(state, config, good, peer);
                 balances.reserve = household_production::reserve(state, actors, config, peer, good);
@@ -315,7 +315,7 @@ impl PeerBalances {
             }
             MarketFlag::Payroll | MarketFlag::Distribution => (),
             _ => {
-                let good = comptime!(parameters.market.good().expect("goods market") as u32);
+                let good = parameters.traded_good();
                 set(
                     state,
                     config,

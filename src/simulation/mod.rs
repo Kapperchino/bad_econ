@@ -217,6 +217,9 @@ impl Simulation {
             .collect::<ActorMetadataRows>();
         let actors = device.tensor(&actor_layouts.words());
         let spatial = device.tensor(&SpatialIndex::new(&scenario, &initial).words);
+        #[cfg(target_endian = "little")]
+        let state = device.tensor(bytemuck::cast_slice(&initial.values));
+        #[cfg(target_endian = "big")]
         let state = device.tensor(bytemuck::cast_slice(&encode(&initial.values)));
         let audited = device.empty(initial.values.len() * TICK_WORDS);
         let snapshot_copy = tensor::SnapshotCopy::new(&device, initial.values.len() * TICK_WORDS);
@@ -378,6 +381,11 @@ impl Simulation {
                 % self.metadata.actors.len().max(1) as u64) as u32,
             phase,
             market: market.into(),
+            good: match market {
+                Market::Input(good) | Market::Consumer(good) => good as u32,
+                Market::Household => Good::Bread as u32,
+                _ => 0,
+            },
             discovery: match self.market_execution {
                 MarketExecution::Grouped => Discovery::Indexed,
                 #[cfg(test)]

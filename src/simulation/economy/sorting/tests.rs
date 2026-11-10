@@ -72,6 +72,7 @@ impl SortCase {
             settlement_rotation: self.active as u32,
             phase: Phase::Opening,
             market: MarketFlag::Labor,
+            good: 0,
             discovery: Discovery::Indexed,
             offset: 0,
             count: self.capacity as u32,
