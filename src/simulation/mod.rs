@@ -97,6 +97,11 @@ enum RegistryExecution {
 #[cfg(test)]
 mod tests;
 
+enum MatchingState {
+    Searching,
+    Exhausted,
+}
+
 #[derive(Clone, Copy, Debug)]
 pub enum Trace {
     Record,
@@ -535,6 +540,7 @@ impl Simulation {
                 (0..MATCHING_ROUNDS).try_for_each(|round| {
                     self.matching_round = round;
                     self.market(Market::Labor, phase, trace, &mut evidence)
+                        .map(|_| ())
                 })?;
                 self.market_result(&mut evidence)
             }
@@ -551,10 +557,17 @@ impl Simulation {
                     .goods_markets()
                     .into_iter()
                     .try_for_each(|market| {
-                        (0..MATCHING_ROUNDS).try_for_each(|round| {
-                            self.matching_round = round;
-                            self.market(market, phase, trace, &mut evidence)
-                        })?;
+                        (0..MATCHING_ROUNDS).try_fold(
+                            MatchingState::Searching,
+                            |state, round| match state {
+                                MatchingState::Searching => {
+                                    self.matching_round = round;
+                                    self.market(market, phase, trace, &mut evidence)
+                                }
+                                MatchingState::Exhausted => Ok(MatchingState::Exhausted),
+                            },
+                        )?;
+                        self.matching_round = MATCHING_ROUNDS - 1;
                         if let (Market::Household, Some(_)) = (market, self.scenario.config().rent)
                         {
                             let parameters =
@@ -1403,6 +1416,7 @@ impl Simulation {
         self.fault_check()
     }
     fn railways(&self, stage: economy::railway::RailStage) {
+        let started = Instant::now();
         economy::railway::launch(
             &self.device,
             &self.state,
@@ -1411,6 +1425,16 @@ impl Simulation {
             &self.control,
             stage,
         );
+        if self.day + 1 == profiling_day() && std::env::var_os("BAD_ECON_PROFILE_STAGES").is_some()
+        {
+            self.device
+                .sync()
+                .expect("railway profiling synchronization");
+            eprintln!(
+                "RAILWAY {stage:?} {:.3}",
+                started.elapsed().as_secs_f64() * 1000.0
+            );
+        }
     }
     fn market_result(&mut self, evidence: &mut PhaseEvidence) -> Result<()> {
         let execution = match (
@@ -1440,7 +1464,7 @@ impl Simulation {
         phase: Phase,
         trace: Trace,
         evidence: &mut PhaseEvidence,
-    ) -> Result<()> {
+    ) -> Result<MatchingState> {
         let regional_transport = !self.scenario.config().railway.companies.is_empty()
             && matches!(
                 market,
@@ -1450,7 +1474,9 @@ impl Simulation {
             _ if regional_transport => self.device_market(market, phase, trace, evidence),
             MarketExecution::Grouped => self.device_market(market, phase, trace, evidence),
             #[cfg(test)]
-            _ => self.original_market(market, phase, trace, evidence),
+            _ => self
+                .original_market(market, phase, trace, evidence)
+                .map(|_| MatchingState::Searching),
         }
     }
     fn device_market(
@@ -1459,8 +1485,9 @@ impl Simulation {
         phase: Phase,
         trace: Trace,
         evidence: &mut PhaseEvidence,
-    ) -> Result<()> {
+    ) -> Result<MatchingState> {
         let submission_started = Instant::now();
+        let mut matching = MatchingState::Searching;
         let regional_transport = !self.scenario.config().railway.companies.is_empty()
             && matches!(
                 market,
@@ -1525,13 +1552,14 @@ impl Simulation {
                 );
             }
         };
-        let initialization = match (market, self.matching_round) {
-            (Market::Input(_), 0) => EconomyStage::InputMarketStart,
-            (Market::Input(_), _) => EconomyStage::InputMarketRepeat,
+        let initialization = match (market, self.matching_round, trace) {
+            (Market::Input(_), 0, Trace::Discard) => EconomyStage::InputMarketPrepare,
+            (Market::Input(_), 0, Trace::Record) => EconomyStage::InputMarketStart,
+            (Market::Input(_), _, Trace::Record) => EconomyStage::InputMarketRepeat,
             _ => EconomyStage::MarketStart,
         };
-        let initialization_count = match market {
-            Market::Input(_) => count,
+        let initialization_count = match initialization {
+            EconomyStage::InputMarketStart | EconomyStage::InputMarketRepeat => count,
             _ => 1,
         };
         launch(initialization, initialization_count, &parameters);
@@ -1672,22 +1700,6 @@ impl Simulation {
             }
         }
         launch(EconomyStage::MarketBoundary, 1, &parameters);
-        let freight = |stage| {
-            economy::railway::settlement::launch(
-                &self.device,
-                &self.state,
-                &self.actors,
-                &self.config,
-                &self.proposals,
-                &self.scratch,
-                &self.control,
-                &parameters,
-                stage,
-            );
-        };
-        if regional_transport {
-            freight(economy::railway::settlement::Stage::Snapshot);
-        }
         parameters.sort_source = self.market_sort.run(
             &self.device,
             &self.scratch,
@@ -1695,6 +1707,25 @@ impl Simulation {
             &self.searches.dispatches,
             &parameters,
         )?;
+        let freight = |stage| {
+            let window = device_profile.start(&self.device);
+            economy::railway::settlement::launch(
+                &self.device,
+                &self.state,
+                &self.actors,
+                &self.spatial,
+                &self.config,
+                &self.proposals,
+                &self.scratch,
+                &self.control,
+                &parameters,
+                stage,
+            );
+            device_profile.end(&self.device, window, "FREIGHT", stage);
+        };
+        if regional_transport {
+            freight(economy::railway::settlement::Stage::Snapshot);
+        }
         launch(EconomyStage::GroupRanges, count, &parameters);
         launch(EconomyStage::MarketBoundary, 1, &parameters);
         if matches!(
@@ -1761,10 +1792,12 @@ impl Simulation {
         if regional_transport {
             use economy::railway::settlement::{self, Stage};
             let freight = |simulation: &Self, stage| {
+                let window = device_profile.start(&simulation.device);
                 settlement::launch(
                     &simulation.device,
                     &simulation.state,
                     &simulation.actors,
+                    &simulation.spatial,
                     &simulation.config,
                     &simulation.proposals,
                     &simulation.scratch,
@@ -1772,6 +1805,7 @@ impl Simulation {
                     &parameters,
                     stage,
                 );
+                device_profile.end(&simulation.device, window, "FREIGHT", stage);
             };
             freight(self, Stage::Initialize);
             let mut pending = 1;
@@ -1780,9 +1814,13 @@ impl Simulation {
                 freight(self, Stage::Propose);
                 freight(self, Stage::Commit);
                 freight(self, Stage::Release);
-                pending = settlement::pending(&self.device, &self.config)?;
-                self.readback_bytes += WORD_BYTES as u64;
-                self.fault_check()?;
+                let progress = settlement::progress(&self.device, &self.config, &self.control)?;
+                pending = progress.pending;
+                matching = match progress.searches {
+                    0 => MatchingState::Exhausted,
+                    _ => MatchingState::Searching,
+                };
+                self.readback_bytes += (3 * WORD_BYTES) as u64;
             }
             freight(self, Stage::Accounts);
         }
@@ -1816,7 +1854,7 @@ impl Simulation {
             );
         }
         device_profile.resolve(market, self.matching_round);
-        Ok(())
+        Ok(matching)
     }
     #[cfg(test)]
     fn original_market(

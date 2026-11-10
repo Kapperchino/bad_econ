@@ -1067,6 +1067,7 @@ impl Scenario {
                         + companies * stations.pow(2) * railway::RAIL_ROUTE_WORDS as u64
                         + stations.pow(2) * self.ring() as u64
                         + companies.pow(2)
+                        + railway::FREIGHT_DISPATCH_WORDS as u64
                         + 1)
                         * 4
                 }

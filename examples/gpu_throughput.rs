@@ -4,7 +4,11 @@ use bad_econ::{
     simulation::{Device, Simulation},
 };
 use clap::Parser;
-use std::{num::NonZeroU32, path::PathBuf, time::Instant};
+use std::{
+    num::NonZeroU32,
+    path::PathBuf,
+    time::{Duration, Instant},
+};
 
 #[derive(Parser)]
 struct Arguments {
@@ -18,6 +22,8 @@ struct Arguments {
     warmup: u32,
     #[arg(long, default_value = "60")]
     days: NonZeroU32,
+    #[arg(long)]
+    max_day_ms: Option<NonZeroU32>,
     #[arg(long)]
     output: PathBuf,
 }
@@ -49,20 +55,23 @@ fn main() -> Result<()> {
         let starting_day = simulation.snapshot.day;
         let readback_before = simulation.readback_bytes;
         let mut daily = Vec::new();
+        let mut slowest = Duration::ZERO;
         let start = Instant::now();
         for _ in 0..days {
             let day_start = Instant::now();
             simulation.advance()?;
+            let elapsed = day_start.elapsed();
+            slowest = slowest.max(elapsed);
             let memory = simulation.memory_usage();
             eprintln!(
                 "{households} households day {}: {:.3}s, reserved={} bytes",
                 simulation.snapshot.day,
-                day_start.elapsed().as_secs_f64(),
+                elapsed.as_secs_f64(),
                 memory.bytes_reserved
             );
             daily.push(serde_json::json!({
                 "day": simulation.snapshot.day,
-                "seconds": day_start.elapsed().as_secs_f64(),
+                "seconds": elapsed.as_secs_f64(),
                 "phases": simulation.timings,
                 "memory": memory,
             }));
@@ -86,6 +95,8 @@ fn main() -> Result<()> {
             "preflight_state_hash": expected_hash,
             "startup_seconds": startup_seconds,
             "seconds": seconds,
+            "max_day_milliseconds": slowest.as_secs_f64() * 1000.0,
+            "target_day_milliseconds": args.max_day_ms,
             "readback_bytes": readback_bytes,
             "final_state_hash": final_state_hash,
             "state_hash_version": STATE_HASH_VERSION,
@@ -95,6 +106,17 @@ fn main() -> Result<()> {
             "daily": daily,
         }));
         std::fs::write(&args.output, serde_json::to_vec_pretty(&reports)?)?;
+        match args.max_day_ms {
+            Some(limit) if slowest >= Duration::from_millis(u64::from(limit.get())) => {
+                Err(anyhow!(
+                    "{households} households: slowest day was {:.3} ms, exceeding the strict {} ms budget; report saved to {}",
+                    slowest.as_secs_f64() * 1000.0,
+                    limit,
+                    args.output.display(),
+                ))?
+            }
+            _ => (),
+        }
     }
     Ok(())
 }

@@ -92,6 +92,14 @@ cargo run --release --example startup_throughput -- --sizes 1000000 --days 3 --o
 
 This reports scenario generation, device setup, simulation initialization, and each day's phase timings separately, plus a final state hash. Use a separate process for each size when comparing startup; later sizes in the same process can reuse compiled kernels. GPU driver caches can also make subsequent launches faster. Input and consumer markets share compiled kernels across goods; grain and household bread retain dedicated kernels.
 
+To enforce a strict daily latency budget after warming the complete measured trajectory:
+
+```sh
+cargo run --release --example gpu_throughput -- --sizes 1000000 --warmup 2 --days 28 --max-day-ms 250 --output /tmp/throughput.json
+```
+
+This checks that the warmup and measured runs reach identical state hashes, records the slowest day, and saves the report before failing if any measured simulation step takes 250 ms or longer. Startup and reporting time are excluded from individual step timings.
+
 Use the GPU timestamp profiler to attribute time to individual kernels:
 
 ```sh

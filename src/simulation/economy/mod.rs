@@ -2292,6 +2292,7 @@ pub enum EconomyStage {
     GroupFinalize,
     MarketStart,
     InputMarketStart,
+    InputMarketPrepare,
     InputMarketRepeat,
     MarketBoundary,
     GroupRanges,
@@ -2341,6 +2342,7 @@ pub fn economy(
         match stage {
             EconomyStage::MarketStart
             | EconomyStage::InputMarketStart
+            | EconomyStage::InputMarketPrepare
             | EconomyStage::InputMarketRepeat
             | EconomyStage::MarketBoundary => {
                 if id == 0 {
@@ -2350,7 +2352,10 @@ pub fn economy(
                         control[RANGE_SLOTS_WORD].store(0);
                         control[markets::SEARCHES_WORD].store(0);
                     }
-                    if comptime!(stage == EconomyStage::InputMarketStart) {
+                    if comptime!(matches!(
+                        stage,
+                        EconomyStage::InputMarketStart | EconomyStage::InputMarketPrepare
+                    )) {
                         control[markets::PREPARATION_ACTORS_WORD].store(0);
                     }
                 }

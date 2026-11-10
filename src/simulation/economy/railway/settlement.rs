@@ -1,7 +1,7 @@
 use super::*;
 
 use crate::domain::railway::{
-    FREIGHT_ACCOUNT_WORDS as ACCOUNT_WORDS, FREIGHT_BOOKING_WORDS,
+    FREIGHT_ACCOUNT_WORDS as ACCOUNT_WORDS, FREIGHT_BOOKING_WORDS, FREIGHT_DISPATCH_WORDS,
     FREIGHT_RESOURCE_WORDS as RESOURCE_WORDS,
 };
 const PENDING: usize = 0;
@@ -39,6 +39,7 @@ pub struct Buffers {
     accounts: CubeTensor,
     bookings: CubeTensor,
     progress: CubeTensor,
+    dispatches: CubeTensor,
 }
 
 impl Buffers {
@@ -48,6 +49,49 @@ impl Buffers {
             accounts: device.empty(actors * ACCOUNT_WORDS),
             bookings: device.empty(actors * FREIGHT_BOOKING_WORDS),
             progress: device.tensor(&[0]),
+            dispatches: device
+                .client
+                .memory_dedicated_allocation(FREIGHT_DISPATCH_WORDS, |words| device.empty(words)),
+        }
+    }
+}
+
+#[derive(CubeType, CubeLaunch)]
+struct DispatchInput {
+    control: Box<[Atomic<u32>]>,
+    dispatches: Box<[u32]>,
+    workgroup: u32,
+    resources: u32,
+    good: u32,
+}
+
+struct FreightDispatch;
+struct PrepareDispatch;
+
+impl System for FreightDispatch {
+    type Input = DispatchInput;
+    type Passes = gpu_passes![PrepareDispatch];
+}
+
+#[cube]
+impl GpuPass<DispatchInput> for PrepareDispatch {
+    type Output = ();
+
+    fn execute(mut input: DispatchInput) {
+        let active = input.control[CONSTRUCTED_EVENTS_WORD].load();
+        let mut resources = input.resources;
+        if input.good == comptime!(Good::Bread as u32) {
+            resources += active;
+        }
+        let mut counts = Array::<u32>::new(3usize);
+        counts[0usize] = resources;
+        counts[1usize] = active;
+        counts[2usize] = max(resources, active);
+        for index in 0..3usize {
+            let groups = ceildiv(max(counts[index], 1), input.workgroup);
+            input.dispatches[index * 3] = min(groups, 65535);
+            input.dispatches[index * 3 + 1] = ceildiv(groups, 65535);
+            input.dispatches[index * 3 + 2] = 1;
         }
     }
 }
@@ -56,6 +100,7 @@ impl Buffers {
 struct Input {
     state: Box<[u32]>,
     actors: Box<[u32]>,
+    spatial: Box<[u32]>,
     config: EconomyConfig,
     proposals: Box<[u32]>,
     scratch: Box<[u32]>,
@@ -81,6 +126,7 @@ pub fn launch(
     device: &Device,
     state: &CubeTensor,
     actors: &CubeTensor,
+    spatial: &CubeTensor,
     config: &Configuration,
     proposals: &CubeTensor,
     scratch: &CubeTensor,
@@ -89,19 +135,33 @@ pub fn launch(
     stage: Stage,
 ) {
     let buffers = &config.railway.freight;
-    let count = match stage {
-        Stage::Reset | Stage::Initialize | Stage::Release => {
-            config.actors + config.railway.region_count
-        }
-        _ => config.actors,
+    if let Stage::Snapshot = stage {
+        FreightDispatch::launch(
+            device,
+            CubeCount::Static(1, 1, 1),
+            CubeDim::new_1d(1),
+            DispatchInputLaunch {
+                control: control.clone().into_buffer_arg(),
+                dispatches: buffers.dispatches.clone().into_buffer_arg(),
+                workgroup: device.workgroup,
+                resources: config.railway.firms + config.railway.region_count,
+                good: parameters.good,
+            },
+        );
+    }
+    let dispatch = match stage {
+        Stage::Propose | Stage::Commit => 3,
+        Stage::Initialize => 6,
+        _ => 0,
     };
     FreightSettlement::launch(
         device,
-        device.count(count as usize),
+        markets::dispatch(&buffers.dispatches, dispatch),
         CubeDim::new_1d(device.workgroup),
         InputLaunch {
             state: state.clone().into_buffer_arg(),
             actors: actors.clone().into_buffer_arg(),
+            spatial: spatial.clone().into_buffer_arg(),
             config: config.launch(),
             proposals: proposals.clone().into_buffer_arg(),
             scratch: scratch.clone().into_buffer_arg(),
@@ -116,8 +176,63 @@ pub fn launch(
     );
 }
 
-pub fn pending(device: &Device, config: &Configuration) -> anyhow::Result<u32> {
-    Ok(device.read(&config.railway.freight.progress)?[PENDING])
+#[cube]
+fn resource(input: &Input, index: u32) -> u32 {
+    let cells = input.config.spatial_side * input.config.spatial_side;
+    let base = 2 * (cells + 1 + input.config.actors);
+    let firms = input.spatial[(base + cells) as usize];
+    let mut sellers = 0u32;
+    if input.parameters.traded_good() == comptime!(Good::Bread as u32) {
+        sellers = markets::active(&input.control, &input.parameters);
+    }
+    let mut resource = u32::new(comptime!(i64::from(u32::MAX)));
+    if index < firms {
+        resource = input.spatial[(base + cells + 1 + index) as usize];
+    } else if index < firms + sellers {
+        let slot = index - firms;
+        let seller = input.scratch[(input.parameters.sort_source + slot) as usize];
+        let mut first = true;
+        if slot > 0 {
+            first = input.scratch[(input.parameters.sort_source + slot - 1) as usize] != seller;
+        }
+        if first && kind(&input.actors, seller).is(comptime!(ActorKind::Household)) {
+            resource = seller;
+        }
+    } else {
+        resource = input.config.actors + index - firms - sellers;
+    }
+    resource
+}
+
+pub struct Progress {
+    pub pending: u32,
+    pub searches: u32,
+}
+
+pub fn progress(
+    device: &Device,
+    config: &Configuration,
+    control: &CubeTensor,
+) -> anyhow::Result<Progress> {
+    let word = |index: usize| {
+        let handle = control.handle.clone();
+        let size = handle.size_in_used();
+        let offset = index * size_of::<u32>();
+        handle
+            .offset_start(offset as u64)
+            .offset_end(size - (offset + size_of::<u32>()) as u64)
+    };
+    let values = device.client.read(vec![
+        config.railway.freight.progress.handle.clone(),
+        word(crate::simulation::flags::FAULT_WORD),
+        word(markets::SEARCHES_WORD),
+    ])?;
+    let faults = u32::from_le_bytes(values[1][..4].try_into()?);
+    FaultFlags::new(faults)?.into_result()?;
+    Ok(Progress {
+        pending: u32::from_le_bytes(values[0][..4].try_into()?),
+        searches: u32::from_le_bytes(values[2][..4].try_into()?),
+    })
 }
 
 #[cube]
@@ -544,7 +659,8 @@ impl GpuPass<Input> for SettleFreight {
     type Output = ();
 
     fn execute(mut input: Input) {
-        let id = ABSOLUTE_POS as u32;
+        let invocation = ABSOLUTE_POS as u32;
+        let id = resource(&input, invocation);
         let actors = input.config.actors;
         let resources = actors + input.config.railway.region_count;
         let base = id as usize * RESOURCE_WORDS;
@@ -576,11 +692,17 @@ impl GpuPass<Input> for SettleFreight {
                     for field in 0..ACCOUNT_WORDS {
                         input.accounts[id as usize * ACCOUNT_WORDS + field].store(0);
                     }
+                }
+                if invocation < markets::active(&input.control, &input.parameters) {
+                    let buyer = input.scratch[(input.parameters.sort_source
+                        + input.parameters.count
+                        + invocation) as usize]
+                        + input.parameters.offset;
                     let status = KernelEventStatus::load(
                         &mut input.scratch,
-                        4 * input.parameters.count + id,
+                        4 * input.parameters.count + buyer - input.parameters.offset,
                     );
-                    input.bookings[id as usize * 2] = select(
+                    input.bookings[buyer as usize * 2] = select(
                         status.contains(comptime!(EventStatus::Accepted)),
                         comptime!(BookingState::Pending as u32),
                         comptime!(BookingState::Complete as u32),
@@ -602,12 +724,12 @@ impl GpuPass<Input> for SettleFreight {
                         input.resources[base + offset].store(select(offset == 4, u32::MAX, 0));
                     }
                 }
-                if id == 0 {
+                if invocation == 0 {
                     input.progress[PENDING].store(0);
                 }
             }
-            Stage::Propose => propose(&mut input, id),
-            Stage::Commit => commit(&mut input, id),
+            Stage::Propose => propose(&mut input, invocation),
+            Stage::Commit => commit(&mut input, invocation),
             Stage::Release => {
                 if id < resources {
                     let available = budget(&input, id);

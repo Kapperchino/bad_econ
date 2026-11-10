@@ -42,6 +42,7 @@ pub struct RailNetwork {
 
 pub struct Network {
     freight: settlement::Buffers,
+    firms: u32,
     nodes: u32,
     company_count: u32,
     segment_count: u32,
@@ -147,6 +148,7 @@ impl Network {
         }
         offsets.extend(carriers);
         Self {
+            firms: state.actors.firms() as u32,
             freight: settlement::Buffers::new(
                 device,
                 match config.companies.is_empty() {
@@ -579,7 +581,11 @@ pub(super) fn demand(
     good: u32,
 ) -> Ticks {
     let mut wanted = zero();
+    let requested_material = good == comptime!(Good::Coal as u32)
+        || good == comptime!(Good::Steel as u32)
+        || good == comptime!(Good::Locomotives as u32);
     if comptime!(config.railway.enabled == Feature::Enabled)
+        && requested_material
         && kind(actors, firm).bits() == comptime!(Good::Railway as u32)
     {
         for company in 0..config.railway.company_count {

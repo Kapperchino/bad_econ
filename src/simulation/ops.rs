@@ -75,9 +75,14 @@ impl Device {
             true => {
                 let name = format!("{} / {:?}", setup.adapter.get_info().name, setup.backend);
                 let memory_budget = MemoryBudget::gpu(&setup.adapter);
-                let imported =
-                    burn_wgpu::try_init_device(setup, burn_wgpu::RuntimeOptions::default())
-                        .map_err(|e| anyhow::anyhow!("{e}"))?;
+                let options = burn_wgpu::RuntimeOptions::with_tasks_max(
+                    std::env::var_os("CUBECL_WGPU_MAX_TASKS")
+                        .is_none()
+                        .then_some(128),
+                )
+                .map_err(|error| anyhow!("{error}"))?;
+                let imported = burn_wgpu::try_init_device(setup, options)
+                    .map_err(|error| anyhow!("{error}"))?;
                 let cube = cubecl::Device::Wgpu(imported);
                 let client = cube.client();
                 Ok(Self {
