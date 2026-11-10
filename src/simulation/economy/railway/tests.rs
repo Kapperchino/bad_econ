@@ -221,3 +221,96 @@ fn shared_freight_settles_multiple_workgroups_in_one_gpu_wave() -> Result<()> {
     }
     Ok(())
 }
+
+#[test]
+fn repeated_input_initialization_resets_prior_suppliers_and_preserves_faults_on_gpu() -> Result<()>
+{
+    use crate::simulation::{Market, encode, flags::FAULT_WORD};
+
+    #[derive(Clone, Copy, Debug)]
+    enum ResetCase {
+        Suppliers,
+        Empty,
+        Fault,
+    }
+
+    for workgroup in [32, 64, 128, 256] {
+        let device = crate::simulation::tests::device(workgroup)?;
+        for case in [ResetCase::Suppliers, ResetCase::Empty, ResetCase::Fault] {
+            let scenario = Scenario::industrial(67, 42, Experiment::Transport)?;
+            let mut initial = scenario.initial()?;
+            initial.set(Field::Bread, 0, 0);
+            let simulation = Simulation::new(scenario, device.clone())?;
+            let count = initial.actors.len();
+            let parameters = simulation.parameters(
+                Phase::ProvisionPurchase,
+                Market::Input(Good::Bread),
+                0,
+                count,
+            )?;
+            let initialize = |stage| {
+                EconomySystem::launch(
+                    &device,
+                    device.count(count),
+                    CubeDim::new_1d(workgroup),
+                    EconomyInputLaunch {
+                        state: simulation.state.clone().into_buffer_arg(),
+                        actors: simulation.actors.clone().into_buffer_arg(),
+                        config: simulation.config.launch(),
+                        spatial: simulation.spatial.clone().into_buffer_arg(),
+                        proposals: simulation.proposals.clone().into_buffer_arg(),
+                        bundles: simulation.scratch.clone().into_buffer_arg(),
+                        control: simulation.control.clone().into_buffer_arg(),
+                        parameters: parameters.launch(),
+                        stage,
+                    },
+                );
+            };
+            device.write(
+                &simulation.state,
+                bytemuck::cast_slice(&encode(&initial.values)),
+            );
+            let mut control = vec![0; simulation.control.meta.num_elements()];
+            device.write(&simulation.control, &control);
+            initialize(EconomyStage::InputMarketStart);
+            let clean_statuses = device.read_range(&simulation.scratch, 4 * count, count)?;
+            let cells = (simulation.config.spatial_side * simulation.config.spatial_side) as usize;
+            let mut spatial = vec![0; simulation.spatial.meta.num_elements()];
+            match case {
+                ResetCase::Suppliers | ResetCase::Fault => {
+                    let suppliers = [0, 67, 68];
+                    spatial[cells] = suppliers.len() as u32;
+                    for (index, seller) in suppliers.into_iter().enumerate() {
+                        spatial[cells + 1 + index] = seller as u32;
+                    }
+                }
+                ResetCase::Empty => (),
+            }
+            control[FAULT_WORD] = match case {
+                ResetCase::Fault => FaultFlags::ARITHMETIC_OVERFLOW.bits(),
+                _ => 0,
+            };
+            let sentinel = 0x1234_5678;
+            device.write(&simulation.control, &control);
+            device.write(&simulation.spatial, &spatial);
+            device.write(
+                &simulation.scratch,
+                &vec![sentinel; simulation.scratch.meta.num_elements()],
+            );
+            initialize(EconomyStage::InputMarketRepeat);
+            let expected_statuses = match case {
+                ResetCase::Fault => vec![sentinel; count],
+                _ => clean_statuses,
+            };
+            assert_eq!(
+                device.read_range(&simulation.scratch, 4 * count, count)?,
+                expected_statuses,
+                "{case:?}, workgroup {workgroup}, statuses"
+            );
+            let actual_control = device.read(&simulation.control)?;
+            assert_eq!(actual_control[FAULT_WORD], control[FAULT_WORD]);
+            assert_eq!(actual_control[LATCH_WORD], control[FAULT_WORD]);
+        }
+    }
+    Ok(())
+}

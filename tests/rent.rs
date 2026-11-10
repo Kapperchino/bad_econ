@@ -172,11 +172,16 @@ fn daily_rent_conserves_cash_and_replays_arrears_on_gpu() -> Result<()> {
 }
 
 #[test]
-fn industrial_paycheck_households_avoid_startup_famine_at_a_million_on_gpu() -> Result<()> {
+fn industrial_paycheck_households_avoid_famine_with_next_day_delivery_at_a_million_on_gpu()
+-> Result<()> {
     let mut config = Scenario::industrial(1_000_000, 42, Experiment::Baseline)?
         .config()
         .clone();
     config.shipment_speed = config.search_radius;
+    config.expansion = enterprise::ExpansionPolicy {
+        small_business_per_mille: 0,
+        industrial_per_mille: 0,
+    };
     let scenario = Scenario::new(config)?;
     assert_eq!(scenario.ring(), 2);
     let mut simulation = Simulation::new(scenario, support::device(128)?)?;

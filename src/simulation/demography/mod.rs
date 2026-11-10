@@ -278,7 +278,7 @@ impl DemographyRuntime {
             super::CopyDirection::Save => (&self.people, &self.audited),
             super::CopyDirection::Restore => (&self.audited, &self.people),
         };
-        super::tensor::copy(device, source, target);
+        super::tensor::copy_contiguous(device, source, target);
     }
     pub fn download(
         &self,

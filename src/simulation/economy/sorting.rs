@@ -227,7 +227,7 @@ impl GpuPass<SortInput> for Sort {
     type Output = ();
 
     fn execute(mut input: SortInput) {
-        if input.control[markets::LATCH_WORD].load() == 0 {
+        if markets::faults_clear(&input.control) {
             match comptime!(input.stage) {
                 SortStage::Local => markets::radix_local(
                     &mut input.scratch,

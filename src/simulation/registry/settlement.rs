@@ -107,7 +107,8 @@ impl SettlementBatch {
             .iter()
             .flat_map(|&firm| metadata.company_sites(metadata.actors.at(firm).identity))
             .collect::<BTreeSet<_>>();
-        for (index, actor) in metadata.actors.iter().enumerate() {
+        for index in metadata.actors.firm_indices() {
+            let actor = metadata.actors.at(index);
             if company_sites.contains(&actor.identity) {
                 firms.insert(index);
                 selected.insert(index);
@@ -146,6 +147,24 @@ impl SettlementBatch {
             false => Err(anyhow!("settlement shareholder is missing"))?,
         }
         let selected = selected.into_iter().collect::<Vec<_>>();
+        if day == crate::simulation::profiling_day()
+            && std::env::var_os("BAD_ECON_PROFILE_REGISTRY").is_some()
+        {
+            let tiles = selected
+                .iter()
+                .map(|actor| actor / crate::simulation::economy::audit::TILE_ACTORS)
+                .collect::<BTreeSet<_>>()
+                .len();
+            eprintln!(
+                "REGISTRY {day} Settlement actors={} total_actors={} tiles={tiles} total_tiles={}",
+                selected.len(),
+                metadata.actors.len(),
+                metadata
+                    .actors
+                    .len()
+                    .div_ceil(crate::simulation::economy::audit::TILE_ACTORS),
+            );
+        }
         let required = selected.len() as u64 * scenario.fields() as u64 * 16;
         device.reclaim_memory(required)?;
         match device
@@ -269,6 +288,10 @@ impl SettlementBatch {
             actor.owner = change.owner;
             actors.set(change.firm, actor);
         }
+    }
+
+    pub fn indices(&self) -> &CubeTensor {
+        &self.indices
     }
 
     pub fn apply(&self, device: &Device, state: &CubeTensor, actors: usize) {

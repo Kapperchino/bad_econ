@@ -1,5 +1,5 @@
 use super::{
-    Actor, Field, Good, Position, Scenario, State, Technique,
+    Actor, ActorRows, Field, Good, Position, Scenario, State, Technique,
     enterprise::{EnterpriseState, Ownership, OwnershipShare},
     property::PropertyUse,
 };
@@ -25,6 +25,45 @@ pub struct RentalAccount {
 
 pub struct RentalRegistry {
     pub accounts: Vec<RentalAccount>,
+    assignments: Vec<Option<usize>>,
+    locations: Vec<RentalLocation>,
+    regions: BTreeMap<usize, RentalRegion>,
+}
+
+pub(crate) enum RentalRefresh {
+    Current,
+    Changed,
+}
+
+#[derive(PartialEq, Eq)]
+struct RentalLocation {
+    landlord: usize,
+    position: Position,
+}
+
+#[derive(PartialEq, Eq)]
+struct RentalTenant {
+    position: Position,
+    household: usize,
+    kind: u32,
+}
+
+impl RentalTenant {
+    fn new(index: usize, actor: &Actor) -> Self {
+        Self {
+            position: actor.position,
+            household: match actor.kind {
+                0 => index,
+                _ => actor.owner as usize,
+            },
+            kind: actor.kind,
+        }
+    }
+}
+
+struct RentalHistory<'a> {
+    registry: &'a RentalRegistry,
+    actors: &'a ActorRows,
 }
 
 struct RentalSite {
@@ -168,9 +207,90 @@ fn region(scenario: &Scenario, actor: &Actor) -> usize {
 
 impl RentalRegistry {
     pub fn new(scenario: &Scenario, state: &State) -> Self {
+        Self::build(scenario, state, None)
+    }
+
+    pub(crate) fn updated(&self, scenario: &Scenario, previous: &ActorRows, state: &State) -> Self {
+        Self::build(
+            scenario,
+            state,
+            Some(RentalHistory {
+                registry: self,
+                actors: previous,
+            }),
+        )
+    }
+
+    pub(crate) fn refresh(
+        &mut self,
+        scenario: &Scenario,
+        state: &State,
+        changes: impl IntoIterator<Item = usize>,
+    ) -> RentalRefresh {
+        let changes = changes.into_iter().collect::<Vec<_>>();
+        let current = self.assignments.len() == state.actors.len()
+            && changes.iter().all(|&index| {
+                let actor = state.actors.at(index);
+                match (
+                    self.locations
+                        .binary_search_by_key(&index, |site| site.landlord),
+                    actor.kind == Good::Housing as u32,
+                ) {
+                    (Ok(site), true) => self.locations[site].position == actor.position,
+                    (Err(_), false) => true,
+                    _ => false,
+                }
+            });
+        match current {
+            false => {
+                *self = Self::new(scenario, state);
+                RentalRefresh::Changed
+            }
+            true => {
+                let mut refresh = RentalRefresh::Current;
+                for index in changes {
+                    let actor = state.actors.at(index);
+                    let assignment = match (actor.kind, self.regions.get(&region(scenario, &actor)))
+                    {
+                        (kind, Some(sites)) if kind != Good::Housing as u32 => {
+                            let household = match actor.kind {
+                                0 => index,
+                                _ => actor.owner as usize,
+                            };
+                            Some(sites.account(actor.position, household))
+                        }
+                        _ => None,
+                    };
+                    match self.assignments[index] == assignment {
+                        true => (),
+                        false => {
+                            if let Some(account) = self.assignments[index] {
+                                let tenants = &mut self.accounts[account].tenants;
+                                let position =
+                                    tenants.binary_search(&index).expect("assigned tenant");
+                                tenants.remove(position);
+                            }
+                            if let Some(account) = assignment {
+                                let tenants = &mut self.accounts[account].tenants;
+                                let position =
+                                    tenants.binary_search(&index).expect_err("new tenant");
+                                tenants.insert(position, index);
+                            }
+                            self.assignments[index] = assignment;
+                            refresh = RentalRefresh::Changed;
+                        }
+                    }
+                }
+                refresh
+            }
+        }
+    }
+
+    fn build(scenario: &Scenario, state: &State, history: Option<RentalHistory<'_>>) -> Self {
         let mut buildings = BTreeMap::<usize, Vec<RentalSite>>::new();
         let mut accounts = Vec::<RentalAccount>::new();
-        for (index, actor) in state.actors.iter().enumerate() {
+        for index in state.actors.firm_indices() {
+            let actor = state.actors.at(index);
             if actor.kind == Good::Housing as u32 {
                 let sites = buildings.entry(region(scenario, &actor)).or_default();
                 sites.push(RentalSite {
@@ -188,20 +308,47 @@ impl RentalRegistry {
             .into_iter()
             .map(|(region, sites)| (region, RentalRegion::new(sites)))
             .collect::<BTreeMap<_, _>>();
+        let locations = accounts
+            .iter()
+            .map(|account| RentalLocation {
+                landlord: account.landlord,
+                position: state.actors.at(account.landlord).position,
+            })
+            .collect::<Vec<_>>();
+        let history = history.filter(|history| history.registry.locations == locations);
+        let mut assignments = Vec::with_capacity(state.actors.len());
         for (index, actor) in state.actors.iter().enumerate() {
-            match (actor.kind, buildings.get(&region(scenario, &actor))) {
-                (kind, Some(sites)) if kind != Good::Housing as u32 => {
+            let cached = history.as_ref().and_then(|history| {
+                history
+                    .actors
+                    .get(index)
+                    .filter(|previous| {
+                        RentalTenant::new(index, previous) == RentalTenant::new(index, &actor)
+                    })
+                    .map(|_| history.registry.assignments[index])
+            });
+            let assignment = match (cached, actor.kind, buildings.get(&region(scenario, &actor))) {
+                (Some(account), _, _) => account,
+                (_, kind, Some(sites)) if kind != Good::Housing as u32 => {
                     let household = match actor.kind {
                         0 => index,
                         _ => actor.owner as usize,
                     };
-                    let account = sites.account(actor.position, household);
-                    accounts[account].tenants.push(index);
+                    Some(sites.account(actor.position, household))
                 }
-                _ => (),
+                _ => None,
+            };
+            if let Some(account) = assignment {
+                accounts[account].tenants.push(index);
             }
+            assignments.push(assignment);
         }
-        Self { accounts }
+        Self {
+            accounts,
+            assignments,
+            locations,
+            regions: buildings,
+        }
     }
 
     pub fn words(&self) -> Vec<u32> {

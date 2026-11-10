@@ -133,6 +133,7 @@ pub struct EconomyConfig {
     pub industrial_expansion: u32,
 }
 pub struct Configuration {
+    rentals: crate::domain::landlords::RentalRegistry,
     pub actors: u32,
     pub fields: u32,
     pub ring: u32,
@@ -183,13 +184,50 @@ pub struct Configuration {
 }
 impl Configuration {
     pub fn new(device: &super::Device, scenario: &Scenario, state: &State) -> Self {
-        let config = scenario.config();
         let rentals = crate::domain::landlords::RentalRegistry::new(scenario, state);
+        Self::with_rentals(device, scenario, state, rentals)
+    }
+
+    pub fn updated(
+        &self,
+        device: &super::Device,
+        scenario: &Scenario,
+        previous: &crate::domain::ActorRows,
+        state: &State,
+    ) -> Self {
+        let rentals = self.rentals.updated(scenario, previous, state);
+        Self::with_rentals(device, scenario, state, rentals)
+    }
+
+    pub fn update_rentals(
+        &mut self,
+        device: &super::Device,
+        scenario: &Scenario,
+        state: &State,
+        changes: impl IntoIterator<Item = usize>,
+    ) {
+        match self.rentals.refresh(scenario, state, changes) {
+            crate::domain::landlords::RentalRefresh::Current => (),
+            crate::domain::landlords::RentalRefresh::Changed => {
+                self.rental_accounts = device.tensor(&self.rentals.words());
+                self.rental_businesses = self.rentals.accounts.len() as u32;
+            }
+        }
+    }
+
+    fn with_rentals(
+        device: &super::Device,
+        scenario: &Scenario,
+        state: &State,
+        rentals: crate::domain::landlords::RentalRegistry,
+    ) -> Self {
+        let config = scenario.config();
         Self {
             small_business_expansion: config.expansion.small_business_per_mille,
             industrial_expansion: config.expansion.industrial_per_mille,
             rental_accounts: device.tensor(&rentals.words()),
             rental_businesses: rentals.accounts.len() as u32,
+            rentals,
             actors: state.actors.len() as u32,
             fields: scenario.fields() as u32,
             ring: scenario.ring() as u32,
@@ -349,5 +387,101 @@ impl Configuration {
                 .map(|bracket| bracket.launch())
                 .collect(),
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::domain::{Actor, Experiment, Position};
+    use anyhow::Result;
+
+    enum RentalChange {
+        Migration,
+        Ownership,
+        Entry,
+        Housing,
+        BuildingMigration,
+        Capacity,
+    }
+
+    #[test]
+    fn cached_rental_configuration_matches_rebuilt_assignments_on_gpu() -> Result<()> {
+        let scenario = Scenario::industrial(128, 42, Experiment::Baseline)?;
+        let device = crate::simulation::tests::device(64)?;
+        let mut state = scenario.initial()?;
+        let mut cached = Configuration::new(&device, &scenario, &state);
+        for change in [
+            RentalChange::Migration,
+            RentalChange::Ownership,
+            RentalChange::Entry,
+            RentalChange::Housing,
+            RentalChange::BuildingMigration,
+            RentalChange::Capacity,
+        ] {
+            let previous = state.actors.clone();
+            let housing = state
+                .actors
+                .iter()
+                .position(|actor| actor.kind == Good::Housing as u32)
+                .unwrap();
+            let changed = match change {
+                RentalChange::Migration => {
+                    let mut actor = state.actors.at(2);
+                    actor.position = Position { x: 1, y: 1 };
+                    state.actors.set(2, actor);
+                    2
+                }
+                RentalChange::Ownership => {
+                    let firm = state
+                        .actors
+                        .iter()
+                        .position(|actor| actor.kind == Good::Bread as u32)
+                        .unwrap();
+                    let mut actor = state.actors.at(firm);
+                    actor.owner = 2;
+                    state.actors.set(firm, actor);
+                    firm
+                }
+                RentalChange::Entry | RentalChange::Housing => {
+                    let kind = match change {
+                        RentalChange::Entry => Good::Bread,
+                        _ => Good::Housing,
+                    };
+                    state.actors.extend([Actor {
+                        identity: state.next_identity,
+                        position: Position { x: 2, y: 2 },
+                        kind: kind as u32,
+                        owner: 3,
+                        capacity: 1,
+                    }]);
+                    state.next_identity += 1;
+                    state.actors.len() - 1
+                }
+                RentalChange::BuildingMigration => {
+                    let mut actor = state.actors.at(housing);
+                    actor.position = Position { x: 1, y: 2 };
+                    state.actors.set(housing, actor);
+                    housing
+                }
+                RentalChange::Capacity => {
+                    let mut actor = state.actors.at(housing);
+                    actor.capacity += 1;
+                    state.actors.set(housing, actor);
+                    housing
+                }
+            };
+            match previous.len() == state.actors.len() {
+                true => cached.update_rentals(&device, &scenario, &state, [changed]),
+                false => cached = cached.updated(&device, &scenario, &previous, &state),
+            }
+            let rebuilt = Configuration::new(&device, &scenario, &state);
+            assert_eq!(cached.rental_businesses, rebuilt.rental_businesses);
+            assert_eq!(
+                device.read(&cached.rental_accounts)?,
+                device.read(&rebuilt.rental_accounts)?
+            );
+        }
+        Ok(())
     }
 }

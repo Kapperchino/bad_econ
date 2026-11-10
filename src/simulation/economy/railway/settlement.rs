@@ -1,7 +1,9 @@
 use super::*;
 
-const RESOURCE_WORDS: usize = 11;
-const ACCOUNT_WORDS: usize = 8;
+use crate::domain::railway::{
+    FREIGHT_ACCOUNT_WORDS as ACCOUNT_WORDS, FREIGHT_BOOKING_WORDS,
+    FREIGHT_RESOURCE_WORDS as RESOURCE_WORDS,
+};
 const PENDING: usize = 0;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
@@ -44,7 +46,7 @@ impl Buffers {
         Self {
             resources: device.empty((actors + regions) * RESOURCE_WORDS),
             accounts: device.empty(actors * ACCOUNT_WORDS),
-            bookings: device.empty(actors * 2),
+            bookings: device.empty(actors * FREIGHT_BOOKING_WORDS),
             progress: device.tensor(&[0]),
         }
     }

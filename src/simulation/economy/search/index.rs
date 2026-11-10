@@ -1,7 +1,7 @@
 use super::*;
 
-const FIELDS: usize = 6;
-
+const FIELDS: usize = 7;
+pub(super) const BLOCK: u32 = 32;
 #[derive(Clone, Copy)]
 enum BlockField {
     StockedPrice,
@@ -10,6 +10,88 @@ enum BlockField {
     MaxX,
     MinY,
     MaxY,
+    Stocked,
+}
+
+#[derive(Clone, Copy)]
+enum SupplyField {
+    Quote,
+    AvailableLow,
+    AvailableHigh,
+    Flags,
+}
+
+#[derive(CubeType, Clone, Copy)]
+pub(super) struct Supply {
+    pub quote: u32,
+    pub available: Ticks,
+    pub offered: bool,
+    pub producer: bool,
+}
+
+#[cube]
+impl Supply {
+    pub fn new(
+        state: &mut [u32],
+        actors: &[u32],
+        config: &EconomyConfig,
+        actor: u32,
+        good: u32,
+    ) -> Self {
+        let kind = kind(actors, actor);
+        let producer = !kind.is(comptime!(ActorKind::Household)) && kind.output() == good;
+        let supplier = kind.output() == good
+            || (kind.is(comptime!(ActorKind::Household)) && good == comptime!(Good::Bread as u32));
+        let available = positive(
+            value(state, config, good, actor),
+            household_production::reserve(state, actors, config, actor, good),
+        );
+        Supply {
+            quote: number(state, config, comptime!(Field::Price as u32), actor),
+            available,
+            offered: supplier && !equal(available, zero()),
+            producer,
+        }
+    }
+
+    fn store(&self, scratch: &mut [u32], config: &EconomyConfig, member: u32) {
+        let count = config.actors;
+        scratch[(comptime!(SupplyField::Quote as u32) * count + member) as usize] = self.quote;
+        scratch[(comptime!(SupplyField::AvailableLow as u32) * count + member) as usize] =
+            self.available.extract(LOW_WORD);
+        scratch[(comptime!(SupplyField::AvailableHigh as u32) * count + member) as usize] =
+            self.available.extract(HIGH_WORD);
+        scratch[(comptime!(SupplyField::Flags as u32) * count + member) as usize] =
+            u32::cast_from(self.offered) | (u32::cast_from(self.producer) << 1);
+    }
+
+    pub fn load(scratch: &[u32], config: &EconomyConfig, member: u32) -> Self {
+        let count = config.actors;
+        let flags = scratch[(comptime!(SupplyField::Flags as u32) * count + member) as usize];
+        Supply {
+            quote: scratch[(comptime!(SupplyField::Quote as u32) * count + member) as usize],
+            available: ticks(
+                scratch[(comptime!(SupplyField::AvailableLow as u32) * count + member) as usize],
+                scratch[(comptime!(SupplyField::AvailableHigh as u32) * count + member) as usize],
+            ),
+            offered: flags & 1 != 0,
+            producer: flags & 2 != 0,
+        }
+    }
+}
+
+#[derive(Clone, Copy)]
+enum IndexReduction {
+    Workgroup,
+    Plane,
+}
+
+#[cube]
+fn reduce_minimum(value: u32, #[comptime] reduction: IndexReduction) -> u32 {
+    match comptime!(reduction) {
+        IndexReduction::Workgroup => parallel::reduce(value, comptime!(Reduction::Minimum)),
+        IndexReduction::Plane => plane_min(value),
+    }
 }
 
 #[cube]
@@ -21,27 +103,73 @@ pub(super) fn build(
     scratch: &mut [u32],
     parameters: &EconomyParameters,
 ) {
+    let cooperative = comptime!(parameters.scan == crate::simulation::parallel::ScanMode::Plane)
+        && PLANE_DIM == 32;
+    if cooperative {
+        build_blocks(
+            state,
+            actors,
+            config,
+            spatial,
+            scratch,
+            parameters,
+            comptime!(IndexReduction::Plane),
+        );
+    } else {
+        build_blocks(
+            state,
+            actors,
+            config,
+            spatial,
+            scratch,
+            parameters,
+            comptime!(IndexReduction::Workgroup),
+        );
+    }
+}
+
+#[cube]
+fn build_blocks(
+    state: &mut [u32],
+    actors: &[u32],
+    config: &EconomyConfig,
+    spatial: &[u32],
+    scratch: &mut [u32],
+    parameters: &EconomyParameters,
+    #[comptime] reduction: IndexReduction,
+) {
     let cells = config.spatial_side * config.spatial_side;
     let count = spatial[cells as usize];
-    let block = CUBE_POS as u32;
-    if block * DISCOVERY_BLOCK < count {
+    let start = CUBE_POS as u32 * (DISCOVERY_BLOCK / BLOCK);
+    let end = min(start + DISCOVERY_BLOCK / BLOCK, ceildiv(count, BLOCK));
+    let width = match comptime!(reduction) {
+        IndexReduction::Plane => 32u32,
+        IndexReduction::Workgroup => CUBE_DIM,
+    };
+    let lane = UNIT_POS % width;
+    let step = CUBE_DIM / width;
+    let mut block = start + UNIT_POS / width;
+    while block < end {
         let mut stocked_price = u32::new(comptime!(i64::from(u32::MAX)));
         let mut empty_price = u32::new(comptime!(i64::from(u32::MAX)));
         let mut min_x = u32::new(comptime!(i64::from(u32::MAX)));
         let mut max_x = 0u32;
         let mut min_y = u32::new(comptime!(i64::from(u32::MAX)));
         let mut max_y = 0u32;
+        let mut stocked = 0u32;
         let good = comptime!(parameters.market.good().expect("consumer good") as u32);
-        let mut member = block * DISCOVERY_BLOCK + UNIT_POS;
-        while member < min((block + 1) * DISCOVERY_BLOCK, count) {
+        let mut member = block * BLOCK + lane;
+        while member < min((block + 1) * BLOCK, count) {
             let actor = spatial[(cells + 1 + member) as usize];
-            let quote = number(state, config, comptime!(Field::Price as u32), actor);
-            let offered = household_production::offers(state, actors, config, actor, good);
-            let producer = !kind(actors, actor).is(comptime!(ActorKind::Household))
-                && kind(actors, actor).output() == good;
+            let supply = Supply::new(state, actors, config, actor, good);
+            supply.store(scratch, config, member);
+            let quote = supply.quote;
+            let offered = supply.offered;
+            let producer = supply.producer;
             let price = select(quote > 0, quote, u32::MAX);
             stocked_price = min(stocked_price, select(offered, price, u32::MAX));
             empty_price = min(empty_price, select(producer && !offered, price, u32::MAX));
+            stocked = max(stocked, u32::cast_from(offered));
             let stride = actors.len() / ActorLayout::WORDS;
             let x = actors[ActorLayout::X * stride + actor as usize];
             let y = actors[ActorLayout::Y * stride + actor as usize];
@@ -49,15 +177,16 @@ pub(super) fn build(
             max_x = max(max_x, x);
             min_y = min(min_y, y);
             max_y = max(max_y, y);
-            member += CUBE_DIM;
+            member += width;
         }
-        stocked_price = parallel::reduce(stocked_price, comptime!(Reduction::Minimum));
-        empty_price = parallel::reduce(empty_price, comptime!(Reduction::Minimum));
-        min_x = parallel::reduce(min_x, comptime!(Reduction::Minimum));
-        max_x = !parallel::reduce(!max_x, comptime!(Reduction::Minimum));
-        min_y = parallel::reduce(min_y, comptime!(Reduction::Minimum));
-        max_y = !parallel::reduce(!max_y, comptime!(Reduction::Minimum));
-        if UNIT_POS == 0 {
+        stocked_price = reduce_minimum(stocked_price, comptime!(reduction));
+        empty_price = reduce_minimum(empty_price, comptime!(reduction));
+        min_x = reduce_minimum(min_x, comptime!(reduction));
+        max_x = !reduce_minimum(!max_x, comptime!(reduction));
+        min_y = reduce_minimum(min_y, comptime!(reduction));
+        max_y = !reduce_minimum(!max_y, comptime!(reduction));
+        stocked = !reduce_minimum(!stocked, comptime!(reduction));
+        if lane == 0 {
             let base = 6 * config.actors as usize + block as usize * FIELDS;
             scratch[base + comptime!(BlockField::StockedPrice as usize)] = stocked_price;
             scratch[base + comptime!(BlockField::EmptyPrice as usize)] = empty_price;
@@ -65,7 +194,9 @@ pub(super) fn build(
             scratch[base + comptime!(BlockField::MaxX as usize)] = max_x;
             scratch[base + comptime!(BlockField::MinY as usize)] = min_y;
             scratch[base + comptime!(BlockField::MaxY as usize)] = max_y;
+            scratch[base + comptime!(BlockField::Stocked as usize)] = stocked;
         }
+        block += step;
     }
 }
 
@@ -79,6 +210,7 @@ pub(super) fn skip(
     cash: Ticks,
     chosen: u32,
     empty_score: Ticks,
+    visibility: u32,
 ) -> bool {
     let base = 6 * config.actors as usize + block as usize * FIELDS;
     let stocked_price = scratch[base + comptime!(BlockField::StockedPrice as usize)];
@@ -87,6 +219,7 @@ pub(super) fn skip(
     let max_x = scratch[base + comptime!(BlockField::MaxX as usize)];
     let min_y = scratch[base + comptime!(BlockField::MinY as usize)];
     let max_y = scratch[base + comptime!(BlockField::MaxY as usize)];
+    let stocked = scratch[base + comptime!(BlockField::Stocked as usize)];
     let distance = max(x, min_x) - min(x, max_x) + max(y, min_y) - min(y, max_y);
     let delivery = times32(
         max(
@@ -104,5 +237,6 @@ pub(super) fn skip(
         && empty_price != u32::MAX
         && !lt(cash, ticks(empty_price, 0))
         && lt(lower_score, empty_score);
-    distance > config.search_radius || !(stock_possible || empty_improves)
+    let unseen_stock = stocked > 0 && visibility == 0;
+    distance > config.search_radius || !(stock_possible || empty_improves || unseen_stock)
 }

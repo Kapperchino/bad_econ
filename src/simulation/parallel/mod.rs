@@ -456,9 +456,7 @@ fn scan_active_blocks(
     );
     let block = CUBE_POS as u32;
     let start = block * CUBE_DIM * items + UNIT_POS * items;
-    if block * CUBE_DIM * items < count
-        && control[crate::simulation::markets::LATCH_WORD].load() == 0
-    {
+    if block * CUBE_DIM * items < count && crate::simulation::markets::faults_clear(control) {
         let mut values = Array::<u32>::new(items as usize);
         let mut total = 0u32;
         #[unroll]
@@ -502,7 +500,7 @@ fn add_active_offsets(
     );
     let block = CUBE_POS as u32;
     let start = block * CUBE_DIM * items + UNIT_POS * items;
-    if start < count && block > 0 && control[crate::simulation::markets::LATCH_WORD].load() == 0 {
+    if start < count && block > 0 && crate::simulation::markets::faults_clear(control) {
         let preceding = buffer[(offset + bound + block - 1) as usize];
         #[unroll]
         for item in 0..items {

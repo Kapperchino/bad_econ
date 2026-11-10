@@ -10,6 +10,284 @@ use crate::{
 use anyhow::Result;
 use burn_wgpu::CubeTensor;
 
+#[derive(CubeType, CubeLaunch)]
+struct DispatchProbeInput {
+    executed: Box<[Atomic<u32>]>,
+}
+
+struct DispatchProbe;
+struct CountDispatches;
+
+impl System for DispatchProbe {
+    type Input = DispatchProbeInput;
+    type Passes = gpu_passes![CountDispatches];
+}
+
+#[cube]
+impl GpuPass<DispatchProbeInput> for CountDispatches {
+    type Output = ();
+
+    fn execute(input: DispatchProbeInput) {
+        if UNIT_POS == 0 {
+            input.executed[0usize].fetch_add(1);
+        }
+    }
+}
+
+#[test]
+fn empty_indirect_queues_skip_work_after_active_dispatches_on_gpu() -> Result<()> {
+    let device = Device::headless(64)?;
+    let buffers = SearchBuffers::new(&device, 129);
+    let control = device.empty(CONTROL_WORDS + 3);
+    let executed = device.tensor(&[17]);
+    let mut expected = 17;
+    for active in [0u32, 1, 64, 65, 129, 0] {
+        let mut words = vec![0; CONTROL_WORDS + 3];
+        words[CONSTRUCTED_EVENTS_WORD] = active;
+        device.write(&control, &words);
+        prepare_dispatch(&device, &control, &buffers.dispatches, 129);
+        DispatchProbe::launch(
+            &device,
+            dispatch(&buffers.dispatches, SORT_DISPATCH),
+            CubeDim::new_1d(device.workgroup),
+            DispatchProbeInputLaunch {
+                executed: executed.clone().into_buffer_arg(),
+            },
+        );
+        expected += active.div_ceil(device.workgroup);
+        assert_eq!(device.read(&executed)?, [expected]);
+    }
+    Ok(())
+}
+
+#[test]
+fn compaction_and_ranges_preserve_buffers_after_unlatched_faults_on_gpu() -> Result<()> {
+    use crate::{
+        domain::{Experiment, Good, Market, Scenario},
+        simulation::{Simulation, economy::search, layout::ProposalLayout},
+    };
+    let scenario = Scenario::baseline(97, 42, Experiment::Baseline)?;
+    let simulation = Simulation::new(scenario, crate::simulation::tests::device(64)?)?;
+    let count = simulation.metadata.actors.len();
+    let mut parameters =
+        simulation.parameters(Phase::Commitment, Market::Input(Good::Grain), 0, count)?;
+    parameters.settlement_rotation = 0;
+    let mut control = vec![0; simulation.control.meta.num_elements()];
+    control[FAULT_WORD] = FaultFlags::ARITHMETIC_OVERFLOW.bits();
+    control[CONSTRUCTED_EVENTS_WORD] = 1;
+    control[SEARCHES_WORD] = 1;
+    let mut scratch = vec![0; simulation.scratch.meta.num_elements()];
+    scratch[0] = 1;
+    let mut proposals = vec![NO_ACTOR; simulation.proposals.meta.num_elements()];
+    proposals[ProposalLayout::ACTOR] = 2;
+    let mut successes = vec![0; simulation.searches.successes.meta.num_elements()];
+    successes[0] = 1;
+    successes[search_counts_offset(count) + search_blocks(count) - 1] = 1;
+    simulation.device.write(&simulation.control, &control);
+    simulation.device.write(&simulation.scratch, &scratch);
+    simulation.device.write(&simulation.proposals, &proposals);
+    simulation
+        .device
+        .write(&simulation.searches.successes, &successes);
+    simulation.device.write(
+        &simulation.searches.requests,
+        &vec![0; simulation.searches.requests.meta.num_elements()],
+    );
+    for stage in [
+        super::super::EconomyStage::GroupCompactFill,
+        super::super::EconomyStage::GroupRanges,
+    ] {
+        simulation.economy(stage, count, &parameters, &simulation.proposals);
+        assert_eq!(simulation.device.read(&simulation.scratch)?, scratch);
+        assert_eq!(simulation.device.read(&simulation.control)?, control);
+        assert_eq!(simulation.device.read(&simulation.proposals)?, proposals);
+    }
+    search::MarketSearch::launch(
+        &simulation.device,
+        simulation.device.count(count),
+        CubeDim::new_1d(simulation.device.workgroup),
+        search::SearchInputLaunch {
+            state: simulation.state.clone().into_buffer_arg(),
+            actors: simulation.actors.clone().into_buffer_arg(),
+            config: simulation.config.launch(),
+            spatial: simulation.spatial.clone().into_buffer_arg(),
+            proposals: simulation.proposals.clone().into_buffer_arg(),
+            searches: simulation.searches.requests.clone().into_buffer_arg(),
+            successes: simulation.searches.successes.clone().into_buffer_arg(),
+            scratch: simulation.scratch.clone().into_buffer_arg(),
+            control: simulation.control.clone().into_buffer_arg(),
+            parameters: parameters.launch(),
+            stage: search::SearchStage::Compact,
+            status_reset: search::StatusReset::Full,
+        },
+    );
+    assert_eq!(simulation.device.read(&simulation.scratch)?, scratch);
+    assert_eq!(simulation.device.read(&simulation.control)?, control);
+    assert_eq!(simulation.device.read(&simulation.proposals)?, proposals);
+    Ok(())
+}
+
+#[test]
+fn indexed_feedback_ignores_stale_statuses_and_matches_dense_feedback_on_gpu() -> Result<()> {
+    use crate::{
+        domain::{Experiment, Field, Market, Scenario},
+        simulation::{Simulation, encode, layout::TICK_WORDS},
+    };
+    #[derive(Clone, Copy)]
+    enum FeedbackCase {
+        Active,
+        Empty,
+        Faulted,
+        Overflow,
+    }
+    #[derive(Debug, PartialEq, Eq)]
+    struct FeedbackSnapshot {
+        feedback: Vec<u32>,
+        access: Vec<u32>,
+    }
+    let scenario = Scenario::baseline(97, 42, Experiment::Baseline)?;
+    let initial = scenario.initial()?;
+    let simulation = Simulation::new(scenario, crate::simulation::tests::device(64)?)?;
+    let count = initial.actors.len();
+    let firm = 97;
+    let mut parameters =
+        simulation.parameters(Phase::ProvisionPurchase, Market::Household, 0, count)?;
+    parameters.status_start = 4 * count as u32;
+    parameters.sort_source = 2 * count as u32;
+    let mut proposals = vec![0; simulation.proposals.meta.num_elements()];
+    for actor in 0..count {
+        proposals[actor * ProposalLayout::WORDS + ProposalLayout::ACTOR] = firm as u32;
+        proposals[actor * ProposalLayout::WORDS + ProposalLayout::QUANTITY_LOW] = 7;
+    }
+    proposals[64 * ProposalLayout::WORDS + ProposalLayout::QUANTITY_LOW] = 9;
+    simulation.device.write(&simulation.proposals, &proposals);
+    for case in [
+        FeedbackCase::Active,
+        FeedbackCase::Empty,
+        FeedbackCase::Faulted,
+        FeedbackCase::Overflow,
+    ] {
+        let active = match case {
+            FeedbackCase::Empty => 0,
+            _ => 3,
+        };
+        let mut control = vec![0; simulation.control.meta.num_elements()];
+        control[CONSTRUCTED_EVENTS_WORD] = active;
+        if let FeedbackCase::Faulted = case {
+            control[FAULT_WORD] = FaultFlags::ARITHMETIC_OVERFLOW.bits();
+        }
+        simulation.device.write(&simulation.control, &control);
+        let mut feedback = vec![0; simulation.feedback.meta.num_elements()];
+        let base = CONTROL_WORDS + firm * TICK_WORDS;
+        if let FeedbackCase::Overflow = case {
+            feedback[base] = u32::MAX - 8;
+            feedback[base + 1] = u32::MAX;
+        }
+        let mut indexed = vec![0; simulation.scratch.meta.num_elements()];
+        indexed[3 * count..3 * count + 3].copy_from_slice(&[64, 37, 3]);
+        indexed[4 * count..5 * count].fill(EventStatus::Rejected as u32);
+        indexed[4 * count + 37] = EventStatus::Accepted as u32;
+        let mut dense = indexed.clone();
+        dense[4 * count..5 * count].fill(EventStatus::Inactive as u32);
+        for actor in [64, 37, 3].into_iter().take(active as usize) {
+            dense[4 * count + actor] = indexed[4 * count + actor];
+        }
+        let capture = |discovery, outcomes: &[u32]| -> Result<FeedbackSnapshot> {
+            simulation.device.write(
+                &simulation.state,
+                bytemuck::cast_slice(&encode(&initial.values)),
+            );
+            simulation.device.write(&simulation.feedback, &feedback);
+            simulation.device.write(&simulation.scratch, outcomes);
+            feedback_boundary(
+                &simulation.device,
+                &simulation.control,
+                &simulation.feedback,
+            );
+            simulation.feedback_operation(
+                super::super::EconomyStage::RecordFeedback,
+                count,
+                &EconomyParameters {
+                    discovery,
+                    ..parameters
+                },
+            );
+            Ok(FeedbackSnapshot {
+                feedback: simulation.device.read(&simulation.feedback)?,
+                access: simulation.device.read_range(
+                    &simulation.state,
+                    Field::FoodAccess as usize * count * TICK_WORDS,
+                    count * TICK_WORDS,
+                )?,
+            })
+        };
+        let actual = capture(Discovery::Indexed, &indexed)?;
+        assert_eq!(actual, capture(Discovery::Original, &dense)?);
+        let expected = match case {
+            FeedbackCase::Active => [16, 0, 0],
+            FeedbackCase::Empty | FeedbackCase::Faulted => [0, 0, 0],
+            FeedbackCase::Overflow => [7, 0, FaultFlags::DEMAND_OVERFLOW.bits()],
+        };
+        assert_eq!(
+            [
+                actual.feedback[base],
+                actual.feedback[base + 1],
+                actual.feedback[FAULT_WORD]
+            ],
+            expected
+        );
+    }
+    Ok(())
+}
+
+#[test]
+#[ignore]
+fn profile_boundary_submission_and_completion_on_gpu() -> Result<()> {
+    use anyhow::{Context, anyhow};
+    let device = crate::simulation::tests::device(64)?;
+    let capacity = 1_010_000;
+    let dispatches = device
+        .client
+        .memory_dedicated_allocation(144, |_| device.empty(36));
+    let mut control = vec![0; CONTROL_WORDS + 3];
+    control[SEARCHES_WORD] = capacity as u32;
+    control[CONSTRUCTED_EVENTS_WORD] = 600_000;
+    control[RANGE_SLOTS_WORD] = 50_000;
+    let control = device.tensor(&control);
+    prepare_dispatch(&device, &control, &dispatches, capacity);
+    device.sync()?;
+    for repeat in 0..3 {
+        for count in [654, 434] {
+            let window = device
+                .client
+                .profile_start()
+                .map_err(|error| anyhow!("{error:?}"))?;
+            let started = std::time::Instant::now();
+            for _ in 0..count {
+                prepare_dispatch(&device, &control, &dispatches, capacity);
+            }
+            let submission = started.elapsed().as_secs_f64() * 1000.0;
+            let duration = device
+                .client
+                .profile_end(window)
+                .map_err(|error| anyhow!("{error:?}"))?;
+            let method = duration.timing_method();
+            let measured =
+                pollster::block_on(duration.resolve()).context("missing boundary profile")?;
+            eprintln!(
+                "BOUNDARY {repeat} count={count} submission_ms={submission:.3} completion_ms={:.3} {method}_ms={:.3}",
+                started.elapsed().as_secs_f64() * 1000.0,
+                measured.duration().as_secs_f64() * 1000.0,
+            );
+        }
+    }
+    assert_eq!(
+        device.read(&dispatches)?[SORT_DISPATCH],
+        600_000u32.div_ceil(device.workgroup)
+    );
+    Ok(())
+}
+
 #[derive(Clone, Copy, Debug, Hash, PartialEq, Eq)]
 enum SortStage {
     Local,
@@ -72,7 +350,7 @@ impl SortBuffers {
             control: device.tensor(&control),
             dispatches: device
                 .client
-                .memory_dedicated_allocation(132, |_| device.empty(33)),
+                .memory_dedicated_allocation(144, |_| device.empty(36)),
         };
         prepare_dispatch(
             device,
@@ -398,7 +676,7 @@ impl ProposalCase {
             control: device.tensor(&control),
             dispatches: device
                 .client
-                .memory_dedicated_allocation(132, |_| device.empty(33)),
+                .memory_dedicated_allocation(144, |_| device.empty(36)),
         };
         let parameters = EconomyParameters {
             scan: self.scan,

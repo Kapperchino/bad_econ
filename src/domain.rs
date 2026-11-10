@@ -1030,6 +1030,7 @@ impl Scenario {
         let actors = self.actors() as u64;
         let batch = u64::from(self.config.batch_size).min(actors);
         self.state_len() as u64 * 8 * 2
+            + (self.state_len() as u64 * 2).div_ceil(1024) * 4
             + self
                 .config
                 .finance
@@ -1047,7 +1048,20 @@ impl Scenario {
                     * self.config.demography.initial_household_members as usize,
             ) as u64
                 * 164
-            + actors * 28
+            + actors * 32
+            + 12
+            + match self.config.railway.companies.is_empty() {
+                true => 0,
+                false => {
+                    ((actors + self.rail_geography.regions.len() as u64)
+                        * railway::FREIGHT_RESOURCE_WORDS as u64
+                        + actors
+                            * (railway::FREIGHT_ACCOUNT_WORDS + railway::FREIGHT_BOOKING_WORDS)
+                                as u64
+                        + 1)
+                        * 4
+                }
+            }
             + batch * (16 * 8 * 4 + 16 * 4 * 3 + 28)
             + 128 * 1024 * 1024
     }

@@ -2265,7 +2265,7 @@ fn inspect(
 }
 
 #[enumflags2::bitflags]
-#[repr(u32)]
+#[repr(u64)]
 #[derive(Clone, Copy, Debug, Hash, PartialEq, Eq)]
 pub enum EconomyStage {
     ClearFeedback,
@@ -2291,6 +2291,8 @@ pub enum EconomyStage {
     GroupPrepare,
     GroupFinalize,
     MarketStart,
+    InputMarketStart,
+    InputMarketRepeat,
     MarketBoundary,
     GroupRanges,
     ProposeCompact,
@@ -2337,13 +2339,29 @@ pub fn economy(
     );
     if !guarded || control[LATCH_WORD].load() == 0 {
         match stage {
-            EconomyStage::MarketStart | EconomyStage::MarketBoundary => {
+            EconomyStage::MarketStart
+            | EconomyStage::InputMarketStart
+            | EconomyStage::InputMarketRepeat
+            | EconomyStage::MarketBoundary => {
                 if id == 0 {
                     control[LATCH_WORD].store(control[crate::simulation::flags::FAULT_WORD].load());
-                    if comptime!(stage == EconomyStage::MarketStart) {
+                    if comptime!(stage != EconomyStage::MarketBoundary) {
                         control[CONSTRUCTED_EVENTS_WORD].store(0);
                         control[RANGE_SLOTS_WORD].store(0);
                         control[markets::SEARCHES_WORD].store(0);
+                    }
+                    if comptime!(stage == EconomyStage::InputMarketStart) {
+                        control[markets::PREPARATION_ACTORS_WORD].store(0);
+                    }
+                }
+                if comptime!(matches!(
+                    stage,
+                    EconomyStage::InputMarketStart | EconomyStage::InputMarketRepeat
+                )) && control[crate::simulation::flags::FAULT_WORD].load() == 0
+                {
+                    if id < parameters.count {
+                        KernelEventStatus::new(comptime!(EventStatus::Inactive))
+                            .store(bundles, 4 * parameters.count + id);
                     }
                 }
             }
@@ -2362,13 +2380,19 @@ pub fn economy(
                 markets::compact_proposal(peer, bundles, parameters, id);
             }
             EconomyStage::GroupCompactFill => {
-                markets::compact_fill(proposals, bundles, control, parameters, id)
+                if control[crate::simulation::flags::FAULT_WORD].load() == 0 {
+                    markets::compact_fill(proposals, bundles, control, parameters, id);
+                }
             }
             EconomyStage::GroupRadixLocal => markets::radix_local(bundles, control, parameters, id),
             EconomyStage::GroupRadixScatter => {
                 markets::radix_scatter(bundles, control, parameters, id)
             }
-            EconomyStage::GroupRanges => markets::ranges(bundles, control, config, parameters, id),
+            EconomyStage::GroupRanges => {
+                if control[crate::simulation::flags::FAULT_WORD].load() == 0 {
+                    markets::ranges(bundles, control, config, parameters, id);
+                }
+            }
             EconomyStage::ClearFeedback => {
                 if id < control.len() as u32 {
                     control[id as usize].store(0);
@@ -2887,10 +2911,22 @@ fn record_feedback(
     parameters: &EconomyParameters,
     id: u32,
 ) {
-    if id < parameters.count && feedback[CONSTRUCTED_EVENTS_WORD].load() == 0 {
-        let status = KernelEventStatus::load(outcomes, parameters.status_start + id);
+    let count = match comptime!(parameters.discovery) {
+        Discovery::Indexed => feedback[markets::FEEDBACK_EVENTS_WORD].load(),
+        #[cfg(test)]
+        _ => parameters.count,
+    };
+    if id < count && feedback[CONSTRUCTED_EVENTS_WORD].load() == 0 {
+        let index = match comptime!(parameters.discovery) {
+            Discovery::Indexed => {
+                outcomes[(parameters.sort_source + parameters.count + id) as usize]
+            }
+            #[cfg(test)]
+            _ => id,
+        };
+        let status = KernelEventStatus::load(outcomes, parameters.status_start + index);
         if status.contains(comptime!(EventStatus::Rejected)) {
-            let actor = parameters.offset + id;
+            let actor = parameters.offset + index;
             if comptime!(parameters.market == MarketFlag::Household)
                 && number(state, config, comptime!(Field::FoodAccess as u32), actor) == 0
             {
