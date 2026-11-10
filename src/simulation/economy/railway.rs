@@ -1,5 +1,5 @@
 use super::*;
-use crate::domain::railway::RailCapacityField;
+use crate::domain::railway::{RAIL_ROUTE_WORDS as ROUTE_WORDS, RailCapacityField};
 use crate::simulation::{Device, configuration::Configuration};
 use burn_wgpu::CubeTensor;
 
@@ -11,7 +11,6 @@ pub(in crate::simulation) mod settlement;
 const COMPANY_WORDS: usize = 4;
 const SEGMENT_WORDS: usize = 7;
 const REGION_WORDS: usize = 3;
-const ROUTE_WORDS: usize = 6;
 const UNREACHABLE: u32 = u32::MAX / 4;
 
 #[derive(CubeType, CubeLaunch)]

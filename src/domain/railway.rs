@@ -3,6 +3,7 @@ use anyhow::{Result, anyhow};
 use serde::{Deserialize, Serialize};
 use std::collections::{BTreeMap, BTreeSet};
 
+pub(crate) const RAIL_ROUTE_WORDS: usize = 6;
 pub(crate) const FREIGHT_RESOURCE_WORDS: usize = 11;
 pub(crate) const FREIGHT_ACCOUNT_WORDS: usize = 8;
 pub(crate) const FREIGHT_BOOKING_WORDS: usize = 2;

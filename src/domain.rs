@@ -1053,11 +1053,16 @@ impl Scenario {
             + match self.config.railway.companies.is_empty() {
                 true => 0,
                 false => {
+                    let companies = self.config.railway.companies.len() as u64;
+                    let stations = self.config.railway.stations().len() as u64;
                     ((actors + self.rail_geography.regions.len() as u64)
                         * railway::FREIGHT_RESOURCE_WORDS as u64
                         + actors
-                            * (railway::FREIGHT_ACCOUNT_WORDS + railway::FREIGHT_BOOKING_WORDS)
+                            * (railway::FREIGHT_ACCOUNT_WORDS + railway::FREIGHT_BOOKING_WORDS + 2)
                                 as u64
+                        + companies * stations.pow(2) * railway::RAIL_ROUTE_WORDS as u64
+                        + stations.pow(2) * self.ring() as u64
+                        + companies.pow(2)
                         + 1)
                         * 4
                 }
