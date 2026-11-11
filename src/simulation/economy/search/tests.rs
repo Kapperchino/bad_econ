@@ -466,6 +466,41 @@ fn first_round_inventory_faults_gate_repeat_preparation_on_gpu() -> Result<()> {
 }
 
 #[test]
+fn fused_search_index_preserves_bread_price_blocks_on_gpu() -> Result<()> {
+    for market in [Market::Household, Market::Consumer(Good::Bread)] {
+        for workgroup in [32, 64, 256] {
+            let mut probe = SearchProbe::new(SupplyCase::Capped, 0, market)?;
+            probe.simulation.device.workgroup = workgroup;
+            let prices = (1..=SUPPLIERS)
+                .map(|firm| firm / DISCOVERY_BLOCK * 500 + firm * 97 % 23)
+                .collect::<Vec<_>>();
+            for (firm, price) in prices.iter().enumerate() {
+                probe.state.set(Field::Price, firm + 1, u64::from(*price));
+            }
+            let expected = prices
+                .chunks(DISCOVERY_BLOCK as usize)
+                .map(|block| *block.iter().min().expect("price block"))
+                .collect::<Vec<_>>();
+            for execution in [SearchExecution::Shared, SearchExecution::Plane] {
+                probe.outcome(execution)?;
+                let config = &probe.simulation.config;
+                let base = 3 * (config.spatial_side * config.spatial_side + 1 + config.actors);
+                assert_eq!(
+                    probe.simulation.device.read_range(
+                        &probe.simulation.spatial,
+                        base as usize,
+                        expected.len(),
+                    )?,
+                    expected,
+                    "{market:?}, workgroup {workgroup}, {execution:?}"
+                );
+            }
+        }
+    }
+    Ok(())
+}
+
+#[test]
 fn cooperative_market_search_preserves_serial_search_and_shared_fallback_on_gpu() -> Result<()> {
     let cases = [
         SupplyCase::Capped,

@@ -35,6 +35,9 @@ mimalloc = "0.1.52"
 [target.'cfg(any(windows, target_os = "linux", target_os = "android", target_os = "freebsd", target_os = "macos"))'.dependencies]
 ash = { version = "=0.38.0", default-features = false, optional = true }
 
+[target.'cfg(any(windows, target_os = "linux", target_os = "android", target_os = "freebsd"))'.dependencies]
+cubecl = { version = "=0.11.1", default-features = false, features = ["vulkan"], optional = true }
+
 [target.'cfg(target_vendor = "apple")'.dependencies]
 objc2-metal = { version = "=0.3.2", default-features = false, features = ["std", "MTLDevice"], optional = true }
 sysinfo = { version = "=0.39.6", default-features = false, features = ["system"], optional = true }

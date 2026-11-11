@@ -394,6 +394,7 @@ impl SortCase {
                 16 * self.capacity.div_ceil(device.workgroup as usize),
                 &buffers.control,
                 &buffers.dispatches,
+                parallel::HistogramScan::Complete,
             );
             self.launch(device, buffers, &parameters, SortStage::Scatter);
             parameters.sort_source = 2 * self.capacity as u32 - parameters.sort_source;

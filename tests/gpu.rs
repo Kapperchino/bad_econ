@@ -6,6 +6,47 @@ use bad_econ::{
     domain::*,
     simulation::{MemoryBudget, Simulation},
 };
+use cubecl::prelude::*;
+
+#[cube(launch)]
+fn write_buffer_probes(buffer: &mut [u32], positions: &[u32], seed: u32) {
+    if ABSOLUTE_POS < positions.len() {
+        let position = positions[ABSOLUTE_POS];
+        buffer[position as usize] = position ^ seed;
+    }
+}
+
+#[test]
+#[ignore = "allocates the reported 3.46 GB buffer; requires sufficient GPU memory"]
+fn gpu_buffer_larger_than_two_gib_preserves_distant_writes() -> Result<()> {
+    let device = support::device(64)?;
+    let words = 3_458_240_000 / size_of::<u32>();
+    let boundary = (1usize << 31) / size_of::<u32>();
+    let positions =
+        [0, boundary - 1, boundary, boundary + 1, words - 1].map(|position| position as u32);
+    eprintln!("{}: {} bytes", device.name, words * size_of::<u32>());
+    assert!(device.memory_budget.bytes() >= (words * size_of::<u32>()) as u64);
+    let buffer = device.empty(words);
+    let probes = device.tensor(&positions);
+    for seed in [0x923a5ce1, 0x6dc5a31e] {
+        write_buffer_probes::launch(
+            &device.client,
+            CubeCount::Static(1, 1, 1),
+            CubeDim::new_1d(device.workgroup),
+            buffer.clone().into_buffer_arg(),
+            probes.clone().into_buffer_arg(),
+            seed,
+        );
+        for position in positions {
+            assert_eq!(
+                device.read_range(&buffer, position as usize, 1)?,
+                vec![position ^ seed],
+                "word {position}"
+            );
+        }
+    }
+    Ok(())
+}
 
 #[test]
 fn gpu_memory_budget_rejects_scenarios_before_allocation() -> Result<()> {

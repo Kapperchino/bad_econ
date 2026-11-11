@@ -32,23 +32,45 @@ pub struct Device {
 }
 impl Device {
     pub fn headless(workgroup: u32) -> Result<Self> {
-        let instance = wgpu::Instance::new(wgpu::InstanceDescriptor::new_without_display_handle());
-        let adapter =
-            pollster::block_on(instance.request_adapter(&wgpu::RequestAdapterOptions::default()))
-                .context("no GPU adapter")?;
-        let info = adapter.get_info();
-        let limits = adapter.limits();
-        let descriptor = wgpu::DeviceDescriptor {
-            label: Some("bad-econ simulation"),
-            required_limits: limits,
-            required_features: adapter.features()
-                & (wgpu::Features::TIMESTAMP_QUERY
-                    | wgpu::Features::TIMESTAMP_QUERY_INSIDE_ENCODERS
-                    | wgpu::Features::SHADER_INT64
-                    | wgpu::Features::SUBGROUP),
+        let instance = wgpu::Instance::new(wgpu::InstanceDescriptor {
+            backends: wgpu::Backends::VULKAN | wgpu::Backends::METAL,
+            ..wgpu::InstanceDescriptor::new_without_display_handle()
+        });
+        let adapter = pollster::block_on(instance.request_adapter(&wgpu::RequestAdapterOptions {
+            power_preference: wgpu::PowerPreference::HighPerformance,
             ..Default::default()
+        }))
+        .context("no GPU adapter")?;
+        let info = adapter.get_info();
+        let native = match info.backend {
+            #[cfg(any(
+                windows,
+                target_os = "linux",
+                target_os = "android",
+                target_os = "freebsd"
+            ))]
+            wgpu::Backend::Vulkan => {
+                pollster::block_on(cubecl::wgpu::vulkan::try_request_vulkan_device(&adapter))
+                    .map_err(|error| anyhow!("{error}"))?
+            }
+            _ => None,
         };
-        let (device, queue) = pollster::block_on(adapter.request_device(&descriptor))?;
+        let (device, queue) = match native {
+            Some(native) => native,
+            None => {
+                let descriptor = wgpu::DeviceDescriptor {
+                    label: Some("bad-econ simulation"),
+                    required_limits: adapter.limits(),
+                    required_features: adapter.features()
+                        & (wgpu::Features::TIMESTAMP_QUERY
+                            | wgpu::Features::TIMESTAMP_QUERY_INSIDE_ENCODERS
+                            | wgpu::Features::SHADER_INT64
+                            | wgpu::Features::SUBGROUP),
+                    ..Default::default()
+                };
+                pollster::block_on(adapter.request_device(&descriptor))?
+            }
+        };
         Self::import(
             WgpuSetup {
                 instance,
@@ -85,6 +107,7 @@ impl Device {
                     .map_err(|error| anyhow!("{error}"))?;
                 let cube = cubecl::Device::Wgpu(imported);
                 let client = cube.client();
+                let name = format!("{name} / {}", client.name());
                 Ok(Self {
                     client,
                     cube,

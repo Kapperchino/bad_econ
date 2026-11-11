@@ -275,7 +275,15 @@ mod tests {
                             &dispatches,
                             capacity,
                         );
-                        scan_active(&device, &buffer, offset, bound, &control, &dispatches);
+                        scan_active(
+                            &device,
+                            &buffer,
+                            offset,
+                            bound,
+                            &control,
+                            &dispatches,
+                            HistogramScan::Complete,
+                        );
                         let actual = device.read(&buffer)?;
                         let expected = match state {
                             ActiveScanState::Ready => {
@@ -345,6 +353,12 @@ mod tests {
 
 const ACTIVE_SCAN_ITEMS: u32 = 8;
 
+#[derive(Clone, Copy, Debug, Hash, PartialEq, Eq)]
+pub(super) enum HistogramScan {
+    Complete,
+    BlockLocal,
+}
+
 #[derive(Clone, Copy)]
 pub(super) enum ActiveScanTile {
     Scalar,
@@ -374,6 +388,7 @@ pub(super) fn scan_active(
     count: usize,
     control: &CubeTensor,
     dispatches: &CubeTensor,
+    output: HistogramScan,
 ) {
     let items = ActiveScanTile::new(device, count).items();
     let span = device.workgroup * items;
@@ -417,6 +432,10 @@ pub(super) fn scan_active(
         .enumerate()
         .rev()
         .filter(|(_, level)| level.blocks > 1)
+        .filter(|(index, _)| match output {
+            HistogramScan::Complete => true,
+            HistogramScan::BlockLocal => *index > 0,
+        })
     {
         ActiveBlockOffsets::launch(
             device,

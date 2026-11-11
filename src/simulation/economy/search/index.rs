@@ -99,7 +99,7 @@ pub(super) fn build(
     state: &mut [u32],
     actors: &[u32],
     config: &EconomyConfig,
-    spatial: &[u32],
+    spatial: &mut [u32],
     scratch: &mut [u32],
     parameters: &EconomyParameters,
 ) {
@@ -133,7 +133,7 @@ fn build_blocks(
     state: &mut [u32],
     actors: &[u32],
     config: &EconomyConfig,
-    spatial: &[u32],
+    spatial: &mut [u32],
     scratch: &mut [u32],
     parameters: &EconomyParameters,
     #[comptime] reduction: IndexReduction,
@@ -149,6 +149,8 @@ fn build_blocks(
     let lane = UNIT_POS % width;
     let step = CUBE_DIM / width;
     let mut block = start + UNIT_POS / width;
+    let good = parameters.traded_good();
+    let mut minimum_quote = u32::new(comptime!(i64::from(u32::MAX)));
     while block < end {
         let mut stocked_price = u32::new(comptime!(i64::from(u32::MAX)));
         let mut empty_price = u32::new(comptime!(i64::from(u32::MAX)));
@@ -157,13 +159,15 @@ fn build_blocks(
         let mut min_y = u32::new(comptime!(i64::from(u32::MAX)));
         let mut max_y = 0u32;
         let mut stocked = 0u32;
-        let good = parameters.traded_good();
         let mut member = block * BLOCK + lane;
         while member < min((block + 1) * BLOCK, count) {
             let actor = spatial[(cells + 1 + member) as usize];
             let supply = Supply::new(state, actors, config, actor, good);
             supply.store(scratch, config, member);
             let quote = supply.quote;
+            if good == comptime!(Good::Bread as u32) {
+                minimum_quote = min(minimum_quote, quote);
+            }
             let offered = supply.offered;
             let producer = supply.producer;
             let price = select(quote > 0, quote, u32::MAX);
@@ -197,6 +201,13 @@ fn build_blocks(
             scratch[base + comptime!(BlockField::Stocked as usize)] = stocked;
         }
         block += step;
+    }
+    if good == comptime!(Good::Bread as u32) {
+        let minimum = parallel::reduce(minimum_quote, comptime!(Reduction::Minimum));
+        if UNIT_POS == 0 && CUBE_POS as u32 * DISCOVERY_BLOCK < count {
+            let base = 3 * (cells + 1 + config.actors);
+            spatial[(base + CUBE_POS as u32) as usize] = minimum;
+        }
     }
 }
 

@@ -792,7 +792,7 @@ impl GpuPass<SearchInput> for Search {
                     &mut input.state,
                     &input.actors,
                     &input.config,
-                    &input.spatial,
+                    &mut input.spatial,
                     &mut input.scratch,
                     &input.parameters,
                 ),

@@ -130,8 +130,9 @@ impl MarketSort {
         parameters: &EconomyParameters,
     ) -> Result<u32> {
         let plan = SortPlan::new(parameters);
+        let histogram = parallel::HistogramScan::BlockLocal;
         match self {
-            Self::Profiled => encode(device, scratch, control, dispatches, parameters),
+            Self::Profiled => encode(device, scratch, control, dispatches, parameters, histogram),
             Self::Recorded(recorded)
                 if recorded.compatible(device, scratch, control, dispatches, plan) =>
             {
@@ -141,9 +142,9 @@ impl MarketSort {
                 *self = Self::Unrecorded;
                 let client = &device.client;
                 client.graph_prepare()?;
-                encode(device, scratch, control, dispatches, parameters);
+                encode(device, scratch, control, dispatches, parameters, histogram);
                 client.start_capture()?;
-                encode(device, scratch, control, dispatches, parameters);
+                encode(device, scratch, control, dispatches, parameters, histogram);
                 let graph = client.stop_capture()?;
                 *self = Self::Recorded(Box::new(RecordedSort {
                     graph,
@@ -167,9 +168,12 @@ fn encode(
     control: &CubeTensor,
     dispatches: &CubeTensor,
     parameters: &EconomyParameters,
+    histogram: parallel::HistogramScan,
 ) {
     let mut parameters = *parameters;
     let count = parameters.count as usize;
+    let histogram_count = 16 * count.div_ceil(device.workgroup as usize);
+    let histogram_items = parallel::ActiveScanTile::new(device, histogram_count).items();
     for shift in (0..parameters.count.max(1).ilog2() + 1).step_by(4) {
         parameters.sort_width = shift;
         let launch = |stage| {
@@ -182,6 +186,8 @@ fn encode(
                     control: control.clone().into_buffer_arg(),
                     parameters: parameters.launch(),
                     stage,
+                    histogram,
+                    histogram_items,
                 },
             );
         };
@@ -190,9 +196,10 @@ fn encode(
             device,
             scratch,
             7 * count,
-            16 * count.div_ceil(device.workgroup as usize),
+            histogram_count,
             control,
             dispatches,
+            histogram,
         );
         launch(SortStage::Scatter);
         parameters.sort_source = 2 * parameters.count - parameters.sort_source;
@@ -212,6 +219,10 @@ struct SortInput {
     parameters: EconomyParameters,
     #[cube(comptime)]
     stage: SortStage,
+    #[cube(comptime)]
+    histogram: parallel::HistogramScan,
+    #[cube(comptime)]
+    histogram_items: u32,
 }
 
 struct RadixSort;
@@ -235,11 +246,13 @@ impl GpuPass<SortInput> for Sort {
                     &input.parameters,
                     ABSOLUTE_POS as u32,
                 ),
-                SortStage::Scatter => markets::radix_scatter(
+                SortStage::Scatter => markets::radix_scatter_histogram(
                     &mut input.scratch,
                     &input.control,
                     &input.parameters,
                     ABSOLUTE_POS as u32,
+                    comptime!(input.histogram),
+                    comptime!(input.histogram_items),
                 ),
             }
         }

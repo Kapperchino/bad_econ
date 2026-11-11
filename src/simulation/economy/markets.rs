@@ -368,6 +368,25 @@ pub(in crate::simulation) fn radix_scatter(
     parameters: &EconomyParameters,
     id: u32,
 ) {
+    radix_scatter_histogram(
+        scratch,
+        control,
+        parameters,
+        id,
+        comptime!(parallel::HistogramScan::Complete),
+        1u32,
+    );
+}
+
+#[cube]
+pub(in crate::simulation) fn radix_scatter_histogram(
+    scratch: &mut [u32],
+    control: &[Atomic<u32>],
+    parameters: &EconomyParameters,
+    id: u32,
+    #[comptime] output: parallel::HistogramScan,
+    #[comptime] items: u32,
+) {
     let count = parameters.count;
     if id < active(control, parameters) {
         let blocks = ceildiv(active(control, parameters), CUBE_DIM);
@@ -380,8 +399,31 @@ pub(in crate::simulation) fn radix_scatter(
         if histogram > 0 {
             target += scratch[(7 * count + histogram - 1) as usize];
         }
+        target += radix_histogram_offset(scratch, count, histogram, output, items);
         scratch[(destination + target) as usize] = key;
         scratch[(destination + count + target) as usize] = scratch[(source + count + id) as usize];
+    }
+}
+
+#[cube]
+fn radix_histogram_offset(
+    scratch: &mut [u32],
+    count: u32,
+    histogram: u32,
+    #[comptime] output: parallel::HistogramScan,
+    #[comptime] items: u32,
+) -> u32 {
+    match comptime!(output) {
+        parallel::HistogramScan::Complete => 0u32,
+        parallel::HistogramScan::BlockLocal => {
+            let tile = (max(histogram, 1) - 1) / (CUBE_DIM * items);
+            let mut offset = 0u32;
+            if tile > 0 {
+                let bound = 16 * ceildiv(count, CUBE_DIM);
+                offset = scratch[(7 * count + bound + tile - 1) as usize];
+            }
+            offset
+        }
     }
 }
 

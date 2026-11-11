@@ -1494,6 +1494,10 @@ impl Simulation {
                 Market::Input(_) | Market::Consumer(_) | Market::Household
             );
         let count = self.metadata.actors.len();
+        let members = match market {
+            Market::Household | Market::Input(Good::Bread) | Market::Consumer(Good::Bread) => count,
+            _ => self.metadata.actors.firms(),
+        };
         let mut parameters = self.parameters(phase, market, 0, count)?;
         parameters.discovery = Discovery::Indexed;
         let profile = self.day + 1 == profiling_day()
@@ -1572,12 +1576,6 @@ impl Simulation {
                 .config()
                 .map_size
                 .div_ceil(self.scenario.config().search_radius);
-            let members = match market {
-                Market::Household | Market::Input(Good::Bread) | Market::Consumer(Good::Bread) => {
-                    count
-                }
-                _ => self.metadata.actors.firms(),
-            };
             launch(EconomyStage::IndexCount, members, &parameters);
             parallel::scan(
                 &self.device,
@@ -1597,10 +1595,7 @@ impl Simulation {
                     parameters: parameters.launch(),
                 },
             );
-            if matches!(
-                market,
-                Market::Household | Market::Input(Good::Bread) | Market::Consumer(Good::Bread)
-            ) {
+            if let Market::Input(Good::Bread) = market {
                 launch(
                     EconomyStage::IndexPrices,
                     count.div_ceil(DISCOVERY_BLOCK as usize) * self.device.workgroup as usize,
@@ -1617,7 +1612,7 @@ impl Simulation {
             };
             let dispatch = match stage {
                 economy::search::SearchStage::Index => self.device.count(
-                    count.div_ceil(DISCOVERY_BLOCK as usize) * self.device.workgroup as usize,
+                    members.div_ceil(DISCOVERY_BLOCK as usize) * self.device.workgroup as usize,
                 ),
                 economy::search::SearchStage::Prepare
                 | economy::search::SearchStage::PrepareRepeat

@@ -99,6 +99,7 @@ impl SortCase {
             &expected.control,
             &expected.dispatches,
             &parameters,
+            parallel::HistogramScan::Complete,
         );
         let source = cache.run(
             device,
@@ -107,8 +108,13 @@ impl SortCase {
             &actual.dispatches,
             &parameters,
         )? as usize;
+        assert_eq!(
+            device.read(&actual.control)?,
+            device.read(&expected.control)?
+        );
         let actual = device.read(&actual.scratch)?;
-        assert_eq!(actual, device.read(&expected.scratch)?);
+        let expected = device.read(&expected.scratch)?;
+        assert_eq!(actual[..7 * self.capacity], expected[..7 * self.capacity]);
         match self.fault {
             Fault::Clear => {
                 let mut order = (0..self.active).collect::<Vec<_>>();
@@ -155,6 +161,29 @@ fn graph_sort_preserves_first_use_replay_dynamic_counts_and_faults_on_gpu() -> R
                     }
                     .check(&device, &mut cache, &actual, &expected)?;
                 }
+            }
+        }
+    }
+    Ok(())
+}
+
+#[test]
+fn blocked_histogram_scatter_matches_complete_prefixes_across_scan_hierarchies_on_gpu() -> Result<()>
+{
+    for (workgroup, capacity) in [(32, 131_090), (256, 1_048_593)] {
+        let device = crate::simulation::tests::device(workgroup)?;
+        let actual = SortBuffers::new(&device, capacity);
+        let expected = SortBuffers::new(&device, capacity);
+        let mut cache = MarketSort::default();
+        for scan in [parallel::ScanMode::Shared, parallel::ScanMode::new(&device)] {
+            for active in [257, capacity - 17, capacity] {
+                SortCase {
+                    capacity,
+                    active,
+                    scan,
+                    fault: Fault::Clear,
+                }
+                .check(&device, &mut cache, &actual, &expected)?;
             }
         }
     }
