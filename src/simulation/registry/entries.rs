@@ -231,7 +231,7 @@ impl EntryBatch {
         before: usize,
         fields: usize,
     ) -> CubeTensor {
-        let grown = device.empty(self.metadata.actors.len() * fields * TICK_WORDS);
+        let grown = device.state_buffer(self.metadata.actors.len() * fields * TICK_WORDS);
         transfer(
             device,
             previous,

@@ -16,6 +16,7 @@ use cubecl::{CubeCount, CubeDim, client::Client};
 
 const WORKGROUP_SIZES: [u32; 4] = [32, 64, 128, 256];
 const DEDICATED_BUFFER_BYTES: usize = 1024 * 1024;
+const STATE_BUFFER_BYTES: usize = 16 * 1024 * 1024;
 const MAX_READBACK_WORDS: usize = 4 * 1024 * 1024;
 const DIRECT_READBACK_WORDS: usize = 1024;
 
@@ -157,6 +158,25 @@ impl Device {
             handle,
             DType::U32,
         )
+    }
+    pub(super) fn state_buffer(&self, words: usize) -> CubeTensor {
+        match words * WORD_BYTES {
+            bytes if bytes >= STATE_BUFFER_BYTES => {
+                let capacity = bytes.next_multiple_of(STATE_BUFFER_BYTES);
+                let handle = self
+                    .client
+                    .memory_persistent_allocation(capacity, |capacity| self.client.empty(capacity))
+                    .offset_end((capacity - bytes) as u64);
+                CubeTensor::new_contiguous(
+                    self.client.clone(),
+                    self.cube.clone(),
+                    Shape::new([words]),
+                    handle,
+                    DType::U32,
+                )
+            }
+            _ => self.empty(words),
+        }
     }
     pub fn read(&self, tensor: &CubeTensor) -> Result<Vec<u32>> {
         self.read_range(tensor, 0, tensor.meta.shape()[0])
@@ -325,5 +345,40 @@ impl EconomyOps for CubeBackend {
                 stage,
             },
         );
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn reusable_state_buffers_preserve_logical_bounds_and_clear_stale_snapshots() -> Result<()> {
+        let device = crate::simulation::tests::device(64)?;
+        let words = STATE_BUFFER_BYTES / WORD_BYTES + 4;
+        let stale = device.state_buffer(words + 4);
+        device.write(&stale, &vec![u32::MAX; words + 4]);
+        device.sync()?;
+        let reserved = || {
+            device
+                .client
+                .memory_report(cubecl::MemoryScope::Device)
+                .streams
+                .iter()
+                .map(|stream| stream.pools.persistent.usage.bytes_reserved)
+                .sum::<u64>()
+        };
+        let before = reserved();
+        drop(stale);
+        let target = device.state_buffer(words);
+        device.sync()?;
+        assert_eq!(target.handle.size_in_used(), (words * WORD_BYTES) as u64);
+        assert_eq!(reserved(), before);
+        let values = vec![0; words];
+        let source = device.tensor(&values);
+        let snapshot = crate::simulation::tensor::SnapshotCopy::new(&device, words);
+        snapshot.save(&device, &source, &target);
+        assert_eq!(device.read(&target)?, values);
+        Ok(())
     }
 }

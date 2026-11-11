@@ -226,7 +226,7 @@ impl Simulation {
         let state = device.tensor(bytemuck::cast_slice(&initial.values));
         #[cfg(target_endian = "big")]
         let state = device.tensor(bytemuck::cast_slice(&encode(&initial.values)));
-        let audited = device.empty(initial.values.len() * TICK_WORDS);
+        let audited = device.state_buffer(initial.values.len() * TICK_WORDS);
         let snapshot_copy = tensor::SnapshotCopy::new(&device, initial.values.len() * TICK_WORDS);
         let research = scenario
             .config()
@@ -1006,7 +1006,7 @@ impl Simulation {
             state,
             audited: self
                 .device
-                .empty(count * self.scenario.fields() * TICK_WORDS),
+                .state_buffer(count * self.scenario.fields() * TICK_WORDS),
             snapshot_copy: tensor::SnapshotCopy::new(
                 &self.device,
                 count * self.scenario.fields() * TICK_WORDS,
