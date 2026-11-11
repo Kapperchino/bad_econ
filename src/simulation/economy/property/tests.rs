@@ -180,6 +180,7 @@ fn consolidate_serial(
                     selected,
                     0,
                 );
+                discard_grain(state, config, control, selected);
             }
             remaining = max(remaining, plots.extract(LOW_WORD)) - plots.extract(LOW_WORD);
         } else {

@@ -129,10 +129,10 @@ impl ProductionMethod {
             Good::Iron | Good::Coal => vec![Self::SteamMining],
             Good::Steel => vec![Self::BessemerProcess],
             Good::Linen | Good::Cloth => vec![Self::PowerLooms],
-            Good::Coats => vec![Self::SewingMachines],
+            Good::Clothes | Good::LuxuryClothes => vec![Self::SewingMachines],
             Good::Wood => vec![Self::Sawmills],
             Good::Tools => vec![Self::MachineTools],
-            Good::Furniture => vec![Self::FurnitureWorkshops],
+            Good::Furniture | Good::LuxuryFurniture => vec![Self::FurnitureWorkshops],
             Good::Glass => vec![Self::Glassworks],
             Good::Construction => vec![Self::MechanizedConstruction],
             Good::Housing | Good::Locomotives | Good::Railway => vec![],
@@ -165,7 +165,7 @@ where
 {
     let values = Vec::<T>::deserialize(deserializer)?;
     match values.len() {
-        3 | 16 | 17 | 18 | 19 | Good::COUNT => {
+        3 | 16 | 17 | 18 | 19 | 20 | Good::COUNT => {
             let mut result = [T::default(); Good::COUNT];
             result[..values.len()].copy_from_slice(&values);
             Ok(result)

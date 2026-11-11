@@ -288,7 +288,7 @@ fn prepare(
                             && until_due <= config.coverage + config.ring;
                         let reserve = ticks(
                             number(state, config, comptime!(Field::FoodNeed as u32), id)
-                                * (config.coverage + config.ring),
+                                * (config.coverage + config.ring - 1),
                             0,
                         );
                         let food = add_checked(
@@ -312,6 +312,8 @@ fn prepare(
                                 cash_reserve,
                                 value(state, config, comptime!(Field::Cash as u32), id),
                             );
+                        purchasing_power = consumption::budget(state, config, control, id, good);
+                        search = search && !equal(purchasing_power, zero());
                         wanted = ticks(1, 0);
                     }
                     MarketFlag::Household => {

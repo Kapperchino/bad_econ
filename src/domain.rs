@@ -34,8 +34,8 @@ pub use population::{
 pub use resources::{ProductionSite, ResourceMap, ResourceRegion};
 
 pub const SCENARIO_VERSION: u32 = 2;
-const CHECKPOINT_VERSION: u32 = 16;
-pub const STATE_HASH_VERSION: &str = "bad-econ/state/CubekV2/v17";
+const CHECKPOINT_VERSION: u32 = 17;
+pub const STATE_HASH_VERSION: &str = "bad-econ/state/CubekV2/v18";
 pub const USED_FIELDS: usize = Field::RailCapacity as usize + 1;
 pub const TRANSIT_FIELDS: usize = USED_FIELDS + Good::COUNT;
 pub const CONSUMPTION_FIELDS: usize = TRANSIT_FIELDS + Good::COUNT;
@@ -55,7 +55,8 @@ pub enum Field {
     Flax,
     Linen,
     Cloth,
-    Coats,
+    #[serde(alias = "Coats")]
+    Clothes,
     Wood,
     Tools,
     Furniture,
@@ -66,6 +67,8 @@ pub enum Field {
     Housing,
     Locomotives,
     Railway,
+    LuxuryClothes,
+    LuxuryFurniture,
     Escrow,
     Slots,
     Wage,
@@ -183,7 +186,7 @@ impl Field {
             Good::Flax => Self::Flax,
             Good::Linen => Self::Linen,
             Good::Cloth => Self::Cloth,
-            Good::Coats => Self::Coats,
+            Good::Clothes => Self::Clothes,
             Good::Wood => Self::Wood,
             Good::Tools => Self::Tools,
             Good::Furniture => Self::Furniture,
@@ -194,6 +197,8 @@ impl Field {
             Good::Housing => Self::Housing,
             Good::Locomotives => Self::Locomotives,
             Good::Railway => Self::Railway,
+            Good::LuxuryClothes => Self::LuxuryClothes,
+            Good::LuxuryFurniture => Self::LuxuryFurniture,
         }
     }
 }
@@ -216,7 +221,8 @@ pub enum Good {
     Flax = 7,
     Linen = 8,
     Cloth = 9,
-    Coats = 10,
+    #[serde(alias = "Coats")]
+    Clothes = 10,
     Wood = 11,
     Tools = 12,
     Furniture = 13,
@@ -227,9 +233,12 @@ pub enum Good {
     Housing = 18,
     Locomotives = 19,
     Railway = 20,
+    LuxuryClothes = 21,
+    LuxuryFurniture = 22,
 }
 impl Good {
-    pub const COUNT: usize = 20;
+    pub const COUNT: usize = 22;
+    pub const LUXURY_RESERVE_DAYS: u32 = 30;
     pub const ALL: [Self; Self::COUNT] = [
         Self::Grain,
         Self::Flour,
@@ -240,7 +249,7 @@ impl Good {
         Self::Flax,
         Self::Linen,
         Self::Cloth,
-        Self::Coats,
+        Self::Clothes,
         Self::Wood,
         Self::Tools,
         Self::Furniture,
@@ -251,6 +260,8 @@ impl Good {
         Self::Housing,
         Self::Locomotives,
         Self::Railway,
+        Self::LuxuryClothes,
+        Self::LuxuryFurniture,
     ];
     pub fn kind(self) -> GoodKind {
         match self {
@@ -266,14 +277,16 @@ impl Good {
             | Self::Steel
             | Self::Linen
             | Self::Cloth
-            | Self::Coats
+            | Self::Clothes
             | Self::Tools
             | Self::Furniture
             | Self::Glass
             | Self::Construction
             | Self::Housing
             | Self::Locomotives
-            | Self::Railway => GoodKind::Manufactured,
+            | Self::Railway
+            | Self::LuxuryClothes
+            | Self::LuxuryFurniture => GoodKind::Manufactured,
         }
     }
     pub fn inputs(self) -> [Option<Self>; 2] {
@@ -283,12 +296,14 @@ impl Good {
             Self::Steel => [Some(Self::Iron), Some(Self::Coal)],
             Self::Linen => [Some(Self::Flax), None],
             Self::Cloth => [Some(Self::Cotton), Some(Self::Dye)],
-            Self::Coats => [Some(Self::Cloth), Some(Self::Linen)],
+            Self::Clothes => [Some(Self::Cloth), Some(Self::Linen)],
             Self::Tools => [Some(Self::Iron), Some(Self::Wood)],
             Self::Furniture | Self::Construction => [Some(Self::Wood), Some(Self::Tools)],
             Self::Glass => [Some(Self::Coal), None],
             Self::Housing => [Some(Self::Construction), None],
             Self::Locomotives => [Some(Self::Steel), Some(Self::Tools)],
+            Self::LuxuryClothes => [Some(Self::Clothes), Some(Self::Dye)],
+            Self::LuxuryFurniture => [Some(Self::Furniture), Some(Self::Glass)],
             _ => [None, None],
         }
     }
@@ -296,15 +311,22 @@ impl Good {
         match self {
             Self::Bread => 1,
             Self::Linen | Self::Cloth => 20,
-            Self::Coats => 40,
-            Self::Furniture | Self::Glass => 60,
+            Self::Clothes | Self::LuxuryClothes => 40,
+            Self::Furniture | Self::Glass | Self::LuxuryFurniture => 60,
             _ => 0,
+        }
+    }
+    pub fn luxury_basic(self) -> Option<Self> {
+        match self {
+            Self::LuxuryClothes => Some(Self::Clothes),
+            Self::LuxuryFurniture => Some(Self::Furniture),
+            _ => None,
         }
     }
     pub fn initial_price(self) -> u32 {
         [
             150, 300, 450, 160, 100, 350, 100, 220, 260, 600, 100, 320, 500, 100, 120, 250, 120,
-            10, 800, 1,
+            10, 800, 1, 1200, 1500,
         ][self as usize - 1]
     }
     pub fn food<T: Default + Copy>(values: [T; 3]) -> [T; Self::COUNT] {
@@ -323,7 +345,7 @@ impl Good {
             7 => Ok(Self::Flax),
             8 => Ok(Self::Linen),
             9 => Ok(Self::Cloth),
-            10 => Ok(Self::Coats),
+            10 => Ok(Self::Clothes),
             11 => Ok(Self::Wood),
             12 => Ok(Self::Tools),
             13 => Ok(Self::Furniture),
@@ -334,8 +356,19 @@ impl Good {
             18 => Ok(Self::Housing),
             19 => Ok(Self::Locomotives),
             20 => Ok(Self::Railway),
-
+            21 => Ok(Self::LuxuryClothes),
+            22 => Ok(Self::LuxuryFurniture),
             _ => Err(anyhow!("invalid good")),
+        }
+    }
+}
+
+impl std::fmt::Display for Good {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::LuxuryClothes => formatter.write_str("Luxury clothes"),
+            Self::LuxuryFurniture => formatter.write_str("Luxury furniture"),
+            _ => write!(formatter, "{self:?}"),
         }
     }
 }
@@ -2744,9 +2777,9 @@ impl Market {
             Self::Labor => 0,
             Self::Input(good) => good as u32,
             Self::Consumer(good) => Good::COUNT as u32 + good as u32,
-            Self::Household => 33,
-            Self::Payroll => 34,
-            Self::Distribution => 35,
+            Self::Household => 2 * Good::COUNT as u32 + 1,
+            Self::Payroll => 2 * Good::COUNT as u32 + 2,
+            Self::Distribution => 2 * Good::COUNT as u32 + 3,
         }
     }
 }

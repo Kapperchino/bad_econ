@@ -530,6 +530,7 @@ fn consolidate_farm(
                         household,
                         0,
                     );
+                    discard_grain(state, config, control, household);
                     acquired += plots;
                 }
                 member += CUBE_DIM;
@@ -828,6 +829,28 @@ fn reserve_site(state: &mut [u32], config: &EconomyConfig, actor: u32, available
 }
 
 #[cube]
+fn discard_grain(state: &mut [u32], config: &EconomyConfig, control: &[Atomic<u32>], actor: u32) {
+    let grain = value(state, config, comptime!(Field::Grain as u32), actor);
+    set(state, config, comptime!(Field::Grain as u32), actor, zero());
+    increase(
+        state,
+        config,
+        control,
+        USED_FIELDS as u32 + comptime!(Good::Grain as u32) - 1,
+        actor,
+        grain,
+    );
+    increase(
+        state,
+        config,
+        control,
+        comptime!(Field::Used as u32),
+        actor,
+        grain,
+    );
+}
+
+#[cube]
 fn allocate_plots(
     state: &mut [u32],
     config: &EconomyConfig,
@@ -862,6 +885,9 @@ fn allocate_plots(
         actor,
         select(equal(retained, zero()), zero(), work),
     );
+    if !equal(lost, zero()) {
+        discard_grain(state, config, control, actor);
+    }
     minus(free, retained)
 }
 

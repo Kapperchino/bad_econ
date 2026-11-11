@@ -97,7 +97,13 @@ fn grouped_markets_match_coordinate_scheduler_at_every_phase() -> Result<()> {
 #[test]
 fn cooperative_consumer_markets_preserve_trades_and_accounting_at_every_phase() -> Result<()> {
     for experiment in [Experiment::Baseline, Experiment::Concentrated] {
-        compare_market_execution(Scenario::industrial(97, 42, experiment)?, 3)?;
+        let mut config = Scenario::industrial(97, 42, experiment)?.config().clone();
+        config.household_cash = 50_000;
+        config.household_liquidity = crate::domain::HouseholdLiquidity::Uniform;
+        config.buffer_days = 30;
+        config.producer_buffer_days = None;
+        config.shipment_speed = 1000;
+        compare_market_execution(Scenario::new(config)?, 3)?;
     }
     Ok(())
 }

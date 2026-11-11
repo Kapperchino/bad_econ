@@ -514,10 +514,7 @@ impl Chart {
             Self::Research => ["Attempts", "Discoveries", "Striking"]
                 .map(String::from)
                 .into(),
-            _ => Good::ALL
-                .into_iter()
-                .map(|good| format!("{good:?}"))
-                .collect(),
+            _ => Good::ALL.into_iter().map(|good| good.to_string()).collect(),
         }
     }
     pub fn values(

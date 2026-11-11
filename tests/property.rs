@@ -206,7 +206,12 @@ fn completed_commercial_expansion_consolidates_local_land_and_releases_workers_o
     assert_eq!(state.get(Field::LandPlots, 1), 0);
     assert_eq!(state.get(Field::DisplacedPlots, 1), 2);
     assert_eq!(state.get(Field::CropWork, 1), 0);
-    assert_eq!(state.get(Field::Grain, 1), initial.get(Field::Grain, 1));
+    assert_eq!(state.get(Field::Grain, 1), 0);
+    assert_eq!(
+        state.values[(USED_FIELDS + Good::Grain as usize - 1) * state.actors.len() + 1],
+        initial.get(Field::Grain, 1)
+    );
+    assert_eq!(state.get(Field::Grain, 6), initial.get(Field::Grain, 6));
     assert_eq!(state.get(Field::OccupiedPlots, 9), 6);
     assert!(state.get(Field::Produced, 9) > state.get(Field::UnscaledProduced, 9));
     assert!(state.actors.at(9).capacity > initial.actors.at(9).capacity);
@@ -289,8 +294,19 @@ fn contractors_build_housing_farms_and_factories_and_displace_only_local_farmers
         assert_eq!(first.get(Field::LandPlots, farmer), 0);
         assert_eq!(first.get(Field::DisplacedPlots, farmer), 2);
         assert_eq!(first.get(Field::CropWork, farmer), 0);
+        assert_eq!(first.get(Field::Grain, farmer), 0);
+        assert_eq!(
+            first.values[(USED_FIELDS + Good::Grain as usize - 1) * first.actors.len() + farmer],
+            initial.get(Field::Grain, farmer)
+        );
     }
     assert_eq!(first.get(Field::LandPlots, 6), 3);
+    for household in [0, 4, 5, 6, 7] {
+        assert_eq!(
+            first.get(Field::Grain, household),
+            initial.get(Field::Grain, household)
+        );
+    }
     assert!(simulation.snapshot.produced[Good::Construction as usize - 1] > 0);
     assert!(simulation.snapshot.used[Good::Wood as usize - 1] > 0);
     assert!(simulation.snapshot.used[Good::Tools as usize - 1] > 0);

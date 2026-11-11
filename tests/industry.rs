@@ -178,6 +178,237 @@ fn steel_requires_both_inputs_and_conserves_each_good_on_gpu() -> Result<()> {
 }
 
 #[test]
+fn luxury_production_requires_both_inputs_and_conserves_goods_on_gpu() -> Result<()> {
+    for good in [Good::LuxuryClothes, Good::LuxuryFurniture] {
+        let [Some(first), Some(second)] = good.inputs() else {
+            panic!("luxury goods require two inputs")
+        };
+        for inputs in [[0, 20], [20, 0], [20, 2]] {
+            let mut config = steelworks(0)?;
+            let firms = &mut config.population.as_mut().unwrap().firms;
+            firms[0].good = good;
+            firms[0].inventories = [0; Good::COUNT];
+            firms[0].inventories[first as usize - 1] = inputs[0];
+            firms[0].inventories[second as usize - 1] = inputs[1];
+            firms[1].good = first;
+            firms[1].technique = Technique::new(60, u32::from(first.inputs()[0].is_some()), 3)?;
+            firms[2].good = second;
+            firms[2].technique = Technique::new(60, u32::from(second.inputs()[0].is_some()), 3)?;
+            let scenario = Scenario::new(config)?;
+            let mut simulation = Simulation::new(scenario.clone(), support::device(64)?)?;
+            simulation.advance()?;
+            let packets = inputs.into_iter().min().unwrap() / 2;
+            assert_eq!(simulation.snapshot.produced[good as usize - 1], packets * 3);
+            for input in [first, second] {
+                assert_eq!(simulation.snapshot.used[input as usize - 1], packets * 2);
+            }
+            let state = simulation.download()?;
+            assert_eq!(
+                simulation.snapshot,
+                ObservationSnapshot::from_state(&scenario, &state)?
+            );
+            simulation.checkpoint()?.restore()?;
+        }
+    }
+    Ok(())
+}
+
+#[derive(Clone, Copy, Debug)]
+enum LuxuryBuyer {
+    Affluent,
+    OneAffordable,
+    ReservedSavings,
+    MissingFood,
+    MissingBasics,
+}
+
+impl LuxuryBuyer {
+    const ALL: [Self; 5] = [
+        Self::Affluent,
+        Self::OneAffordable,
+        Self::ReservedSavings,
+        Self::MissingFood,
+        Self::MissingBasics,
+    ];
+
+    fn household(self) -> usize {
+        115 + self as usize
+    }
+
+    fn cash(self) -> u64 {
+        match self {
+            Self::OneAffordable => 30 * (450 + 10) + 1200 + 1500 - 1,
+            Self::ReservedSavings => 30 * (450 + 10),
+            _ => 100_000,
+        }
+    }
+
+    fn purchased(self, good: Good) -> u64 {
+        match (self, good) {
+            (Self::Affluent, _) | (Self::OneAffordable, Good::LuxuryClothes) => 1,
+            _ => 0,
+        }
+    }
+}
+
+#[test]
+fn luxury_buyers_preserve_necessities_and_savings_through_delivery_and_replay_on_gpu() -> Result<()>
+{
+    let mut config = steelworks(0)?;
+    config.economy = Economy::Industrial;
+    config.households = 120;
+    config.firms = 3;
+    config.coverage = 3;
+    config.rent = Some(RentPolicy {
+        household_daily: 10,
+        firm_daily: 0,
+    });
+    config.entrepreneurship.interested_per_mille = 0;
+    config.expansion = enterprise::ExpansionPolicy {
+        small_business_per_mille: 0,
+        industrial_per_mille: 0,
+    };
+    let position = Position { x: 0, y: 0 };
+    let mut inventories = Good::food([0, 0, 5]);
+    inventories[Good::Clothes as usize - 1] = 3;
+    inventories[Good::Furniture as usize - 1] = 3;
+    let mut households = (1..=120)
+        .map(|identity| HouseholdSeed {
+            identity,
+            position,
+            cash: 0,
+            inventories,
+            fatigue: 0,
+        })
+        .collect::<Vec<_>>();
+    for buyer in LuxuryBuyer::ALL {
+        let household = &mut households[buyer.household()];
+        household.cash = buyer.cash();
+        match buyer {
+            LuxuryBuyer::Affluent => household.inventories[Good::Bread as usize - 1] = 4,
+            LuxuryBuyer::MissingFood => household.inventories[Good::Bread as usize - 1] = 0,
+            LuxuryBuyer::MissingBasics => {
+                household.inventories[Good::Clothes as usize - 1] = 0;
+                household.inventories[Good::Furniture as usize - 1] = 0;
+            }
+            _ => (),
+        }
+    }
+    config.population = Some(Population {
+        households,
+        firms: [Good::LuxuryClothes, Good::LuxuryFurniture, Good::Clothes]
+            .into_iter()
+            .enumerate()
+            .map(|(index, good)| {
+                let mut inventories = [0; Good::COUNT];
+                inventories[good as usize - 1] = match good.luxury_basic() {
+                    Some(_) => 20,
+                    None => 0,
+                };
+                FirmSeed {
+                    identity: 1000 + index as u64,
+                    position,
+                    owner: 1,
+                    good,
+                    cash: 0,
+                    inventories,
+                    capacity: 1,
+                    technique: Technique::new(60, 1, 1).unwrap(),
+                    wage: 1,
+                    price: good.initial_price(),
+                }
+            })
+            .collect(),
+    });
+    let scenario = Scenario::new(config)?;
+    let mut simulation = Simulation::new(scenario.clone(), support::device(64)?)?;
+    simulation.advance()?;
+    let dispatched = simulation.download()?;
+    for buyer in LuxuryBuyer::ALL {
+        let mut spent = 0;
+        for good in [Good::LuxuryClothes, Good::LuxuryFurniture] {
+            let purchased = buyer.purchased(good);
+            assert_eq!(
+                dispatched.values[(TRANSIT_FIELDS + good as usize - 1) * dispatched.actors.len()
+                    + buyer.household()],
+                purchased,
+                "{buyer:?} {good}"
+            );
+            spent += purchased * u64::from(good.initial_price());
+        }
+        assert_eq!(
+            dispatched.get(Field::Cash, buyer.household()),
+            buyer.cash() - spent - dispatched.get(Field::RentTreasury, buyer.household())
+        );
+    }
+    let mut replay = Simulation::from_checkpoint(simulation.checkpoint()?, support::device(64)?)?;
+    for _ in 0..5 {
+        simulation.advance()?;
+        replay.advance()?;
+    }
+    let delivered = simulation.download()?;
+    assert_eq!(delivered, replay.download()?);
+    for buyer in LuxuryBuyer::ALL {
+        for good in [Good::LuxuryClothes, Good::LuxuryFurniture] {
+            assert_eq!(
+                delivered.values[(CONSUMPTION_FIELDS + good as usize - 1) * delivered.actors.len()
+                    + buyer.household()],
+                buyer.purchased(good),
+                "{buyer:?} {good}"
+            );
+        }
+    }
+    assert_eq!(
+        simulation.snapshot,
+        ObservationSnapshot::from_state(&scenario, &delivered)?
+    );
+    simulation.checkpoint()?.restore()?;
+    Ok(())
+}
+
+#[test]
+fn legacy_coats_and_inventory_arrays_load_as_clothes_on_gpu() -> Result<()> {
+    let mut config = steelworks(0)?;
+    let firm = &mut config.population.as_mut().unwrap().firms[0];
+    firm.good = Good::Clothes;
+    firm.inventories = [0; Good::COUNT];
+    firm.inventories[Good::Clothes as usize - 1] = 7;
+    let mut legacy = serde_json::to_value(config)?;
+    legacy["population"]["firms"][0]["good"] = "Coats".into();
+    for kind in ["households", "firms"] {
+        for actor in legacy["population"][kind].as_array_mut().unwrap() {
+            actor["inventories"].as_array_mut().unwrap().truncate(20);
+        }
+    }
+    let scenario = Scenario::new(serde_json::from_value(legacy)?)?;
+    let mut simulation = Simulation::new(scenario.clone(), support::device(64)?)?;
+    simulation.advance()?;
+    let state = simulation.download()?;
+    assert_eq!(state.get(Field::Clothes, 6), 7);
+    assert_eq!(state.get(Field::LuxuryClothes, 6), 0);
+    assert_eq!(state.get(Field::LuxuryFurniture, 6), 0);
+    assert_eq!(
+        serde_json::to_value(scenario.config())?["population"]["firms"][0]["good"],
+        "Clothes"
+    );
+    let mut codes = Good::ALL
+        .into_iter()
+        .flat_map(|good| [Market::Input(good).code(), Market::Consumer(good).code()])
+        .chain([
+            Market::Labor.code(),
+            Market::Household.code(),
+            Market::Payroll.code(),
+            Market::Distribution.code(),
+        ])
+        .collect::<Vec<_>>();
+    codes.sort_unstable();
+    codes.dedup();
+    assert_eq!(codes.len(), 2 * Good::COUNT + 4);
+    simulation.checkpoint()?.restore()?;
+    Ok(())
+}
+
+#[test]
 #[ignore = "extended scenario coverage; run cargo gpu-extended"]
 fn research_changes_next_days_recipe_and_checkpoint_replays_on_gpu() -> Result<()> {
     let mut config = steelworks(20)?;
@@ -255,8 +486,9 @@ fn industrial_markets_ship_consume_and_replay_all_goods_on_gpu() -> Result<()> {
         .config()
         .clone();
     config.shipment_speed = 1000;
-    config.household_cash = 5000;
+    config.household_cash = 50_000;
     config.household_liquidity = HouseholdLiquidity::Uniform;
+    config.buffer_days = 30;
     config.producer_buffer_days = None;
     let scenario = Scenario::new(config)?;
     let mut first = Simulation::new(scenario.clone(), support::device(32)?)?;
@@ -278,9 +510,11 @@ fn industrial_markets_ship_consume_and_replay_all_goods_on_gpu() -> Result<()> {
     for good in [
         Good::Linen,
         Good::Cloth,
-        Good::Coats,
+        Good::Clothes,
         Good::Furniture,
         Good::Glass,
+        Good::LuxuryClothes,
+        Good::LuxuryFurniture,
     ] {
         assert!(
             first.snapshot.consumption[good as usize - 1] > 0,

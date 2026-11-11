@@ -62,9 +62,13 @@ impl StartingDemand {
         }
         for good in Good::ALL {
             if good.consumption_interval() > 1 {
+                let customers = match good.luxury_basic() {
+                    Some(_) => households.div_ceil(10),
+                    None => households,
+                };
                 demand.include(
                     good,
-                    households.div_ceil(u64::from(good.consumption_interval())),
+                    customers.div_ceil(u64::from(good.consumption_interval())),
                 );
             }
         }
