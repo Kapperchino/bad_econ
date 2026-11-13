@@ -117,8 +117,12 @@ fn planned_packets(scenario: &Scenario, state: &State, index: usize) -> Result<u
     let actor = &state.actors.at(index);
     let technique = scenario.technique(index);
     let output = Good::from_index(actor.kind)?;
-    let demand =
-        u128::from(state.get(Field::Demand, index)) * u128::from(scenario.config().coverage);
+    let observed = u128::from(state.get(Field::Demand, index));
+    let daily = match output {
+        Good::Grain | Good::Flour | Good::Bread => (observed * 5).div_ceil(4),
+        _ => observed,
+    };
+    let demand = daily * u128::from(scenario.config().coverage);
     let available = u128::from(state.get(Field::inventory(output), index))
         + u128::from(state.get(Field::Pipeline, index));
     let requested = demand
@@ -162,7 +166,7 @@ fn proposal_and_decision_kernels_match_independent_policy_formulas() -> Result<(
             let first_plans = (12..18)
                 .map(|firm| proposed.get(Field::Plan, firm))
                 .collect::<Vec<_>>();
-            assert_eq!(first_plans, [1, 2, 0, 2, 5, 0]);
+            assert_eq!(first_plans, [1, 2, 0, 10, 5, 0]);
         }
         for phase in [
             Phase::Commitment,

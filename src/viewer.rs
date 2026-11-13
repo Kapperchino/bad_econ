@@ -762,7 +762,7 @@ fn capture_compact_frame(
         });
     verification.capture(&captured.image, "compact");
     eprintln!(
-        "viewer interaction and layout verification passed: separate rendering and simulation queues, native mouse clicks, reset/step/comparison feedback, audited days, household and firm inspection, refreshed inspection, all five menus and 28 charts, four history periods, series focus, retained GPU chart on speed and inspection changes, previous/next navigation, footer controls, compact window"
+        "viewer interaction and layout verification passed: separate rendering and simulation queues, native mouse clicks, reset/step/comparison feedback, audited days, household and firm inspection, refreshed inspection, all five menus and 29 charts, four history periods, series focus, retained GPU chart on speed and inspection changes, previous/next navigation, footer controls, compact window"
     );
     match &verification.capture_error {
         None => {

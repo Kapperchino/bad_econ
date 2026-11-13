@@ -94,8 +94,8 @@ fn industrial_food_production_is_more_efficient_than_subsistence_on_gpu() -> Res
     for good in [Good::Grain, Good::Flour, Good::Bread] {
         let home_minutes = u64::from(household_minutes[good as usize - 1]);
         let advantage = match good {
-            Good::Grain => 5,
-            _ => 15,
+            Good::Grain => 10,
+            _ => 30,
         };
         let firms = state
             .actors
@@ -111,7 +111,8 @@ fn industrial_food_production_is_more_efficient_than_subsistence_on_gpu() -> Res
                 .iter()
                 .map(|&firm| state.get(Field::Produced, firm))
                 .sum::<u64>()
-                > 0
+                > 0,
+            "{good:?} firms did not produce"
         );
         for firm in firms {
             let output = state.get(Field::OutputTicks, firm);

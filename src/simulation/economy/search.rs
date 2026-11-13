@@ -151,7 +151,7 @@ fn prepare(
                             actors[ActorLayout::CAPACITY * (actors.len() / ActorLayout::WORDS)
                                 + id as usize]
                                 * number(state, config, comptime!(Field::InputTicks as u32), id)
-                                * config.coverage,
+                                * consumption::input_coverage(config, k.bits()),
                             0u32,
                         );
                         if number(state, config, comptime!(Field::EnterpriseModel as u32), id) == 1

@@ -214,6 +214,35 @@ pub(super) fn produce(
         comptime!(Good::Bread as u32),
         baked,
     );
+    let wood = add_checked(
+        control,
+        value(state, config, comptime!(Good::Wood as u32), actor),
+        value(
+            state,
+            config,
+            TRANSIT_FIELDS as u32 + comptime!(Good::Wood as u32) - 1,
+            actor,
+        ),
+    );
+    let needed = positive(
+        consumption::fuel_target(state, config, control, actor, comptime!(Good::Wood as u32)),
+        wood,
+    );
+    let minutes = comptime!(crate::domain::enterprise::HouseholdProduction::FIREWOOD_MINUTES);
+    let gathered = select(
+        plots > 0 && tools,
+        minimum(needed, ticks(time / minutes, 0)),
+        zero(),
+    );
+    time -= gathered.extract(LOW_WORD) * minutes;
+    output(
+        state,
+        config,
+        control,
+        actor,
+        comptime!(Good::Wood as u32),
+        gathered,
+    );
     let construction = number(state, config, comptime!(Field::HomeMinutes as u32), actor);
     set32(
         state,

@@ -174,6 +174,8 @@ pub enum HouseholdProduction {
     },
 }
 impl HouseholdProduction {
+    pub const FIREWOOD_MINUTES: u32 = 30;
+
     pub fn industrial() -> Self {
         Self::Available {
             milling_minutes: 30,

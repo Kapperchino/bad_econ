@@ -429,6 +429,10 @@ fn comparison_text(display: &Display) -> String {
 
 pub(super) fn chart_color(chart: Chart, series: usize) -> Color {
     match (chart, series) {
+        (Chart::Deaths, 0) | (Chart::Demography, 1) => ui::MUTED,
+        (Chart::Deaths, 1) | (Chart::Demography, 2) => Color::srgb(0.88, 0.66, 0.33),
+        (Chart::Deaths, 2) | (Chart::Demography, 3) => Color::srgb(0.90, 0.42, 0.32),
+        (Chart::Deaths, 3) | (Chart::Demography, 4) => Color::srgb(0.48, 0.70, 0.85),
         (Chart::Employment, 0) => Color::srgb(0.48, 0.78, 0.57),
         (Chart::Employment | Chart::Credit, 1) => Color::srgb(0.90, 0.42, 0.32),
         (_, 0) => ui::GOLD,

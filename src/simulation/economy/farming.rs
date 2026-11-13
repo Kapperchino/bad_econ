@@ -73,13 +73,26 @@ pub(super) fn farm(state: &mut [u32], config: &EconomyConfig, actor: u32, good: 
 }
 
 #[cube]
-pub(super) fn starts(state: &mut [u32], config: &EconomyConfig, actor: u32, day: u32) -> Ticks {
+pub(super) fn production_target(control: &[Atomic<u32>], demand: Ticks) -> Ticks {
+    divide(
+        add_checked(control, multiply(control, demand, 5), ticks(3, 0)),
+        4,
+    )
+}
+
+#[cube]
+pub(super) fn starts(
+    state: &mut [u32],
+    config: &EconomyConfig,
+    control: &[Atomic<u32>],
+    actor: u32,
+    day: u32,
+) -> Ticks {
+    let demand = value(state, config, comptime!(Field::Demand as u32), actor);
+    let buffered = production_target(control, demand);
     select(
         cultivating(config, day),
-        maximum(
-            value(state, config, comptime!(Field::Demand as u32), actor),
-            ticks(1, 0),
-        ),
+        maximum(buffered, ticks(1, 0)),
         zero(),
     )
 }

@@ -307,19 +307,20 @@ pub fn step(
             let need = get(state, config, comptime!(Field::FoodNeed as u32), household);
             let deficit = get(state, config, comptime!(Field::Shortage as u32), household) * 1000
                 / max(need, 1);
-            let heating = get(
+            let freezing_need = get(
                 state,
                 config,
-                comptime!(Field::HeatingNeed as u32),
+                comptime!(Field::LivingMembers as u32),
                 household,
-            );
+            ) * (max(config.heating_per_person, 2) - 2);
             let served = get(
                 state,
                 config,
                 comptime!(Field::HeatingServed as u32),
                 household,
             );
-            let cold_deficit = (heating - min(heating, served)) * 1000 / max(heating, 1);
+            let cold_deficit =
+                (freezing_need - min(freezing_need, served)) * 1000 / max(freezing_need, 1);
             let selected = get(state, config, comptime!(Field::Worker as u32), household);
             let employer = get(state, config, comptime!(Field::Employer as u32), household);
             let minutes = get(state, config, comptime!(Field::Hours as u32), household);

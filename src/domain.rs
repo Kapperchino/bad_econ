@@ -35,8 +35,8 @@ pub use population::{
 pub use resources::{ProductionSite, ResourceMap, ResourceRegion};
 
 pub const SCENARIO_VERSION: u32 = 2;
-const CHECKPOINT_VERSION: u32 = 18;
-pub const STATE_HASH_VERSION: &str = "bad-econ/state/CubekV2/v19";
+const CHECKPOINT_VERSION: u32 = 20;
+pub const STATE_HASH_VERSION: &str = "bad-econ/state/CubekV2/v21";
 pub const USED_FIELDS: usize = Field::HeatingServed as usize + 1;
 pub const TRANSIT_FIELDS: usize = USED_FIELDS + Good::COUNT;
 pub const CONSUMPTION_FIELDS: usize = TRANSIT_FIELDS + Good::COUNT;
@@ -504,9 +504,9 @@ impl Scenario {
             _ => 6,
         };
         config.packet_minutes = 20;
-        config.packet_output = 10;
+        config.packet_output = 20;
         config.wage = 12;
-        config.prices = [24, 48, 72];
+        config.prices = [12, 24, 36];
         config.household_cash = 7
             * (u64::from(config.household_need)
                 * u64::from(config.demography.initial_household_members)
@@ -746,8 +746,15 @@ impl Scenario {
                     }
                 }
                 let demand = supply::StartingDemand::new(&config);
+                let food_reserve = supply::StartingReserves::new(&config);
                 let daily = std::array::from_fn::<_, { Good::COUNT }, _>(|good| {
                     demand.daily[good]
+                        .div_ceil(u64::from(firm_counts[good].max(1)))
+                        .max(1)
+                });
+                let production = std::array::from_fn::<_, { Good::COUNT }, _>(|good| {
+                    demand
+                        .production(Good::ALL[good])
                         .div_ceil(u64::from(firm_counts[good].max(1)))
                         .max(1)
                 });
@@ -756,7 +763,7 @@ impl Scenario {
                         (Good::Housing | Good::Railway, _) => 0,
                         (_, Economy::Agrarian) => config.capacity,
                         (_, Economy::Industrial) => {
-                            (daily[good].div_ceil(config.packet_output.into()) as u32)
+                            (production[good].div_ceil(config.packet_output.into()) as u32)
                                 .max(1)
                                 .min(config.capacity)
                         }
@@ -765,9 +772,9 @@ impl Scenario {
                     std::array::from_fn(|good| match (Good::ALL[good], config.economy) {
                         (Good::Railway, _) => 0,
                         (Good::Grain | Good::Flax | Good::Cotton | Good::Dye, _) => {
-                            daily[good]
-                                * match (config.buffer_days, config.producer_buffer_days) {
-                                    (0, _) | (_, Some(0)) => 0,
+                            production[good]
+                                * match config.buffer_days {
+                                    0 => 0,
                                     _ => u64::from(calendar::DAYS_PER_YEAR),
                                 }
                         }
@@ -786,6 +793,8 @@ impl Scenario {
                                 )
                         }
                     });
+                let initial_employment =
+                    employment::InitialEmployment::new(&config, &capacities, &daily);
                 let totals = match &config.population {
                     Some(population) => population.totals()?,
                     None => {
@@ -793,21 +802,21 @@ impl Scenario {
                             0u128,
                             |total, household| -> Result<u128> {
                                 Ok(total
-                                    + u128::from(config.household_liquidity.cash(
-                                        config.household_cash,
-                                        config.seed,
-                                        household,
-                                    )?))
+                                    + u128::from(
+                                        initial_employment.cash(&config, household as usize - 1)?,
+                                    ))
                             },
                         )?;
                         let cash = household_cash
                             + u128::from(config.firm_cash) * u128::from(config.firms);
 
                         let mut goods = [0; Good::COUNT];
-                        goods[Good::Bread as usize - 1] = u64::from(config.households)
-                            * u64::from(config.household_need)
-                            * u64::from(config.demography.initial_household_members)
-                            * u64::from(config.buffer_days);
+                        goods[Good::Bread as usize - 1] =
+                            u64::from(config.households) * food_reserve.household_stock;
+                        goods[Good::Coal as usize - 1] =
+                            u64::from(config.households) * food_reserve.coal;
+                        goods[Good::Wood as usize - 1] =
+                            u64::from(config.households) * food_reserve.wood;
                         if let enterprise::HouseholdProduction::Available {
                             annual_yield_per_plot,
                             ..
@@ -842,7 +851,7 @@ impl Scenario {
                                 let inputs = match config.economy {
                                     Economy::Agrarian => stock,
                                     Economy::Industrial => {
-                                        daily[good as usize - 1] * u64::from(config.buffer_days)
+                                        food_reserve.inputs(good, daily[good as usize - 1])
                                     }
                                 };
                                 goods[input as usize - 1] = add(goods[input as usize - 1], inputs)?;
@@ -856,8 +865,6 @@ impl Scenario {
                     }
                 };
                 let resources = resources::ResourceGeography::new(&config)?;
-                let initial_employment =
-                    employment::InitialEmployment::new(&config, &capacities, &daily);
                 let mut scenario = Self {
                     config,
                     totals,
@@ -989,6 +996,11 @@ impl Scenario {
             property: None,
             working_conditions: Vec::new(),
         };
+        config.capacity = (supply::StartingDemand::new(&config)
+            .production(Good::Bread)
+            .div_ceil(u64::from(config.firms / 3) * u64::from(config.packet_output))
+            as u32)
+            .max(config.capacity);
         match experiment {
             Experiment::Shortage => config.buffer_days = 0,
             Experiment::Transport => config.shipment_speed = 100,
@@ -1468,6 +1480,7 @@ impl Scenario {
     fn generated(&self) -> Result<State> {
         let actors = self.actors();
         let config = &self.config;
+        let food_reserve = supply::StartingReserves::new(config);
         let properties = (0..actors)
             .map(|index| self.actor(index))
             .collect::<ActorRows>();
@@ -1488,11 +1501,7 @@ impl Scenario {
             let kind = state.actors.at(actor).kind;
             let retailer = self.retailers.get(&state.actors.at(actor).identity);
             let cash = match kind {
-                0 => config.household_liquidity.cash(
-                    config.household_cash,
-                    config.seed,
-                    state.actors.at(actor).identity,
-                )?,
+                0 => self.initial_employment.cash(config, actor)?,
                 _ => config.firm_cash,
             };
             state.set(Field::Cash, actor, cash);
@@ -1522,15 +1531,21 @@ impl Scenario {
             );
             if kind == 0 {
                 state.set(Field::Price, actor, config.prices[2].into());
+                state.set(Field::Coal, actor, food_reserve.coal);
+                state.set(Field::Wood, actor, food_reserve.wood);
+                state.initial_goods[Good::Coal as usize - 1] = add(
+                    state.initial_goods[Good::Coal as usize - 1],
+                    food_reserve.coal,
+                )?;
+                state.initial_goods[Good::Wood as usize - 1] = add(
+                    state.initial_goods[Good::Wood as usize - 1],
+                    food_reserve.wood,
+                )?;
             }
 
             state.set(Field::Wage, actor, u64::from(config.wage));
             let stock = match (kind, retailer) {
-                (0, _) => {
-                    u64::from(config.household_need)
-                        * u64::from(config.demography.initial_household_members)
-                        * u64::from(config.buffer_days)
-                }
+                (0, _) => food_reserve.household_stock,
                 (_, Some(store)) => {
                     self.retail_demand[kind as usize - 1]
                         * u64::from(config.buffer_days.min(store.reserve_days))
@@ -1553,7 +1568,7 @@ impl Scenario {
                 let inputs = match config.economy {
                     Economy::Agrarian => stock,
                     Economy::Industrial => {
-                        self.retail_demand[kind as usize - 1] * u64::from(config.buffer_days)
+                        food_reserve.inputs(output, self.retail_demand[kind as usize - 1])
                     }
                 };
                 state.set(Field::inventory(input), actor, inputs);
@@ -1574,8 +1589,13 @@ impl Scenario {
                     state.set(
                         Field::Demand,
                         actor,
-                        u64::from(state.actors.at(actor).capacity)
-                            * u64::from(config.packet_output),
+                        match config.economy {
+                            Economy::Agrarian => {
+                                u64::from(state.actors.at(actor).capacity)
+                                    * u64::from(config.packet_output)
+                            }
+                            Economy::Industrial => self.retail_demand[kind as usize - 1],
+                        },
                     );
                 }
             }

@@ -77,6 +77,97 @@ fn fuel(state: &mut State, household: usize, good: Good, quantity: u64) {
 }
 
 #[test]
+fn subsistence_firewood_uses_land_tools_and_available_household_time_on_gpu() -> Result<()> {
+    let mut config = heating_scenario(3)?.config().clone();
+    config.demography.initial_household_members = 3;
+    config.household_production = enterprise::HouseholdProduction::industrial();
+    config.land_access = Some(enterprise::LandAccess {
+        total_plots: 4,
+        allocations: vec![
+            enterprise::LandGrant {
+                household: 1,
+                plots: 2,
+            },
+            enterprise::LandGrant {
+                household: 2,
+                plots: 2,
+            },
+        ],
+    });
+    let population = config.population.as_mut().unwrap();
+    for household in &mut population.households {
+        household.inventories[Good::Bread as usize - 1] = 1000;
+        household.inventories[Good::Tools as usize - 1] = u64::from(household.identity != 2);
+    }
+    let scenario = Scenario::new(config)?;
+    let mut simulation = Simulation::new(scenario.clone(), support::device(64)?)?;
+    simulation.advance()?;
+    let state = simulation.download()?;
+    assert_eq!(state.get(Field::HeatingServed, 0), 9);
+    assert_eq!(state.get(Field::HeatingServed, 1), 0);
+    assert_eq!(state.get(Field::HeatingServed, 2), 0);
+    assert_eq!(simulation.snapshot.produced[Good::Wood as usize - 1], 27);
+    assert_eq!(state.get(Field::Wood, 0), 18);
+    assert_eq!(state.get(Field::HomeMinutes, 0), 810);
+    assert!(state.get(Field::HomeMinutes, 0) <= state.get(Field::HouseholdBudget, 0));
+    simulation.checkpoint()?.restore()?;
+    Ok(())
+}
+
+#[test]
+fn mild_underheating_does_not_accumulate_dangerous_cold_exposure_on_gpu() -> Result<()> {
+    let scenario = heating_scenario(3)?;
+    let mut initial = scenario.initial()?;
+    initial.day = 80;
+    for person in &mut initial.people {
+        person.cold_exposure = 1000;
+    }
+    let mut simulation =
+        Simulation::from_checkpoint(Checkpoint::new(&scenario, &initial)?, support::device(64)?)?;
+    simulation.advance()?;
+    let state = simulation.download()?;
+    assert_eq!(state.get(Field::HeatingNeed, 0), 1);
+    assert_eq!(state.get(Field::HeatingServed, 0), 0);
+    assert!(
+        state
+            .people
+            .iter()
+            .all(|person| person.cold_exposure == 500)
+    );
+    Ok(())
+}
+
+#[test]
+fn generated_population_survives_its_first_winter_on_gpu() -> Result<()> {
+    for (households, seed) in [(1000, 7), (1000, 42), (1000, 43), (10000, 42)] {
+        let scenario = Scenario::industrial(households, seed, Experiment::Baseline)?;
+        let mut simulation = Simulation::new(scenario.clone(), support::device(64)?)?;
+        let initial = simulation.download()?;
+        simulation.advance()?;
+        let opening = simulation.download()?;
+        assert!(
+            opening
+                .people
+                .iter()
+                .all(|person| person.cold_exposure == 0)
+        );
+        for _ in 1..90 {
+            simulation.advance()?;
+            assert_eq!(simulation.snapshot.cash, initial.initial_cash);
+        }
+        assert!(
+            simulation.snapshot.population.living >= initial.initial_population * 98 / 100,
+            "seed {seed}: {} of {} people remain; deaths {:?}",
+            simulation.snapshot.population.living,
+            initial.initial_population,
+            simulation.snapshot.population.deaths,
+        );
+        simulation.checkpoint()?.restore()?;
+    }
+    Ok(())
+}
+
+#[test]
 fn cold_households_burn_substitute_fuels_and_conserve_every_unit() -> Result<()> {
     let scenario = heating_scenario(5)?;
     let mut initial = scenario.initial()?;
@@ -106,9 +197,9 @@ fn cold_households_burn_substitute_fuels_and_conserve_every_unit() -> Result<()>
             .iter()
             .map(|person| person.cold_exposure)
             .collect::<Vec<_>>(),
-        [0, 0, 0, 1000, 666]
+        [0, 0, 0, 1000, 0]
     );
-    assert_eq!(simulation.snapshot.population.cold_exposure, 1666);
+    assert_eq!(simulation.snapshot.population.cold_exposure, 1000);
     assert_eq!(
         simulation.snapshot,
         ObservationSnapshot::from_state(&scenario, &state)?

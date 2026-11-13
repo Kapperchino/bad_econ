@@ -1,6 +1,15 @@
 use super::*;
 
 #[cube]
+pub(super) fn input_coverage(config: &EconomyConfig, output: u32) -> u32 {
+    select(
+        output == comptime!(Good::Flour as u32) || output == comptime!(Good::Bread as u32),
+        config.coverage + config.ring - 1,
+        config.coverage,
+    )
+}
+
+#[cube]
 pub(super) fn budget(
     state: &mut [u32],
     config: &EconomyConfig,

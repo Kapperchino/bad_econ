@@ -202,7 +202,14 @@ fn industrial_paycheck_households_avoid_famine_with_next_day_delivery_on_gpu() -
         );
     }
     assert!(simulation.snapshot.population.deaths[2] < u64::from(households) * 3 / 1000);
-    assert!(simulation.snapshot.employed > u64::from(households) * 2 / 5);
+    assert!(
+        simulation.snapshot.employed
+            > u64::from(households)
+                * u64::from(scenario.config().demography.initial_household_members)
+                / u64::from(scenario.config().packet_output),
+        "{} employed households",
+        simulation.snapshot.employed
+    );
     assert!(simulation.snapshot.rent_collected > 0);
     assert!(simulation.snapshot.rent_arrears < simulation.snapshot.rent_collected / 5);
     Ok(())

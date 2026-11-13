@@ -1,7 +1,45 @@
 use super::{Good, ScenarioConfig, enterprise::HouseholdProduction};
 
+pub(super) struct StartingReserves {
+    pub household_stock: u64,
+    pub coal: u64,
+    pub wood: u64,
+    days: u32,
+    buffer_days: u32,
+}
+
+impl StartingReserves {
+    pub fn new(config: &ScenarioConfig) -> Self {
+        let delivery_days = config.search_radius.div_ceil(config.shipment_speed).max(1);
+        let days = match config.buffer_days {
+            0 => 0,
+            _ => config.buffer_days.max(config.coverage + delivery_days),
+        };
+        let heat = config.demography.initial_household_members
+            * super::calendar::Weather::default().heating_units_per_person;
+        Self {
+            household_stock: u64::from(config.household_need)
+                * u64::from(config.demography.initial_household_members)
+                * u64::from(days),
+            coal: u64::from(heat / 2) * u64::from(days),
+            wood: u64::from(heat % 2) * u64::from(days),
+            days,
+            buffer_days: config.buffer_days,
+        }
+    }
+
+    pub fn inputs(&self, output: Good, daily: u64) -> u64 {
+        let days = match output {
+            Good::Flour | Good::Bread => self.days,
+            _ => self.buffer_days,
+        };
+        daily * u64::from(days)
+    }
+}
+
 pub(super) struct StartingDemand {
     pub daily: [u64; Good::COUNT],
+    food: u64,
 }
 
 impl StartingDemand {
@@ -49,6 +87,7 @@ impl StartingDemand {
         };
         let mut demand = Self {
             daily: [0; Good::COUNT],
+            food,
         };
         demand.include(Good::Bread, food.saturating_sub(harvest));
         let population = households * u64::from(members);
@@ -76,6 +115,13 @@ impl StartingDemand {
             }
         }
         demand
+    }
+
+    pub fn production(&self, good: Good) -> u64 {
+        match good {
+            Good::Grain | Good::Flour | Good::Bread => (self.food * 5).div_ceil(4),
+            _ => self.daily[good as usize - 1],
+        }
     }
 
     fn include(&mut self, good: Good, quantity: u64) {

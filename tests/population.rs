@@ -23,7 +23,17 @@ fn industrial_household_liquidity_is_unequal_and_replays_on_gpu() -> Result<()> 
         .iter()
         .filter(|&&cash| cash <= 7 * daily_expenses)
         .count();
-    assert!((550..=650).contains(&weekly));
+    let seasonal = (0..config.households as usize)
+        .filter_map(|household| initial.get(Field::Job, household).checked_sub(1))
+        .filter(|&firm| {
+            [Good::Grain, Good::Flax, Good::Cotton, Good::Dye]
+                .iter()
+                .any(|good| initial.actors.at(firm as usize).kind == *good as u32)
+        })
+        .count();
+    let regular = config.households as usize - seasonal;
+    assert!(seasonal > 0);
+    assert!((regular * 55 / 100..=regular * 65 / 100).contains(&weekly));
     assert!(balances[500] < 7 * daily_expenses);
     assert!(balances[950] > 28 * daily_expenses);
     assert_eq!(

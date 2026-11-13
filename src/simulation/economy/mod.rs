@@ -213,17 +213,21 @@ fn local(
                     if comptime!(config.home_mode == Feature::Enabled) {
                         enterprises::available_method(state, actors, config, control, id);
                     }
+                    let mut demand = value(state, config, comptime!(Field::Demand as u32), id);
+                    if k.bits() <= comptime!(Good::Bread as u32) {
+                        demand = farming::production_target(control, demand);
+                    }
                     let mut desired = proposed_starts(
                         KernelStarts {
                             coverage: config.coverage,
-                            demand: value(state, config, comptime!(Field::Demand as u32), id),
+                            demand,
                             finished: value(state, config, k.output(), id),
                             pipeline: value(state, config, comptime!(Field::Pipeline as u32), id),
                         },
                         control,
                     );
                     if farming::farm(state, config, id, k.output()) {
-                        desired = farming::starts(state, config, id, parameters.day);
+                        desired = farming::starts(state, config, control, id, parameters.day);
                     }
                     let quotient = divide(
                         add_checked(
@@ -708,7 +712,7 @@ fn propose(
                     actors
                         [ActorLayout::CAPACITY * (actors.len() / ActorLayout::WORDS) + id as usize]
                         * number(state, config, comptime!(Field::InputTicks as u32), id)
-                        * config.coverage,
+                        * consumption::input_coverage(config, k.bits()),
                     0u32,
                 );
                 if number(state, config, comptime!(Field::EnterpriseModel as u32), id) == 1 {

@@ -121,6 +121,7 @@ pub enum Chart {
     Occupations,
     Population,
     Demography,
+    Deaths,
     Housing,
     Credit,
     Debt,
@@ -194,6 +195,7 @@ impl Menu {
             Self::Population => &[
                 Chart::Occupations,
                 Chart::Population,
+                Chart::Deaths,
                 Chart::Demography,
                 Chart::Housing,
             ],
@@ -208,7 +210,7 @@ impl Menu {
     }
 }
 impl Chart {
-    pub const ALL: [Self; 28] = [
+    pub const ALL: [Self; 29] = [
         Self::Employment,
         Self::Unemployment,
         Self::Cash,
@@ -230,6 +232,7 @@ impl Chart {
         Self::Occupations,
         Self::Population,
         Self::Demography,
+        Self::Deaths,
         Self::Housing,
         Self::Credit,
         Self::Debt,
@@ -261,6 +264,7 @@ impl Chart {
             Self::Occupations => "Occupations",
             Self::Population => "Population",
             Self::Demography => "Births / deaths",
+            Self::Deaths => "Death causes",
             Self::Housing => "Housing",
             Self::Credit => "Loans",
             Self::Debt => "Debt",
@@ -293,6 +297,7 @@ impl Chart {
             Self::Occupations => "Population by occupation",
             Self::Population => "Living population",
             Self::Demography => "Daily demographic change",
+            Self::Deaths => "Deaths by cause",
             Self::Housing => "Households without housing",
             Self::Credit => "Active and overdue loans",
             Self::Debt => "Outstanding credit obligations",
@@ -325,6 +330,7 @@ impl Chart {
             Self::Occupations => "%",
             Self::Population => "people",
             Self::Demography => "people / day",
+            Self::Deaths => "people",
             Self::Housing => "households",
             Self::Credit => "loans",
             Self::Debt => "cash",
@@ -397,6 +403,9 @@ impl Chart {
             Self::Demography => {
                 "Daily changes in cumulative births and deaths, separated by cause."
             }
+            Self::Deaths => {
+                "Cumulative deaths since the run began, separated into background mortality, occupational hazards, starvation, and cold exposure."
+            }
             Self::Housing => {
                 "Living households without available housing. Compare with housing output and rent arrears."
             }
@@ -437,6 +446,7 @@ impl Chart {
             Self::Occupations => Menu::Population,
             Self::Population => Menu::Population,
             Self::Demography => Menu::Population,
+            Self::Deaths => Menu::Population,
             Self::Housing => Menu::Population,
             Self::Credit => Menu::Finance,
             Self::Debt => Menu::Finance,
@@ -504,6 +514,9 @@ impl Chart {
             ]
             .map(String::from)
             .into(),
+            Self::Deaths => ["Background", "Occupational", "Starvation", "Cold"]
+                .map(String::from)
+                .into(),
             Self::Housing => ["Homeless households"].map(String::from).into(),
             Self::Credit => ["Active loans", "Overdue loans"].map(String::from).into(),
             Self::Debt => ["Principal", "Interest due"].map(String::from).into(),
@@ -627,6 +640,12 @@ impl Chart {
                 daily_change(s, previous, |s| s.population.deaths[2]),
                 daily_change(s, previous, |s| s.population.deaths[3]),
             ],
+            Self::Deaths => s
+                .population
+                .deaths
+                .iter()
+                .map(|&deaths| deaths as f64)
+                .collect(),
             Self::Housing => vec![s.homeless_households as f64],
             Self::Credit => vec![s.active_loans as f64, s.overdue_loans as f64],
             Self::Debt => vec![s.loan_principal as f64, s.loan_interest as f64],

@@ -100,6 +100,10 @@ struct Accounts {
     minutes: u64,
     home_minutes: u64,
     budget: u64,
+    coal: u64,
+    wood: u64,
+    heating_need: u64,
+    heating_served: u64,
 }
 
 #[derive(Serialize)]
@@ -146,6 +150,10 @@ fn household_summaries(
         summary.minutes += state.get(Field::Hours, index);
         summary.home_minutes += state.get(Field::HomeMinutes, index);
         summary.budget += state.get(Field::HouseholdBudget, index);
+        summary.coal += state.get(Field::Coal, index);
+        summary.wood += state.get(Field::Wood, index);
+        summary.heating_need += state.get(Field::HeatingNeed, index);
+        summary.heating_served += state.get(Field::HeatingServed, index);
     }
     for (summary, balances) in households.iter_mut().zip(&mut balances) {
         balances.sort_unstable();
@@ -169,7 +177,7 @@ struct PeopleCohort {
     class: HouseholdClass,
     initial_people: u64,
     living_initial_people: u64,
-    deaths: [u64; 3],
+    deaths: [u64; 4],
 }
 
 impl InitialCohorts {
@@ -195,7 +203,7 @@ impl InitialCohorts {
             class,
             initial_people: 0,
             living_initial_people: 0,
-            deaths: [0; 3],
+            deaths: [0; 4],
         });
         for person in &state.people {
             if let Some(&group) = self.people.get(&person.identity) {
