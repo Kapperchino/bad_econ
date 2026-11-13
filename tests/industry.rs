@@ -83,8 +83,13 @@ fn industrial_food_production_is_more_efficient_than_subsistence_on_gpu() -> Res
         enterprise::HouseholdProduction::Unavailable => [0; 3],
     };
     let scenario = Scenario::new(config)?;
-    let mut simulation = Simulation::new(scenario.clone(), support::device(64)?)?;
-    simulation.advance()?;
+    let mut initial = scenario.initial()?;
+    initial.day = 269;
+    let mut simulation =
+        Simulation::from_checkpoint(Checkpoint::new(&scenario, &initial)?, support::device(64)?)?;
+    for _ in 0..2 {
+        simulation.advance()?;
+    }
     let state = simulation.download()?;
     for good in [Good::Grain, Good::Flour, Good::Bread] {
         let home_minutes = u64::from(household_minutes[good as usize - 1]);
@@ -691,7 +696,10 @@ fn tools_required_by_an_upgrade_are_replenished_beyond_the_maintenance_reserve()
         ..Default::default()
     });
     let scenario = Scenario::new(config)?;
-    let mut simulation = Simulation::new(scenario.clone(), support::device(64)?)?;
+    let mut initial = scenario.initial()?;
+    initial.day = 268;
+    let mut simulation =
+        Simulation::from_checkpoint(Checkpoint::new(&scenario, &initial)?, support::device(64)?)?;
     simulation.advance()?;
     let ordered = simulation.download()?;
     let tools_in_transit =
@@ -703,10 +711,17 @@ fn tools_required_by_an_upgrade_are_replenished_beyond_the_maintenance_reserve()
         replenished.get(Field::ActiveMethod, 6),
         ProductionMethod::MechanicalHarvesting as u64
     );
-    assert!(replenished.get(Field::Produced, 6) > ordered.get(Field::Produced, 6));
+    assert_eq!(replenished.get(Field::Produced, 6), 0);
+    assert!(replenished.get(Field::CropWork, 6) > ordered.get(Field::CropWork, 6));
+    simulation.advance()?;
+    let harvested = simulation.download()?;
+    assert_eq!(
+        harvested.get(Field::Produced, 6),
+        replenished.get(Field::CropWork, 6) * 365 / 211
+    );
     assert_eq!(
         simulation.snapshot,
-        ObservationSnapshot::from_state(&scenario, &replenished)?
+        ObservationSnapshot::from_state(&scenario, &harvested)?
     );
     Ok(())
 }

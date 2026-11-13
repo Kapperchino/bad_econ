@@ -573,7 +573,8 @@ fn gpu_firm_growth_matches_full_rebuild_with_births_and_migration() -> Result<()
     config.buffer_days = 30;
     config.household_cash = 1_000_000;
     let scenario = Scenario::new(config)?;
-    let mut initial = scenario.initial()?;
+    let mut initial = Simulation::new(scenario.clone(), device(64)?)?.download()?;
+    initial.day = 120;
     for actor in 0..3 {
         for (good, amount) in [(Good::Tools, 20), (Good::Wood, 50)] {
             let field = Field::inventory(good);

@@ -286,8 +286,10 @@ fn farm_expansion_without_a_productivity_advantage_leaves_subsistence_land_intac
 #[test]
 fn contractors_build_housing_farms_and_factories_and_displace_only_local_farmers() -> Result<()> {
     let scenario = Scenario::new(development()?)?;
-    let initial = scenario.initial()?;
-    let mut simulation = Simulation::new(scenario.clone(), support::device(64)?)?;
+    let mut initial = scenario.initial()?;
+    initial.day = 257;
+    let mut simulation =
+        Simulation::from_checkpoint(Checkpoint::new(&scenario, &initial)?, support::device(64)?)?;
     simulation.advance()?;
     let first = simulation.download()?;
     for farmer in [1, 2, 3] {
@@ -332,9 +334,15 @@ fn contractors_build_housing_farms_and_factories_and_displace_only_local_farmers
         completed.get(Field::EnterpriseStatus, 9),
         EnterpriseState::Operating as u64
     );
-    assert!(completed.get(Field::Produced, 9) > 0);
+    assert_eq!(completed.get(Field::Produced, 9), 0);
+    assert!(completed.get(Field::CropWork, 9) > 0);
     assert!(completed.get(Field::Produced, 10) > 0);
-    let land = PropertySnapshot::from_state(&scenario, &completed)?.unwrap();
+    simulation.advance()?;
+    replay.advance()?;
+    let harvested = simulation.download()?;
+    assert_eq!(harvested, replay.download()?);
+    assert!(harvested.get(Field::Produced, 9) > 0);
+    let land = PropertySnapshot::from_state(&scenario, &harvested)?.unwrap();
     assert_eq!(land.displaced_plots, 6);
     assert_eq!(land.regions[0].housing, 7);
     assert_eq!(land.regions[0].farms, 3);
@@ -344,7 +352,7 @@ fn contractors_build_housing_farms_and_factories_and_displace_only_local_farmers
     assert_eq!(simulation.snapshot.cash, initial.initial_cash);
     assert_eq!(
         simulation.snapshot,
-        ObservationSnapshot::from_state(&scenario, &completed)?
+        ObservationSnapshot::from_state(&scenario, &harvested)?
     );
     simulation.checkpoint()?.restore()?;
     Ok(())

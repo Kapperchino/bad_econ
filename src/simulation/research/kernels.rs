@@ -81,6 +81,27 @@ fn cap_plan(main: &mut [u32], config: &KernelResearchConfig, firm: u32, capacity
 }
 
 #[cube]
+fn executed_packets(
+    main: &mut [u32],
+    config: &KernelResearchConfig,
+    control: &[Atomic<u32>],
+    firm: u32,
+) -> Ticks {
+    let plan = read(
+        main,
+        main_coordinate(config, comptime!(Field::Plan as u32), firm),
+    );
+    let slots = read(
+        main,
+        main_coordinate(config, comptime!(Field::Slots as u32), firm),
+    );
+    if lt(plan, slots) {
+        KernelFaults::new(comptime!(FaultFlags::RESEARCH_MISMATCH)).record(control);
+    }
+    positive(plan, slots)
+}
+
+#[cube]
 fn access(state: &mut [u32], base: &RowIndex) -> u32 {
     state[base.field(LabState::DISCOVERED, 1usize)]
         & state[base.field(LabState::MASTERED, 1usize)]
@@ -598,43 +619,14 @@ fn research(
                     config.parameters.machine_count as usize,
                     id,
                 );
-                let produced = read(
+                let used = executed_packets(
                     main,
-                    main_coordinate(
-                        config,
-                        comptime!(Field::UnscaledProduced as u32),
-                        config.records[item.field(MachineLayout::FIRM, 1usize)],
-                    ),
-                );
-                let before = read(state, saved.field(MachineState::PRODUCED_BEFORE, 2usize));
-                let used = divide(
-                    positive(produced, before),
-                    read(
-                        main,
-                        main_coordinate(
-                            config,
-                            comptime!(Field::OutputTicks as u32),
-                            config.records[item.field(MachineLayout::FIRM, 1usize)],
-                        ),
-                    )
-                    .extract(0usize),
+                    config,
+                    control,
+                    config.records[item.field(MachineLayout::FIRM, 1usize)],
                 );
                 let remaining = read(state, saved.field(MachineState::REMAINING, 2usize));
-                let reproduced = times(
-                    used,
-                    read(
-                        main,
-                        main_coordinate(
-                            config,
-                            comptime!(Field::OutputTicks as u32),
-                            config.records[item.field(MachineLayout::FIRM, 1usize)],
-                        ),
-                    )
-                    .extract(0usize),
-                );
-                reproduced.faults.record(control);
                 if lt(remaining, used)
-                    || lt(produced, before)
                     || lt(
                         ticks(
                             config.records[item.field(MachineLayout::MAXIMUM_PACKETS, 1usize)],
@@ -642,7 +634,6 @@ fn research(
                         ),
                         used,
                     )
-                    || !equal(reproduced.value, positive(produced, before))
                 {
                     KernelFaults::new(comptime!(FaultFlags::RESEARCH_MISMATCH)).record(control);
                 }
@@ -672,26 +663,11 @@ fn research(
                     config.parameters.stock_count as usize,
                     id,
                 );
-                let produced = read(
+                let used = executed_packets(
                     main,
-                    main_coordinate(
-                        config,
-                        comptime!(Field::UnscaledProduced as u32),
-                        config.records[item.field(StockLayout::FIRM, 1usize)],
-                    ),
-                );
-                let before = read(state, saved.field(StockState::PRODUCED_BEFORE, 2usize));
-                let used = divide(
-                    positive(produced, before),
-                    read(
-                        main,
-                        main_coordinate(
-                            config,
-                            comptime!(Field::OutputTicks as u32),
-                            config.records[item.field(StockLayout::FIRM, 1usize)],
-                        ),
-                    )
-                    .extract(0usize),
+                    config,
+                    control,
+                    config.records[item.field(StockLayout::FIRM, 1usize)],
                 );
                 let extraction = times(
                     used,
@@ -699,21 +675,7 @@ fn research(
                 );
                 extraction.faults.record(control);
                 let stock = state[saved.field(StockState::STOCK, 1usize)];
-                let reproduced = times(
-                    used,
-                    read(
-                        main,
-                        main_coordinate(
-                            config,
-                            comptime!(Field::OutputTicks as u32),
-                            config.records[item.field(StockLayout::FIRM, 1usize)],
-                        ),
-                    )
-                    .extract(0usize),
-                );
-                reproduced.faults.record(control);
                 if lt(ticks(stock, 0), extraction.value)
-                    || lt(produced, before)
                     || lt(
                         ticks(
                             config.records[item.field(StockLayout::MAXIMUM_PACKETS, 1usize)],
@@ -721,7 +683,6 @@ fn research(
                         ),
                         used,
                     )
-                    || !equal(reproduced.value, positive(produced, before))
                 {
                     KernelFaults::new(comptime!(FaultFlags::RESEARCH_MISMATCH)).record(control);
                 }

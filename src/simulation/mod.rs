@@ -488,6 +488,8 @@ impl Simulation {
         }
     }
     fn execute_phase(&mut self, phase: Phase, trace: Trace) -> Result<PhaseEvidence> {
+        self.config.heating_per_person =
+            crate::domain::calendar::Weather::on_day(self.day).heating_units_per_person;
         self.demography.before(
             &self.device,
             &self.state,
@@ -553,9 +555,14 @@ impl Simulation {
                 self.railways(economy::railway::RailStage::Access);
                 self.railways(economy::railway::RailStage::Routes);
                 self.railways(economy::railway::RailStage::Quotes);
+                let heating = self.config.heating_per_person;
                 self.scenario
                     .goods_markets()
                     .into_iter()
+                    .filter(|market| match market {
+                        Market::Consumer(Good::Coal | Good::Wood) => heating > 0,
+                        _ => true,
+                    })
                     .try_for_each(|market| {
                         (0..MATCHING_ROUNDS).try_fold(
                             MatchingState::Searching,
@@ -616,6 +623,7 @@ impl Simulation {
                 }
                 self.day = add(self.day, 1)?;
                 self.snapshot.day = self.day;
+                self.snapshot.weather = self.scenario.weather(self.day);
                 self.commit_enterprises(RegistryAudit::Validated)?;
                 Ok(())
             }
@@ -787,6 +795,7 @@ impl Simulation {
                         work_minutes: 0,
                         fatigue: 0,
                         famine_exposure: 0,
+                        cold_exposure: 0,
                         birth_cooldown: 0,
                     });
                 }
@@ -1557,9 +1566,15 @@ impl Simulation {
             }
         };
         let initialization = match (market, self.matching_round, trace) {
-            (Market::Input(_), 0, Trace::Discard) => EconomyStage::InputMarketPrepare,
-            (Market::Input(_), 0, Trace::Record) => EconomyStage::InputMarketStart,
-            (Market::Input(_), _, Trace::Record) => EconomyStage::InputMarketRepeat,
+            (Market::Input(_) | Market::Consumer(Good::Coal | Good::Wood), 0, Trace::Discard) => {
+                EconomyStage::InputMarketPrepare
+            }
+            (Market::Input(_) | Market::Consumer(Good::Coal | Good::Wood), 0, Trace::Record) => {
+                EconomyStage::InputMarketStart
+            }
+            (Market::Input(_) | Market::Consumer(Good::Coal | Good::Wood), _, Trace::Record) => {
+                EconomyStage::InputMarketRepeat
+            }
             _ => EconomyStage::MarketStart,
         };
         let initialization_count = match initialization {
@@ -1623,7 +1638,8 @@ impl Simulation {
                 economy::search::SearchStage::Search => {
                     markets::dispatch(&self.searches.dispatches, markets::SEARCH_DISPATCH)
                 }
-                economy::search::SearchStage::Compact => {
+                economy::search::SearchStage::SearchFuel
+                | economy::search::SearchStage::Compact => {
                     markets::dispatch(&self.searches.dispatches, markets::SEARCH_COMPACT_DISPATCH)
                 }
             };
@@ -1643,7 +1659,9 @@ impl Simulation {
                     control: self.control.clone().into_buffer_arg(),
                     parameters: parameters.launch(),
                     status_reset: match (market, trace) {
-                        (Market::Input(_), _) => economy::search::StatusReset::Active,
+                        (Market::Input(_) | Market::Consumer(Good::Coal | Good::Wood), _) => {
+                            economy::search::StatusReset::Active
+                        }
                         (_, Trace::Record) => economy::search::StatusReset::Full,
                         (_, Trace::Discard) => economy::search::StatusReset::Active,
                     },
@@ -1678,13 +1696,22 @@ impl Simulation {
             }
             _ => {
                 let stage = match (market, self.matching_round) {
-                    (Market::Input(_), 0) => economy::search::SearchStage::PrepareCandidates,
-                    (Market::Input(_), _) => economy::search::SearchStage::PrepareSelected,
+                    (Market::Input(_) | Market::Consumer(Good::Coal | Good::Wood), 0) => {
+                        economy::search::SearchStage::PrepareCandidates
+                    }
+                    (Market::Input(_) | Market::Consumer(Good::Coal | Good::Wood), _) => {
+                        economy::search::SearchStage::PrepareSelected
+                    }
                     _ => economy::search::SearchStage::Prepare,
                 };
                 search(stage);
                 launch(EconomyStage::MarketBoundary, 1, &parameters);
-                search(economy::search::SearchStage::Search);
+                search(match market {
+                    Market::Consumer(Good::Coal | Good::Wood) => {
+                        economy::search::SearchStage::SearchFuel
+                    }
+                    _ => economy::search::SearchStage::Search,
+                });
                 parallel::scan(
                     &self.device,
                     &self.searches.successes,
@@ -1752,6 +1779,22 @@ impl Simulation {
                     economy::batch::labor::LaborInputLaunch {
                         state: self.state.clone().into_buffer_arg(),
                         config: self.config.launch(),
+                        scratch: self.scratch.clone().into_buffer_arg(),
+                        control: self.control.clone().into_buffer_arg(),
+                        parameters: parameters.launch(),
+                    },
+                )
+            }
+            Market::Consumer(Good::Wood | Good::Coal) => {
+                economy::batch::quantity::QuantitySettlement::launch(
+                    &self.device,
+                    markets::dispatch(&self.searches.dispatches, markets::QUEUE_DISPATCH),
+                    cubecl::CubeDim::new_1d(self.device.workgroup),
+                    economy::batch::quantity::QuantityInputLaunch {
+                        state: self.state.clone().into_buffer_arg(),
+                        actors: self.actors.clone().into_buffer_arg(),
+                        config: self.config.launch(),
+                        proposals: self.proposals.clone().into_buffer_arg(),
                         scratch: self.scratch.clone().into_buffer_arg(),
                         control: self.control.clone().into_buffer_arg(),
                         parameters: parameters.launch(),
@@ -2193,6 +2236,7 @@ impl Simulation {
                 }),
             },
             day: self.day,
+            weather: self.scenario.weather(self.day),
             cash: add(totals.cash.into(), financial.cash()?)?,
             payroll_reserves: totals.payroll_reserves.into(),
             income_tax: totals.income_tax.into(),
@@ -2465,6 +2509,7 @@ impl Simulation {
             output_ticks: values[Field::OutputTicks as usize],
             actor: self.metadata.actors.at(actor),
             day: self.day,
+            weather: self.scenario.weather(self.day),
             cash: values[Field::Cash as usize],
             gross_income: values[Field::GrossIncome as usize],
             payroll_reserve: values[Field::PayrollReserve as usize],
@@ -2512,6 +2557,8 @@ impl Simulation {
                 .identity,
             available_minutes: values[Field::Time as usize],
             living_members: values[Field::LivingMembers as usize],
+            heating_need: values[Field::HeatingNeed as usize],
+            heating_served: values[Field::HeatingServed as usize],
             equipment_condition: values[Field::EquipmentCondition as usize],
             safety_provision: values[Field::SafetyProvision as usize],
             business_scale: (self.metadata.actors.at(actor).kind > 0).then(|| {

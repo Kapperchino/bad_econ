@@ -65,8 +65,10 @@ fn entrepreneurial_interest_limits_entry_even_with_abundant_savings_on_gpu() -> 
         })
         .count();
     assert!((60..=100).contains(&interested));
-    let initial = scenario.initial()?;
-    let mut simulation = Simulation::new(scenario.clone(), support::device(64)?)?;
+    let mut initial = scenario.initial()?;
+    initial.day = 120;
+    let mut simulation =
+        Simulation::from_checkpoint(Checkpoint::new(&scenario, &initial)?, support::device(64)?)?;
     for _ in 0..60 {
         simulation.advance()?;
         assert!(simulation.snapshot.firm_entries <= interested as u64);
@@ -156,8 +158,10 @@ fn household_surplus_finances_construction_and_subsequent_paid_work() -> Result<
             .collect(),
     });
     let scenario = Scenario::new(config)?;
-    let initial = scenario.initial()?;
-    let mut simulation = Simulation::new(scenario.clone(), support::device(64)?)?;
+    let mut initial = scenario.initial()?;
+    initial.day = 120;
+    let mut simulation =
+        Simulation::from_checkpoint(Checkpoint::new(&scenario, &initial)?, support::device(64)?)?;
     let mut sales = 0;
     let mut saved = 0;
     for _ in 0..100 {
@@ -531,7 +535,10 @@ fn multiple_owned_projects_rotate_and_pay_only_affordable_construction() -> Resu
     ] {
         let request = InspectionRequest::new(identity, &scenario)?;
         let inspection = simulation.inspect(request.clone())?;
-        assert_eq!(inspection, Inspection::from_state(&completed, &request)?);
+        assert_eq!(
+            inspection,
+            Inspection::from_state(&scenario, &completed, &request)?
+        );
         assert_eq!(inspection.enterprise_state, Some(status));
         assert_eq!(inspection.construction_minutes_remaining, minutes);
     }

@@ -48,7 +48,11 @@ pub struct HomeProduction {
 impl HomeProduction {
     fn new(value: crate::domain::enterprise::HouseholdProduction) -> Self {
         match value {
-            crate::domain::enterprise::HouseholdProduction::Unavailable => Self::default(),
+            crate::domain::enterprise::HouseholdProduction::Unavailable => Self {
+                harvest_start: crate::domain::calendar::HARVEST_START,
+                harvest_days: crate::domain::calendar::HARVEST_DAYS,
+                ..Self::default()
+            },
             crate::domain::enterprise::HouseholdProduction::Available {
                 milling_minutes,
                 baking_minutes,
@@ -79,6 +83,7 @@ impl HomeProduction {
 }
 #[derive(CubeType, CubeLaunch)]
 pub struct EconomyConfig {
+    pub heating_per_person: u32,
     pub actors: u32,
     pub fields: u32,
     pub ring: u32,
@@ -133,6 +138,7 @@ pub struct EconomyConfig {
     pub industrial_expansion: u32,
 }
 pub struct Configuration {
+    pub heating_per_person: u32,
     rentals: crate::domain::landlords::RentalRegistry,
     pub actors: u32,
     pub fields: u32,
@@ -223,6 +229,8 @@ impl Configuration {
     ) -> Self {
         let config = scenario.config();
         Self {
+            heating_per_person: crate::domain::calendar::Weather::on_day(state.day)
+                .heating_units_per_person,
             small_business_expansion: config.expansion.small_business_per_mille,
             industrial_expansion: config.expansion.industrial_per_mille,
             rental_accounts: device.tensor(&rentals.words()),
@@ -335,6 +343,7 @@ impl Configuration {
     }
     pub fn launch(&self) -> EconomyConfigLaunch {
         EconomyConfigLaunch {
+            heating_per_person: self.heating_per_person,
             small_business_expansion: self.small_business_expansion,
             industrial_expansion: self.industrial_expansion,
             rental_accounts: self.rental_accounts.clone().into_buffer_arg(),

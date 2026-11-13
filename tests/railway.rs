@@ -349,13 +349,16 @@ fn generated_industry_has_rail_plans_and_gpu_inspection_survives_checkpointing()
     assert!(!scenario.config().railway.segments.is_empty());
     let identity = scenario.config().railway.companies[0].firm;
     let request = InspectionRequest::new(identity, &scenario)?;
-    let mut simulation = Simulation::new(scenario, support::device(64)?)?;
+    let mut simulation = Simulation::new(scenario.clone(), support::device(64)?)?;
     for _ in 0..8 {
         simulation.advance()?;
     }
     let inspection = simulation.inspect(request.clone())?;
     let state = simulation.download()?;
-    assert_eq!(inspection, Inspection::from_state(&state, &request)?);
+    assert_eq!(
+        inspection,
+        Inspection::from_state(&scenario, &state, &request)?
+    );
     assert!(inspection.railway_business.is_some());
     simulation.checkpoint()?.restore()?;
     Ok(())

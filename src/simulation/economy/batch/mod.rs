@@ -2,6 +2,7 @@ use super::*;
 
 pub(in crate::simulation) mod labor;
 pub(in crate::simulation) mod payroll;
+pub(in crate::simulation) mod quantity;
 
 #[derive(CubeType)]
 struct UniformCapacity {

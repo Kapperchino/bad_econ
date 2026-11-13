@@ -216,6 +216,7 @@ fn scarce_work_is_accessible_beyond_the_first_identity_block() -> Result<()> {
     });
     let scenario = Scenario::new(config)?;
     let mut state = scenario.initial()?;
+    state.day = 59;
     state.set(Field::Demand, 1000, 1000);
     let checkpoint = Checkpoint::new(&scenario, &state)?;
     let mut simulation = Simulation::from_checkpoint(checkpoint.clone(), support::device(64)?)?;

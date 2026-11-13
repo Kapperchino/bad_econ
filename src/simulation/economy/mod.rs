@@ -34,6 +34,7 @@ pub(super) mod batch;
 mod clearing;
 mod consumption;
 pub(super) mod enterprises;
+mod farming;
 mod household_production;
 pub(super) mod indexing;
 pub(in crate::simulation) mod landlords;
@@ -212,7 +213,7 @@ fn local(
                     if comptime!(config.home_mode == Feature::Enabled) {
                         enterprises::available_method(state, actors, config, control, id);
                     }
-                    let desired = proposed_starts(
+                    let mut desired = proposed_starts(
                         KernelStarts {
                             coverage: config.coverage,
                             demand: value(state, config, comptime!(Field::Demand as u32), id),
@@ -221,6 +222,9 @@ fn local(
                         },
                         control,
                     );
+                    if farming::farm(state, config, id, k.output()) {
+                        desired = farming::starts(state, config, id, parameters.day);
+                    }
                     let quotient = divide(
                         add_checked(
                             control,
@@ -350,6 +354,9 @@ fn local(
             }
             Phase::PhysicalClose => match k.bits() {
                 ActorKind::HOUSEHOLD_BITS => {
+                    if config.heating_per_person > 0 {
+                        consumption::heat(state, config, control, id);
+                    }
                     let consumed = minimum(
                         value(state, config, comptime!(Field::Bread as u32), id),
                         ticks(
@@ -436,7 +443,11 @@ fn local(
                     set32(state, config, comptime!(Field::Fatigue as u32), id, fatigue);
                 }
                 _ => {
-                    let output = value(state, config, comptime!(Field::Pipeline as u32), id);
+                    let mut output = value(state, config, comptime!(Field::Pipeline as u32), id);
+                    if farming::farm(state, config, id, k.output()) {
+                        output =
+                            farming::harvest(state, config, control, id, parameters.day, output);
+                    }
                     increase(
                         state,
                         config,
@@ -517,7 +528,7 @@ fn local(
                                 crate::domain::enterprise::EnterpriseModel::Distributor as u32
                             )
                     {
-                        enterprises::lifecycle(state, config, control, id);
+                        enterprises::lifecycle(state, actors, config, control, id, parameters.day);
                     }
                     let old = value(state, config, comptime!(Field::Demand as u32), id);
                     let signal = add_checked(
@@ -534,7 +545,11 @@ fn local(
                         config.forecast_weight,
                         control,
                     );
-                    let excess = positive(value(state, config, k.output(), id), demand);
+                    let mut target = demand;
+                    if farming::farm(state, config, id, k.output()) {
+                        target = farming::inventory_target(config, control, demand, parameters.day);
+                    }
+                    let excess = positive(value(state, config, k.output(), id), target);
                     let unfilled = value(state, config, comptime!(Field::Unfilled as u32), id);
                     let positive_sign = !lt(unfilled, excess);
                     let magnitude = select(
@@ -816,41 +831,54 @@ fn propose(
             }
             MarketFlag::Consumer => {
                 good = parameters.traded_good();
-                let interval = config.consumption_intervals[good as usize - 1];
-                let until_due =
-                    (interval - (parameters.day + id) % max(interval, 1)) % max(interval, 1);
-                search = k.is(comptime!(ActorKind::Household))
-                    && number(state, config, comptime!(Field::LivingMembers as u32), id) > 0
-                    && until_due <= config.coverage + config.ring;
-                let reserve = ticks(
-                    number(state, config, comptime!(Field::FoodNeed as u32), id)
-                        * (config.coverage + config.ring - 1),
-                    0,
-                );
-                let food = add_checked(
-                    control,
-                    value(state, config, comptime!(Field::Bread as u32), id),
-                    value(
-                        state,
-                        config,
-                        TRANSIT_FIELDS as u32 + comptime!(Good::Bread as u32) - 1,
-                        id,
-                    ),
-                );
-                let cash_reserve = multiply(
-                    control,
-                    reserve,
-                    number(state, config, comptime!(Field::Price as u32), id),
-                );
-                search = search
-                    && !lt(food, reserve)
-                    && lt(
-                        cash_reserve,
-                        value(state, config, comptime!(Field::Cash as u32), id),
+                if good == comptime!(Good::Coal as u32) || good == comptime!(Good::Wood as u32) {
+                    wanted = consumption::fuel_target(state, config, control, id, good);
+                    search = k.is(comptime!(ActorKind::Household))
+                        && number(state, config, comptime!(Field::LivingMembers as u32), id) > 0
+                        && !lt(
+                            value(state, config, comptime!(Field::Bread as u32), id),
+                            ticks(
+                                number(state, config, comptime!(Field::FoodNeed as u32), id),
+                                0,
+                            ),
+                        );
+                } else {
+                    let interval = config.consumption_intervals[good as usize - 1];
+                    let until_due =
+                        (interval - (parameters.day + id) % max(interval, 1)) % max(interval, 1);
+                    search = k.is(comptime!(ActorKind::Household))
+                        && number(state, config, comptime!(Field::LivingMembers as u32), id) > 0
+                        && until_due <= config.coverage + config.ring;
+                    let reserve = ticks(
+                        number(state, config, comptime!(Field::FoodNeed as u32), id)
+                            * (config.coverage + config.ring - 1),
+                        0,
                     );
-                purchasing_power = consumption::budget(state, config, control, id, good);
-                search = search && !equal(purchasing_power, zero());
-                wanted = ticks(1, 0);
+                    let food = add_checked(
+                        control,
+                        value(state, config, comptime!(Field::Bread as u32), id),
+                        value(
+                            state,
+                            config,
+                            TRANSIT_FIELDS as u32 + comptime!(Good::Bread as u32) - 1,
+                            id,
+                        ),
+                    );
+                    let cash_reserve = multiply(
+                        control,
+                        reserve,
+                        number(state, config, comptime!(Field::Price as u32), id),
+                    );
+                    search = search
+                        && !lt(food, reserve)
+                        && lt(
+                            cash_reserve,
+                            value(state, config, comptime!(Field::Cash as u32), id),
+                        );
+                    purchasing_power = consumption::budget(state, config, control, id, good);
+                    search = search && !equal(purchasing_power, zero());
+                    wanted = ticks(1, 0);
+                }
             }
             MarketFlag::Household => {
                 good = comptime!(Good::Bread as u32);

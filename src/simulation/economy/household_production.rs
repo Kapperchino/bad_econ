@@ -84,15 +84,24 @@ pub(super) fn produce(
     let available = selected_time + number(state, config, comptime!(Field::HomeTime as u32), actor);
     let mut time = available;
     let plots = number(state, config, comptime!(Field::LandPlots as u32), actor);
-    let season = day % 365;
-    let harvest = season >= config.home.harvest_start
-        && season < config.home.harvest_start + config.home.harvest_days;
+    let harvest = farming::harvesting(config, day);
+    let year = farming::year(config, day);
     let tools = !equal(
         value(state, config, comptime!(Field::Tools as u32), actor),
         zero(),
     );
     if plots > 0 && tools {
-        let cultivated = min(time, plots * 20);
+        let annual_work = config.home.annual_yield_per_plot * config.home.cultivation_minutes;
+        let daily_work = ceildiv(annual_work, max(farming::growing_days(config), 1));
+        let needed = positive(
+            times32(plots, annual_work),
+            value(state, config, comptime!(Field::CropWork as u32), actor),
+        );
+        let cultivated = select(
+            farming::cultivating(config, day),
+            minimum(minimum(ticks(time, 0), times32(plots, daily_work)), needed).extract(LOW_WORD),
+            0,
+        );
         increase(
             state,
             config,
@@ -102,13 +111,11 @@ pub(super) fn produce(
             ticks(cultivated, 0),
         );
         time -= cultivated;
-        if harvest
-            && number(state, config, comptime!(Field::HarvestYear as u32), actor) != day / 365 + 1
-        {
+        if harvest && number(state, config, comptime!(Field::HarvestYear as u32), actor) != year {
             let crop = value(state, config, comptime!(Field::CropWork as u32), actor);
             let yield_ticks = minimum(
                 divide(crop, max(config.home.cultivation_minutes, 1)),
-                ticks(plots * config.home.annual_yield_per_plot, 0),
+                times32(plots, config.home.annual_yield_per_plot),
             );
             output(
                 state,
@@ -128,7 +135,7 @@ pub(super) fn produce(
                     multiply(control, yield_ticks, config.home.cultivation_minutes),
                 ),
             );
-            put_harvest(state, config, actor, day / 365 + 1);
+            put_harvest(state, config, actor, year);
         }
     }
     let surplus_days = comptime!(match config.economy {

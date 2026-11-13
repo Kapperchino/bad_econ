@@ -16,7 +16,7 @@ fn planning_scenario() -> Result<Scenario> {
     let position = Position { x: 0, y: 0 };
     config.resources = ResourceMap::Explicit {
         regions: vec![ResourceRegion::new(
-            Good::Grain,
+            Good::Wood,
             Position { x: 0, y: 0 },
             Position {
                 x: config.map_size,
@@ -40,7 +40,7 @@ fn planning_scenario() -> Result<Scenario> {
                 identity: 100,
                 position,
                 owner: 1,
-                good: Good::Grain,
+                good: Good::Wood,
                 cash: 120,
                 inventories: Good::food([0, 0, 0]),
                 capacity: 7,
@@ -52,7 +52,7 @@ fn planning_scenario() -> Result<Scenario> {
                 identity: 200,
                 position,
                 owner: 2,
-                good: Good::Grain,
+                good: Good::Wood,
                 cash: 100_000,
                 inventories: Good::food([0, 0, 0]),
                 capacity: 2,
@@ -238,7 +238,7 @@ fn commuting_rounds_up_and_can_exclude_a_higher_wage() -> Result<()> {
                 identity: 100,
                 position: Position { x: 11, y: 0 },
                 owner: 1,
-                good: Good::Grain,
+                good: Good::Wood,
                 cash: 100_000,
                 inventories: Good::food([0, 0, 0]),
                 capacity: 3,

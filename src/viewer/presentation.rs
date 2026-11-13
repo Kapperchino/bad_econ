@@ -8,7 +8,7 @@ use super::{
     },
 };
 use crate::{
-    domain::{Good, ObservationSnapshot},
+    domain::{Good, ObservationSnapshot, calendar::CalendarDate},
     runtime::RuntimeState,
 };
 use bevy::{
@@ -83,7 +83,7 @@ fn draw(
         labels.iter_mut().for_each(|(kind, mut label)| {
             let value = match kind {
                 Label::Resources => format!("Population {}     Paid households {}     Cash {}     Firms {}", number(s.population.living), number(s.employed), number(s.cash), number(s.firms)),
-                Label::Date => format!("DAY {:04}   |   {}   |   {}", s.day, display.status.label(), display.speed.label()),
+                Label::Date => format!("{} | {} | {}°C\nDAY {:04} | {} | {}", s.weather.date, s.weather.season, s.weather.temperature_celsius, s.day, display.status.label(), display.speed.label()),
                 Label::Title => chart.menu().label().into(),
                 Label::Subtitle => chart.menu().description().into(),
                 Label::Summary => summary(chart.menu(), s),
@@ -383,11 +383,12 @@ fn summary(menu: Menu, s: &ObservationSnapshot) -> String {
             number(s.research.striking)
         ),
         Menu::Population => format!(
-            "Population / dependents    {} / {}\nBirths    {}\nDeaths: background / work / famine    {:?}\nHomeless households    {}",
+            "Population / dependents    {} / {}\nBirths    {}\nDeaths: background / work / famine / cold    {:?}\nCold exposure    {:.1} person-days\nHomeless households    {}",
             number(s.population.living),
             number(s.population.dependents),
             number(s.population.births),
             s.population.deaths,
+            s.population.cold_exposure as f64 / 1000.0,
             number(s.homeless_households)
         ),
         Menu::Finance => format!(
@@ -460,8 +461,8 @@ fn draw_axes(parent: &mut ChildSpawnerCommands, range: &ChartRange, area: Vec2) 
         ));
     });
     let labels = [
-        format!("Day {}", range.first_day),
-        format!("Day {}", range.last_day),
+        CalendarDate::on_day(range.first_day).to_string(),
+        CalendarDate::on_day(range.last_day).to_string(),
     ];
     parent
         .spawn(Node {
@@ -486,10 +487,12 @@ fn inspection_text(display: &Display) -> String {
                 .map(|i| {
                     let detail = match i.actor.kind {
                         0 => format!(
-                            "{} | members {} | fatigue {} | labor {} min\nEmployer {} | gross paid {}\nTax {} | charges {} | payroll reserve {}",
+                            "{} | members {} | fatigue {} | labor {} min\nEmployer {} | gross paid {}\nTax {} | charges {} | payroll reserve {}\nHeating fuel: wood {} | coal {}\nHeat supplied {} / {} | deficit {}",
                             i.housing_state.map(|state| format!("{state:?}")).unwrap_or_default(),
                             i.living_members, i.fatigue, i.available_minutes, i.employer,
-                            i.gross_income, i.income_tax, i.employee_charges, i.payroll_reserve
+                            i.gross_income, i.income_tax, i.employee_charges, i.payroll_reserve,
+                            i.inventory[Good::Wood as usize - 1], i.inventory[Good::Coal as usize - 1],
+                            i.heating_served, i.heating_need, i.heating_need.saturating_sub(i.heating_served)
                         ),
                         _ => format!(
                             "{} {:?} | {}\nBuilding {} {}\nCondition {} | safety {}\nRent overdue {} days\nCompany {} ({} sites) | owner {}\nWage {} | price {}\nCapacity {} (+{}) | planned {} | open {}\nMethod {:?} | {} output / {} min",
@@ -523,10 +526,13 @@ fn inspection_text(display: &Display) -> String {
                         format!("\nLandlord business | homes {} | rental income {}\nHousing project {:?} | {} work remaining", business.homes, business.income, i.project_status, i.construction_minutes_remaining)
                     });
                     format!(
-                        "Actor {} | day {} | kind {}\nCash {} | transit {}\nRent paid {} | owed {}\nFood {:?} | other stock {}\n{}{}{}{}{}",
+                        "Actor {} | day {} | kind {}\n{} | {} | {}°C\nCash {} | transit {}\nRent paid {} | owed {}\nFood {:?} | other stock {}\n{}{}{}{}{}",
                         i.actor.identity,
                         i.day,
                         i.actor.kind,
+                        i.weather.date,
+                        i.weather.season,
+                        i.weather.temperature_celsius,
                         i.cash,
                         i.transit,
                         i.rent_collected,
@@ -629,7 +635,13 @@ fn draw_readout(
                 })
                 .collect::<Vec<_>>()
                 .join("\n");
-            format!("DAY {} | {}\n{}", snapshot.day, chart.unit(), rows)
+            format!(
+                "{} | DAY {} | {}\n{}",
+                snapshot.weather.date,
+                snapshot.day,
+                chart.unit(),
+                rows
+            )
         };
         labels.iter_mut().for_each(|mut text| {
             if text.0 != detail {

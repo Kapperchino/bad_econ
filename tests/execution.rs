@@ -132,7 +132,10 @@ fn dispatch_is_buyer_owned_and_output_matures_at_close() -> Result<()> {
     assert_eq!(delivered.get(Field::Bread, 0), 2);
     assert_eq!(delivered.get(Field::Transit, 0), 0);
     let shortage = Scenario::baseline(6, 17, Experiment::Shortage)?;
-    let mut simulation = Simulation::new(shortage.clone(), support::device(64)?)?;
+    let mut initial = shortage.initial()?;
+    initial.day = 269;
+    let mut simulation =
+        Simulation::from_checkpoint(Checkpoint::new(&shortage, &initial)?, support::device(64)?)?;
     for phase in [
         Phase::Opening,
         Phase::Observation,
@@ -168,7 +171,26 @@ fn dispatch_is_buyer_owned_and_output_matures_at_close() -> Result<()> {
             .sum::<u64>(),
         0
     );
-    assert!(firms.map(|i| closed.get(Field::Grain, i)).sum::<u64>() > 0);
+    assert_eq!(
+        firms
+            .clone()
+            .map(|i| closed.get(Field::Grain, i))
+            .sum::<u64>(),
+        0
+    );
+    assert!(
+        firms
+            .clone()
+            .map(|i| closed.get(Field::CropWork, i))
+            .sum::<u64>()
+            > 0
+    );
+    for phase in [Phase::AccountsDecisions, Phase::Audit] {
+        simulation.phase(phase, Trace::Record)?;
+    }
+    simulation.advance()?;
+    let harvested = simulation.download()?;
+    assert!(firms.map(|i| harvested.get(Field::Grain, i)).sum::<u64>() > 0);
     Ok(())
 }
 
@@ -201,7 +223,7 @@ fn checkpoint_rejects_tampering_and_keeps_last_audited_boundary() -> Result<()> 
     let state = simulation.download()?;
     for identity in [1, 31] {
         let request = InspectionRequest::new(identity, &scenario)?;
-        let expected = Inspection::from_state(&state, &request)?;
+        let expected = Inspection::from_state(&scenario, &state, &request)?;
         assert_eq!(simulation.inspect(request)?, expected);
     }
     simulation.command(SimulationCommand::Resume)?;
@@ -234,6 +256,8 @@ fn high_word_cash_and_reserve_distributions_remain_exact() -> Result<()> {
 fn arithmetic_fault_rolls_back_and_reset_recovers() -> Result<()> {
     let scenario = Scenario::baseline(1, 42, Experiment::Concentrated)?;
     let mut state = scenario.initial()?;
+    state.set(Field::CropWork, 1, 1);
+    state.day = 270;
     let grain = state.get(Field::Grain, 1);
     state.set(Field::Grain, 0, grain);
     state.set(Field::Grain, 1, 0);
@@ -248,7 +272,7 @@ fn arithmetic_fault_rolls_back_and_reset_recovers() -> Result<()> {
     assert!(matches!(
         simulation.status,
         RuntimeState::Fault {
-            last_audited_day: 0,
+            last_audited_day: 270,
             ..
         }
     ));

@@ -228,9 +228,9 @@ fn explicit_maps_replace_generated_maps_and_legacy_scenarios_default_to_generati
     let checkpoint = Checkpoint::new(&scenario, &state)?;
     assert_eq!(checkpoint.restore()?.scenario, scenario);
     let mut encoded = serde_json::to_value(checkpoint)?;
-    assert_eq!(encoded["version"], 17);
+    assert_eq!(encoded["version"], 18);
     assert_eq!(encoded["scenario"]["version"], 2);
-    assert_eq!(STATE_HASH_VERSION, "bad-econ/state/CubekV2/v18");
+    assert_eq!(STATE_HASH_VERSION, "bad-econ/state/CubekV2/v19");
     encoded["version"] = serde_json::json!(9);
     assert!(serde_json::from_value::<Checkpoint>(encoded).is_err());
     Ok(())
@@ -332,6 +332,64 @@ mod compute {
         Ok(state)
     }
 
+    fn production_simulation(scenario: Scenario, good: Good) -> Result<Simulation> {
+        let mut simulation = Simulation::new(scenario.clone(), support::device(64)?)?;
+        let mut initial = simulation.download()?;
+        initial.set(
+            Field::Demand,
+            6,
+            u64::from(initial.actors.at(6).capacity)
+                * u64::from((scenario.technique(6).output_ticks * 2).min(100)),
+        );
+        initial.day = match good {
+            Good::Grain | Good::Flax | Good::Cotton | Good::Dye => 269,
+            _ => 120,
+        };
+        simulation.command(SimulationCommand::Restore(Box::new(Checkpoint::new(
+            &scenario, &initial,
+        )?)))?;
+        Ok(simulation)
+    }
+
+    fn assert_production_cycle(
+        simulation: &mut Simulation,
+        good: Good,
+        completed: u64,
+    ) -> Result<()> {
+        let state = assert_conservation(simulation)?;
+        match good {
+            Good::Grain | Good::Flax | Good::Cotton | Good::Dye => {
+                assert_eq!(state.get(Field::Produced, 6), 0, "{good:?}");
+                assert_eq!(state.get(Field::CropWork, 6), completed, "{good:?}");
+                simulation.advance()?;
+                let harvested = assert_conservation(simulation)?;
+                assert_eq!(
+                    harvested.get(Field::Produced, 6),
+                    completed * 365 / 211,
+                    "{good:?}"
+                );
+                assert_eq!(harvested.get(Field::CropWork, 6), 0, "{good:?}");
+                assert_eq!(harvested.get(Field::Cash, 6), state.get(Field::Cash, 6));
+                assert_eq!(
+                    simulation.snapshot.research.remaining_service,
+                    state
+                        .research
+                        .as_ref()
+                        .map_or(0, |research| research.summary.remaining_service)
+                );
+                assert_eq!(
+                    simulation.snapshot.research.natural_stock,
+                    state
+                        .research
+                        .as_ref()
+                        .map_or(0, |research| research.summary.natural_stock)
+                );
+            }
+            _ => assert_eq!(state.get(Field::Produced, 6), completed, "{good:?}"),
+        }
+        Ok(())
+    }
+
     #[test]
     fn generated_geography_preserves_custom_firm_positions_and_nominal_capacity() -> Result<()> {
         let mut config = configuration(Good::Grain)?;
@@ -414,18 +472,18 @@ mod compute {
                 }
                 let scenario = Scenario::new(config)?;
                 let initial = scenario.initial()?;
-                let mut simulation = Simulation::new(scenario, support::device(64)?)?;
+                let mut simulation = production_simulation(scenario, good)?;
                 simulation.advance()?;
                 let state = assert_conservation(&mut simulation)?;
                 assert_eq!(state.actors, initial.actors);
                 assert_eq!(state.get(Field::Plan, 6), case.plan, "{good:?}");
-                assert_eq!(state.get(Field::Produced, 6), case.packets * 3, "{good:?}");
                 assert_eq!(
                     state.get(Field::Cash, 6),
                     10_000 - case.packets * 60,
                     "{good:?}"
                 );
                 assert_eq!(simulation.snapshot.employed, case.packets);
+                assert_production_cycle(&mut simulation, good, case.packets * 3)?;
             }
         }
         Ok(())
@@ -579,17 +637,17 @@ mod compute {
                     Supply::NoFuel if method != ProductionMethod::SteamMining => 2,
                     _ => 0,
                 };
-                let mut simulation = Simulation::new(Scenario::new(config)?, support::device(64)?)?;
+                let mut simulation = production_simulation(Scenario::new(config)?, good)?;
                 simulation.advance()?;
                 let state = assert_conservation(&mut simulation)?;
                 assert_eq!(good.kind(), GoodKind::Natural);
                 assert_eq!(state.get(Field::ActiveMethod, 6), method as u64);
-                assert_eq!(state.get(Field::Produced, 6), packets * 6, "{good:?}");
                 assert_eq!(state.get(Field::Cash, 6), 10_000 - packets * 40, "{good:?}");
                 assert_eq!(simulation.snapshot.used[Good::Tools as usize - 1], packets);
                 if method == ProductionMethod::SteamMining {
                     assert_eq!(simulation.snapshot.used[Good::Coal as usize - 1], packets);
                 }
+                assert_production_cycle(&mut simulation, good, packets * 6)?;
             }
         }
         Ok(())
@@ -625,7 +683,7 @@ mod compute {
             });
             let scenario = Scenario::new(config)?;
             let packets = u64::from(scenario.has_resource(Good::Grain, Position { x: 10, y: 10 }));
-            let mut simulation = Simulation::new(scenario, support::device(64)?)?;
+            let mut simulation = production_simulation(scenario, Good::Grain)?;
             for phase in [Phase::Opening, Phase::Observation, Phase::Proposal] {
                 simulation.phase(phase, Trace::Record)?;
             }
@@ -633,10 +691,10 @@ mod compute {
             for phase in Phase::ALL.into_iter().skip(3) {
                 simulation.phase(phase, Trace::Record)?;
             }
-            let state = assert_conservation(&mut simulation)?;
-            assert_eq!(state.get(Field::Produced, 6), packets * 3);
+            assert_conservation(&mut simulation)?;
             assert_eq!(simulation.snapshot.research.remaining_service, 1 - packets);
             assert_eq!(simulation.snapshot.research.natural_stock, 8 - packets * 2);
+            assert_production_cycle(&mut simulation, Good::Grain, packets * 3)?;
         }
         Ok(())
     }

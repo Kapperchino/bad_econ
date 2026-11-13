@@ -3,7 +3,7 @@ use anyhow::{Result, anyhow};
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeSet;
 
-pub const DAYS_PER_YEAR: u32 = 365;
+pub use super::calendar::DAYS_PER_YEAR;
 pub const PROBABILITY_SCALE: u64 = 1_000_000_000_000;
 pub const EXPOSURE_SCALE: u32 = 1000;
 
@@ -13,6 +13,7 @@ pub enum DeathCause {
     Background = 1,
     Occupational = 2,
     Famine = 3,
+    Cold = 4,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
@@ -49,6 +50,8 @@ pub struct Person {
     pub work_minutes: u32,
     pub fatigue: u32,
     pub famine_exposure: u32,
+    #[serde(default)]
+    pub cold_exposure: u32,
     pub birth_cooldown: u32,
 }
 
@@ -65,6 +68,18 @@ pub struct MortalityProfile {
     pub famine_daily_ppm_at_thirty_days: u32,
     pub famine_vulnerability_per_mille: [u32; 5],
     pub exposure_recovery_per_day: u32,
+    #[serde(default = "default_cold_daily_ppm")]
+    pub cold_daily_ppm_at_seven_days: u32,
+    #[serde(default = "default_cold_vulnerability")]
+    pub cold_vulnerability_per_mille: [u32; 5],
+}
+
+fn default_cold_daily_ppm() -> u32 {
+    1000
+}
+
+fn default_cold_vulnerability() -> [u32; 5] {
+    [2000, 1500, 1000, 1200, 2000]
 }
 
 impl Default for MortalityProfile {
@@ -82,6 +97,8 @@ impl Default for MortalityProfile {
             famine_daily_ppm_at_thirty_days: 20_000,
             famine_vulnerability_per_mille: [2000, 1500, 1000, 1200, 2000],
             exposure_recovery_per_day: 500,
+            cold_daily_ppm_at_seven_days: default_cold_daily_ppm(),
+            cold_vulnerability_per_mille: default_cold_vulnerability(),
         }
     }
 }
@@ -107,6 +124,11 @@ impl MortalityProfile {
                 .iter()
                 .all(|&rate| rate <= 4000),
             profile.exposure_recovery_per_day <= 30_000,
+            profile.cold_daily_ppm_at_seven_days <= 100_000,
+            profile
+                .cold_vulnerability_per_mille
+                .iter()
+                .all(|&rate| rate <= 4000),
         ];
         match admitted.into_iter().all(std::convert::identity) {
             true => Ok(profile),
@@ -240,6 +262,7 @@ impl DemographicPolicy {
                     work_minutes: 0,
                     fatigue: fatigue[&seed.household],
                     famine_exposure: 0,
+                    cold_exposure: 0,
                     birth_cooldown: 0,
                 })
                 .collect()),
@@ -288,9 +311,28 @@ pub struct PopulationObservation {
     pub living: u64,
     pub dependents: u64,
     pub births: u64,
-    pub deaths: [u64; 3],
+    #[serde(deserialize_with = "death_counts")]
+    pub deaths: [u64; 4],
     pub work_minutes: u64,
     pub famine_exposure: u64,
+    #[serde(default)]
+    pub cold_exposure: u64,
+}
+
+fn death_counts<'de, D>(deserializer: D) -> std::result::Result<[u64; 4], D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    let counts = Vec::<u64>::deserialize(deserializer)?;
+    match counts.as_slice() {
+        [background, occupational, famine] => Ok([*background, *occupational, *famine, 0]),
+        [background, occupational, famine, cold] => {
+            Ok([*background, *occupational, *famine, *cold])
+        }
+        _ => Err(serde::de::Error::custom(
+            "expected three or four death causes",
+        )),
+    }
 }
 
 impl PopulationObservation {
@@ -357,6 +399,7 @@ impl PopulationObservation {
                 }
                 observation.work_minutes += u64::from(person.work_minutes);
                 observation.famine_exposure += u64::from(person.famine_exposure);
+                observation.cold_exposure += u64::from(person.cold_exposure);
                 observation
             },
         )
@@ -390,6 +433,7 @@ impl<'a> PersonRegistry<'a> {
                 && person.fatigue <= 1000
                 && person.work_minutes <= 1440
                 && person.famine_exposure <= 365_000
+                && person.cold_exposure <= 365_000
                 && person
                     .employer
                     .is_none_or(|identity| actors.get(&identity).is_some_and(|&kind| kind > 0))

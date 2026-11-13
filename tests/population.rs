@@ -262,13 +262,20 @@ mod compute {
     use super::*;
     use bad_econ::{runtime::SimulationCommand, simulation::Simulation};
 
+    fn growing_simulation(scenario: Scenario) -> Result<Simulation> {
+        let mut initial = scenario.initial()?;
+        initial.day = 59;
+        Simulation::from_checkpoint(Checkpoint::new(&scenario, &initial)?, support::device(64)?)
+    }
+
     #[test]
     fn heterogeneous_packets_preserve_time_goods_ownership_and_replay() -> Result<()> {
         let scenario = scenario()?;
-        let mut simulation = Simulation::new(scenario.clone(), support::device(64)?)?;
+        let mut simulation = growing_simulation(scenario.clone())?;
         simulation.advance()?;
         let state = simulation.download()?;
-        assert_eq!(simulation.snapshot.produced, Good::food([5, 3, 2]));
+        assert_eq!(simulation.snapshot.produced, Good::food([0, 3, 2]));
+        assert_eq!(state.get(Field::CropWork, 3), 5);
         assert_eq!(simulation.snapshot.used, Good::food([2, 3, 0]));
         assert_eq!(simulation.snapshot.employed, 3);
         assert_eq!(state.get(Field::Hours, 0), 240);
@@ -293,7 +300,7 @@ mod compute {
         let mut config = scenario.config().clone();
         config.reserve = 0;
         config.distribution_rate = 1000;
-        let mut distribution = Simulation::new(Scenario::new(config)?, support::device(64)?)?;
+        let mut distribution = growing_simulation(Scenario::new(config)?)?;
         distribution.advance()?;
         let state = distribution.download()?;
         assert_eq!(state.get(Field::Cash, 0), 1720 + 9640);
@@ -372,7 +379,10 @@ fn actor_rows_round_trip_on_gpu_and_reject_mismatched_lengths() -> Result<()> {
     for actor in expected.actors.iter() {
         let request = InspectionRequest::new(actor.identity, &scenario)?;
         assert_eq!(simulation.inspect(request.clone())?.actor, actor);
-        assert_eq!(Inspection::from_state(&expected, &request)?.actor, actor);
+        assert_eq!(
+            Inspection::from_state(&scenario, &expected, &request)?.actor,
+            actor
+        );
     }
     let checkpoint = simulation.checkpoint()?;
     let mut old = serde_json::to_value(&checkpoint)?;

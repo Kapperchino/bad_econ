@@ -200,7 +200,10 @@ fn generated_rentals_house_local_renters_without_counting_subsistence_homes_on_g
         let request =
             InspectionRequest::new(initial.actors.at(account.landlord).identity, &scenario)?;
         let inspected = simulation.inspect(request.clone())?;
-        assert_eq!(inspected, Inspection::from_state(&state, &request)?);
+        assert_eq!(
+            inspected,
+            Inspection::from_state(&scenario, &state, &request)?
+        );
         assert_eq!(
             inspected.business_scale,
             Some(enterprise::BusinessScale::Industrial)
@@ -369,7 +372,10 @@ fn rental_income_funds_paid_housing_and_replays_on_gpu() -> Result<()> {
         );
         let inspection = InspectionRequest::new(103, &scenario)?;
         let inspected = simulation.inspect(inspection.clone())?;
-        assert_eq!(inspected, Inspection::from_state(&completed, &inspection)?);
+        assert_eq!(
+            inspected,
+            Inspection::from_state(&scenario, &completed, &inspection)?
+        );
         assert_eq!(inspected.rental_business.unwrap().homes, 16);
         if let Some(property) = PropertySnapshot::from_state(&scenario, &completed)? {
             assert_eq!(property.regions[0].housing, 2);

@@ -3,6 +3,7 @@ use super::support;
 use anyhow::Result;
 use bad_econ::{
     domain::{enterprise::HouseholdProduction, *},
+    runtime::SimulationCommand,
     simulation::{Simulation, Trace},
 };
 
@@ -152,7 +153,7 @@ fn daily_rent_conserves_cash_and_replays_arrears_on_gpu() -> Result<()> {
     let request = InspectionRequest::new(2, &scenario)?;
     assert_eq!(
         simulation.inspect(request.clone())?,
-        Inspection::from_state(&state, &request)?
+        Inspection::from_state(&scenario, &state, &request)?
     );
     let encoded = serde_json::to_string(&simulation.checkpoint()?)?;
     let mut resumed =
@@ -184,7 +185,12 @@ fn industrial_paycheck_households_avoid_famine_with_next_day_delivery_on_gpu() -
     };
     let scenario = Scenario::new(config)?;
     assert_eq!(scenario.ring(), 2);
-    let mut simulation = Simulation::new(scenario, support::device(64)?)?;
+    let mut simulation = Simulation::new(scenario.clone(), support::device(64)?)?;
+    let mut initial = simulation.download()?;
+    initial.day = 120;
+    simulation.command(SimulationCommand::Restore(Box::new(Checkpoint::new(
+        &scenario, &initial,
+    )?)))?;
     let initial_cash = simulation.snapshot.cash;
     for day in 1..=32 {
         simulation.advance()?;
@@ -272,6 +278,7 @@ fn firms_reserve_rent_before_hiring_on_gpu() -> Result<()> {
         config.firm_cash = cash;
         let scenario = Scenario::new(config)?;
         let mut initial = scenario.initial()?;
+        initial.day = 59;
         initial.set(Field::Demand, 1, 1000);
         let mut simulation = Simulation::from_checkpoint(
             Checkpoint::new(&scenario, &initial)?,

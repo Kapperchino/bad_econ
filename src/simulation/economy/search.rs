@@ -1,5 +1,6 @@
 use super::*;
 use crate::simulation::markets::{LATCH_WORD, SEARCHES_WORD};
+mod fuel;
 mod index;
 
 #[cfg(test)]
@@ -279,42 +280,72 @@ fn prepare(
                     }
                     MarketFlag::Consumer => {
                         good = parameters.traded_good();
-                        let interval = config.consumption_intervals[good as usize - 1];
-                        let until_due = (interval - (parameters.day + id) % max(interval, 1))
-                            % max(interval, 1);
-                        search = k.is(comptime!(ActorKind::Household))
-                            && number(state, config, comptime!(Field::LivingMembers as u32), id)
-                                > 0
-                            && until_due <= config.coverage + config.ring;
-                        let reserve = ticks(
-                            number(state, config, comptime!(Field::FoodNeed as u32), id)
-                                * (config.coverage + config.ring - 1),
-                            0,
-                        );
-                        let food = add_checked(
-                            control,
-                            value(state, config, comptime!(Field::Bread as u32), id),
-                            value(
-                                state,
-                                config,
-                                TRANSIT_FIELDS as u32 + comptime!(Good::Bread as u32) - 1,
-                                id,
-                            ),
-                        );
-                        let cash_reserve = multiply(
-                            control,
-                            reserve,
-                            number(state, config, comptime!(Field::Price as u32), id),
-                        );
-                        search = search
-                            && !lt(food, reserve)
-                            && lt(
-                                cash_reserve,
-                                value(state, config, comptime!(Field::Cash as u32), id),
+                        if good == comptime!(Good::Coal as u32)
+                            || good == comptime!(Good::Wood as u32)
+                        {
+                            wanted = consumption::fuel_target(state, config, control, id, good);
+                            search = k.is(comptime!(ActorKind::Household))
+                                && number(
+                                    state,
+                                    config,
+                                    comptime!(Field::LivingMembers as u32),
+                                    id,
+                                ) > 0
+                                && !lt(
+                                    value(state, config, comptime!(Field::Bread as u32), id),
+                                    ticks(
+                                        number(
+                                            state,
+                                            config,
+                                            comptime!(Field::FoodNeed as u32),
+                                            id,
+                                        ),
+                                        0,
+                                    ),
+                                );
+                        } else {
+                            let interval = config.consumption_intervals[good as usize - 1];
+                            let until_due = (interval - (parameters.day + id) % max(interval, 1))
+                                % max(interval, 1);
+                            search = k.is(comptime!(ActorKind::Household))
+                                && number(
+                                    state,
+                                    config,
+                                    comptime!(Field::LivingMembers as u32),
+                                    id,
+                                ) > 0
+                                && until_due <= config.coverage + config.ring;
+                            let reserve = ticks(
+                                number(state, config, comptime!(Field::FoodNeed as u32), id)
+                                    * (config.coverage + config.ring - 1),
+                                0,
                             );
-                        purchasing_power = consumption::budget(state, config, control, id, good);
-                        search = search && !equal(purchasing_power, zero());
-                        wanted = ticks(1, 0);
+                            let food = add_checked(
+                                control,
+                                value(state, config, comptime!(Field::Bread as u32), id),
+                                value(
+                                    state,
+                                    config,
+                                    TRANSIT_FIELDS as u32 + comptime!(Good::Bread as u32) - 1,
+                                    id,
+                                ),
+                            );
+                            let cash_reserve = multiply(
+                                control,
+                                reserve,
+                                number(state, config, comptime!(Field::Price as u32), id),
+                            );
+                            search = search
+                                && !lt(food, reserve)
+                                && lt(
+                                    cash_reserve,
+                                    value(state, config, comptime!(Field::Cash as u32), id),
+                                );
+                            purchasing_power =
+                                consumption::budget(state, config, control, id, good);
+                            search = search && !equal(purchasing_power, zero());
+                            wanted = ticks(1, 0);
+                        }
                     }
                     MarketFlag::Household => {
                         good = comptime!(Good::Bread as u32);
@@ -385,6 +416,9 @@ fn prepare(
                     search = search && !equal(wanted, zero()) && !equal(purchasing_power, zero());
                 }
                 searching = search;
+                if comptime!(round == PreparationRound::Capture && market == MarketFlag::Consumer) {
+                    eligible = searching;
+                }
                 if searching {
                     searches[(config.actors + id) as usize] = wanted.extract(LOW_WORD);
                     searches[(2 * config.actors + id) as usize] = wanted.extract(HIGH_WORD);
@@ -746,6 +780,42 @@ fn candidate_supply(
     }
 }
 
+#[cube]
+fn consumer_candidate(
+    actors: &[u32],
+    config: &EconomyConfig,
+    id: u32,
+    firm: u32,
+    wanted: Ticks,
+    purchasing_power: Ticks,
+    supply: &index::Supply,
+) -> Candidate {
+    let dist = distance(actors, id, firm);
+    let mut eligible = false;
+    let mut seen_supply = false;
+    let mut empty = false;
+    let mut score = zero();
+    if dist <= config.search_radius {
+        seen_supply = supply.offered;
+        let quote = supply.quote;
+        if !lt(purchasing_power, ticks(max(quote, 1), 0)) {
+            let route = railway::route(actors, config, id, firm);
+            score = ticks(quote + route.days * config.delivery_penalty, 0);
+            let usable = firm != id && quote > 0 && !equal(wanted, zero());
+            eligible = usable && supply.offered;
+            empty = usable && supply.producer && !supply.offered;
+        }
+    }
+    Candidate {
+        eligible,
+        seen_supply,
+        empty,
+        quantity: zero(),
+        score,
+        trip: dist,
+    }
+}
+
 #[derive(Clone, Copy, Debug, Hash, PartialEq, Eq)]
 pub(in crate::simulation) enum SearchStage {
     Index,
@@ -754,6 +824,7 @@ pub(in crate::simulation) enum SearchStage {
     PrepareCandidates,
     PrepareSelected,
     Search,
+    SearchFuel,
     Compact,
 }
 
@@ -826,6 +897,18 @@ impl GpuPass<SearchInput> for Search {
                     &input.actors,
                     &input.config,
                     &mut input.spatial,
+                    &mut input.proposals,
+                    &input.searches,
+                    &input.successes,
+                    &input.scratch,
+                    &input.control,
+                    &input.parameters,
+                ),
+                SearchStage::SearchFuel => fuel::search(
+                    &mut input.state,
+                    &input.actors,
+                    &input.config,
+                    &input.spatial,
                     &mut input.proposals,
                     &input.searches,
                     &input.successes,
@@ -1041,18 +1124,29 @@ fn search(
                                         && lt(lower_score, empty_score));
                             }
                             if relevant {
-                                let offer = candidate_supply(
-                                    state,
-                                    actors,
-                                    config,
-                                    &candidate_faults[fault_start..fault_start + CONTROL_WORDS],
-                                    parameters,
-                                    id,
-                                    firm,
-                                    wanted,
-                                    purchasing_power,
-                                    &supply,
-                                );
+                                let offer = match comptime!(parameters.market) {
+                                    MarketFlag::Consumer => consumer_candidate(
+                                        actors,
+                                        config,
+                                        id,
+                                        firm,
+                                        wanted,
+                                        purchasing_power,
+                                        &supply,
+                                    ),
+                                    _ => candidate_supply(
+                                        state,
+                                        actors,
+                                        config,
+                                        &candidate_faults[fault_start..fault_start + CONTROL_WORDS],
+                                        parameters,
+                                        id,
+                                        firm,
+                                        wanted,
+                                        purchasing_power,
+                                        &supply,
+                                    ),
+                                };
                                 candidates[lane * 9] = u32::cast_from(offer.eligible);
                                 candidates[lane * 9 + 1] = u32::cast_from(offer.seen_supply);
                                 candidates[lane * 9 + 2] = u32::cast_from(offer.empty);
@@ -1218,6 +1312,16 @@ fn search(
                 quantity = empty_quantity;
                 trip = empty_trip;
                 missing_supply = true;
+            }
+            if comptime!(parameters.market == MarketFlag::Consumer) && chosen != NO_ACTOR {
+                let supply =
+                    index::Supply::new(state, actors, config, chosen, parameters.traded_good());
+                let affordable = minimum(wanted, divide(purchasing_power, max(supply.quote, 1)));
+                quantity = select(
+                    missing_supply,
+                    affordable,
+                    minimum(affordable, supply.available),
+                );
             }
             if comptime!(parameters.market == MarketFlag::Household) {
                 let mut failure = u32::cast_from(missing_supply);

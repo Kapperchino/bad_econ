@@ -25,7 +25,7 @@ fn base_config() -> Result<ScenarioConfig> {
     let position = Position { x: 0, y: 0 };
     config.resources = ResourceMap::Explicit {
         regions: vec![ResourceRegion::new(
-            Good::Grain,
+            Good::Wood,
             Position { x: 0, y: 0 },
             Position {
                 x: config.map_size,
@@ -49,7 +49,7 @@ fn base_config() -> Result<ScenarioConfig> {
                 identity: 100 + index,
                 position,
                 owner: index + 1,
-                good: Good::Grain,
+                good: Good::Wood,
                 cash: match index {
                     0 => 100_000,
                     _ => 0,

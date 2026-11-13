@@ -88,11 +88,39 @@ fn famine_risk(exposure: u32, daily_ppm: u32, vulnerability: u32) -> Ticks {
 }
 
 #[cube]
-fn death_cause(draw: Ticks, background: Ticks, occupational: Ticks, famine: Ticks) -> u32 {
+fn cold_exposure(prior: u32, deficit: u32, recovery: u32) -> u32 {
+    select(
+        deficit > 0,
+        min(prior + deficit, 365_000),
+        max(prior, recovery) - recovery,
+    )
+}
+
+#[cube]
+fn cold_risk(exposure: u32, daily_ppm: u32, vulnerability: u32) -> Ticks {
+    let mut risk = zero();
+    if exposure > 0 {
+        let severity = min(exposure, 28_000);
+        let base = ratio(times32(daily_ppm, 1_000_000), severity, 7_000).value;
+        let duration = ratio(base, severity, 7_000).value;
+        risk = ratio(duration, vulnerability, 1000).value;
+    }
+    risk
+}
+
+#[cube]
+fn death_cause(
+    draw: Ticks,
+    background: Ticks,
+    occupational: Ticks,
+    famine: Ticks,
+    cold: Ticks,
+) -> u32 {
     let first = background;
     let second = plus(first, occupational).value;
+    let third = plus(second, famine).value;
     let total = minimum(
-        plus(second, famine).value,
+        plus(third, cold).value,
         ticks(
             comptime!(PROBABILITY_SCALE as u32),
             comptime!((PROBABILITY_SCALE >> 32) as u32),
@@ -100,6 +128,9 @@ fn death_cause(draw: Ticks, background: Ticks, occupational: Ticks, famine: Tick
     );
     let mut cause = 0;
     if lt(draw, total) {
+        cause = 4;
+    }
+    if lt(draw, third) {
         cause = 3;
     }
     if lt(draw, second) {
@@ -192,6 +223,20 @@ pub fn step(
             put(
                 state,
                 config,
+                comptime!(Field::HeatingNeed as u32),
+                household,
+                living * config.heating_per_person,
+            );
+            put(
+                state,
+                config,
+                comptime!(Field::HeatingServed as u32),
+                household,
+                0,
+            );
+            put(
+                state,
+                config,
                 comptime!(Field::Worker as u32),
                 household,
                 worker,
@@ -262,6 +307,19 @@ pub fn step(
             let need = get(state, config, comptime!(Field::FoodNeed as u32), household);
             let deficit = get(state, config, comptime!(Field::Shortage as u32), household) * 1000
                 / max(need, 1);
+            let heating = get(
+                state,
+                config,
+                comptime!(Field::HeatingNeed as u32),
+                household,
+            );
+            let served = get(
+                state,
+                config,
+                comptime!(Field::HeatingServed as u32),
+                household,
+            );
+            let cold_deficit = (heating - min(heating, served)) * 1000 / max(heating, 1);
             let selected = get(state, config, comptime!(Field::Worker as u32), household);
             let employer = get(state, config, comptime!(Field::Employer as u32), household);
             let minutes = get(state, config, comptime!(Field::Hours as u32), household);
@@ -292,6 +350,14 @@ pub fn step(
                     let prior = people[base + P::EXPOSURE];
                     let exposure = famine_exposure(prior, deficit, policy.parameters.recovery);
                     people[base + P::EXPOSURE] = exposure;
+                    let sex_and_cold_exposure = people[base + P::SEX_AND_COLD_EXPOSURE];
+                    let sex = sex_and_cold_exposure & 1;
+                    let cold_exposure = cold_exposure(
+                        sex_and_cold_exposure >> 1,
+                        cold_deficit,
+                        policy.parameters.recovery,
+                    );
+                    people[base + P::SEX_AND_COLD_EXPOSURE] = sex | (cold_exposure << 1);
                     people[base + P::EMPLOYER] = select(work > 0, employer, 0);
                     people[base + P::WORK] = work + home_work;
                     let background = rate(policy.background[group as usize]);
@@ -340,7 +406,12 @@ pub fn step(
                         samples[index as usize * 5],
                         samples[index as usize * 5 + 1],
                     );
-                    let cause = death_cause(draw, background, occupational, famine);
+                    let cold = cold_risk(
+                        cold_exposure,
+                        policy.parameters.cold,
+                        policy.cold_vulnerability[group as usize],
+                    );
+                    let cause = death_cause(draw, background, occupational, famine, cold);
                     people[base + P::CAUSE] = cause;
                     living -= u32::cast_from(cause > 0);
                     let independent = age >= 18 * DAYS_PER_YEAR
@@ -366,7 +437,7 @@ pub fn step(
                     people[base + P::COOLDOWN] = max(cooldown, 1) - 1;
                     let fertile = age >= 18 * DAYS_PER_YEAR
                         && age < 45 * DAYS_PER_YEAR
-                        && people[base + P::SEX] == 0
+                        && sex == 0
                         && cooldown == 0
                         && cause == 0;
                     let birth_draw = probability_draw(
@@ -440,22 +511,54 @@ pub fn observe(
                 age < policy.parameters.minimum_age || age >= policy.parameters.retirement_age,
             ));
         } else {
-            output[shard + (cause + 1) as usize].fetch_add(1);
+            match cause {
+                1 => {
+                    output[shard + 2].fetch_add(1);
+                }
+                2 => {
+                    output[shard + 3].fetch_add(1);
+                }
+                3 => {
+                    output[shard + 4].fetch_add(1);
+                }
+                _ => (),
+            }
         }
-        output[shard + 5].fetch_add(people[base + P::WORK]);
+        let work = people[base + P::WORK];
+        if work > 0 {
+            output[shard + 5].fetch_add(work);
+        }
         let exposure = people[base + P::EXPOSURE];
-        let previous = output[shard + 6].fetch_add(exposure);
-        output[shard + 7].fetch_add(u32::cast_from(exposure > u32::MAX - previous));
+        let mut famine_carry = 0u32;
+        if exposure > 0 {
+            let previous = output[shard + 6].fetch_add(exposure);
+            famine_carry = u32::cast_from(exposure > u32::MAX - previous);
+        }
+        if famine_carry > 0 {
+            output[shard + 7].fetch_add(famine_carry);
+        }
+        let cold_exposure = people[base + P::SEX_AND_COLD_EXPOSURE] >> 1;
+        let mut cold_carry = 0u32;
+        if cold_exposure > 0 {
+            let prior_cold = output[shard + 14].fetch_add(cold_exposure);
+            cold_carry = u32::cast_from(cold_exposure > u32::MAX - prior_cold);
+        }
+        if cold_carry > 0 {
+            output[shard + 15].fetch_add(cold_carry);
+        }
     }
 }
 
 #[cube]
 pub fn observation_totals(sums: &[u64], output: &mut [u32]) {
     let metric = ABSOLUTE_POS;
-    if metric < OBSERVATION_METRICS && metric != 7 {
+    if metric < OBSERVATION_METRICS && metric != 7 && metric != 15 {
         output[metric] = sums[metric] as u32;
         if metric == 6 {
             output[7usize] = ((sums[6usize] >> 32) + sums[7usize]) as u32;
+        }
+        if metric == 14 {
+            output[15usize] = ((sums[14usize] >> 32) + sums[15usize]) as u32;
         }
     }
 }
@@ -506,6 +609,7 @@ mod tests {
                 ticks(10, 0),
                 ticks(20, 0),
                 ticks(30, 0),
+                zero(),
             );
         }
     }
@@ -639,7 +743,7 @@ pub(super) fn newborns(
         header.insert(P::IDENTITY + 1, identity.extract(1usize));
         header.insert(P::HOUSEHOLD, household as u32);
         let mut status = Vector::<u32, Const<4>>::new(0);
-        status.insert(P::SEX - 4, births[household] - 1);
+        status.insert(P::SEX_AND_COLD_EXPOSURE - 4, births[household] - 1);
         target[base] = header;
         target[base + 1] = status;
         target[base + 2] = Vector::new(0);
@@ -677,7 +781,7 @@ pub(super) fn original_grow(
             target[base + P::IDENTITY] = identity.extract(0usize);
             target[base + P::IDENTITY + 1] = identity.extract(1usize);
             target[base + 2] = household as u32;
-            target[base + P::SEX] = births[household] - 1;
+            target[base + P::SEX_AND_COLD_EXPOSURE] = births[household] - 1;
         }
     }
 }

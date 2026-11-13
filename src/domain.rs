@@ -7,6 +7,7 @@ use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 
 pub mod bargaining;
+pub mod calendar;
 pub mod company;
 pub mod demography;
 pub mod diagnostics;
@@ -34,9 +35,9 @@ pub use population::{
 pub use resources::{ProductionSite, ResourceMap, ResourceRegion};
 
 pub const SCENARIO_VERSION: u32 = 2;
-const CHECKPOINT_VERSION: u32 = 17;
-pub const STATE_HASH_VERSION: &str = "bad-econ/state/CubekV2/v18";
-pub const USED_FIELDS: usize = Field::RailCapacity as usize + 1;
+const CHECKPOINT_VERSION: u32 = 18;
+pub const STATE_HASH_VERSION: &str = "bad-econ/state/CubekV2/v19";
+pub const USED_FIELDS: usize = Field::HeatingServed as usize + 1;
 pub const TRANSIT_FIELDS: usize = USED_FIELDS + Good::COUNT;
 pub const CONSUMPTION_FIELDS: usize = TRANSIT_FIELDS + Good::COUNT;
 pub const PRODUCTION_FIELDS: usize = CONSUMPTION_FIELDS + Good::COUNT;
@@ -173,6 +174,8 @@ pub enum Field {
     FreightEscrow,
     RailRevenue,
     RailCapacity,
+    HeatingNeed,
+    HeatingServed,
 }
 impl Field {
     pub fn inventory(good: Good) -> Self {
@@ -628,6 +631,7 @@ impl Scenario {
             .into_iter()
             .map(|index| Market::Input(Good::from_index(index).expect("catalogue good")))
             .chain(std::iter::once(Market::Household))
+            .chain([Market::Consumer(Good::Coal), Market::Consumer(Good::Wood)])
             .chain(
                 Good::ALL
                     .into_iter()
@@ -760,6 +764,13 @@ impl Scenario {
                 let starting_stocks =
                     std::array::from_fn(|good| match (Good::ALL[good], config.economy) {
                         (Good::Railway, _) => 0,
+                        (Good::Grain | Good::Flax | Good::Cotton | Good::Dye, _) => {
+                            daily[good]
+                                * match (config.buffer_days, config.producer_buffer_days) {
+                                    (0, _) | (_, Some(0)) => 0,
+                                    _ => u64::from(calendar::DAYS_PER_YEAR),
+                                }
+                        }
                         (_, Economy::Agrarian) => {
                             u64::from(config.capacity)
                                 * u64::from(config.packet_output)
@@ -987,6 +998,18 @@ impl Scenario {
     }
     pub fn config(&self) -> &ScenarioConfig {
         &self.config
+    }
+    pub fn weather(&self, day: u64) -> calendar::Weather {
+        let weather = calendar::Weather::on_day(day);
+        let harvest = match self.config.household_production {
+            enterprise::HouseholdProduction::Available {
+                harvest_start,
+                harvest_days,
+                ..
+            } => calendar::HarvestSeason::in_window(weather.date, harvest_start, harvest_days),
+            enterprise::HouseholdProduction::Unavailable => weather.harvest,
+        };
+        calendar::Weather { harvest, ..weather }
     }
     fn initial_price(&self, good: Good) -> u32 {
         match (self.config.economy, good) {
@@ -1986,6 +2009,8 @@ pub struct Inspection {
     pub output_ticks: u64,
     pub actor: Actor,
     pub day: u64,
+    #[serde(default)]
+    pub weather: calendar::Weather,
     pub cash: u64,
     pub gross_income: u64,
     pub payroll_reserve: u64,
@@ -2008,6 +2033,10 @@ pub struct Inspection {
     pub scale_bonus_per_mille: u32,
     pub available_minutes: u64,
     pub living_members: u64,
+    #[serde(default)]
+    pub heating_need: u64,
+    #[serde(default)]
+    pub heating_served: u64,
     pub equipment_condition: u64,
     pub safety_provision: u64,
     pub enterprise_model: enterprise::EnterpriseModel,
@@ -2027,7 +2056,11 @@ pub struct Inspection {
     pub open_slots: u64,
 }
 impl Inspection {
-    pub fn from_state(state: &State, request: &InspectionRequest) -> Result<Self> {
+    pub fn from_state(
+        scenario: &Scenario,
+        state: &State,
+        request: &InspectionRequest,
+    ) -> Result<Self> {
         let index = state
             .actors
             .iter()
@@ -2055,6 +2088,7 @@ impl Inspection {
             labor_minutes: state.get(Field::LaborMinutes, index),
             output_ticks: state.get(Field::OutputTicks, index),
             day: state.day,
+            weather: scenario.weather(state.day),
             cash: state.get(Field::Cash, index),
             gross_income: state.get(Field::GrossIncome, index),
             payroll_reserve: state.get(Field::PayrollReserve, index),
@@ -2098,6 +2132,8 @@ impl Inspection {
                 .identity,
             available_minutes: state.get(Field::Time, index),
             living_members: state.get(Field::LivingMembers, index),
+            heating_need: state.get(Field::HeatingNeed, index),
+            heating_served: state.get(Field::HeatingServed, index),
             equipment_condition: state.get(Field::EquipmentCondition, index),
             safety_provision: state.get(Field::SafetyProvision, index),
             business_scale: (state.actors.at(index).kind > 0).then(|| {
@@ -2193,6 +2229,8 @@ pub struct ObservationSnapshot {
     #[serde(default)]
     pub economy: diagnostics::EconomyObservation,
     pub day: u64,
+    #[serde(default)]
+    pub weather: calendar::Weather,
     pub cash: u64,
     pub payroll_reserves: u64,
     pub income_tax: u64,
@@ -2235,6 +2273,7 @@ impl ObservationSnapshot {
         let state = admitted.state;
         let mut snapshot = Self {
             day: state.day,
+            weather: scenario.weather(state.day),
             economy: diagnostics::EconomyObservation::from_state(scenario, state)?,
             research: state
                 .research

@@ -241,7 +241,7 @@ fn setup(mut commands: Commands, mut fonts: ResMut<Assets<Font>>) {
                 height: percent(100),
                 grid_template_columns: vec![GridTrack::flex(1.0)],
                 grid_template_rows: vec![
-                    GridTrack::px(88.0),
+                    GridTrack::px(100.0),
                     GridTrack::flex(1.0),
                     GridTrack::px(44.0),
                 ],
@@ -252,7 +252,7 @@ fn setup(mut commands: Commands, mut fonts: ResMut<Assets<Font>>) {
         .with_children(|root| {
             root.spawn((
                 Node {
-                    height: px(88),
+                    height: px(100),
                     flex_shrink: 0.0,
                     padding: UiRect::axes(px(20), px(12)),
                     border: UiRect::bottom(px(2)),
@@ -281,7 +281,7 @@ fn setup(mut commands: Commands, mut fonts: ResMut<Assets<Font>>) {
                     label(resources, Label::Resources, 15.0, PAPER);
                 });
                 top.spawn(column(6.0)).with_children(|time| {
-                    label(time, Label::Date, 14.0, PAPER);
+                    label(time, Label::Date, 12.0, PAPER);
                     time.spawn(row(5.0)).with_children(|controls| {
                         button(controls, UiAction::ToggleRun, "Resume");
                         button(controls, UiAction::Step, "+1 day");

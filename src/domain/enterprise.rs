@@ -179,8 +179,8 @@ impl HouseholdProduction {
             milling_minutes: 30,
             baking_minutes: 30,
             cultivation_minutes: 10,
-            harvest_start: 270,
-            harvest_days: 30,
+            harvest_start: super::calendar::HARVEST_START,
+            harvest_days: super::calendar::HARVEST_DAYS,
             annual_yield_per_plot: 730,
         }
     }
@@ -198,10 +198,8 @@ impl HouseholdProduction {
                 [milling_minutes, baking_minutes, cultivation_minutes]
                     .into_iter()
                     .all(|minutes| (1..=480).contains(&minutes))
-                    && harvest_days > 0
-                    && harvest_start
-                        .checked_add(harvest_days)
-                        .is_some_and(|end| end <= 365)
+                    && (1..=365).contains(&harvest_days)
+                    && harvest_start < 365
                     && (1..=10_000).contains(&annual_yield_per_plot)
             }
         };

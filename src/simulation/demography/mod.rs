@@ -12,7 +12,7 @@ use std::{collections::HashMap, mem::offset_of};
 use systems::*;
 
 const OBSERVATION_SHARDS: usize = 1024;
-const OBSERVATION_METRICS: usize = 14;
+const OBSERVATION_METRICS: usize = 16;
 
 #[repr(C)]
 #[derive(Clone, Copy, Pod, Zeroable)]
@@ -20,7 +20,7 @@ struct PersonLayout {
     identity: [u32; 2],
     household: u32,
     age: u32,
-    sex: u32,
+    sex_and_cold_exposure: u32,
     cause: u32,
     death_day: u32,
     employer: u32,
@@ -34,7 +34,7 @@ impl PersonLayout {
     const IDENTITY: usize = offset_of!(Self, identity) / WORD_BYTES;
     const HOUSEHOLD: usize = offset_of!(Self, household) / WORD_BYTES;
     const AGE: usize = offset_of!(Self, age) / WORD_BYTES;
-    const SEX: usize = offset_of!(Self, sex) / WORD_BYTES;
+    const SEX_AND_COLD_EXPOSURE: usize = offset_of!(Self, sex_and_cold_exposure) / WORD_BYTES;
     const CAUSE: usize = offset_of!(Self, cause) / WORD_BYTES;
     const DEATH_DAY: usize = offset_of!(Self, death_day) / WORD_BYTES;
     const EMPLOYER: usize = offset_of!(Self, employer) / WORD_BYTES;
@@ -54,6 +54,7 @@ struct DemographyParameters {
     reference_minutes: u32,
     famine: u32,
     recovery: u32,
+    cold: u32,
 }
 impl DemographyParameters {
     fn launch(self) -> DemographyParametersLaunch {
@@ -66,6 +67,7 @@ impl DemographyParameters {
             reference_minutes: self.reference_minutes,
             famine: self.famine,
             recovery: self.recovery,
+            cold: self.cold,
         }
     }
 }
@@ -76,6 +78,7 @@ struct DemographyPolicy {
     background: Box<[u32]>,
     occupational: Box<[u32]>,
     vulnerability: Box<[u32]>,
+    cold_vulnerability: Box<[u32]>,
 }
 #[derive(Clone)]
 struct Policy {
@@ -84,6 +87,7 @@ struct Policy {
     background: CubeTensor,
     occupational: CubeTensor,
     vulnerability: CubeTensor,
+    cold_vulnerability: CubeTensor,
 }
 impl Policy {
     fn launch(&self) -> DemographyPolicyLaunch {
@@ -93,6 +97,7 @@ impl Policy {
             background: self.background.clone().into_buffer_arg(),
             occupational: self.occupational.clone().into_buffer_arg(),
             vulnerability: self.vulnerability.clone().into_buffer_arg(),
+            cold_vulnerability: self.cold_vulnerability.clone().into_buffer_arg(),
         }
     }
 }
@@ -139,7 +144,7 @@ impl DemographyRuntime {
                     identity: [person.identity as u32, (person.identity >> 32) as u32],
                     household,
                     age: person.age_days,
-                    sex: person.sex as u32,
+                    sex_and_cold_exposure: person.sex as u32 | (person.cold_exposure << 1),
                     cause,
                     death_day,
                     employer: person
@@ -179,11 +184,13 @@ impl DemographyRuntime {
                 reference_minutes: mortality.reference_work_minutes_per_year,
                 famine: mortality.famine_daily_ppm_at_thirty_days,
                 recovery: mortality.exposure_recovery_per_day,
+                cold: mortality.cold_daily_ppm_at_seven_days,
             },
             food: device.tensor(&config.food_requirement_per_mille),
             background: device.tensor(&mortality.background_annual_ppm),
             occupational: device.tensor(&mortality.occupational_annual_ppm),
             vulnerability: device.tensor(&mortality.famine_vulnerability_per_mille),
+            cold_vulnerability: device.tensor(&mortality.cold_vulnerability_per_mille),
         };
         Ok(Self {
             people,
@@ -309,13 +316,17 @@ impl DemographyRuntime {
                         day: person.death_day.into(),
                         cause: DeathCause::Famine,
                     },
+                    4 => LivingState::Deceased {
+                        day: person.death_day.into(),
+                        cause: DeathCause::Cold,
+                    },
                     _ => Err(anyhow!("invalid mortality cause"))?,
                 };
                 Ok(Person {
                     identity: u64::from(person.identity[0]) | (u64::from(person.identity[1]) << 32),
                     household: state.actors.at(person.household as usize).identity,
                     age_days: person.age,
-                    sex: match person.sex {
+                    sex: match person.sex_and_cold_exposure & 1 {
                         0 => Sex::Female,
                         _ => Sex::Male,
                     },
@@ -327,6 +338,7 @@ impl DemographyRuntime {
                     work_minutes: person.work,
                     fatigue: person.fatigue,
                     famine_exposure: person.exposure,
+                    cold_exposure: person.sex_and_cold_exposure >> 1,
                     birth_cooldown: person.cooldown,
                 })
             })
@@ -377,14 +389,27 @@ impl DemographyRuntime {
             },
         );
         let totals = device.read(&output)?;
+        let classified = [totals[0], totals[2], totals[3], totals[4]]
+            .into_iter()
+            .map(u64::from)
+            .sum::<u64>();
+        let cold_deaths = (self.count as u64)
+            .checked_sub(classified)
+            .context("classified population exceeds the person registry")?;
         Ok(PopulationObservation {
             occupations: std::array::from_fn(|index| u64::from(totals[8 + index])),
             living: totals[0].into(),
             dependents: totals[1].into(),
             births: self.count as u64 - self.initial_population,
-            deaths: [totals[2].into(), totals[3].into(), totals[4].into()],
+            deaths: [
+                totals[2].into(),
+                totals[3].into(),
+                totals[4].into(),
+                cold_deaths,
+            ],
             work_minutes: totals[5].into(),
             famine_exposure: u64::from(totals[6]) + (u64::from(totals[7]) << 32),
+            cold_exposure: u64::from(totals[14]) + (u64::from(totals[15]) << 32),
         })
     }
     pub(super) fn grow_births(

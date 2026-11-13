@@ -500,6 +500,7 @@ impl Chart {
                 "Background deaths",
                 "Work deaths",
                 "Famine deaths",
+                "Cold deaths",
             ]
             .map(String::from)
             .into(),
@@ -624,6 +625,7 @@ impl Chart {
                 daily_change(s, previous, |s| s.population.deaths[0]),
                 daily_change(s, previous, |s| s.population.deaths[1]),
                 daily_change(s, previous, |s| s.population.deaths[2]),
+                daily_change(s, previous, |s| s.population.deaths[3]),
             ],
             Self::Housing => vec![s.homeless_households as f64],
             Self::Credit => vec![s.active_loans as f64, s.overdue_loans as f64],

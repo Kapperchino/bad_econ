@@ -29,7 +29,7 @@ fn scenario(minutes: u32) -> Result<Scenario> {
     config.behavior.wage_increment = 0;
     config.resources = ResourceMap::Explicit {
         regions: vec![ResourceRegion::new(
-            Good::Grain,
+            Good::Wood,
             Position { x: 0, y: 0 },
             Position {
                 x: config.map_size,
@@ -53,7 +53,7 @@ fn scenario(minutes: u32) -> Result<Scenario> {
                 identity,
                 position: Position { x: 0, y: 0 },
                 owner: 1,
-                good: Good::Grain,
+                good: Good::Wood,
                 cash: 100_000,
                 inventories: Good::food([0; 3]),
                 capacity: 1,

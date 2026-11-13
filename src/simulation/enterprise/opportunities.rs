@@ -312,6 +312,8 @@ pub(in crate::simulation) fn discover(
             }
             let stock = load(state, kind * count + source);
             let consumer = kind == comptime!(Good::Bread as u32)
+                || kind == comptime!(Good::Wood as u32)
+                || kind == comptime!(Good::Coal as u32)
                 || (comptime!(config.economy == crate::domain::Economy::Industrial)
                     && config.consumption_intervals[kind as usize - 1] > 1);
             if consumer && !lt(stock, ticks(24, 0)) {

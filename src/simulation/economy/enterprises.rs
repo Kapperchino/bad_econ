@@ -358,9 +358,11 @@ fn retail_viable(
 #[cube]
 pub(super) fn lifecycle(
     state: &mut [u32],
+    actors: &[u32],
     config: &EconomyConfig,
     control: &[Atomic<u32>],
     firm: u32,
+    day: u32,
 ) {
     let status = number(
         state,
@@ -373,6 +375,16 @@ pub(super) fn lifecycle(
         number(state, config, comptime!(Field::Wage as u32), firm),
         number(state, config, comptime!(Field::LaborMinutes as u32), firm),
     );
+    let crop = farming::farm(state, config, firm, kind(actors, firm).output());
+    let payroll = select(crop && !farming::cultivating(config, day), zero(), payroll);
+    let carrying = crop
+        && (!equal(
+            value(state, config, comptime!(Field::CropWork as u32), firm),
+            zero(),
+        ) || !equal(
+            value(state, config, kind(actors, firm).output(), firm),
+            zero(),
+        ));
     let arrears = value(state, config, comptime!(Field::RentArrears as u32), firm);
     let current = equal(arrears, zero());
     let funded = current && !lt(cash, plus(payroll, ticks(config.firm_rent, 0)).value);
@@ -392,7 +404,7 @@ pub(super) fn lifecycle(
             status == comptime!(EnterpriseState::Forming as u32)
                 || retail_viable(state, config, control, firm)
         }
-        _ => sales || funded,
+        _ => sales || funded || carrying,
     };
     let inactive = number(state, config, comptime!(Field::IdleDays as u32), firm);
     let days = select(viable && current, 0, min(inactive + 1, 365));

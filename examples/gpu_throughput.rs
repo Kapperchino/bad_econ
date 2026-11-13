@@ -1,6 +1,6 @@
 use anyhow::{Context, Result, anyhow};
 use bad_econ::{
-    domain::{Experiment, STATE_HASH_VERSION, Scenario},
+    domain::{Checkpoint, Experiment, STATE_HASH_VERSION, Scenario},
     simulation::{Device, Simulation},
 };
 use clap::Parser;
@@ -20,12 +20,30 @@ struct Arguments {
     workgroup: u32,
     #[arg(long, default_value_t = 2)]
     warmup: u32,
+    #[arg(long, default_value_t = 0)]
+    start_day: u64,
     #[arg(long, default_value = "60")]
     days: NonZeroU32,
     #[arg(long)]
     max_day_ms: Option<NonZeroU32>,
     #[arg(long)]
     output: PathBuf,
+}
+
+fn starting_simulation(scenario: Scenario, device: Device, day: u64) -> Result<Simulation> {
+    let mut simulation = Simulation::new(scenario, device)?;
+    match day {
+        0 => (),
+        _ => {
+            let mut state = simulation.download()?;
+            state.day = day;
+            simulation = Simulation::from_checkpoint(
+                Checkpoint::new(&simulation.scenario, &state)?,
+                simulation.device.clone(),
+            )?;
+        }
+    }
+    Ok(simulation)
 }
 
 fn main() -> Result<()> {
@@ -40,7 +58,7 @@ fn main() -> Result<()> {
         let scenario = Scenario::industrial(households, args.seed, Experiment::Baseline)?;
         let device = Device::headless(args.workgroup)?;
         let preflight_start = Instant::now();
-        let mut preflight = Simulation::new(scenario.clone(), device.clone())?;
+        let mut preflight = starting_simulation(scenario.clone(), device.clone(), args.start_day)?;
         (0..preflight_days).try_for_each(|_| preflight.advance())?;
         let expected_hash = preflight.download()?.digest();
         drop(preflight);
@@ -49,7 +67,7 @@ fn main() -> Result<()> {
         device.sync()?;
         let preflight_seconds = preflight_start.elapsed().as_secs_f64();
         let startup = Instant::now();
-        let mut simulation = Simulation::new(scenario, device)?;
+        let mut simulation = starting_simulation(scenario, device, args.start_day)?;
         let startup_seconds = startup.elapsed().as_secs_f64();
         (0..args.warmup).try_for_each(|_| simulation.advance())?;
         let starting_day = simulation.snapshot.day;
@@ -89,6 +107,7 @@ fn main() -> Result<()> {
             "workgroup": args.workgroup,
             "days": days,
             "starting_day": starting_day,
+            "initial_day": args.start_day,
             "warmup_days": args.warmup,
             "preflight_days": preflight_days,
             "preflight_seconds": preflight_seconds,

@@ -10,6 +10,7 @@ fn births_grow_the_person_registry_and_checkpoint_without_creating_money() -> Re
         .clone();
     config.demography.annual_births_per_million_fertile_women = 1_000_000;
     config.demography.mortality.background_annual_ppm = [0; 5];
+    config.demography.mortality.cold_daily_ppm_at_seven_days = 0;
     config.demography.mortality.occupational_annual_ppm = [0; Good::COUNT];
     let scenario = Scenario::new(config)?;
     let initial = scenario.initial()?;
@@ -51,6 +52,7 @@ fn deprivation_records_famine_without_a_labor_damage_multiplier_or_lost_estates(
     config.firm_cash = 0;
     config.demography.annual_births_per_million_fertile_women = 0;
     config.demography.mortality.background_annual_ppm = [0; 5];
+    config.demography.mortality.cold_daily_ppm_at_seven_days = 0;
     config.demography.mortality.famine_daily_ppm_at_thirty_days = 100_000;
     let scenario = Scenario::new(config)?;
     let mut simulation = Simulation::new(scenario.clone(), support::device(64)?)?;
@@ -124,6 +126,7 @@ fn household_formation_and_inheritance_preserve_assets_and_pending_deliveries() 
     config.shipment_speed = 500;
     config.demography.annual_births_per_million_fertile_women = 0;
     config.demography.mortality.background_annual_ppm = [0; 5];
+    config.demography.mortality.cold_daily_ppm_at_seven_days = 0;
     config.demography.mortality.occupational_annual_ppm = [0; Good::COUNT];
     config.demography.mortality.famine_daily_ppm_at_thirty_days = 100_000;
     config.demography.mortality.famine_vulnerability_per_mille = [4000; 5];
@@ -223,6 +226,7 @@ fn exhausted_person_growth_budget_restores_the_complete_audited_day() -> Result<
         .clone();
     config.demography.annual_births_per_million_fertile_women = 1_000_000;
     config.demography.mortality.background_annual_ppm = [0; 5];
+    config.demography.mortality.cold_daily_ppm_at_seven_days = 0;
     let mut simulation = Simulation::new(Scenario::new(config)?, Device::headless(64)?)?;
     let initial = simulation.download()?;
     for phase in Phase::ALL
@@ -260,6 +264,7 @@ fn a_lost_harvest_changes_output_without_a_recovery_timer_or_asset_grant() -> Re
     };
     config.entrepreneurship.interested_per_mille = 0;
     config.demography.mortality.background_annual_ppm = [0; 5];
+    config.demography.mortality.cold_daily_ppm_at_seven_days = 0;
     config.demography.mortality.occupational_annual_ppm = [0; Good::COUNT];
     config.demography.mortality.famine_daily_ppm_at_thirty_days = 0;
     let scenario = Scenario::new(config)?;
@@ -291,7 +296,7 @@ fn a_lost_harvest_changes_output_without_a_recovery_timer_or_asset_grant() -> Re
         crisis.advance()?;
     }
     let mut next_harvest = crisis.download()?;
-    next_harvest.day = 365 + 270;
+    next_harvest.day = 365 + 269;
     crisis.command(SimulationCommand::Restore(Box::new(Checkpoint::new(
         &scenario,
         &next_harvest,
@@ -300,7 +305,9 @@ fn a_lost_harvest_changes_output_without_a_recovery_timer_or_asset_grant() -> Re
         crisis.snapshot.household_production[Good::Grain as usize - 1],
         first_harvest
     );
-    crisis.advance()?;
+    for _ in 0..2 {
+        crisis.advance()?;
+    }
     assert!(crisis.snapshot.household_production[Good::Grain as usize - 1] > first_harvest);
     assert_eq!(crisis.snapshot.cash, failed_crop.initial_cash);
     let state = crisis.download()?;

@@ -51,6 +51,9 @@ impl StartingDemand {
             daily: [0; Good::COUNT],
         };
         demand.include(Good::Bread, food.saturating_sub(harvest));
+        let population = households * u64::from(members);
+        demand.include(Good::Wood, population);
+        demand.include(Good::Coal, population);
         if config.rent.is_some() {
             demand.daily[Good::Housing as usize - 1] = households;
             demand.include(

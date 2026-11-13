@@ -1,5 +1,6 @@
 mod analytics;
 mod bargaining;
+mod calendar;
 mod contracts;
 mod demography;
 mod diagnostics;
@@ -10,6 +11,7 @@ mod enterprise;
 mod estimates;
 mod execution;
 mod finance;
+mod heating;
 mod households;
 mod industry;
 mod institutions;
@@ -23,6 +25,7 @@ mod rent;
 mod research;
 mod resources;
 mod retained;
+mod seasonal_farming;
 mod sensitivity;
 #[cfg(feature = "compute")]
 pub(crate) mod support;
