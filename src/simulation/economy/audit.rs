@@ -91,6 +91,33 @@ pub(in crate::simulation) enum RingValidation<'a> {
     Selected(&'a CubeTensor),
 }
 
+#[derive(Debug)]
+pub(in crate::simulation) enum RegistryObservation {
+    Existing,
+    Updated,
+}
+
+impl RegistryObservation {
+    pub(in crate::simulation) fn new(
+        audit: crate::simulation::RegistryAudit,
+        records: &[crate::simulation::registry::records::PendingRecord],
+        settlement: Option<&crate::simulation::registry::settlement::SettlementBatch>,
+    ) -> Self {
+        match (
+            audit,
+            settlement,
+            records
+                .iter()
+                .all(|record| matches!(record.request >> 24, 0 | 5 | 6)),
+        ) {
+            #[cfg(test)]
+            (crate::simulation::RegistryAudit::Full, _, _) => Self::Updated,
+            (_, None, true) => Self::Existing,
+            _ => Self::Updated,
+        }
+    }
+}
+
 #[derive(Clone, Copy)]
 #[repr(u32)]
 enum Source {
@@ -931,6 +958,124 @@ mod tests {
             FaultFlags::read(&simulation.device.read(&simulation.control)?)?,
             FaultFlags::TRANSIT_MISMATCH,
         );
+        Ok(())
+    }
+
+    #[derive(Clone, Copy)]
+    enum RegistryCase {
+        Capacity,
+        Estate,
+        Migration,
+    }
+
+    struct RegistryResult {
+        state: crate::domain::State,
+        snapshot: crate::domain::ObservationSnapshot,
+    }
+
+    #[test]
+    fn capacity_snapshot_reuse_matches_full_birth_and_migration_audits_on_gpu() -> Result<()> {
+        let scenario = Scenario::baseline(129, 42, Experiment::Baseline)?;
+        let count = scenario.actors();
+        let firm = scenario.config().households as usize;
+        for case in [
+            RegistryCase::Capacity,
+            RegistryCase::Estate,
+            RegistryCase::Migration,
+        ] {
+            let mut initial = scenario.initial()?;
+            let mut requests = vec![0; count];
+            let mut births = vec![0; count];
+            match case {
+                RegistryCase::Capacity => {
+                    initial.set(Field::PendingCapacity, firm, 2);
+                    requests[firm] = (6 << 24) | 2;
+                    births[0] = 1;
+                }
+                RegistryCase::Estate => {
+                    initial.set(Field::EstateSettled, 0, 1);
+                    requests[0] = 5 << 24;
+                }
+                RegistryCase::Migration => requests[0] = (2 << 24) | (firm as u32 + 1),
+            }
+            let records = registry::records::PendingRecords::from_dense(&requests, &births)?;
+            let mut outcomes = Vec::new();
+            for audit in [
+                crate::simulation::RegistryAudit::Validated,
+                crate::simulation::RegistryAudit::Full,
+            ] {
+                let mut simulation = Simulation::new(scenario.clone(), device(64)?)?;
+                simulation.device.write(
+                    &simulation.state,
+                    bytemuck::cast_slice(&encode(&initial.values)),
+                );
+                simulation
+                    .device
+                    .write(&simulation.enterprise_requests, &requests);
+                simulation
+                    .device
+                    .write(simulation.demography.birth_buffer(), &births);
+                simulation.snapshot = simulation.observe()?;
+                let before = simulation.snapshot.economy.household_cash;
+                let plan = registry::RegistryPlan::new(
+                    &scenario,
+                    &simulation.metadata,
+                    &simulation.migrations,
+                    &records.records,
+                )?
+                .expect("supported registry changes");
+                simulation.commit_registry_audited(plan, &records.records, audit)?;
+                match case {
+                    RegistryCase::Capacity | RegistryCase::Estate => {
+                        assert_eq!(simulation.snapshot.economy.household_cash, before);
+                    }
+                    RegistryCase::Migration => {
+                        assert_eq!(simulation.snapshot.economy.household_cash, before - 100);
+                    }
+                }
+                outcomes.push(RegistryResult {
+                    state: simulation.download()?,
+                    snapshot: simulation.snapshot,
+                });
+            }
+            assert_eq!(outcomes[0].state, outcomes[1].state);
+            assert_eq!(outcomes[0].snapshot, outcomes[1].snapshot);
+        }
+        Ok(())
+    }
+
+    #[test]
+    fn reused_capacity_snapshot_preserves_existing_gpu_faults_on_gpu() -> Result<()> {
+        let scenario = Scenario::baseline(97, 42, Experiment::Baseline)?;
+        let mut simulation = Simulation::new(scenario.clone(), device(64)?)?;
+        let mut requests = vec![0; scenario.actors()];
+        let firm = scenario.config().households as usize;
+        requests[firm] = (6 << 24) | 1;
+        simulation
+            .device
+            .write(&simulation.enterprise_requests, &requests);
+        let records =
+            registry::records::PendingRecords::from_dense(&requests, &vec![0; requests.len()])?;
+        let plan = registry::RegistryPlan::new(
+            &scenario,
+            &simulation.metadata,
+            &simulation.migrations,
+            &records.records,
+        )?
+        .expect("capacity registry plan");
+        let mut control = simulation.device.read(&simulation.control)?;
+        control[crate::simulation::flags::FAULT_WORD] = FaultFlags::ARITHMETIC_OVERFLOW.bits();
+        simulation.device.write(&simulation.control, &control);
+        let actors = simulation.metadata.actors.clone();
+        let error = simulation
+            .commit_registry_audited(
+                plan,
+                &records.records,
+                crate::simulation::RegistryAudit::Validated,
+            )
+            .expect_err("the existing GPU fault must propagate");
+        assert!(error.to_string().contains("ARITHMETIC_OVERFLOW"));
+        assert_eq!(simulation.metadata.actors, actors);
         Ok(())
     }
 }

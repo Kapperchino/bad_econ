@@ -41,7 +41,7 @@ pub(in crate::simulation) struct SearchBuffers {
 impl SearchBuffers {
     pub fn new(device: &crate::simulation::Device, actors: usize) -> Self {
         Self {
-            requests: device.empty(actors * 6),
+            requests: device.empty(actors * 18),
             successes: device.empty(search_counts_offset(actors) + 2 * search_blocks(actors) + 512),
             dispatches: device
                 .client

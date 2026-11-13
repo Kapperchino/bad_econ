@@ -1108,7 +1108,7 @@ impl Scenario {
                     * self.config.demography.initial_household_members as usize,
             ) as u64
                 * 164
-            + actors * 32
+            + actors * 80
             + 12
             + match self.config.railway.companies.is_empty() {
                 true => 0,

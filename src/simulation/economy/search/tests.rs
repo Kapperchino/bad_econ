@@ -30,16 +30,32 @@ enum SupplyCase {
 enum SearchExecution {
     Serial,
     Prepare,
-    PrepareRepeat,
     Shared,
     Plane,
     ScalarFuel,
+    ScalarHousehold,
+    SpatialFuel,
+}
+
+#[derive(Clone, Copy)]
+enum CacheRefresh {
+    Reset,
+    Retain,
 }
 
 #[derive(Debug, PartialEq, Eq)]
 struct SearchOutcome {
     proposal: Vec<u32>,
     state: Vec<u32>,
+    faults: u32,
+}
+
+#[derive(Debug, PartialEq, Eq)]
+struct PreparedRequests {
+    actors: Vec<u32>,
+    demand: Vec<u32>,
+    candidates: Vec<u32>,
+    statuses: Vec<u32>,
     faults: u32,
 }
 
@@ -223,6 +239,12 @@ impl SearchProbe {
             .map(|firm| state.get(Field::Price, firm) as u32)
             .min()
             .expect("suppliers");
+        let query = prices + state.actors.len().div_ceil(DISCOVERY_BLOCK as usize) + 1;
+        let mut queries = (0..state.actors.len() as u32).collect::<Vec<_>>();
+        if let Market::Consumer(_) = market {
+            queries.reverse();
+        }
+        spatial[query..query + state.actors.len()].copy_from_slice(&queries);
         simulation.device.write(&simulation.spatial, &spatial);
         Ok(Self {
             simulation,
@@ -239,6 +261,15 @@ impl SearchProbe {
         &self,
         execution: SearchExecution,
         workgroup: u32,
+    ) -> Result<SearchOutcome> {
+        self.outcome_with_cache(execution, workgroup, CacheRefresh::Reset)
+    }
+
+    fn outcome_with_cache(
+        &self,
+        execution: SearchExecution,
+        workgroup: u32,
+        cache: CacheRefresh,
     ) -> Result<SearchOutcome> {
         let simulation = &self.simulation;
         let device = &simulation.device;
@@ -259,7 +290,11 @@ impl SearchProbe {
             &simulation.proposals,
             &vec![NO_ACTOR; count * ProposalLayout::WORDS],
         );
-        let mut searches = vec![0; count * 5];
+        let mut searches = match cache {
+            CacheRefresh::Reset => vec![0; count * 18],
+            CacheRefresh::Retain => device.read(&simulation.searches.requests)?,
+        };
+        searches[..count * 6].fill(0);
         let coverage = match parameters.market {
             MarketFlag::Input(_) if parameters.good == Good::Grain as u32 => {
                 simulation.config.coverage + simulation.config.ring
@@ -311,6 +346,33 @@ impl SearchProbe {
                     stage: SearchStage::Index,
                 },
             );
+            if parameters.market == MarketFlag::Consumer {
+                for stage in [SearchStage::EmptySort, SearchStage::EmptyBounds] {
+                    let invocations = match stage {
+                        SearchStage::EmptyBounds => count.div_ceil(empty::BLOCK as usize),
+                        _ => count,
+                    };
+                    MarketSearch::launch(
+                        device,
+                        device.count(invocations),
+                        CubeDim::new_1d(device.workgroup),
+                        SearchInputLaunch {
+                            state: simulation.state.clone().into_buffer_arg(),
+                            actors: simulation.actors.clone().into_buffer_arg(),
+                            config: simulation.config.launch(),
+                            spatial: simulation.spatial.clone().into_buffer_arg(),
+                            proposals: simulation.proposals.clone().into_buffer_arg(),
+                            searches: simulation.searches.requests.clone().into_buffer_arg(),
+                            successes: simulation.searches.successes.clone().into_buffer_arg(),
+                            scratch: simulation.scratch.clone().into_buffer_arg(),
+                            control: simulation.control.clone().into_buffer_arg(),
+                            parameters: parameters.launch(),
+                            status_reset: StatusReset::Full,
+                            stage,
+                        },
+                    );
+                }
+            }
         }
         match execution {
             SearchExecution::Serial => EconomySystem::launch(
@@ -331,7 +393,12 @@ impl SearchProbe {
             ),
             _ => MarketSearch::launch(
                 device,
-                CubeCount::Static(1, 1, 1),
+                match execution {
+                    SearchExecution::SpatialFuel => {
+                        CubeCount::Static(count.div_ceil(workgroup as usize) as u32, 1, 1)
+                    }
+                    _ => CubeCount::Static(1, 1, 1),
+                },
                 CubeDim::new_1d(workgroup),
                 SearchInputLaunch {
                     state: simulation.state.clone().into_buffer_arg(),
@@ -347,8 +414,9 @@ impl SearchProbe {
                     status_reset: StatusReset::Full,
                     stage: match execution {
                         SearchExecution::Prepare => SearchStage::Prepare,
-                        SearchExecution::PrepareRepeat => SearchStage::PrepareRepeat,
                         SearchExecution::ScalarFuel => SearchStage::SearchFuel,
+                        SearchExecution::ScalarHousehold => SearchStage::SearchHousehold,
+                        SearchExecution::SpatialFuel => SearchStage::SearchSpatialFuel,
                         _ => SearchStage::Search,
                     },
                 },
@@ -385,47 +453,6 @@ fn inactive_household_input_preparation_preserves_inventory_faults_on_gpu() -> R
                 "{good:?}, inventory {inventory}"
             );
         }
-    }
-    Ok(())
-}
-
-#[test]
-fn repeat_input_preparation_preserves_inactive_inventory_and_demand_faults_on_gpu() -> Result<()> {
-    for good in [
-        Good::Grain,
-        Good::Bread,
-        Good::Tools,
-        Good::Wood,
-        Good::Construction,
-        Good::Coal,
-        Good::Linen,
-    ] {
-        let mut probe = SearchProbe::new(SupplyCase::Capped, 0, Market::Input(Good::Linen))?;
-        probe.parameters.good = good as u32;
-        probe.state.set(Field::LivingMembers, 0, 0);
-        probe.state.set(Field::inventory(good), 0, 100);
-        let transit = TRANSIT_FIELDS + good as usize - 1;
-        probe.state.values[transit * probe.state.actors.len()] = 7;
-        let first = probe.outcome(SearchExecution::Prepare)?;
-        assert_eq!(first.faults, 0);
-        if good == Good::Bread {
-            probe.state.set(Field::Bread, 0, 0);
-        }
-        let expected = probe.outcome(SearchExecution::Prepare)?;
-        assert_eq!(
-            probe.outcome(SearchExecution::PrepareRepeat)?,
-            expected,
-            "inactive {good:?}"
-        );
-        probe.state.set(Field::EnterpriseModel, 0, 1);
-        probe.state.set(Field::inventory(good), 0, u64::MAX);
-        let expected = probe.outcome(SearchExecution::Prepare)?;
-        assert_ne!(expected.faults, 0);
-        assert_eq!(
-            probe.outcome(SearchExecution::PrepareRepeat)?,
-            expected,
-            "demand {good:?}"
-        );
     }
     Ok(())
 }
@@ -468,7 +495,7 @@ fn first_round_inventory_faults_gate_repeat_preparation_on_gpu() -> Result<()> {
             control: simulation.control.clone().into_buffer_arg(),
             parameters: probe.parameters.launch(),
             status_reset: StatusReset::Full,
-            stage: SearchStage::PrepareRepeat,
+            stage: SearchStage::Prepare,
         },
     );
     assert_eq!(device.read(&simulation.proposals)?, proposals);
@@ -552,10 +579,19 @@ fn cooperative_market_search_preserves_serial_search_and_shared_fallback_on_gpu(
                     );
                 }
                 if let Market::Consumer(Good::Coal | Good::Wood) = market {
+                    for execution in [SearchExecution::ScalarFuel, SearchExecution::SpatialFuel] {
+                        assert_eq!(
+                            probe.outcome(execution)?,
+                            expected,
+                            "{case:?}, {market:?}, day {day}, {execution:?}"
+                        );
+                    }
+                }
+                if let Market::Household = market {
                     assert_eq!(
-                        probe.outcome(SearchExecution::ScalarFuel)?,
+                        probe.outcome(SearchExecution::ScalarHousehold)?,
                         expected,
-                        "{case:?}, {market:?}, day {day}, scalar fuel"
+                        "{case:?}, {market:?}, day {day}, scalar household"
                     );
                 }
             }
@@ -581,6 +617,7 @@ fn bounded_household_search_rotates_samples_and_repeats_on_gpu() -> Result<()> {
             SearchExecution::Serial,
             SearchExecution::Shared,
             SearchExecution::Plane,
+            SearchExecution::ScalarHousehold,
         ] {
             let first = probe.outcome(execution)?;
             assert_eq!(first.proposal[ProposalLayout::ACTOR], expected);
@@ -628,6 +665,7 @@ fn deferred_consumer_quantity_preserves_wide_budgets_and_empty_requests_on_gpu()
                 SearchExecution::Shared,
                 SearchExecution::Plane,
                 SearchExecution::ScalarFuel,
+                SearchExecution::SpatialFuel,
             ] {
                 assert_eq!(
                     probe.outcome(execution)?,
@@ -687,6 +725,7 @@ fn scalar_fuel_search_preserves_partial_dispatch_buffers_and_rotated_suppliers_o
                     SearchExecution::Shared,
                     SearchExecution::Plane,
                     SearchExecution::ScalarFuel,
+                    SearchExecution::SpatialFuel,
                 ] {
                     assert_eq!(
                         probe.outcome(execution)?,
@@ -696,6 +735,321 @@ fn scalar_fuel_search_preserves_partial_dispatch_buffers_and_rotated_suppliers_o
                 }
             }
         }
+    }
+    Ok(())
+}
+
+#[test]
+fn indexed_empty_suppliers_preserve_rotated_ties_across_cells_on_gpu() -> Result<()> {
+    for good in [Good::Coal, Good::Cloth] {
+        let mut probe =
+            SearchProbe::with_suppliers(SupplyCase::Empty, 0, Market::Consumer(good), 511)?;
+        let count = probe.state.actors.len();
+        let map = probe.simulation.config.map_size;
+        let radius = map.div_ceil(3);
+        let side = map.div_ceil(radius);
+        let cells = (side * side) as usize;
+        let mut actors = probe.simulation.device.read(&probe.simulation.actors)?;
+        for actor in 0..count {
+            let mut record = probe.state.actors.at(actor);
+            record.position = match actor {
+                0 => Position {
+                    x: radius - 1,
+                    y: radius - 1,
+                },
+                _ => Position {
+                    x: (actor as u32 * 97) % map,
+                    y: (actor as u32 * 193) % map,
+                },
+            };
+            actors[ActorLayout::X * count + actor] = record.position.x;
+            actors[ActorLayout::Y * count + actor] = record.position.y;
+            probe.state.actors.set(actor, record);
+            probe.state.set(Field::Price, actor, 1);
+        }
+        probe
+            .simulation
+            .device
+            .write(&probe.simulation.actors, &actors);
+        probe.simulation.config.search_radius = radius;
+        probe.simulation.config.spatial_side = side;
+        for active in [0usize, 1, 511] {
+            let mut members = (1..=active).collect::<Vec<_>>();
+            let cell = |actor| {
+                let position = probe.state.actors.at(actor).position;
+                (position.y / radius * side + position.x / radius) as usize
+            };
+            members.sort_by_key(|&actor| (cell(actor), actor));
+            let segment = cells + 1 + count;
+            let mut spatial =
+                vec![0; 3 * segment + count.div_ceil(DISCOVERY_BLOCK as usize) + 1 + count];
+            for (position, &actor) in members.iter().enumerate() {
+                spatial[cell(actor) + 1] += 1;
+                spatial[cells + 1 + position] = actor as u32;
+            }
+            for cell in 1..=cells {
+                spatial[cell] += spatial[cell - 1];
+            }
+            let query = 3 * segment + count.div_ceil(DISCOVERY_BLOCK as usize) + 1;
+            spatial[query..query + count]
+                .copy_from_slice(&(0..count as u32).rev().collect::<Vec<_>>());
+            probe.simulation.spatial = probe.simulation.device.tensor(&spatial);
+            for rotation in [0, 31, 128, 510, 1024] {
+                probe.parameters.settlement_rotation = rotation;
+                let expected = probe.outcome(SearchExecution::Serial)?;
+                for execution in [SearchExecution::ScalarFuel, SearchExecution::SpatialFuel] {
+                    assert_eq!(
+                        probe.outcome(execution)?,
+                        expected,
+                        "{good:?}, active {active}, rotation {rotation}, {execution:?}",
+                    );
+                }
+            }
+        }
+    }
+    Ok(())
+}
+
+#[test]
+fn empty_supplier_tie_cache_preserves_rotations_and_cash_changes_on_gpu() -> Result<()> {
+    for good in [Good::Coal, Good::Cloth] {
+        let mut probe =
+            SearchProbe::with_suppliers(SupplyCase::Empty, 0, Market::Consumer(good), 211)?;
+        let rotations = [0, 31, 64, 127, 210, 211, 1024];
+        let mut expected = Vec::new();
+        for rotation in rotations {
+            probe.parameters.settlement_rotation = rotation;
+            expected.push(probe.outcome(SearchExecution::Serial)?);
+        }
+        for (rotation, expected) in rotations.into_iter().zip(expected) {
+            probe.parameters.settlement_rotation = rotation;
+            assert_eq!(
+                probe.outcome_with_cache(SearchExecution::SpatialFuel, 64, CacheRefresh::Retain)?,
+                expected,
+                "{good:?}, rotation {rotation}",
+            );
+            let requests = probe
+                .simulation
+                .device
+                .read(&probe.simulation.searches.requests)?;
+            assert_eq!(requests[14 * probe.state.actors.len()], 1);
+        }
+        for cash in [0, 1, u64::from(u32::MAX) + 5000] {
+            probe.state.set(Field::Cash, 0, cash);
+            probe.parameters.settlement_rotation = 209;
+            let cached =
+                probe.outcome_with_cache(SearchExecution::SpatialFuel, 64, CacheRefresh::Retain)?;
+            assert_eq!(
+                cached,
+                probe.outcome_with_cache(SearchExecution::Shared, 32, CacheRefresh::Retain)?,
+                "{good:?}, cash {cash}"
+            );
+        }
+        probe.clear_preparation();
+        let count = probe.state.actors.len();
+        let mut requests = vec![1; 18 * count];
+        requests[count..5 * count].fill(0);
+        probe
+            .simulation
+            .device
+            .write(&probe.simulation.searches.requests, &requests);
+        probe.prepared_inputs(
+            EconomyStage::InputMarketStart,
+            SearchStage::PrepareCandidates,
+        )?;
+        let requests = probe
+            .simulation
+            .device
+            .read(&probe.simulation.searches.requests)?;
+        assert!(
+            requests[14 * count..15 * count]
+                .iter()
+                .all(|&word| word == 0)
+        );
+    }
+    Ok(())
+}
+
+#[test]
+fn compacted_stocked_suppliers_preserve_original_rotation_order_on_gpu() -> Result<()> {
+    let mut probe =
+        SearchProbe::with_suppliers(SupplyCase::Sparse, 0, Market::Consumer(Good::Coal), 511)?;
+    let stocked = [1usize, 2, 32, 33, 65, 129, 130, 257, 383, 385];
+    let count = probe.state.actors.len();
+    let map = probe.simulation.config.map_size;
+    let mut actors = probe.simulation.device.read(&probe.simulation.actors)?;
+    for actor in 1..count {
+        let available = match stocked.binary_search(&actor) {
+            Ok(_) => 100,
+            Err(_) => 0,
+        };
+        probe.state.set(Field::Coal, actor, available);
+        probe
+            .state
+            .set(Field::Price, actor, 1 + (511 - actor) as u64);
+        let mut record = probe.state.actors.at(actor);
+        record.position = Position {
+            x: (actor as u32 * 97) % map,
+            y: (actor as u32 * 193) % map,
+        };
+        actors[ActorLayout::X * count + actor] = record.position.x;
+        actors[ActorLayout::Y * count + actor] = record.position.y;
+        probe.state.actors.set(actor, record);
+    }
+    probe
+        .simulation
+        .device
+        .write(&probe.simulation.actors, &actors);
+    for cash in [3, 5000] {
+        probe.state.set(Field::Cash, 0, cash);
+        for rotation in [0, 31, 128, 257, 384, 1024] {
+            probe.parameters.settlement_rotation = rotation;
+            let expected = probe.outcome(SearchExecution::Serial)?;
+            for execution in [SearchExecution::ScalarFuel, SearchExecution::SpatialFuel] {
+                let actual = probe.outcome(execution)?;
+                assert_eq!(
+                    actual.proposal, expected.proposal,
+                    "cash {cash}, rotation {rotation}, {execution:?}"
+                );
+                assert_eq!(actual.faults, expected.faults);
+                assert!(actual.state == expected.state);
+            }
+        }
+    }
+    Ok(())
+}
+
+#[test]
+fn global_supplier_price_floor_preserves_poor_and_wide_budgets_on_gpu() -> Result<()> {
+    for good in [Good::Coal, Good::Cloth] {
+        for case in [SupplyCase::Capped, SupplyCase::Empty, SupplyCase::Free] {
+            let mut probe = SearchProbe::with_suppliers(case, 0, Market::Consumer(good), 211)?;
+            for actor in 1..probe.state.actors.len() {
+                let price = match case {
+                    SupplyCase::Free => 0,
+                    _ => 30 + actor as u64 % 2,
+                };
+                probe.state.set(Field::Price, actor, price);
+            }
+            probe.state.set(Field::Price, 1, 0);
+            for cash in [0, 1, 29, 30, u64::from(u32::MAX) + 5000] {
+                probe.state.set(Field::Cash, 0, cash);
+                let expected = probe.outcome(SearchExecution::Shared)?;
+                for execution in [SearchExecution::ScalarFuel, SearchExecution::SpatialFuel] {
+                    assert_eq!(
+                        probe.outcome(execution)?,
+                        expected,
+                        "{good:?}, {case:?}, cash {cash}, {execution:?}",
+                    );
+                }
+            }
+        }
+    }
+    Ok(())
+}
+
+#[test]
+fn fuel_preparation_clears_inactive_requests_and_preserves_captured_retries_on_gpu() -> Result<()> {
+    let scenario = Scenario::industrial(129, 42, Experiment::Baseline)?;
+    let device = device(64)?;
+    let simulation = Simulation::new(scenario.clone(), device.clone())?;
+    let count = scenario.actors();
+    for good in [Good::Coal, Good::Wood] {
+        let mut state = scenario.initial()?;
+        let households = (0..count)
+            .filter(|&actor| state.actors.at(actor).kind == 0)
+            .collect::<Vec<_>>();
+        for &actor in &households {
+            state.set(Field::LivingMembers, actor, 3);
+            state.set(Field::HeatingNeed, actor, 9);
+            state.set(Field::Bread, actor, 100_000);
+            state.set(Field::Cash, actor, 1_000_000);
+            state.set(Field::Coal, actor, 0);
+            state.set(Field::Wood, actor, 0);
+        }
+        let mut remaining = state.clone();
+        for actor in households.into_iter().filter(|actor| actor % 3 == 0) {
+            remaining.set(Field::inventory(good), actor, 1_000_000);
+        }
+        let mut expected = Vec::new();
+        for discovery in [Discovery::Linear, Discovery::Indexed] {
+            let mut parameters = simulation.parameters(
+                Phase::ProvisionPurchase,
+                Market::Consumer(good),
+                0,
+                count,
+            )?;
+            parameters.discovery = discovery;
+            device.write(
+                &simulation.state,
+                bytemuck::cast_slice(&encode(&state.values)),
+            );
+            device.write(&simulation.control, &vec![0; CONTROL_WORDS + 4]);
+            device.write(&simulation.searches.requests, &vec![37; 6 * count]);
+            device.write(
+                &simulation.scratch,
+                &vec![u32::MAX; markets::scratch_words(count)],
+            );
+            let mut observations = Vec::new();
+            for stage in [SearchStage::PrepareCandidates, SearchStage::PrepareSelected] {
+                MarketSearch::launch(
+                    &device,
+                    device.count(count),
+                    CubeDim::new_1d(device.workgroup),
+                    SearchInputLaunch {
+                        state: simulation.state.clone().into_buffer_arg(),
+                        actors: simulation.actors.clone().into_buffer_arg(),
+                        config: simulation.config.launch(),
+                        spatial: simulation.spatial.clone().into_buffer_arg(),
+                        proposals: simulation.proposals.clone().into_buffer_arg(),
+                        searches: simulation.searches.requests.clone().into_buffer_arg(),
+                        successes: simulation.searches.successes.clone().into_buffer_arg(),
+                        scratch: simulation.scratch.clone().into_buffer_arg(),
+                        control: simulation.control.clone().into_buffer_arg(),
+                        parameters: parameters.launch(),
+                        status_reset: StatusReset::Full,
+                        stage,
+                    },
+                );
+                let mut control = device.read(&simulation.control)?;
+                let requests = device.read(&simulation.searches.requests)?;
+                let mut actors = requests[..control[SEARCHES_WORD] as usize].to_vec();
+                let mut candidates = requests
+                    [5 * count..5 * count + control[markets::PREPARATION_ACTORS_WORD] as usize]
+                    .to_vec();
+                actors.sort_unstable();
+                candidates.sort_unstable();
+                for actor in 0..count {
+                    match actors.binary_search(&(actor as u32)) {
+                        Ok(_) => assert!(requests[count + actor] > 0),
+                        Err(_) => {
+                            assert_eq!(requests[count + actor], 0);
+                            assert_eq!(requests[2 * count + actor], 0);
+                        }
+                    }
+                }
+                observations.push(PreparedRequests {
+                    actors,
+                    demand: requests[count..5 * count].to_vec(),
+                    candidates,
+                    statuses: device.read_range(&simulation.scratch, 4 * count, count)?,
+                    faults: control[crate::simulation::flags::FAULT_WORD],
+                });
+                control[SEARCHES_WORD] = 0;
+                device.write(&simulation.control, &control);
+                device.write(
+                    &simulation.state,
+                    bytemuck::cast_slice(&encode(&remaining.values)),
+                );
+            }
+            match discovery {
+                Discovery::Linear => expected = observations,
+                _ => assert_eq!(observations, expected, "{good:?}"),
+            }
+        }
+        assert_eq!(expected[0].actors.len(), 129);
+        assert!(expected[1].actors.len() < expected[0].actors.len());
+        assert_eq!(expected[1].candidates, expected[0].candidates);
     }
     Ok(())
 }
@@ -715,7 +1069,11 @@ fn large_search_preserves_rotated_candidates_and_empty_offer_ties_on_gpu() -> Re
         for day in [31, 1023, 1024, 2047, 2176] {
             let probe = SearchProbe::with_suppliers(case, day, Market::Household, 2177)?;
             let expected = probe.outcome(SearchExecution::Serial)?;
-            for execution in [SearchExecution::Shared, SearchExecution::Plane] {
+            for execution in [
+                SearchExecution::Shared,
+                SearchExecution::Plane,
+                SearchExecution::ScalarHousehold,
+            ] {
                 assert_eq!(
                     probe.outcome(execution)?,
                     expected,
@@ -754,13 +1112,25 @@ impl GpuPass<DeliveryFloorInput> for CompareDeliveryFloor {
             let seller = index % count;
             let trip = distance(&input.actors, buyer, seller);
             let mut access = 0u32;
-            if comptime!(input.config.railway.enabled == Feature::Enabled)
+            if comptime!(input.config.railway.routes_enabled == Feature::Enabled)
                 && input.config.railway.nodes > 0
             {
                 access = input.config.railway.access[buyer as usize * 2 + 1];
             }
             let floor = minimum_delivery_days(&input.config, access, seller, trip);
             let route = railway::route(&input.actors, &input.config, buyer, seller);
+            let days = railway::delivery_days(
+                &input.config,
+                railway::DeliveryRequest {
+                    buyer,
+                    seller,
+                    trip,
+                    buyer_access: access,
+                },
+            );
+            if days != route.days {
+                input.findings[2usize].fetch_add(1);
+            }
             if floor > route.days {
                 input.findings[0usize].fetch_add(1);
             }
@@ -798,7 +1168,7 @@ fn station_access_floor_never_exceeds_selected_route_days_on_gpu() -> Result<()>
         ] {
             simulation.railways(stage);
         }
-        let findings = device.tensor(&[0, 0]);
+        let findings = device.tensor(&[0, 0, 0]);
         let count = simulation.metadata.actors.len();
         DeliveryFloorCheck::launch(
             &device,
@@ -812,6 +1182,7 @@ fn station_access_floor_never_exceeds_selected_route_days_on_gpu() -> Result<()>
         );
         let findings = device.read(&findings)?;
         assert_eq!(findings[0], 0);
+        assert_eq!(findings[2], 0);
         improved += findings[1];
     }
     assert!(improved > 0);
@@ -1098,8 +1469,8 @@ fn sparse_input_preparation_preserves_stable_eligibility_and_all_round_requests_
                 probe.state.set(Field::Cash, 0, 5_000);
                 probe.state.set(Field::inventory(good), 0, 0);
             }
-            let expected = dense
-                .prepared_inputs(EconomyStage::InputMarketRepeat, SearchStage::PrepareRepeat)?;
+            let expected =
+                dense.prepared_inputs(EconomyStage::InputMarketRepeat, SearchStage::Prepare)?;
             assert_eq!(
                 sparse.prepared_inputs(
                     EconomyStage::InputMarketRepeat,
@@ -1114,8 +1485,8 @@ fn sparse_input_preparation_preserves_stable_eligibility_and_all_round_requests_
                 probe.state.set(Field::inventory(good), 0, u64::MAX);
                 probe.state.values[(TRANSIT_FIELDS + good as usize - 1) * count] = 1;
             }
-            let expected = dense
-                .prepared_inputs(EconomyStage::InputMarketRepeat, SearchStage::PrepareRepeat)?;
+            let expected =
+                dense.prepared_inputs(EconomyStage::InputMarketRepeat, SearchStage::Prepare)?;
             assert_ne!(expected.faults, 0);
             assert_eq!(
                 sparse.prepared_inputs(
@@ -1285,8 +1656,8 @@ fn selected_fuel_buyers_match_dense_requests_and_reset_trace_statuses_on_gpu() -
                     &vec![u32::MAX; simulation.searches.successes.meta.num_elements()],
                 );
             }
-            let expected = dense
-                .prepared_inputs(EconomyStage::InputMarketRepeat, SearchStage::PrepareRepeat)?;
+            let expected =
+                dense.prepared_inputs(EconomyStage::InputMarketRepeat, SearchStage::Prepare)?;
             assert_eq!(
                 selected.prepared_inputs(
                     EconomyStage::InputMarketRepeat,

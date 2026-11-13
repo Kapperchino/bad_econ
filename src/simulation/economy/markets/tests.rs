@@ -370,6 +370,7 @@ struct SortCase {
 impl SortCase {
     fn encode(&self, device: &Device, buffers: &SortBuffers) -> usize {
         let mut parameters = EconomyParameters {
+            clock: crate::simulation::parameters::MarketClock::Scalars,
             scan: self.scan,
             day: 0,
             settlement_rotation: 0,
@@ -680,6 +681,7 @@ impl ProposalCase {
                 .memory_dedicated_allocation(144, |_| device.empty(36)),
         };
         let parameters = EconomyParameters {
+            clock: crate::simulation::parameters::MarketClock::Scalars,
             scan: self.scan,
             day: 0,
             settlement_rotation: self.rotation as u32,

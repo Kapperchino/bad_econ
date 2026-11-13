@@ -24,6 +24,8 @@ impl Discovery {
 #[derive(CubeType, CubeLaunch, Clone, Copy)]
 pub struct EconomyParameters {
     #[cube(comptime)]
+    pub clock: MarketClock,
+    #[cube(comptime)]
     pub scan: super::parallel::ScanMode,
     pub day: u32,
     pub settlement_rotation: u32,
@@ -44,6 +46,7 @@ pub struct EconomyParameters {
 impl EconomyParameters {
     pub fn launch(self) -> EconomyParametersLaunch {
         EconomyParametersLaunch {
+            clock: self.clock,
             scan: self.scan,
             day: self.day,
             settlement_rotation: self.settlement_rotation,
@@ -63,6 +66,17 @@ impl EconomyParameters {
 
 #[cube]
 impl EconomyParameters {
+    pub fn refresh(&mut self, config: &mut super::configuration::EconomyConfig) {
+        if comptime!(self.clock == MarketClock::Device) {
+            self.day = config.consumption_intervals[crate::domain::Good::COUNT + 0usize];
+            self.settlement_rotation =
+                config.consumption_intervals[crate::domain::Good::COUNT + 1usize];
+            self.good = config.consumption_intervals[crate::domain::Good::COUNT + 2usize];
+            config.heating_per_person =
+                config.consumption_intervals[crate::domain::Good::COUNT + 3usize];
+        }
+    }
+
     pub fn traded_good(&self) -> u32 {
         match comptime!(self.market) {
             MarketFlag::Input(InputMarket::Grain) => u32::new(Good::Grain as i64),
@@ -71,6 +85,12 @@ impl EconomyParameters {
             _ => u32::new(0),
         }
     }
+}
+
+#[derive(Clone, Copy, Debug, Hash, PartialEq, Eq)]
+pub enum MarketClock {
+    Scalars,
+    Device,
 }
 
 #[derive(CubeType, CubeLaunch, Clone, Copy, Default)]

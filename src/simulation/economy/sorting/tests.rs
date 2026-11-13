@@ -67,6 +67,7 @@ struct SortCase {
 impl SortCase {
     fn parameters(&self) -> EconomyParameters {
         EconomyParameters {
+            clock: crate::simulation::parameters::MarketClock::Scalars,
             scan: self.scan,
             day: self.active as u32,
             settlement_rotation: self.active as u32,

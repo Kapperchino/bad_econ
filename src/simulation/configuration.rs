@@ -189,6 +189,18 @@ pub struct Configuration {
     pub industrial_expansion: u32,
 }
 impl Configuration {
+    pub(super) fn graph_buffers(&self) -> Vec<burn_wgpu::CubeTensor> {
+        let mut buffers = vec![
+            self.consumption_intervals.clone(),
+            self.price_table.clone(),
+            self.property_regions.clone(),
+            self.grain_farms.clone(),
+            self.rental_accounts.clone(),
+        ];
+        buffers.extend(self.railway.graph_buffers());
+        buffers
+    }
+
     pub fn new(device: &super::Device, scenario: &Scenario, state: &State) -> Self {
         let rentals = crate::domain::landlords::RentalRegistry::new(scenario, state);
         Self::with_rentals(device, scenario, state, rentals)
@@ -215,8 +227,17 @@ impl Configuration {
         match self.rentals.refresh(scenario, state, changes) {
             crate::domain::landlords::RentalRefresh::Current => (),
             crate::domain::landlords::RentalRefresh::Changed => {
-                self.rental_accounts = device.tensor(&self.rentals.words());
-                self.rental_businesses = self.rentals.accounts.len() as u32;
+                let words = self.rentals.words();
+                let businesses = self.rentals.accounts.len() as u32;
+                match (
+                    self.rental_accounts.meta.num_elements(),
+                    self.rental_businesses,
+                ) == (words.len(), businesses)
+                {
+                    true => device.write(&self.rental_accounts, &words),
+                    false => self.rental_accounts = device.tensor(&words),
+                }
+                self.rental_businesses = businesses;
             }
         }
     }
@@ -288,7 +309,13 @@ impl Configuration {
                     Feature::Enabled
                 }
             },
-            consumption_intervals: device.tensor(&Good::ALL.map(Good::consumption_interval)),
+            consumption_intervals: device.tensor(
+                &Good::ALL
+                    .map(Good::consumption_interval)
+                    .into_iter()
+                    .chain([0; 4])
+                    .collect::<Vec<_>>(),
+            ),
             work_cap: config.work_cap,
             reserved_minutes: config.reserved_minutes,
             forecast_weight: config.forecast_weight,
@@ -429,6 +456,8 @@ mod tests {
             RentalChange::Capacity,
         ] {
             let previous = state.actors.clone();
+            let previous_accounts = cached.rental_accounts.clone();
+            let previous_businesses = cached.rental_businesses;
             let housing = state
                 .actors
                 .iter()
@@ -485,6 +514,20 @@ mod tests {
                 false => cached = cached.updated(&device, &scenario, &previous, &state),
             }
             let rebuilt = Configuration::new(&device, &scenario, &state);
+            if (
+                previous.len(),
+                previous_accounts.meta.num_elements(),
+                previous_businesses,
+            ) == (
+                state.actors.len(),
+                rebuilt.rental_accounts.meta.num_elements(),
+                rebuilt.rental_businesses,
+            ) {
+                assert!(crate::simulation::market_graphs::same_buffer(
+                    &previous_accounts,
+                    &cached.rental_accounts,
+                ));
+            }
             assert_eq!(cached.rental_businesses, rebuilt.rental_businesses);
             assert_eq!(
                 device.read(&cached.rental_accounts)?,

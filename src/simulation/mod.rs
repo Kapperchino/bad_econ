@@ -8,6 +8,7 @@ pub mod finance;
 mod flags;
 pub mod households;
 mod layout;
+mod market_graphs;
 mod memory;
 pub mod negotiation;
 mod ops;
@@ -102,6 +103,14 @@ enum MatchingState {
     Exhausted,
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum FreightActivity {
+    Active,
+    Dormant,
+    #[cfg(test)]
+    Unconditional,
+}
+
 #[derive(Clone, Copy, Debug)]
 pub enum Trace {
     Record,
@@ -130,6 +139,8 @@ pub struct Simulation {
     scratch: CubeTensor,
     searches: markets::SearchBuffers,
     market_sort: economy::sorting::MarketSort,
+    market_graphs: market_graphs::MarketGraphs,
+    freight_activity: FreightActivity,
     #[cfg(test)]
     links: CubeTensor,
     market_execution: MarketExecution,
@@ -195,7 +206,10 @@ impl Simulation {
         let restored = checkpoint.restore()?;
         Self::from_state(restored.scenario, restored.state, device)
     }
-    fn from_state(scenario: Scenario, mut initial: State, device: Device) -> Result<Self> {
+    fn from_state(scenario: Scenario, mut initial: State, mut device: Device) -> Result<Self> {
+        unsafe {
+            device.client.set_stream(burn::tensor::StreamId::current());
+        }
         let required = scenario.memory_estimate().max(
             initial.values.len() as u64 * 24
                 + initial.people.len() as u64 * 144
@@ -322,6 +336,8 @@ impl Simulation {
             scratch,
             searches,
             market_sort: economy::sorting::MarketSort::default(),
+            market_graphs: market_graphs::MarketGraphs::default(),
+            freight_activity: FreightActivity::Active,
             #[cfg(test)]
             links,
             market_execution: MarketExecution::Grouped,
@@ -371,6 +387,7 @@ impl Simulation {
             }
         }
         Ok(EconomyParameters {
+            clock: crate::simulation::parameters::MarketClock::Scalars,
             scan: parallel::ScanMode::new(&self.device),
             day,
             settlement_rotation: (crate::arithmetic::DrawKey {
@@ -433,6 +450,25 @@ impl Simulation {
         let control = self.device.read_range(&self.control, 0, CONTROL_WORDS)?;
         self.readback_bytes += (CONTROL_WORDS * WORD_BYTES) as u64;
         FaultFlags::read(&control)?.into_result()
+    }
+    fn measure_freight_activity(&mut self) -> Result<FreightActivity> {
+        match self.scenario.config().railway.companies.len() {
+            0 => Ok(FreightActivity::Dormant),
+            _ => {
+                let count = self.metadata.actors.len();
+                let first = self.metadata.actors.firm_indices().next().unwrap_or(count);
+                let words = self.device.read_range(
+                    &self.state,
+                    (Field::RailOperating as usize * count + first) * TICK_WORDS,
+                    (count - first) * TICK_WORDS,
+                )?;
+                self.readback_bytes += (words.len() * WORD_BYTES) as u64;
+                Ok(match words.into_iter().any(|word| word != 0) {
+                    true => FreightActivity::Active,
+                    false => FreightActivity::Dormant,
+                })
+            }
+        }
     }
     pub fn phase(&mut self, phase: Phase, trace: Trace) -> Result<PhaseEvidence> {
         match (&self.status, self.next_phase == phase) {
@@ -555,8 +591,26 @@ impl Simulation {
                 self.railways(economy::railway::RailStage::Access);
                 self.railways(economy::railway::RailStage::Routes);
                 self.railways(economy::railway::RailStage::Quotes);
+                self.freight_activity = match self.freight_activity {
+                    #[cfg(test)]
+                    FreightActivity::Unconditional => FreightActivity::Unconditional,
+                    _ => self.measure_freight_activity()?,
+                };
+                if std::env::var_os("BAD_ECON_PROFILE_GRAPHS").is_some() {
+                    eprintln!(
+                        "FREIGHT_ACTIVITY {} {:?}",
+                        self.day + 1,
+                        self.freight_activity
+                    );
+                }
                 let heating = self.config.heating_per_person;
-                self.scenario
+                let availability = match self.freight_activity {
+                    FreightActivity::Dormant => economy::railway::RouteAvailability::Dormant,
+                    _ => economy::railway::RouteAvailability::Available,
+                };
+                let routing = self.config.railway.replace_route_availability(availability);
+                let result = self
+                    .scenario
                     .goods_markets()
                     .into_iter()
                     .filter(|market| match market {
@@ -588,7 +642,9 @@ impl Simulation {
                             self.fault_check()?;
                         }
                         Ok::<(), anyhow::Error>(())
-                    })?;
+                    });
+                self.config.railway.replace_route_availability(routing);
+                result?;
                 self.market_result(&mut evidence)?;
                 self.apply_feedback()
             }
@@ -719,6 +775,16 @@ impl Simulation {
         };
         checkpoint("PendingRecords");
         let records = &pending.records;
+        if std::env::var_os("BAD_ECON_PROFILE_REGISTRY").is_some() {
+            let requests = records.iter().filter(|record| record.request > 0).fold(
+                std::collections::BTreeMap::<u32, usize>::new(),
+                |mut counts, record| {
+                    *counts.entry(record.request >> 24).or_default() += 1;
+                    counts
+                },
+            );
+            eprintln!("REGISTRY {} Requests {requests:?}", self.day);
+        }
         let count = records.iter().filter(|record| record.request > 0).count();
         let newborns = records.iter().filter(|record| record.birth > 0).count();
         if count == 0 && newborns > 0 {
@@ -820,6 +886,7 @@ impl Simulation {
         mut plan: registry::RegistryPlan,
         births: &[PendingRecord],
     ) -> Result<()> {
+        self.market_graphs = market_graphs::MarketGraphs::default();
         let profile_device = self.device.clone();
         let profile_day = self.day;
         let profile =
@@ -1028,6 +1095,8 @@ impl Simulation {
             scratch: self.device.empty(scratch_words),
             searches: markets::SearchBuffers::new(&self.device, count),
             market_sort: economy::sorting::MarketSort::default(),
+            market_graphs: market_graphs::MarketGraphs::default(),
+            freight_activity: self.freight_activity,
             #[cfg(test)]
             links: self.device.empty(batch_size * LinkLayout::WORDS_PER_EVENT),
             market_execution: self.market_execution,
@@ -1255,7 +1324,18 @@ impl Simulation {
             }
             (RegistryAudit::Validated, None) => economy::audit::RingValidation::Unchanged,
         };
-        let observation = self.observe_rings(rings).and_then(|snapshot| {
+        let registry_observation =
+            economy::audit::RegistryObservation::new(audit, births, settlement.as_ref());
+        if std::env::var_os("BAD_ECON_PROFILE_REGISTRY").is_some() {
+            eprintln!("REGISTRY {} Observation {registry_observation:?}", self.day);
+        }
+        let observation = match registry_observation {
+            economy::audit::RegistryObservation::Existing => {
+                self.fault_check().map(|_| self.snapshot.clone())
+            }
+            economy::audit::RegistryObservation::Updated => self.observe_rings(rings),
+        }
+        .and_then(|snapshot| {
             self.device.reclaim_memory(0)?;
             match self.memory_usage().bytes_reserved <= self.device.memory_budget.bytes() {
                 true => Ok(snapshot),
@@ -1322,6 +1402,14 @@ impl Simulation {
                 self.metadata.next_identity = next_identity;
                 self.migrations = plan.migrations;
                 self.snapshot = snapshot;
+                if !market_graphs::same_buffer(&self.actors, &previous_actor_buffer) {
+                    tensor::copy_contiguous(&self.device, &self.actors, &previous_actor_buffer);
+                    self.actors = previous_actor_buffer;
+                }
+                if !market_graphs::same_buffer(&self.spatial, &previous_spatial) {
+                    tensor::copy_contiguous(&self.device, &self.spatial, &previous_spatial);
+                    self.spatial = previous_spatial;
+                }
                 Ok(())
             }
             Err(error) => {
@@ -1488,30 +1576,77 @@ impl Simulation {
                 .map(|_| MatchingState::Searching),
         }
     }
-    fn device_market(
+    fn market_graph_buffers(&self) -> Vec<CubeTensor> {
+        let mut buffers = vec![
+            self.state.clone(),
+            self.actors.clone(),
+            self.spatial.clone(),
+            self.proposals.clone(),
+            self.scratch.clone(),
+            self.control.clone(),
+            self.searches.requests.clone(),
+            self.searches.successes.clone(),
+            self.searches.dispatches.clone(),
+        ];
+        buffers.extend(self.config.graph_buffers());
+        buffers
+    }
+
+    fn initialize_market(&self, market: Market, trace: Trace, parameters: &EconomyParameters) {
+        let count = self.metadata.actors.len();
+        let initialization = match (market, self.matching_round, trace) {
+            (Market::Input(_) | Market::Consumer(_), 0, Trace::Discard) => {
+                EconomyStage::InputMarketPrepare
+            }
+            (Market::Input(_) | Market::Consumer(_), 0, Trace::Record) => {
+                EconomyStage::InputMarketStart
+            }
+            (Market::Input(_) | Market::Consumer(_), _, Trace::Record) => {
+                EconomyStage::InputMarketRepeat
+            }
+            _ => EconomyStage::MarketStart,
+        };
+        let initialization_count = match initialization {
+            EconomyStage::InputMarketStart | EconomyStage::InputMarketRepeat => count,
+            _ => 1,
+        };
+        economy::EconomySystem::launch(
+            &self.device,
+            self.device.count(initialization_count),
+            cubecl::CubeDim::new_1d(self.device.workgroup),
+            economy::EconomyInputLaunch {
+                state: self.state.clone().into_buffer_arg(),
+                actors: self.actors.clone().into_buffer_arg(),
+                config: self.config.launch(),
+                spatial: self.spatial.clone().into_buffer_arg(),
+                proposals: self.proposals.clone().into_buffer_arg(),
+                bundles: self.scratch.clone().into_buffer_arg(),
+                control: self.control.clone().into_buffer_arg(),
+                parameters: parameters.launch(),
+                stage: initialization,
+            },
+        );
+    }
+
+    fn device_market_prefix(
         &mut self,
         market: Market,
-        phase: Phase,
         trace: Trace,
-        evidence: &mut PhaseEvidence,
-    ) -> Result<MatchingState> {
-        let submission_started = Instant::now();
-        let mut matching = MatchingState::Searching;
-        let regional_transport = !self.scenario.config().railway.companies.is_empty()
-            && matches!(
-                market,
-                Market::Input(_) | Market::Consumer(_) | Market::Household
-            );
+        mut parameters: EconomyParameters,
+        device_profile: &profiling::MarketProfile,
+    ) -> Result<u32> {
         let count = self.metadata.actors.len();
         let members = match market {
             Market::Household | Market::Input(Good::Bread) | Market::Consumer(Good::Bread) => count,
             _ => self.metadata.actors.firms(),
         };
-        let mut parameters = self.parameters(phase, market, 0, count)?;
-        parameters.discovery = Discovery::Indexed;
+        let regional_transport = !self.scenario.config().railway.companies.is_empty()
+            && matches!(
+                market,
+                Market::Input(_) | Market::Consumer(_) | Market::Household
+            );
         let profile = self.day + 1 == profiling_day()
             && std::env::var_os("BAD_ECON_PROFILE_STAGES").is_some();
-        let device_profile = profiling::MarketProfile::new(self.day + 1);
         let launch = |stage, invocations, parameters: &EconomyParameters| {
             let started = Instant::now();
             let window = device_profile.start(&self.device);
@@ -1565,23 +1700,6 @@ impl Simulation {
                 );
             }
         };
-        let initialization = match (market, self.matching_round, trace) {
-            (Market::Input(_) | Market::Consumer(Good::Coal | Good::Wood), 0, Trace::Discard) => {
-                EconomyStage::InputMarketPrepare
-            }
-            (Market::Input(_) | Market::Consumer(Good::Coal | Good::Wood), 0, Trace::Record) => {
-                EconomyStage::InputMarketStart
-            }
-            (Market::Input(_) | Market::Consumer(Good::Coal | Good::Wood), _, Trace::Record) => {
-                EconomyStage::InputMarketRepeat
-            }
-            _ => EconomyStage::MarketStart,
-        };
-        let initialization_count = match initialization {
-            EconomyStage::InputMarketStart | EconomyStage::InputMarketRepeat => count,
-            _ => 1,
-        };
-        launch(initialization, initialization_count, &parameters);
         if matches!(
             market,
             Market::Labor | Market::Input(_) | Market::Consumer(_) | Market::Household
@@ -1626,11 +1744,13 @@ impl Simulation {
                 _ => self.device.workgroup,
             };
             let dispatch = match stage {
+                economy::search::SearchStage::SearchSpatialFuel => self.device.count(count),
+                economy::search::SearchStage::EmptySort => self.device.count(members),
+                economy::search::SearchStage::EmptyBounds => self.device.count(members.div_ceil(8)),
                 economy::search::SearchStage::Index => self.device.count(
                     members.div_ceil(DISCOVERY_BLOCK as usize) * self.device.workgroup as usize,
                 ),
                 economy::search::SearchStage::Prepare
-                | economy::search::SearchStage::PrepareRepeat
                 | economy::search::SearchStage::PrepareCandidates => self.device.count(count),
                 economy::search::SearchStage::PrepareSelected => {
                     markets::dispatch(&self.searches.dispatches, markets::PREPARATION_DISPATCH)
@@ -1639,6 +1759,7 @@ impl Simulation {
                     markets::dispatch(&self.searches.dispatches, markets::SEARCH_DISPATCH)
                 }
                 economy::search::SearchStage::SearchFuel
+                | economy::search::SearchStage::SearchHousehold
                 | economy::search::SearchStage::Compact => {
                     markets::dispatch(&self.searches.dispatches, markets::SEARCH_COMPACT_DISPATCH)
                 }
@@ -1683,6 +1804,26 @@ impl Simulation {
         if matches!(market, Market::Consumer(_) | Market::Household) {
             search(economy::search::SearchStage::Index);
         }
+        if let Market::Consumer(_) = market {
+            search(economy::search::SearchStage::EmptySort);
+            search(economy::search::SearchStage::EmptyBounds);
+            if self.day + 1 == profiling_day()
+                && std::env::var_os("BAD_ECON_PROFILE_SUPPLY").is_some()
+            {
+                let cells = self.config.spatial_side * self.config.spatial_side;
+                let suppliers = self.device.read_range(&self.spatial, cells as usize, 1)?[0];
+                let flags = self
+                    .device
+                    .read_range(&self.scratch, 3 * count, suppliers as usize)?;
+                self.readback_bytes += (flags.len() + 1) as u64 * WORD_BYTES as u64;
+                let stocked = flags.iter().filter(|&&flags| flags & 1 != 0).count();
+                let empty = flags.iter().filter(|&&flags| flags & 3 == 2).count();
+                eprintln!(
+                    "SUPPLY {market:?} {} suppliers={suppliers} stocked={stocked} empty={empty}",
+                    self.matching_round,
+                );
+            }
+        }
         match market {
             Market::Labor | Market::Payroll | Market::Distribution => {
                 launch(EconomyStage::ProposeCompact, count, &parameters);
@@ -1696,10 +1837,10 @@ impl Simulation {
             }
             _ => {
                 let stage = match (market, self.matching_round) {
-                    (Market::Input(_) | Market::Consumer(Good::Coal | Good::Wood), 0) => {
+                    (Market::Input(_) | Market::Consumer(_), 0) => {
                         economy::search::SearchStage::PrepareCandidates
                     }
-                    (Market::Input(_) | Market::Consumer(Good::Coal | Good::Wood), _) => {
+                    (Market::Input(_) | Market::Consumer(_), _) => {
                         economy::search::SearchStage::PrepareSelected
                     }
                     _ => economy::search::SearchStage::Prepare,
@@ -1708,8 +1849,10 @@ impl Simulation {
                 launch(EconomyStage::MarketBoundary, 1, &parameters);
                 search(match market {
                     Market::Consumer(Good::Coal | Good::Wood) => {
-                        economy::search::SearchStage::SearchFuel
+                        economy::search::SearchStage::SearchSpatialFuel
                     }
+                    Market::Household => economy::search::SearchStage::SearchHousehold,
+                    Market::Consumer(_) => economy::search::SearchStage::SearchFuel,
                     _ => economy::search::SearchStage::Search,
                 });
                 parallel::scan(
@@ -1722,13 +1865,22 @@ impl Simulation {
             }
         }
         launch(EconomyStage::MarketBoundary, 1, &parameters);
-        parameters.sort_source = self.market_sort.run(
-            &self.device,
-            &self.scratch,
-            &self.control,
-            &self.searches.dispatches,
-            &parameters,
-        )?;
+        parameters.sort_source = match parameters.clock {
+            parameters::MarketClock::Device => economy::sorting::MarketSort::encode(
+                &self.device,
+                &self.scratch,
+                &self.control,
+                &self.searches.dispatches,
+                &parameters,
+            ),
+            parameters::MarketClock::Scalars => self.market_sort.run(
+                &self.device,
+                &self.scratch,
+                &self.control,
+                &self.searches.dispatches,
+                &parameters,
+            )?,
+        };
         let freight = |stage| {
             let window = device_profile.start(&self.device);
             economy::railway::settlement::launch(
@@ -1750,10 +1902,7 @@ impl Simulation {
         }
         launch(EconomyStage::GroupRanges, count, &parameters);
         launch(EconomyStage::MarketBoundary, 1, &parameters);
-        if matches!(
-            market,
-            Market::Labor | Market::Input(_) | Market::Consumer(_) | Market::Household
-        ) {
+        if matches!(market, Market::Labor | Market::Input(_)) {
             launch(EconomyStage::GroupPrepare, count, &parameters);
         }
         match market {
@@ -1828,6 +1977,111 @@ impl Simulation {
         }
         launch(EconomyStage::MarketBoundary, 1, &parameters);
         if regional_transport {
+            for stage in [
+                economy::railway::settlement::Stage::Initialize,
+                economy::railway::settlement::Stage::Queue,
+                economy::railway::settlement::Stage::Reset,
+                economy::railway::settlement::Stage::Propose,
+                economy::railway::settlement::Stage::CountClaims,
+            ] {
+                freight(stage);
+            }
+        }
+        Ok(parameters.sort_source)
+    }
+
+    fn device_market(
+        &mut self,
+        market: Market,
+        phase: Phase,
+        trace: Trace,
+        evidence: &mut PhaseEvidence,
+    ) -> Result<MatchingState> {
+        let submission_started = Instant::now();
+        let mut matching = MatchingState::Searching;
+        let regional_transport = !self.scenario.config().railway.companies.is_empty()
+            && matches!(
+                market,
+                Market::Input(_) | Market::Consumer(_) | Market::Household
+            );
+        let count = self.metadata.actors.len();
+        let mut parameters = self.parameters(phase, market, 0, count)?;
+        parameters.discovery = Discovery::Indexed;
+        let profile = self.day + 1 == profiling_day()
+            && std::env::var_os("BAD_ECON_PROFILE_STAGES").is_some();
+        let device_profile = profiling::MarketProfile::new(self.day + 1);
+        self.initialize_market(market, trace, &parameters);
+        parameters.clock = match (
+            trace,
+            count,
+            profile,
+            &device_profile,
+            &self.market_sort,
+            &self.device.cube,
+        ) {
+            (
+                Trace::Discard,
+                4096..,
+                false,
+                profiling::MarketProfile::Disabled,
+                economy::sorting::MarketSort::Profiled,
+                _,
+            ) => parameters::MarketClock::Scalars,
+            (
+                Trace::Discard,
+                4096..,
+                false,
+                profiling::MarketProfile::Disabled,
+                _,
+                cubecl::Device::Wgpu(_),
+            ) => parameters::MarketClock::Device,
+            _ => parameters::MarketClock::Scalars,
+        };
+        if std::env::var_os("BAD_ECON_PROFILE_SUPPLY").is_some() {
+            parameters.clock = parameters::MarketClock::Scalars;
+        }
+        parameters.sort_source = match parameters.clock {
+            parameters::MarketClock::Scalars => {
+                self.device_market_prefix(market, trace, parameters, &device_profile)?
+            }
+            parameters::MarketClock::Device => {
+                let buffers = self.market_graph_buffers();
+                let key = market_graphs::MarketKey {
+                    market,
+                    phase,
+                    routing: self.config.railway.route_availability(),
+                    preparation: match self.matching_round {
+                        0 => market_graphs::Preparation::First,
+                        _ => market_graphs::Preparation::Repeat,
+                    },
+                };
+                let device = self.device.clone();
+                let mut graphs = std::mem::take(&mut self.market_graphs);
+                let result = graphs.run(&device, key, buffers, || {
+                    self.device_market_prefix(market, trace, parameters, &device_profile)
+                });
+                let result = result.and_then(|source| match (regional_transport, key.routing) {
+                    (true, economy::railway::RouteAvailability::Dormant) => {
+                        let routing = self.config.railway.replace_route_availability(
+                            economy::railway::RouteAvailability::Available,
+                        );
+                        let available = market_graphs::MarketKey {
+                            routing: economy::railway::RouteAvailability::Available,
+                            ..key
+                        };
+                        let recorded = graphs.prerecord(&device, available, source, || {
+                            self.device_market_prefix(market, trace, parameters, &device_profile)
+                        });
+                        self.config.railway.replace_route_availability(routing);
+                        recorded.map(|_| source)
+                    }
+                    _ => Ok(source),
+                });
+                self.market_graphs = graphs;
+                result?
+            }
+        };
+        if regional_transport {
             use economy::railway::settlement::{self, Stage};
             let freight = |simulation: &Self, stage| {
                 let window = device_profile.start(&simulation.device);
@@ -1845,31 +2099,42 @@ impl Simulation {
                 );
                 device_profile.end(&simulation.device, window, "FREIGHT", stage);
             };
-            freight(self, Stage::Initialize);
-            let mut round = settlement::Round::Initial;
-            while let Some(commit) = round.commit() {
-                freight(self, Stage::Queue);
-                freight(self, Stage::Reset);
-                freight(self, Stage::Propose);
-                freight(self, Stage::CountClaims);
-                let claims = settlement::prepare_claims(&self.device, &mut self.config)?;
-                self.readback_bytes += (2 * WORD_BYTES) as u64;
-                if let settlement::ClaimWork::Ready = claims {
-                    freight(self, Stage::EmitClaims);
-                    freight(self, Stage::SortClaims);
-                    freight(self, Stage::ClaimOffsets);
-                    freight(self, Stage::Resolve);
+            match (trace, self.freight_activity) {
+                (Trace::Discard, FreightActivity::Dormant) => {
+                    freight(self, Stage::Commit);
+                    freight(self, Stage::Release);
                 }
-                freight(self, commit);
-                freight(self, Stage::Release);
-                round = round.next(claims);
+                _ => {
+                    let mut round = settlement::Round::Initial;
+                    while let Some(commit) = round.commit() {
+                        if let settlement::Round::Retry = round {
+                            freight(self, Stage::Queue);
+                            freight(self, Stage::Reset);
+                            freight(self, Stage::Propose);
+                            freight(self, Stage::CountClaims);
+                        }
+                        let preparation = settlement::prepare_market_claims(
+                            &self.device,
+                            &mut self.config,
+                            &self.control,
+                        )?;
+                        self.readback_bytes += (4 * WORD_BYTES) as u64;
+                        matching = match preparation.searches {
+                            0 => MatchingState::Exhausted,
+                            _ => MatchingState::Searching,
+                        };
+                        let claims = preparation.claims;
+                        if let settlement::ClaimWork::Ready = claims {
+                            freight(self, Stage::EmitClaims);
+                            freight(self, Stage::SortClaims);
+                            freight(self, Stage::Resolve);
+                        }
+                        freight(self, commit);
+                        freight(self, Stage::Release);
+                        round = round.next(claims);
+                    }
+                }
             }
-            let progress = settlement::progress(&self.device, &self.config, &self.control)?;
-            matching = match progress.searches {
-                0 => MatchingState::Exhausted,
-                _ => MatchingState::Searching,
-            };
-            self.readback_bytes += (2 * WORD_BYTES) as u64;
             freight(self, Stage::Accounts);
         }
         parameters.status_start = 4 * count as u32;
@@ -2389,7 +2654,7 @@ impl Simulation {
             )),
         }?;
         self.timings.clear();
-        Phase::ALL.into_iter().try_for_each(|phase| -> Result<()> {
+        let result = Phase::ALL.into_iter().try_for_each(|phase| -> Result<()> {
             let start = Instant::now();
             let evidence = self.phase(phase, Trace::Discard)?;
             self.timings.push(PhaseTiming {
@@ -2399,7 +2664,9 @@ impl Simulation {
                 frontier_depth: evidence.frontier_depth,
             });
             Ok(())
-        })
+        });
+        self.market_graphs.report(self.day);
+        result
     }
     pub fn command(&mut self, command: SimulationCommand) -> Result<()> {
         match command {

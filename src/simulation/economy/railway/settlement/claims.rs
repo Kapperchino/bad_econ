@@ -261,21 +261,26 @@ impl GpuPass<SortInput> for SortClaims {
 }
 
 #[cube]
+fn lower_bound(input: &Input, resource: u32) -> u32 {
+    let mut low = 0u32;
+    let mut high = input.progress[CLAIM_COUNT].load();
+    while low < high {
+        let middle = low + (high - low) / 2;
+        let index = input.claims[(input.claim_source + middle) as usize];
+        let claim = Claim::load(&input.claims, index);
+        if claim.resource < resource {
+            low = middle + 1;
+        } else {
+            high = middle;
+        }
+    }
+    low
+}
+
+#[cube]
 pub(super) fn offset(input: &mut Input, resource: u32) {
     if resource <= input.config.actors + input.config.railway.region_count {
-        let mut low = 0u32;
-        let mut high = input.progress[CLAIM_COUNT].load();
-        while low < high {
-            let middle = low + (high - low) / 2;
-            let index = input.claims[(input.claim_source + middle) as usize];
-            let claim = Claim::load(&input.claims, index);
-            if claim.resource < resource {
-                low = middle + 1;
-            } else {
-                high = middle;
-            }
-        }
-        input.claims[(input.claim_offsets + resource) as usize] = low;
+        input.claims[(input.claim_offsets + resource) as usize] = lower_bound(&*input, resource);
     }
 }
 
@@ -288,22 +293,24 @@ enum PrefixState {
 
 #[cube]
 pub(super) fn resolve(input: &mut Input, resource: u32) {
-    let start = input.claims[(input.claim_offsets + resource) as usize];
-    let end = input.claims[(input.claim_offsets + resource + 1) as usize];
-    let mut remaining = budget(&*input, resource);
-    let mut state = u32::new(comptime!(PrefixState::Available as i64));
-    for position in start..end {
-        let index = input.claims[(input.claim_source + position) as usize];
-        let claim = Claim::load(&input.claims, index);
-        state = select(
-            lt(remaining, claim.amount),
-            comptime!(PrefixState::Exceeded as u32),
-            state,
-        );
-        if state == comptime!(PrefixState::Available as u32) {
-            remaining = minus(remaining, claim.amount);
-        } else {
-            input.accounts[claim.buyer as usize * ACCOUNT_WORDS + DENIED].fetch_or(1);
+    if contested(&*input, resource) {
+        let start = lower_bound(&*input, resource);
+        let end = lower_bound(&*input, resource + 1);
+        let mut remaining = budget(&*input, resource);
+        let mut state = u32::new(comptime!(PrefixState::Available as i64));
+        for position in start..end {
+            let index = input.claims[(input.claim_source + position) as usize];
+            let claim = Claim::load(&input.claims, index);
+            state = select(
+                lt(remaining, claim.amount),
+                comptime!(PrefixState::Exceeded as u32),
+                state,
+            );
+            if state == comptime!(PrefixState::Available as u32) {
+                remaining = minus(remaining, claim.amount);
+            } else {
+                input.accounts[claim.buyer as usize * ACCOUNT_WORDS + DENIED].fetch_or(1);
+            }
         }
     }
 }

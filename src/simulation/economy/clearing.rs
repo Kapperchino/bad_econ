@@ -34,22 +34,176 @@ pub(super) fn actor_settlement(
             _ => status.contains(comptime!(EventStatus::Accepted)),
         };
         if eligible {
-            let mut event = Array::<u32>::new(EVENT_WORDS);
-            construct(
-                state,
-                actors,
-                config,
-                proposals,
-                &mut event[..],
-                control,
-                parameters,
-                id,
-                comptime!(EventStorage::Local),
-            );
-            settle(state, &event[..], control, 0, actor, config.actors, posting)
-                .store(scratch, 4 * parameters.count + id);
+            let mut status = KernelEventStatus::new(comptime!(EventStatus::Rejected));
+            match comptime!(parameters.market) {
+                MarketFlag::Input(_) | MarketFlag::Consumer | MarketFlag::Household => {
+                    status.replace(buyer_settlement(
+                        state, actors, config, proposals, control, parameters, actor, other,
+                        posting,
+                    ));
+                }
+                _ => {
+                    status.replace(event_settlement(
+                        state, actors, config, proposals, control, parameters, id, posting,
+                    ));
+                }
+            }
+            status.store(scratch, 4 * parameters.count + id);
         }
     }
+}
+
+#[cube]
+fn event_settlement(
+    state: &mut [u32],
+    actors: &[u32],
+    config: &EconomyConfig,
+    proposals: &mut [u32],
+    control: &[Atomic<u32>],
+    parameters: &EconomyParameters,
+    id: u32,
+    #[comptime] posting: Posting,
+) -> KernelEventStatus {
+    let mut event = Array::<u32>::new(EVENT_WORDS);
+    construct(
+        state,
+        actors,
+        config,
+        proposals,
+        &mut event[..],
+        control,
+        parameters,
+        id,
+        comptime!(EventStorage::Local),
+    );
+    settle(
+        state,
+        &event[..],
+        control,
+        0,
+        id + parameters.offset,
+        config.actors,
+        posting,
+    )
+}
+
+#[cube]
+pub(super) fn buyer_settlement(
+    state: &mut [u32],
+    actors: &[u32],
+    config: &EconomyConfig,
+    proposals: &mut [u32],
+    control: &[Atomic<u32>],
+    parameters: &EconomyParameters,
+    actor: u32,
+    other: u32,
+    #[comptime] posting: Posting,
+) -> KernelEventStatus {
+    let good = parameters.traded_good();
+    let quantity = ticks(
+        proposals[actor as usize * ProposalLayout::WORDS + ProposalLayout::QUANTITY_LOW],
+        proposals[actor as usize * ProposalLayout::WORDS + ProposalLayout::QUANTITY_HIGH],
+    );
+    let price = value(state, config, comptime!(Field::Price as u32), other);
+    let cost = multiply(control, quantity, price.extract(LOW_WORD));
+    let retained = household_production::reserve(state, actors, config, other, good);
+    let _ = add_checked(control, retained, quantity);
+    let route = railway::animal_route(actors, config, actor, other);
+    let slot =
+        BASE_FIELDS as u32 + (good - 1) * config.ring + (parameters.day + route.days) % config.ring;
+    let cash = value(state, config, comptime!(Field::Cash as u32), actor);
+    let incoming = plus(value(state, config, slot, actor), quantity);
+    let transit_good = plus(
+        value(state, config, TRANSIT_FIELDS as u32 + good - 1, actor),
+        quantity,
+    );
+    let transit = plus(
+        value(state, config, comptime!(Field::Transit as u32), actor),
+        quantity,
+    );
+    let purchased = plus(
+        value(state, config, comptime!(Field::Purchased as u32), actor),
+        quantity,
+    );
+    let faults = incoming
+        .faults
+        .union(transit_good.faults)
+        .union(transit.faults)
+        .union(purchased.faults);
+    let mut status = KernelEventStatus::new(comptime!(EventStatus::Rejected));
+    if !lt(cash, cost) {
+        status.set(comptime!(EventStatus::Accepted));
+    }
+    if !faults.is_empty() {
+        faults.record(control);
+        status.set(comptime!(EventStatus::Faulted));
+    }
+    if comptime!(posting == Posting::ApplyActor)
+        && status.contains(comptime!(EventStatus::Accepted))
+    {
+        set(
+            state,
+            config,
+            comptime!(Field::Cash as u32),
+            actor,
+            minus(cash, cost),
+        );
+        set(state, config, slot, actor, incoming.value);
+        for input in 0u32..2 {
+            if number(
+                state,
+                config,
+                comptime!(Field::FirstInput as u32) + input,
+                actor,
+            ) == good
+            {
+                set(
+                    state,
+                    config,
+                    comptime!(Field::FirstInputCost as u32) + input,
+                    actor,
+                    price,
+                );
+            }
+        }
+        if number(
+            state,
+            config,
+            comptime!(Field::EnterpriseModel as u32),
+            actor,
+        ) == 1
+        {
+            set(
+                state,
+                config,
+                comptime!(Field::ReplacementCost as u32),
+                actor,
+                price,
+            );
+        }
+        set(
+            state,
+            config,
+            TRANSIT_FIELDS as u32 + good - 1,
+            actor,
+            transit_good.value,
+        );
+        set(
+            state,
+            config,
+            comptime!(Field::Transit as u32),
+            actor,
+            transit.value,
+        );
+        set(
+            state,
+            config,
+            comptime!(Field::Purchased as u32),
+            actor,
+            purchased.value,
+        );
+    }
+    status
 }
 
 #[derive(CubeType, Clone, Copy)]

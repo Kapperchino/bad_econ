@@ -121,6 +121,24 @@ fn same_buffer(recorded: &CubeTensor, current: &CubeTensor) -> bool {
 }
 
 impl MarketSort {
+    pub fn encode(
+        device: &Device,
+        scratch: &CubeTensor,
+        control: &CubeTensor,
+        dispatches: &CubeTensor,
+        parameters: &EconomyParameters,
+    ) -> u32 {
+        encode(
+            device,
+            scratch,
+            control,
+            dispatches,
+            parameters,
+            parallel::HistogramScan::BlockLocal,
+        );
+        SortPlan::new(parameters).output()
+    }
+
     pub fn run(
         &mut self,
         device: &Device,

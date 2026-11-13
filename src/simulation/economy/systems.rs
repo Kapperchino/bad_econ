@@ -27,6 +27,24 @@ impl GpuPass<EconomyInput> for AdvanceEconomy {
     type Output = ();
 
     fn execute(mut input: EconomyInput) {
+        input.parameters.refresh(&mut input.config);
+        if comptime!(matches!(
+            input.stage,
+            EconomyStage::MarketStart
+                | EconomyStage::InputMarketStart
+                | EconomyStage::InputMarketPrepare
+                | EconomyStage::InputMarketRepeat
+        )) && ABSOLUTE_POS == 0
+        {
+            input.config.consumption_intervals[crate::domain::Good::COUNT + 0usize] =
+                input.parameters.day;
+            input.config.consumption_intervals[crate::domain::Good::COUNT + 1usize] =
+                input.parameters.settlement_rotation;
+            input.config.consumption_intervals[crate::domain::Good::COUNT + 2usize] =
+                input.parameters.good;
+            input.config.consumption_intervals[crate::domain::Good::COUNT + 3usize] =
+                input.config.heating_per_person;
+        }
         economy(
             &mut input.state,
             &input.actors,

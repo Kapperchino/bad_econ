@@ -17,6 +17,8 @@ const UNREACHABLE: u32 = u32::MAX / 4;
 pub struct RailNetwork {
     #[cube(comptime)]
     pub enabled: Feature,
+    #[cube(comptime)]
+    pub routes_enabled: Feature,
     pub nodes: u32,
     pub company_count: u32,
     pub segment_count: u32,
@@ -41,6 +43,7 @@ pub struct RailNetwork {
 }
 
 pub struct Network {
+    availability: RouteAvailability,
     freight: settlement::Buffers,
     firms: u32,
     nodes: u32,
@@ -66,7 +69,42 @@ pub struct Network {
     units_per_level: u32,
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(in crate::simulation) enum RouteAvailability {
+    Available,
+    Dormant,
+}
+
 impl Network {
+    pub(in crate::simulation) fn route_availability(&self) -> RouteAvailability {
+        self.availability
+    }
+
+    pub(in crate::simulation) fn replace_route_availability(
+        &mut self,
+        availability: RouteAvailability,
+    ) -> RouteAvailability {
+        std::mem::replace(&mut self.availability, availability)
+    }
+
+    pub(in crate::simulation) fn graph_buffers(&self) -> Vec<CubeTensor> {
+        let mut buffers = vec![
+            self.stations.clone(),
+            self.access.clone(),
+            self.companies.clone(),
+            self.station_companies.clone(),
+            self.access_rights.clone(),
+            self.segments.clone(),
+            self.materials.clone(),
+            self.routes.clone(),
+            self.quotes.clone(),
+            self.regions.clone(),
+            self.segment_regions.clone(),
+        ];
+        buffers.extend(self.freight.graph_buffers());
+        buffers
+    }
+
     pub fn new(
         device: &Device,
         scenario: &crate::domain::Scenario,
@@ -148,6 +186,7 @@ impl Network {
         }
         offsets.extend(carriers);
         Self {
+            availability: RouteAvailability::Available,
             firms: state.actors.firms() as u32,
             freight: settlement::Buffers::new(
                 device,
@@ -230,6 +269,10 @@ impl Network {
         RailNetworkLaunch {
             enabled: match self.company_count {
                 0 => Feature::Disabled,
+                _ => Feature::Enabled,
+            },
+            routes_enabled: match (self.company_count, self.availability) {
+                (0, _) | (_, RouteAvailability::Dormant) => Feature::Disabled,
                 _ => Feature::Enabled,
             },
             nodes: self.nodes,
@@ -834,7 +877,7 @@ fn candidate(
     company: u32,
 ) -> FreightRoute {
     let mut result = animal_route(actors, config, buyer, seller);
-    if comptime!(config.railway.enabled == Feature::Enabled)
+    if comptime!(config.railway.routes_enabled == Feature::Enabled)
         && config.railway.nodes > 0
         && company < config.railway.company_count
     {
@@ -918,7 +961,7 @@ pub(super) fn route(
     seller: u32,
 ) -> FreightRoute {
     let mut result = animal_route(actors, config, buyer, seller);
-    if comptime!(config.railway.enabled == Feature::Enabled) && config.railway.nodes > 0 {
+    if comptime!(config.railway.routes_enabled == Feature::Enabled) && config.railway.nodes > 0 {
         let origin = config.railway.access[seller as usize * 2];
         let destination = config.railway.access[buyer as usize * 2];
         let access = ceildiv(
@@ -933,6 +976,50 @@ pub(super) fn route(
         result.replace(&path);
     }
     result
+}
+
+#[derive(CubeType, Clone, Copy)]
+pub(super) struct DeliveryRequest {
+    pub buyer: u32,
+    pub seller: u32,
+    pub trip: u32,
+    pub buyer_access: u32,
+}
+
+#[cube]
+pub(super) fn delivery_days(config: &EconomyConfig, request: DeliveryRequest) -> u32 {
+    let mut days = max(ceildiv(request.trip, config.shipment_speed), 1);
+    if comptime!(config.railway.routes_enabled == Feature::Enabled) && config.railway.nodes > 0 {
+        let origin = config.railway.access[request.seller as usize * 2];
+        let destination = config.railway.access[request.buyer as usize * 2];
+        let access = ceildiv(
+            config.railway.access[request.seller as usize * 2 + 1] + request.buyer_access,
+            config.shipment_speed,
+        );
+        let limit = min(max(days, access + 1) - access - 1, config.ring - 1);
+        let company = config.railway.quotes
+            [((origin * config.railway.nodes + destination) * config.ring + limit) as usize];
+        if company < config.railway.company_count {
+            let base = (((company * config.railway.nodes + origin) * config.railway.nodes
+                + destination)
+                * ROUTE_WORDS as u32) as usize;
+            let carrier = config.railway.routes[base + 2];
+            let candidate = access
+                + max(
+                    ceildiv(
+                        config.railway.routes[base],
+                        config.shipment_speed * config.railway.speed_multiplier,
+                    ),
+                    1,
+                );
+            days = select(
+                carrier < config.railway.company_count && candidate < days,
+                candidate,
+                days,
+            );
+        }
+    }
+    days
 }
 
 #[cube]

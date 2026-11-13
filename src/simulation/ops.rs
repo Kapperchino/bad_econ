@@ -20,6 +20,11 @@ const STATE_BUFFER_BYTES: usize = 16 * 1024 * 1024;
 const MAX_READBACK_WORDS: usize = 4 * 1024 * 1024;
 const DIRECT_READBACK_WORDS: usize = 1024;
 
+enum TensorAllocation {
+    Pooled,
+    Dedicated,
+}
+
 #[cfg(test)]
 pub const TEST_WORKGROUP: u32 = 64;
 
@@ -121,6 +126,16 @@ impl Device {
         }
     }
     pub fn tensor(&self, words: &[u32]) -> CubeTensor {
+        let allocation = match words.len() * WORD_BYTES {
+            bytes if bytes >= DEDICATED_BUFFER_BYTES => TensorAllocation::Dedicated,
+            _ => TensorAllocation::Pooled,
+        };
+        self.upload(words, allocation)
+    }
+    pub(super) fn dedicated_tensor(&self, words: &[u32]) -> CubeTensor {
+        self.upload(words, TensorAllocation::Dedicated)
+    }
+    fn upload(&self, words: &[u32], allocation: TensorAllocation) -> CubeTensor {
         #[cfg(target_endian = "little")]
         let bytes: &[u8] = bytemuck::cast_slice(words);
         #[cfg(target_endian = "big")]
@@ -130,11 +145,11 @@ impl Device {
             .collect::<Vec<_>>();
         #[cfg(target_endian = "big")]
         let bytes = encoded.as_slice();
-        let handle = match bytes.len() {
-            size if size >= DEDICATED_BUFFER_BYTES => self
+        let handle = match allocation {
+            TensorAllocation::Dedicated => self
                 .client
                 .memory_dedicated_allocation(bytes, |bytes| self.client.create_from_slice(bytes)),
-            _ => self.client.create_from_slice(bytes),
+            TensorAllocation::Pooled => self.client.create_from_slice(bytes),
         };
         CubeTensor::new_contiguous(
             self.client.clone(),

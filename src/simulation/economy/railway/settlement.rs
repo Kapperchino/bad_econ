@@ -31,6 +31,7 @@ pub enum Stage {
     CountClaims,
     EmitClaims,
     SortClaims,
+    #[cfg_attr(not(test), expect(dead_code))]
     ClaimOffsets,
     Resolve,
     Commit,
@@ -69,6 +70,18 @@ pub struct Buffers {
 }
 
 impl Buffers {
+    pub(in crate::simulation) fn graph_buffers(&self) -> Vec<CubeTensor> {
+        vec![
+            self.resources.clone(),
+            self.accounts.clone(),
+            self.bookings.clone(),
+            self.queue.clone(),
+            self.claims.clone(),
+            self.progress.clone(),
+            self.dispatches.clone(),
+        ]
+    }
+
     pub fn new(device: &Device, actors: usize, regions: usize) -> Self {
         let claim_capacity = actors * 2;
         Self {
@@ -297,15 +310,19 @@ fn resource(input: &Input, index: u32) -> u32 {
     resource
 }
 
+#[cfg(test)]
 pub struct Progress {
-    #[cfg(test)]
     pub pending: u32,
-    pub searches: u32,
 }
 
 pub enum ClaimWork {
     Empty,
     Ready,
+}
+
+pub struct ClaimPreparation {
+    pub claims: ClaimWork,
+    pub searches: u32,
 }
 
 #[derive(Clone, Copy)]
@@ -352,10 +369,12 @@ impl ClaimAllocation {
     }
 }
 
-pub fn prepare_claims(device: &Device, config: &mut Configuration) -> anyhow::Result<ClaimWork> {
+fn claim_work(
+    device: &Device,
+    config: &mut Configuration,
+    count: u64,
+) -> anyhow::Result<ClaimWork> {
     let buffers = &mut config.railway.freight;
-    let count = device.read_range(&buffers.progress, CLAIM_COUNT, 2)?;
-    let count = u64::from(count[0]) | (u64::from(count[1]) << 32);
     if count > buffers.claim_capacity as u64 {
         let allocation = ClaimAllocation::new(
             count,
@@ -383,9 +402,47 @@ pub fn prepare_claims(device: &Device, config: &mut Configuration) -> anyhow::Re
     })
 }
 
+pub fn prepare_market_claims(
+    device: &Device,
+    config: &mut Configuration,
+    control: &CubeTensor,
+) -> anyhow::Result<ClaimPreparation> {
+    let range = |tensor: &CubeTensor, start: usize, words: usize| {
+        let handle = tensor.handle.clone();
+        let size = handle.size_in_used();
+        let offset = start * size_of::<u32>();
+        handle
+            .offset_start(offset as u64)
+            .offset_end(size - (offset + words * size_of::<u32>()) as u64)
+    };
+    let values = device.client.read(vec![
+        range(&config.railway.freight.progress, CLAIM_COUNT, 2),
+        range(control, crate::simulation::flags::FAULT_WORD, 1),
+        range(control, markets::SEARCHES_WORD, 1),
+    ])?;
+    let count = u64::from_le_bytes(values[0][..8].try_into()?);
+    let faults = u32::from_le_bytes(values[1][..4].try_into()?);
+    FaultFlags::new(faults)?.into_result()?;
+    Ok(ClaimPreparation {
+        claims: claim_work(device, config, count)?,
+        searches: u32::from_le_bytes(values[2][..4].try_into()?),
+    })
+}
+
+#[cfg(test)]
+pub fn prepare_claims(device: &Device, config: &mut Configuration) -> anyhow::Result<ClaimWork> {
+    let count = device.read_range(&config.railway.freight.progress, CLAIM_COUNT, 2)?;
+    claim_work(
+        device,
+        config,
+        u64::from(count[0]) | (u64::from(count[1]) << 32),
+    )
+}
+
+#[cfg(test)]
 pub fn progress(
     device: &Device,
-    _config: &Configuration,
+    config: &Configuration,
     control: &CubeTensor,
 ) -> anyhow::Result<Progress> {
     let word = |index: usize| {
@@ -398,16 +455,12 @@ pub fn progress(
     };
     let values = device.client.read(vec![
         word(crate::simulation::flags::FAULT_WORD),
-        word(markets::SEARCHES_WORD),
-        #[cfg(test)]
-        _config.railway.freight.progress.handle.clone(),
+        config.railway.freight.progress.handle.clone(),
     ])?;
     let faults = u32::from_le_bytes(values[0][..4].try_into()?);
     FaultFlags::new(faults)?.into_result()?;
     Ok(Progress {
-        #[cfg(test)]
-        pending: u32::from_le_bytes(values[2][..4].try_into()?),
-        searches: u32::from_le_bytes(values[1][..4].try_into()?),
+        pending: u32::from_le_bytes(values[1][..4].try_into()?),
     })
 }
 

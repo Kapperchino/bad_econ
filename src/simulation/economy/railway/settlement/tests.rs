@@ -407,3 +407,34 @@ fn cross_resource_contention_stops_after_one_retry_on_gpu() -> Result<()> {
     }
     Ok(())
 }
+
+#[test]
+fn market_claim_preparation_reads_gpu_searches_and_propagates_prior_faults() -> Result<()> {
+    let scenario = Scenario::new(serde_json::from_str(include_str!(
+        "../../../../../scenarios/railway.json"
+    ))?)?;
+    let device = crate::simulation::tests::device(64)?;
+    let mut simulation = Simulation::new(scenario, device.clone())?;
+    let mut control = vec![0; CONTROL_WORDS + 4];
+    control[markets::SEARCHES_WORD] = 17;
+    device.write(&simulation.control, &control);
+    let preparation = prepare_market_claims(&device, &mut simulation.config, &simulation.control)?;
+    assert!(matches!(preparation.claims, ClaimWork::Empty));
+    assert_eq!(preparation.searches, 17);
+    device.write(
+        &simulation.config.railway.freight.progress,
+        &[0, 0, 1, 0, 0],
+    );
+    control[markets::SEARCHES_WORD] = 0;
+    device.write(&simulation.control, &control);
+    let preparation = prepare_market_claims(&device, &mut simulation.config, &simulation.control)?;
+    assert!(matches!(preparation.claims, ClaimWork::Ready));
+    assert_eq!(preparation.searches, 0);
+    control[crate::simulation::flags::FAULT_WORD] = FaultFlags::ARITHMETIC_OVERFLOW.bits();
+    device.write(&simulation.control, &control);
+    let error = prepare_market_claims(&device, &mut simulation.config, &simulation.control)
+        .err()
+        .expect("the prior GPU fault must propagate");
+    assert!(error.to_string().contains("ARITHMETIC_OVERFLOW"));
+    Ok(())
+}

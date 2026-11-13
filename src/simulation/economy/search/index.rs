@@ -1,6 +1,6 @@
 use super::*;
 
-const FIELDS: usize = 7;
+const FIELDS: usize = 8;
 pub(super) const BLOCK: u32 = 32;
 #[derive(Clone, Copy)]
 enum BlockField {
@@ -11,6 +11,7 @@ enum BlockField {
     MinY,
     MaxY,
     Stocked,
+    MinAccess,
 }
 
 #[derive(Clone, Copy)]
@@ -159,6 +160,7 @@ fn build_blocks(
         let mut min_y = u32::new(comptime!(i64::from(u32::MAX)));
         let mut max_y = 0u32;
         let mut stocked = 0u32;
+        let mut min_access = u32::new(comptime!(i64::from(u32::MAX)));
         let mut member = block * BLOCK + lane;
         while member < min((block + 1) * BLOCK, count) {
             let actor = spatial[(cells + 1 + member) as usize];
@@ -177,10 +179,18 @@ fn build_blocks(
             let stride = actors.len() / ActorLayout::WORDS;
             let x = actors[ActorLayout::X * stride + actor as usize];
             let y = actors[ActorLayout::Y * stride + actor as usize];
+            if comptime!(parameters.market == MarketFlag::Consumer) {
+                scratch[(5 * config.actors + member) as usize] = empty::key(config, x, y);
+            }
             min_x = min(min_x, x);
             max_x = max(max_x, x);
             min_y = min(min_y, y);
             max_y = max(max_y, y);
+            if comptime!(config.railway.routes_enabled == Feature::Enabled)
+                && config.railway.nodes > 0
+            {
+                min_access = min(min_access, config.railway.access[actor as usize * 2 + 1]);
+            }
             member += width;
         }
         stocked_price = reduce_minimum(stocked_price, comptime!(reduction));
@@ -190,6 +200,10 @@ fn build_blocks(
         min_y = reduce_minimum(min_y, comptime!(reduction));
         max_y = !reduce_minimum(!max_y, comptime!(reduction));
         stocked = !reduce_minimum(!stocked, comptime!(reduction));
+        if comptime!(config.railway.routes_enabled == Feature::Enabled) && config.railway.nodes > 0
+        {
+            min_access = reduce_minimum(min_access, comptime!(reduction));
+        }
         if lane == 0 {
             let base = 6 * config.actors as usize + block as usize * FIELDS;
             scratch[base + comptime!(BlockField::StockedPrice as usize)] = stocked_price;
@@ -199,6 +213,7 @@ fn build_blocks(
             scratch[base + comptime!(BlockField::MinY as usize)] = min_y;
             scratch[base + comptime!(BlockField::MaxY as usize)] = max_y;
             scratch[base + comptime!(BlockField::Stocked as usize)] = stocked;
+            scratch[base + comptime!(BlockField::MinAccess as usize)] = min_access;
         }
         block += step;
     }
@@ -218,6 +233,7 @@ pub(super) fn skip(
     block: u32,
     x: u32,
     y: u32,
+    buyer_access: u32,
     cash: Ticks,
     chosen: u32,
     empty_score: Ticks,
@@ -232,16 +248,13 @@ pub(super) fn skip(
     let max_y = scratch[base + comptime!(BlockField::MaxY as usize)];
     let stocked = scratch[base + comptime!(BlockField::Stocked as usize)];
     let distance = max(x, min_x) - min(x, max_x) + max(y, min_y) - min(y, max_y);
-    let delivery = times32(
-        max(
-            ceildiv(
-                distance,
-                config.shipment_speed * config.railway.speed_multiplier,
-            ),
-            1,
-        ),
-        config.delivery_penalty,
-    );
+    let mut days = max(ceildiv(distance, config.shipment_speed), 1);
+    if comptime!(config.railway.routes_enabled == Feature::Enabled) && config.railway.nodes > 0 {
+        let seller_access = scratch[base + comptime!(BlockField::MinAccess as usize)];
+        let rail_days = ceildiv(buyer_access + seller_access, config.shipment_speed) + 1;
+        days = min(days, rail_days);
+    }
+    let delivery = times32(days, config.delivery_penalty);
     let lower_score = plus(ticks(empty_price, 0), delivery).value;
     let stock_possible = stocked_price != u32::MAX && !lt(cash, ticks(stocked_price, 0));
     let empty_improves = chosen == NO_ACTOR
@@ -250,4 +263,23 @@ pub(super) fn skip(
         && lt(lower_score, empty_score);
     let unseen_stock = stocked > 0 && visibility == 0;
     distance > config.search_radius || !(stock_possible || empty_improves || unseen_stock)
+}
+
+#[cube]
+pub(super) fn skip_stocked(
+    scratch: &[u32],
+    config: &EconomyConfig,
+    block: u32,
+    x: u32,
+    y: u32,
+    cash: Ticks,
+) -> bool {
+    let base = 6 * config.actors as usize + block as usize * FIELDS;
+    let price = scratch[base + comptime!(BlockField::StockedPrice as usize)];
+    let min_x = scratch[base + comptime!(BlockField::MinX as usize)];
+    let max_x = scratch[base + comptime!(BlockField::MaxX as usize)];
+    let min_y = scratch[base + comptime!(BlockField::MinY as usize)];
+    let max_y = scratch[base + comptime!(BlockField::MaxY as usize)];
+    let distance = max(x, min_x) - min(x, max_x) + max(y, min_y) - min(y, max_y);
+    distance > config.search_radius || price == u32::MAX || lt(cash, ticks(price, 0))
 }

@@ -1,5 +1,6 @@
 use super::*;
 use crate::simulation::markets::{LATCH_WORD, SEARCHES_WORD};
+mod empty;
 mod fuel;
 mod index;
 
@@ -16,7 +17,6 @@ enum Preparation {
 #[derive(Clone, Copy, PartialEq, Eq)]
 enum PreparationRound {
     First,
-    Repeat,
     Capture,
     Selected,
 }
@@ -63,12 +63,21 @@ fn prepare(
                 .store(scratch, 4 * config.actors + invocation);
         }
         let market = comptime!(parameters.market);
-
+        if comptime!(market == MarketFlag::Consumer && round == PreparationRound::Capture) {
+            searches[(14 * config.actors + id) as usize] = 0;
+        }
         if comptime!(market == MarketFlag::Household && parameters.discovery.indexed()) {
             let cells = config.spatial_side * config.spatial_side;
             let base =
                 3 * (cells + 1 + config.actors) + ceildiv(config.actors, DISCOVERY_BLOCK) + 1;
             id = spatial[(base + invocation) as usize];
+        }
+        if comptime!(market == MarketFlag::Consumer)
+            && (parameters.traded_good() == comptime!(Good::Coal as u32)
+                || parameters.traded_good() == comptime!(Good::Wood as u32))
+        {
+            searches[(config.actors + id) as usize] = 0;
+            searches[(2 * config.actors + id) as usize] = 0;
         }
         let k = kind(actors, id);
         let mut chosen = u32::new(comptime!(i64::from(NO_ACTOR)));
@@ -516,7 +525,7 @@ pub(super) struct Candidate {
 #[cube]
 fn minimum_delivery_days(config: &EconomyConfig, buyer_access: u32, seller: u32, trip: u32) -> u32 {
     let mut days = max(ceildiv(trip, config.shipment_speed), 1);
-    if comptime!(config.railway.enabled == Feature::Enabled) && config.railway.nodes > 0 {
+    if comptime!(config.railway.routes_enabled == Feature::Enabled) && config.railway.nodes > 0 {
         let access = buyer_access + config.railway.access[seller as usize * 2 + 1];
         days = min(days, ceildiv(access, config.shipment_speed) + 1);
     }
@@ -603,6 +612,11 @@ pub(super) fn candidate(
     purchasing_power: Ticks,
 ) -> Candidate {
     let supply = index::Supply::new(state, actors, config, firm, parameters.traded_good());
+    let trip = distance(actors, id, firm);
+    let mut buyer_access = 0u32;
+    if comptime!(config.railway.routes_enabled == Feature::Enabled) && config.railway.nodes > 0 {
+        buyer_access = config.railway.access[id as usize * 2 + 1];
+    }
     candidate_supply(
         state,
         actors,
@@ -611,6 +625,8 @@ pub(super) fn candidate(
         parameters,
         id,
         firm,
+        trip,
+        buyer_access,
         wanted,
         purchasing_power,
         &supply,
@@ -626,6 +642,8 @@ fn candidate_supply(
     parameters: &EconomyParameters,
     id: u32,
     firm: u32,
+    dist: u32,
+    buyer_access: u32,
     wanted: Ticks,
     purchasing_power: Ticks,
     supply: &index::Supply,
@@ -638,7 +656,6 @@ fn candidate_supply(
     let empty_score = ticks(u32::MAX, u32::MAX);
     let mut score = zero();
     let mut amount = zero();
-    let dist = distance(actors, id, firm);
     if dist <= config.search_radius {
         let mut wage = number(state, config, comptime!(Field::Wage as u32), firm);
         let quote = supply.quote;
@@ -652,11 +669,19 @@ fn candidate_supply(
         }
         if inspect {
             eligible = true;
-            let route = match comptime!(market) {
-                MarketFlag::Labor => railway::animal_route(actors, config, id, firm),
-                _ => railway::route(actors, config, id, firm),
+            let days = match comptime!(market) {
+                MarketFlag::Labor => max(ceildiv(dist, config.shipment_speed), 1),
+                _ => railway::delivery_days(
+                    config,
+                    railway::DeliveryRequest {
+                        buyer: id,
+                        seller: firm,
+                        trip: dist,
+                        buyer_access,
+                    },
+                ),
             };
-            score = ticks(quote + route.days * config.delivery_penalty, 0u32);
+            score = ticks(quote + days * config.delivery_penalty, 0u32);
             amount = ticks(1u32, 0u32);
             if comptime!(market == MarketFlag::Labor) {
                 if comptime!(config.bargaining.enabled == Feature::Enabled) {
@@ -782,15 +807,15 @@ fn candidate_supply(
 
 #[cube]
 fn consumer_candidate(
-    actors: &[u32],
     config: &EconomyConfig,
     id: u32,
     firm: u32,
+    dist: u32,
+    buyer_access: u32,
     wanted: Ticks,
     purchasing_power: Ticks,
     supply: &index::Supply,
 ) -> Candidate {
-    let dist = distance(actors, id, firm);
     let mut eligible = false;
     let mut seen_supply = false;
     let mut empty = false;
@@ -799,8 +824,16 @@ fn consumer_candidate(
         seen_supply = supply.offered;
         let quote = supply.quote;
         if !lt(purchasing_power, ticks(max(quote, 1), 0)) {
-            let route = railway::route(actors, config, id, firm);
-            score = ticks(quote + route.days * config.delivery_penalty, 0);
+            let days = railway::delivery_days(
+                config,
+                railway::DeliveryRequest {
+                    buyer: id,
+                    seller: firm,
+                    trip: dist,
+                    buyer_access,
+                },
+            );
+            score = ticks(quote + days * config.delivery_penalty, 0);
             let usable = firm != id && quote > 0 && !equal(wanted, zero());
             eligible = usable && supply.offered;
             empty = usable && supply.producer && !supply.offered;
@@ -819,12 +852,15 @@ fn consumer_candidate(
 #[derive(Clone, Copy, Debug, Hash, PartialEq, Eq)]
 pub(in crate::simulation) enum SearchStage {
     Index,
+    EmptySort,
+    EmptyBounds,
     Prepare,
-    PrepareRepeat,
     PrepareCandidates,
     PrepareSelected,
     Search,
     SearchFuel,
+    SearchHousehold,
+    SearchSpatialFuel,
     Compact,
 }
 
@@ -859,6 +895,7 @@ impl GpuPass<SearchInput> for Search {
     type Output = ();
 
     fn execute(mut input: SearchInput) {
+        input.parameters.refresh(&mut input.config);
         if input.control[LATCH_WORD].load() == 0 {
             match comptime!(input.stage) {
                 SearchStage::Index => index::build(
@@ -869,8 +906,19 @@ impl GpuPass<SearchInput> for Search {
                     &mut input.scratch,
                     &input.parameters,
                 ),
+                SearchStage::EmptySort => empty::sort(
+                    &input.config,
+                    &input.spatial,
+                    &mut input.scratch,
+                    &mut input.searches,
+                ),
+                SearchStage::EmptyBounds => empty::bounds(
+                    &input.actors,
+                    &input.config,
+                    &input.spatial,
+                    &mut input.scratch,
+                ),
                 SearchStage::Prepare
-                | SearchStage::PrepareRepeat
                 | SearchStage::PrepareCandidates
                 | SearchStage::PrepareSelected => prepare(
                     &mut input.state,
@@ -885,7 +933,6 @@ impl GpuPass<SearchInput> for Search {
                     &input.parameters,
                     ABSOLUTE_POS as u32,
                     comptime!(match input.stage {
-                        SearchStage::PrepareRepeat => PreparationRound::Repeat,
                         SearchStage::PrepareCandidates => PreparationRound::Capture,
                         SearchStage::PrepareSelected => PreparationRound::Selected,
                         _ => PreparationRound::First,
@@ -904,17 +951,23 @@ impl GpuPass<SearchInput> for Search {
                     &input.control,
                     &input.parameters,
                 ),
-                SearchStage::SearchFuel => fuel::search(
+                SearchStage::SearchFuel
+                | SearchStage::SearchHousehold
+                | SearchStage::SearchSpatialFuel => fuel::search(
                     &mut input.state,
                     &input.actors,
                     &input.config,
                     &input.spatial,
                     &mut input.proposals,
-                    &input.searches,
+                    &mut input.searches,
                     &input.successes,
                     &input.scratch,
                     &input.control,
                     &input.parameters,
+                    comptime!(match input.stage {
+                        SearchStage::SearchSpatialFuel => fuel::SearchOrder::Spatial,
+                        _ => fuel::SearchOrder::Compact,
+                    }),
                 ),
                 SearchStage::Compact => {
                     if input.control[crate::simulation::flags::FAULT_WORD].load() == 0 {
@@ -927,6 +980,31 @@ impl GpuPass<SearchInput> for Search {
                             &input.parameters,
                             ABSOLUTE_POS as u32,
                         );
+                        if comptime!(matches!(
+                            input.parameters.market,
+                            MarketFlag::Consumer | MarketFlag::Household
+                        )) {
+                            let job = ABSOLUTE_POS as u32;
+                            if job < input.control[SEARCHES_WORD].load() {
+                                let actor = input.searches[job as usize];
+                                let peer = input.proposals[actor as usize * ProposalLayout::WORDS
+                                    + ProposalLayout::ACTOR];
+                                if peer != NO_ACTOR {
+                                    super::clearing::buyer_settlement(
+                                        &mut input.state,
+                                        &input.actors,
+                                        &input.config,
+                                        &mut input.proposals,
+                                        &input.control,
+                                        &input.parameters,
+                                        actor,
+                                        peer,
+                                        comptime!(super::scheduler::Posting::CheckActor),
+                                    )
+                                    .store(&mut input.scratch, 4 * input.parameters.count + actor);
+                                }
+                            }
+                        }
                     }
                 }
             }
@@ -959,7 +1037,8 @@ fn search(
             searches[(4 * config.actors + id) as usize],
         );
         let mut buyer_access = 0u32;
-        if comptime!(config.railway.enabled == Feature::Enabled) && config.railway.nodes > 0 {
+        if comptime!(config.railway.routes_enabled == Feature::Enabled) && config.railway.nodes > 0
+        {
             buyer_access = config.railway.access[id as usize * 2 + 1];
         }
         let px = actors[ActorLayout::X * (actors.len() / ActorLayout::WORDS) + id as usize];
@@ -1019,6 +1098,7 @@ fn search(
                             block,
                             px,
                             py,
+                            buyer_access,
                             purchasing_power,
                             chosen,
                             empty_score,
@@ -1107,13 +1187,13 @@ fn search(
                                     parameters.traded_good(),
                                 ),
                             };
+                            let trip = distance(actors, id, firm);
                             let mut relevant = true;
                             if comptime!(matches!(
                                 parameters.market,
                                 MarketFlag::Household | MarketFlag::Consumer
                             )) {
                                 let quote = supply.quote;
-                                let trip = distance(actors, id, firm);
                                 let days = minimum_delivery_days(config, buyer_access, firm, trip);
                                 let lower_score =
                                     plus(ticks(quote, 0), times32(days, config.delivery_penalty))
@@ -1126,10 +1206,11 @@ fn search(
                             if relevant {
                                 let offer = match comptime!(parameters.market) {
                                     MarketFlag::Consumer => consumer_candidate(
-                                        actors,
                                         config,
                                         id,
                                         firm,
+                                        trip,
+                                        buyer_access,
                                         wanted,
                                         purchasing_power,
                                         &supply,
@@ -1142,6 +1223,8 @@ fn search(
                                         parameters,
                                         id,
                                         firm,
+                                        trip,
+                                        buyer_access,
                                         wanted,
                                         purchasing_power,
                                         &supply,
