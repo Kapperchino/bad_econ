@@ -178,9 +178,11 @@ impl Device {
         match words * WORD_BYTES {
             bytes if bytes >= STATE_BUFFER_BYTES => {
                 let granularity = (bytes / 16).next_power_of_two().max(STATE_BUFFER_BYTES);
+                let memory = &self.client.properties().memory;
+                let limit = memory.max_page_size / memory.alignment * memory.alignment;
                 let capacity = bytes
                     .next_multiple_of(granularity)
-                    .min(self.client.properties().memory.max_page_size as usize)
+                    .min(limit as usize)
                     .max(bytes);
                 let handle = self
                     .client
