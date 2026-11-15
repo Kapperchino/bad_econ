@@ -32,6 +32,7 @@ enum SearchExecution {
     Prepare,
     Shared,
     Plane,
+    Cached,
     ScalarFuel,
     ScalarHousehold,
     SpatialFuel,
@@ -254,7 +255,13 @@ impl SearchProbe {
     }
 
     fn outcome(&self, execution: SearchExecution) -> Result<SearchOutcome> {
-        self.outcome_with_workgroup(execution, 32)
+        self.outcome_with_workgroup(
+            execution,
+            match execution {
+                SearchExecution::Cached => 256,
+                _ => 32,
+            },
+        )
     }
 
     fn outcome_with_workgroup(
@@ -324,8 +331,8 @@ impl SearchProbe {
             ],
         );
         if matches!(
-            parameters.market,
-            MarketFlag::Consumer | MarketFlag::Household
+            (parameters.market, execution),
+            (MarketFlag::Consumer | MarketFlag::Household, _) | (_, SearchExecution::Cached)
         ) {
             MarketSearch::launch(
                 device,
@@ -417,6 +424,7 @@ impl SearchProbe {
                         SearchExecution::ScalarFuel => SearchStage::SearchFuel,
                         SearchExecution::ScalarHousehold => SearchStage::SearchHousehold,
                         SearchExecution::SpatialFuel => SearchStage::SearchSpatialFuel,
+                        SearchExecution::Cached => SearchStage::SearchIndexed,
                         _ => SearchStage::Search,
                     },
                 },
@@ -433,6 +441,32 @@ impl SearchProbe {
             faults: device.read(&simulation.control)?[crate::simulation::flags::FAULT_WORD],
         })
     }
+}
+
+#[test]
+fn cached_bread_suppliers_preserve_rotations_stock_and_affordability_on_gpu() -> Result<()> {
+    for case in [
+        SupplyCase::Capped,
+        SupplyCase::Sparse,
+        SupplyCase::Empty,
+        SupplyCase::Unaffordable,
+        SupplyCase::MixedAffordability,
+        SupplyCase::Retail,
+        SupplyCase::Free,
+        SupplyCase::HighCash,
+        SupplyCase::DistantStock,
+        SupplyCase::DistantEmpty,
+    ] {
+        for day in [0, 1, 19] {
+            let probe = SearchProbe::new(case, day, Market::Input(Good::Bread))?;
+            assert_eq!(
+                probe.outcome(SearchExecution::Cached)?,
+                probe.outcome(SearchExecution::Plane)?,
+                "{case:?} day {day}",
+            );
+        }
+    }
+    Ok(())
 }
 
 #[test]

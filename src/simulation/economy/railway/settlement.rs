@@ -892,6 +892,7 @@ impl GpuPass<Input> for SettleFreight {
     type Output = ();
 
     fn execute(mut input: Input) {
+        input.parameters.refresh(&mut input.config);
         let invocation = ABSOLUTE_POS as u32;
         let id = resource(&input, invocation);
         let actors = input.config.actors;

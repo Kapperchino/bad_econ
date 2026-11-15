@@ -6,6 +6,7 @@ use super::{
 use anyhow::{Context, Result};
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
+use std::sync::Arc;
 
 pub const HOUSEHOLDS_PER_BUILDING: usize = 32;
 pub const MAINTENANCE_DAYS: u32 = 30;
@@ -18,16 +19,18 @@ pub struct RentalBusiness {
     pub income: u64,
 }
 
+#[derive(Clone)]
 pub struct RentalAccount {
     pub landlord: usize,
     pub tenants: Vec<usize>,
 }
 
+#[derive(Clone)]
 pub struct RentalRegistry {
     pub accounts: Vec<RentalAccount>,
     assignments: Vec<Option<usize>>,
     locations: Vec<RentalLocation>,
-    regions: BTreeMap<usize, RentalRegion>,
+    regions: Arc<BTreeMap<usize, RentalRegion>>,
 }
 
 pub(crate) enum RentalRefresh {
@@ -35,7 +38,7 @@ pub(crate) enum RentalRefresh {
     Changed,
 }
 
-#[derive(PartialEq, Eq)]
+#[derive(Clone, PartialEq, Eq)]
 struct RentalLocation {
     landlord: usize,
     position: Position,
@@ -211,14 +214,42 @@ impl RentalRegistry {
     }
 
     pub(crate) fn updated(&self, scenario: &Scenario, previous: &ActorRows, state: &State) -> Self {
-        Self::build(
-            scenario,
-            state,
-            Some(RentalHistory {
-                registry: self,
-                actors: previous,
-            }),
-        )
+        let housing = state
+            .actors
+            .iter_from(previous.len())
+            .any(|actor| actor.kind == Good::Housing as u32);
+        match (state.actors.len() >= previous.len(), housing) {
+            (true, false) => {
+                let mut current = self.clone();
+                for (offset, actor) in state.actors.iter_from(previous.len()).enumerate() {
+                    let index = previous.len() + offset;
+                    let assignment = match current.regions.get(&region(scenario, &actor)) {
+                        Some(sites) => {
+                            let household = match actor.kind {
+                                0 => index,
+                                _ => actor.owner as usize,
+                            };
+                            Some(sites.account(actor.position, household))
+                        }
+                        None => None,
+                    };
+                    if let Some(account) = assignment {
+                        current.accounts[account].tenants.push(index);
+                    }
+                    current.assignments.push(assignment);
+                }
+                current.refresh(scenario, state, previous.rental_changes(&state.actors));
+                current
+            }
+            _ => Self::build(
+                scenario,
+                state,
+                Some(RentalHistory {
+                    registry: self,
+                    actors: previous,
+                }),
+            ),
+        }
     }
 
     pub(crate) fn refresh(
@@ -347,7 +378,7 @@ impl RentalRegistry {
             accounts,
             assignments,
             locations,
-            regions: buildings,
+            regions: Arc::new(buildings),
         }
     }
 

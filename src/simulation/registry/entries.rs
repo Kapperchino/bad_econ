@@ -3,6 +3,11 @@ use crate::domain::Good;
 use crate::simulation::{decode, encode, enterprise, layout::TICK_WORDS, words::Ticks};
 use std::collections::BTreeSet;
 
+pub(in crate::simulation) fn state_capacity(count: usize) -> usize {
+    let growth = (count / 64).next_power_of_two().clamp(64, 16_384);
+    (count + growth).next_multiple_of(growth)
+}
+
 pub(in crate::simulation) struct EntryRequests {
     pub transitions: Vec<PendingRecord>,
     entries: Vec<PendingRecord>,
@@ -228,8 +233,12 @@ impl EntryBatch {
         let count = self.metadata.actors.len();
         match count <= previous {
             true => previous,
-            false => count.next_multiple_of((count / 64).next_power_of_two().clamp(64, 16_384)),
+            false => state_capacity(count),
         }
+    }
+
+    pub fn indices(&self) -> &CubeTensor {
+        &self.indices
     }
 
     pub fn grow(&self, device: &Device, previous: &CubeTensor, fields: usize) -> CubeTensor {

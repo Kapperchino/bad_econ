@@ -34,10 +34,42 @@ enum Recording {
 
 #[derive(Clone, Copy, PartialEq, Eq)]
 pub(super) struct MarketKey {
-    pub market: crate::domain::Market,
+    pub market: MarketProgram,
     pub phase: crate::domain::Phase,
     pub preparation: Preparation,
     pub routing: super::economy::railway::RouteAvailability,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(super) enum MarketProgram {
+    Labor,
+    GrainInput,
+    BreadInput,
+    Input,
+    BreadConsumer,
+    Fuel,
+    Consumer,
+    Household,
+    Payroll,
+    Distribution,
+}
+
+impl From<crate::domain::Market> for MarketProgram {
+    fn from(market: crate::domain::Market) -> Self {
+        use crate::domain::{Good, Market};
+        match market {
+            Market::Labor => Self::Labor,
+            Market::Input(Good::Grain) => Self::GrainInput,
+            Market::Input(Good::Bread) => Self::BreadInput,
+            Market::Input(_) => Self::Input,
+            Market::Consumer(Good::Bread) => Self::BreadConsumer,
+            Market::Consumer(Good::Coal | Good::Wood) => Self::Fuel,
+            Market::Consumer(_) => Self::Consumer,
+            Market::Household => Self::Household,
+            Market::Payroll => Self::Payroll,
+            Market::Distribution => Self::Distribution,
+        }
+    }
 }
 
 #[derive(Clone, Copy, PartialEq, Eq)]
@@ -179,7 +211,7 @@ mod tests {
     use super::*;
     use crate::domain::{Experiment, Field, Phase, Scenario};
     use crate::simulation::{
-        FreightActivity, Simulation, Trace, economy::sorting::MarketSort, encode,
+        FreightActivity, Simulation, Trace, economy::sorting::MarketSort, encode, tensor,
     };
     use cubecl::prelude::*;
 
@@ -199,7 +231,7 @@ mod tests {
         let counter = device.tensor(&[0]);
         let mut graphs = MarketGraphs::default();
         let key = MarketKey {
-            market: crate::domain::Market::Household,
+            market: MarketProgram::Household,
             phase: Phase::ProvisionPurchase,
             preparation: Preparation::First,
             routing: crate::simulation::economy::railway::RouteAvailability::Dormant,
@@ -259,7 +291,11 @@ mod tests {
                         }
                         simulation.device.write(
                             &simulation.state,
-                            bytemuck::cast_slice(&encode(&state.values)),
+                            bytemuck::cast_slice(&encode(&tensor::state_values(
+                                &state.values,
+                                state.actors.len(),
+                                simulation.config.state_stride as usize,
+                            ))),
                         );
                     }
                 }
@@ -272,7 +308,7 @@ mod tests {
                     ] {
                         assert!(actual.market_graphs.entries.iter().any(|entry| {
                             entry.key.routing == routing
-                                && matches!(entry.key.market, crate::domain::Market::Household)
+                                && matches!(entry.key.market, MarketProgram::Household)
                         }));
                     }
                 }

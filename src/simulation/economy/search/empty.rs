@@ -122,11 +122,11 @@ pub(super) fn sort(
             let other_key = scratch[(5 * config.actors + other) as usize];
             rank += u32::cast_from(other_key < key || other_key == key && other < member);
             stocked_rank += u32::cast_from(
-                other < member && scratch[(3 * config.actors + other) as usize] & 1 != 0,
+                other < member && index::Supply::load(&*scratch, config, other).offered,
             );
         }
         scratch[(7 * config.actors + rank) as usize] = member;
-        if scratch[(3 * config.actors + member) as usize] & 1 != 0 {
+        if index::Supply::load(&*scratch, config, member).offered {
             searches[(17 * config.actors + stocked_rank) as usize] = member;
         }
     }

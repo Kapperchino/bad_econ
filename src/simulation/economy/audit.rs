@@ -89,6 +89,10 @@ pub(in crate::simulation) enum RingValidation<'a> {
     All,
     Unchanged,
     Selected(&'a CubeTensor),
+    Changed {
+        entries: &'a CubeTensor,
+        settlements: &'a CubeTensor,
+    },
 }
 
 #[derive(Debug)]
@@ -336,7 +340,9 @@ impl AuditBuffers {
                 count.div_ceil(device.workgroup as usize),
                 match input.rings {
                     RingValidation::All => Good::COUNT + 1,
-                    RingValidation::Unchanged | RingValidation::Selected(_) => 1,
+                    RingValidation::Unchanged
+                    | RingValidation::Selected(_)
+                    | RingValidation::Changed { .. } => 1,
                 },
             ),
             CubeDim::new_1d(device.workgroup),
@@ -347,7 +353,7 @@ impl AuditBuffers {
                 control: argument(input.control),
             },
         );
-        if let RingValidation::Selected(indices) = input.rings {
+        let selected = |indices: &CubeTensor| {
             SelectedValidation::launch(
                 device,
                 dispatch(
@@ -366,6 +372,17 @@ impl AuditBuffers {
                     control: argument(input.control),
                 },
             );
+        };
+        match input.rings {
+            RingValidation::Selected(indices) => selected(indices),
+            RingValidation::Changed {
+                entries,
+                settlements,
+            } => {
+                selected(entries);
+                selected(settlements);
+            }
+            _ => (),
         }
         for set in &self.sets {
             MetricSummary::launch(
@@ -903,6 +920,7 @@ mod tests {
         let indices = simulation
             .device
             .tensor(&(count as u32 - 65..count as u32).collect::<Vec<_>>());
+        let entries = simulation.device.tensor(&[0]);
         for case in [
             TransitCase::Unchanged,
             TransitCase::Mismatch,
@@ -953,8 +971,21 @@ mod tests {
             );
             assert_eq!(control, simulation.device.read(&simulation.control)?);
             assert_eq!(FaultFlags::read(&control)?, expected);
-            if let (Ok(sparse), Ok(full)) = (sparse, full) {
+            let combined = simulation.observe_rings(RingValidation::Changed {
+                entries: &entries,
+                settlements: &indices,
+            });
+            assert_eq!(combined.is_ok(), full.is_ok());
+            assert_eq!(control, simulation.device.read(&simulation.control)?);
+            assert_eq!(
+                summary,
+                simulation
+                    .device
+                    .read_range(&simulation.summary, 0, SummaryLayout::WORDS)?,
+            );
+            if let (Ok(sparse), Ok(full), Ok(combined)) = (sparse, full, combined) {
                 assert_eq!(sparse, full);
+                assert_eq!(combined, full);
                 assert_eq!(simulation.observe_rings(RingValidation::Unchanged)?, full);
             }
         }

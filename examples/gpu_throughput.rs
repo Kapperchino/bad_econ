@@ -4,11 +4,15 @@ use bad_econ::{
     simulation::{Device, Simulation},
 };
 use clap::Parser;
+use mimalloc::MiMalloc;
 use std::{
     num::NonZeroU32,
     path::PathBuf,
     time::{Duration, Instant},
 };
+
+#[global_allocator]
+static GLOBAL: MiMalloc = MiMalloc;
 
 #[derive(Parser)]
 struct Arguments {

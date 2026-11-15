@@ -245,6 +245,7 @@ impl GpuPass<LaborInput> for SettleLabor {
     type Output = ();
 
     fn execute(mut input: LaborInput) {
+        input.parameters.refresh(&mut input.config);
         settle_labor(
             &mut input.state,
             &input.config,

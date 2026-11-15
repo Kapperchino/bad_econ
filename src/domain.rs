@@ -1672,6 +1672,29 @@ impl ActorRows {
     pub(crate) fn identities(&self) -> &[u64] {
         &self.identity
     }
+    pub(crate) fn rental_prefix_matches(&self, current: &Self) -> bool {
+        [
+            current.x.get(..self.len()) == Some(self.x.as_slice()),
+            current.y.get(..self.len()) == Some(self.y.as_slice()),
+            current.kind.get(..self.len()) == Some(self.kind.as_slice()),
+            current.owner.get(..self.len()) == Some(self.owner.as_slice()),
+        ]
+        .into_iter()
+        .all(std::convert::identity)
+    }
+    pub(crate) fn rental_changes(&self, current: &Self) -> Vec<usize> {
+        match self.rental_prefix_matches(current) {
+            true => Vec::new(),
+            false => (0..self.len().min(current.len()))
+                .filter(|&index| {
+                    self.x[index] != current.x[index]
+                        || self.y[index] != current.y[index]
+                        || self.kind[index] != current.kind[index]
+                        || self.owner[index] != current.owner[index]
+                })
+                .collect(),
+        }
+    }
     #[cfg(feature = "compute")]
     pub(crate) fn firms(&self) -> usize {
         self.firms

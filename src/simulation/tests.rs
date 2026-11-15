@@ -1,6 +1,25 @@
 use super::*;
 pub(super) use crate::tests::support::device;
 
+#[test]
+fn reserved_state_capacity_preserves_checkpoints_and_fault_rollback_on_gpu() -> Result<()> {
+    let scenario = Scenario::industrial(4097, 42, Experiment::Baseline)?;
+    let initial = scenario.initial()?;
+    let mut simulation = Simulation::new(scenario, device(64)?)?;
+    assert!(simulation.config.state_stride as usize > initial.actors.len());
+    let initialized = simulation.download()?;
+    assert_eq!(initialized.values, initial.values);
+    assert_eq!(simulation.checkpoint()?.restore()?.state, initialized);
+    simulation.advance()?;
+    let state = simulation.download()?;
+    let checkpoint = simulation.checkpoint()?;
+    simulation.device.memory_budget = MemoryBudget::Reported { available_bytes: 2 };
+    assert!(simulation.advance().is_err());
+    assert_eq!(simulation.download()?, state);
+    assert_eq!(simulation.checkpoint()?, checkpoint);
+    Ok(())
+}
+
 fn compare_market_execution(scenario: Scenario, days: usize) -> Result<()> {
     let initial = scenario.initial()?;
     compare_market_state(scenario, initial, days)
@@ -389,7 +408,12 @@ fn gpu_parent_estates_preserve_inheritance_without_full_state_readback() -> Resu
             &gpu.migrations,
             &pending.records,
         )? {
-            Some(growth) => gpu.commit_entries(&growth.requests, growth.plan, &pending.records)?,
+            Some(growth) => gpu.commit_entries(
+                &growth.requests,
+                growth.plan,
+                &pending.records,
+                RegistryAudit::Full,
+            )?,
             None => {
                 let plan = registry::RegistryPlan::new(
                     &scenario,
@@ -503,7 +527,12 @@ fn gpu_household_growth_matches_rebuilds_and_keeps_unrelated_estates_sparse() ->
         &pending.records,
     )?
     .context("household growth should use the GPU")?;
-    gpu.commit_entries(&growth.requests, growth.plan, &pending.records)?;
+    gpu.commit_entries(
+        &growth.requests,
+        growth.plan,
+        &pending.records,
+        RegistryAudit::Full,
+    )?;
     let mut expected = reference.download()?;
     expected.people = reference
         .demography
@@ -631,7 +660,7 @@ fn gpu_firm_growth_matches_full_rebuild_with_births_and_migration() -> Result<()
             )?
             .expect("supported transitions");
             assert!(
-                gpu.commit_entries(&entries, plan, &pending.records)
+                gpu.commit_entries(&entries, plan, &pending.records, RegistryAudit::Full)
                     .is_err()
             );
             gpu.device.memory_budget = budget;
@@ -647,7 +676,7 @@ fn gpu_firm_growth_matches_full_rebuild_with_births_and_migration() -> Result<()
         let previous_state = gpu.state.clone();
         let previous_audited = gpu.audited.clone();
         let previous_stride = gpu.config.state_stride;
-        gpu.commit_entries(&entries, plan, &pending.records)
+        gpu.commit_entries(&entries, plan, &pending.records, RegistryAudit::Full)
             .context("GPU growth")?;
         if gpu.actors().len() <= previous_stride as usize {
             assert!(market_graphs::same_buffer(&previous_state, &gpu.state));
@@ -1250,7 +1279,11 @@ fn partitioned_audits_match_original_tiles_extrema_and_overflow_on_gpu() -> Resu
             }
             simulation.device.write(
                 &simulation.state,
-                bytemuck::cast_slice(&encode(&initial.values)),
+                bytemuck::cast_slice(&encode(&tensor::state_values(
+                    &initial.values,
+                    initial.actors.len(),
+                    simulation.config.state_stride as usize,
+                ))),
             );
             let poison = match amounts {
                 Amounts::Wide => u32::MAX,

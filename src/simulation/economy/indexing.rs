@@ -23,6 +23,7 @@ impl GpuPass<IndexInput> for StoreOffsets {
     type Output = IndexInput;
 
     fn execute(mut input: IndexInput) -> IndexInput {
+        input.parameters.refresh(&mut input.config);
         if input.control[LATCH_WORD].load() == 0 {
             index_offsets(
                 &input.config,

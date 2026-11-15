@@ -178,6 +178,7 @@ impl GpuPass<QuantityInput> for SettleQuantities {
     type Output = ();
 
     fn execute(mut input: QuantityInput) {
+        input.parameters.refresh(&mut input.config);
         let job = CUBE_POS as u32;
         if job < input.control[RANGE_SLOTS_WORD].load() && input.control[LATCH_WORD].load() == 0 {
             let count = input.parameters.count;

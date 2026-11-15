@@ -229,7 +229,13 @@ impl Simulation {
         let snapshot = ObservationSnapshot::default();
         let demography = demography::DemographyRuntime::new(&device, &scenario, &initial)?;
 
-        let config = configuration::Configuration::new(&device, &scenario, &initial);
+        let mut config = configuration::Configuration::new(&device, &scenario, &initial);
+        let count = initial.actors.len();
+        let stride = match (count, scenario.config().finance.as_ref()) {
+            (4096.., None) => registry::entries::state_capacity(count),
+            _ => count,
+        };
+        config.state_stride = stride as u32;
         let actor_layouts = initial
             .actors
             .iter()
@@ -237,12 +243,17 @@ impl Simulation {
             .collect::<ActorMetadataRows>();
         let actors = device.tensor(&actor_layouts.words());
         let spatial = device.tensor(&SpatialIndex::new(&scenario, &initial).words);
-        #[cfg(target_endian = "little")]
-        let state = device.tensor(bytemuck::cast_slice(&initial.values));
-        #[cfg(target_endian = "big")]
-        let state = device.tensor(bytemuck::cast_slice(&encode(&initial.values)));
-        let audited = device.state_buffer(initial.values.len() * TICK_WORDS);
-        let snapshot_copy = tensor::SnapshotCopy::new(&device, initial.values.len() * TICK_WORDS);
+        let state = {
+            let values = tensor::state_values(&initial.values, count, stride);
+            #[cfg(target_endian = "little")]
+            let state = device.tensor(bytemuck::cast_slice(&values));
+            #[cfg(target_endian = "big")]
+            let state = device.tensor(bytemuck::cast_slice(&encode(&values)));
+            state
+        };
+        let state_words = state.meta.num_elements();
+        let audited = device.state_buffer(state_words);
+        let snapshot_copy = tensor::SnapshotCopy::new(&device, state_words);
         let research = scenario
             .config()
             .research
@@ -253,6 +264,8 @@ impl Simulation {
                 ),
                 None => research::ResearchRuntime::new(&device, config, &scenario, &initial),
             })
+            .transpose()?
+            .map(|research| research.with_actors(&initial.actors, stride as u32))
             .transpose()?;
         let finance = scenario
             .config()
@@ -362,6 +375,7 @@ impl Simulation {
         };
         simulation.snapshot = simulation.observe()?;
         simulation.copy_audited(CopyDirection::Save)?;
+        simulation.device.client.memory_cleanup()?;
         simulation.device.reclaim_memory(0)?;
         match simulation.memory_usage().bytes_reserved <= simulation.device.memory_budget.bytes() {
             true => Ok(simulation),
@@ -832,7 +846,7 @@ impl Simulation {
             (0, _, _) => (),
             (_, Some(plan), _) => self.commit_registry_audited(plan, records, audit)?,
             (_, None, Some(growth)) => {
-                self.commit_entries(&growth.requests, growth.plan, records)?
+                self.commit_entries(&growth.requests, growth.plan, records, audit)?
             }
             (_, None, None) => {
                 let mut state = self.download()?;
@@ -887,8 +901,8 @@ impl Simulation {
         entries: &registry::entries::EntryRequests,
         mut plan: registry::RegistryPlan,
         births: &[PendingRecord],
+        registry_audit: RegistryAudit,
     ) -> Result<()> {
-        self.market_graphs = market_graphs::MarketGraphs::default();
         let profile_device = self.device.clone();
         let profile_day = self.day;
         let profile =
@@ -906,6 +920,8 @@ impl Simulation {
                 );
             }
         };
+        self.market_graphs = market_graphs::MarketGraphs::default();
+        checkpoint("ReleaseGraphs");
         let newborns = births.iter().filter(|record| record.birth > 0).count();
         let next_identity = self
             .metadata
@@ -921,6 +937,7 @@ impl Simulation {
             next_identity,
         )?;
         checkpoint("EntryBatch");
+        let ring_indices = batch.indices().clone();
         let count = batch.metadata.actors.len();
         let stride = batch.stride(self.config.state_stride as usize);
         let state_bytes = match stride == self.config.state_stride as usize {
@@ -1130,7 +1147,7 @@ impl Simulation {
             matching_round: self.matching_round,
         };
         checkpoint("Buffers");
-        match settlement {
+        match &settlement {
             Some(batch) => batch.apply(&next.device, &next.state, stride),
             None => registry::apply(
                 &next.device,
@@ -1143,7 +1160,20 @@ impl Simulation {
             ),
         }
         checkpoint("Apply");
-        next.snapshot = next.observe()?;
+        let rings = match (registry_audit, &settlement) {
+            #[cfg(test)]
+            (RegistryAudit::Full, _) => economy::audit::RingValidation::All,
+            (RegistryAudit::Validated, None) => {
+                economy::audit::RingValidation::Selected(&ring_indices)
+            }
+            (RegistryAudit::Validated, Some(settlement)) => {
+                economy::audit::RingValidation::Changed {
+                    entries: &ring_indices,
+                    settlements: settlement.indices(),
+                }
+            }
+        };
+        next.snapshot = next.observe_rings(rings)?;
         checkpoint("Observe");
         next.device.reclaim_memory(0)?;
         match next.memory_usage().bytes_reserved <= next.device.memory_budget.bytes() {
@@ -1152,6 +1182,7 @@ impl Simulation {
                 "registry allocation exceeds the device memory budget"
             ))?,
         }
+        checkpoint("RegistryCommit");
         Ok(())
     }
     #[cfg(test)]
@@ -1745,19 +1776,13 @@ impl Simulation {
                     parameters: parameters.launch(),
                 },
             );
-            if let Market::Input(Good::Bread) = market {
-                launch(
-                    EconomyStage::IndexPrices,
-                    count.div_ceil(DISCOVERY_BLOCK as usize) * self.device.workgroup as usize,
-                    &parameters,
-                );
-            }
         }
         let search = |stage| {
             let started = Instant::now();
             let window = device_profile.start(&self.device);
             let workgroup = match stage {
                 economy::search::SearchStage::Search => 32,
+                economy::search::SearchStage::SearchIndexed => 256,
                 _ => self.device.workgroup,
             };
             let dispatch = match stage {
@@ -1772,7 +1797,8 @@ impl Simulation {
                 economy::search::SearchStage::PrepareSelected => {
                     markets::dispatch(&self.searches.dispatches, markets::PREPARATION_DISPATCH)
                 }
-                economy::search::SearchStage::Search => {
+                economy::search::SearchStage::Search
+                | economy::search::SearchStage::SearchIndexed => {
                     markets::dispatch(&self.searches.dispatches, markets::SEARCH_DISPATCH)
                 }
                 economy::search::SearchStage::SearchFuel
@@ -1818,7 +1844,10 @@ impl Simulation {
                 );
             }
         };
-        if matches!(market, Market::Consumer(_) | Market::Household) {
+        if matches!(
+            market,
+            Market::Input(Good::Bread) | Market::Consumer(_) | Market::Household
+        ) {
             search(economy::search::SearchStage::Index);
         }
         if let Market::Consumer(_) = market {
@@ -1829,12 +1858,18 @@ impl Simulation {
             {
                 let cells = self.config.spatial_side * self.config.spatial_side;
                 let suppliers = self.device.read_range(&self.spatial, cells as usize, 1)?[0];
-                let flags = self
+                let records = self
                     .device
-                    .read_range(&self.scratch, 3 * count, suppliers as usize)?;
-                self.readback_bytes += (flags.len() + 1) as u64 * WORD_BYTES as u64;
-                let stocked = flags.iter().filter(|&&flags| flags & 1 != 0).count();
-                let empty = flags.iter().filter(|&&flags| flags & 3 == 2).count();
+                    .read_range(&self.scratch, 0, suppliers as usize * 4)?;
+                self.readback_bytes += (records.len() + 1) as u64 * WORD_BYTES as u64;
+                let stocked = records
+                    .chunks_exact(4)
+                    .filter(|record| record[3] & 1 != 0)
+                    .count();
+                let empty = records
+                    .chunks_exact(4)
+                    .filter(|record| record[3] & 3 == 2)
+                    .count();
                 eprintln!(
                     "SUPPLY {market:?} {} suppliers={suppliers} stocked={stocked} empty={empty}",
                     self.matching_round,
@@ -1870,6 +1905,7 @@ impl Simulation {
                     }
                     Market::Household => economy::search::SearchStage::SearchHousehold,
                     Market::Consumer(_) => economy::search::SearchStage::SearchFuel,
+                    Market::Input(Good::Bread) => economy::search::SearchStage::SearchIndexed,
                     _ => economy::search::SearchStage::Search,
                 });
                 parallel::scan(
@@ -2064,7 +2100,7 @@ impl Simulation {
             parameters::MarketClock::Device => {
                 let buffers = self.market_graph_buffers();
                 let key = market_graphs::MarketKey {
-                    market,
+                    market: market.into(),
                     phase,
                     routing: self.config.railway.route_availability(),
                     preparation: match self.matching_round {
@@ -2147,6 +2183,22 @@ impl Simulation {
                 }
             }
             freight(self, Stage::Accounts);
+        }
+        if let (
+            Trace::Discard,
+            FreightActivity::Dormant,
+            0,
+            Market::Input(Good::Housing | Good::Railway),
+        ) = (trace, self.freight_activity, self.matching_round, market)
+        {
+            let searches = self
+                .device
+                .read_range(&self.control, markets::SEARCHES_WORD, 1)?[0];
+            self.readback_bytes += WORD_BYTES as u64;
+            matching = match searches {
+                0 => MatchingState::Exhausted,
+                _ => MatchingState::Searching,
+            };
         }
         parameters.status_start = 4 * count as u32;
         if let (Market::Input(_) | Market::Consumer(_) | Market::Household, true) =

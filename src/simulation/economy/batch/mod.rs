@@ -172,6 +172,7 @@ impl GpuPass<SettlementInput> for SettleUnits {
     type Output = ();
 
     fn execute(mut input: SettlementInput) {
+        input.parameters.refresh(&mut input.config);
         settle_units(
             &mut input.state,
             &input.actors,

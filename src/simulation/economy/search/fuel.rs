@@ -107,7 +107,15 @@ pub(super) fn search(
                         cursor = empty::stock_cursor(config, &*searches, stocked, cursor);
                     }
                     let limit = begin + supplier_samples(parameters, length);
-                    let stride = supplier_stride(actors, parameters, id, length);
+                    let mut stride = 1u32;
+                    if comptime!(parameters.market == MarketFlag::Household)
+                        && length > HOUSEHOLD_SEARCH_SAMPLES
+                    {
+                        let offset = (id + parameters.settlement_rotation) % (length / 2);
+                        stride = searches[(index::HOUSEHOLD_STRIDE_FIELD * config.actors
+                            + begin
+                            + offset) as usize];
+                    }
                     let mut j = begin;
                     let nearest = max(px, x * radius) - min(px, (x + 1) * radius - 1)
                         + max(py, y * radius)
@@ -181,7 +189,21 @@ pub(super) fn search(
                                 };
                                 let firm = spatial[(side * side + 1 + member) as usize];
                                 let supply = index::Supply::load(scratch, config, member);
-                                let distance = distance(actors, id, firm);
+                                let distance =
+                                    if comptime!(parameters.market == MarketFlag::Household) {
+                                        let seller_x = searches[(index::HOUSEHOLD_X_FIELD
+                                            * config.actors
+                                            + member)
+                                            as usize];
+                                        let seller_y = searches[(index::HOUSEHOLD_Y_FIELD
+                                            * config.actors
+                                            + member)
+                                            as usize];
+                                        max(px, seller_x) - min(px, seller_x) + max(py, seller_y)
+                                            - min(py, seller_y)
+                                    } else {
+                                        distance(actors, id, firm)
+                                    };
                                 if comptime!(parameters.market == MarketFlag::Household) {
                                     seen_supply =
                                         seen_supply || (distance <= radius && supply.offered);

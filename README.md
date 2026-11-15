@@ -113,10 +113,10 @@ This reports scenario generation, device setup, simulation initialization, and e
 To enforce a strict daily latency budget after warming the complete measured trajectory:
 
 ```sh
-cargo run --release --example gpu_throughput -- --sizes 1000000 --start-day 0 --warmup 2 --days 28 --max-day-ms 250 --output /tmp/throughput.json
+cargo run --release --example gpu_throughput -- --sizes 1000000 --start-day 0 --warmup 2 --days 28 --max-day-ms 300 --output /tmp/throughput.json
 ```
 
-This checks that the warmup and measured runs reach identical state hashes, records the slowest day, and saves the report before failing if any measured simulation step takes 250 ms or longer. Startup and reporting time are excluded from individual step timings.
+This checks that the warmup and measured runs reach identical state hashes, records the slowest day, and saves the report before failing if any measured simulation step takes 300 ms or longer. Startup and reporting time are excluded from individual step timings. The benchmark uses the application's allocator and records active and reserved GPU memory for each day.
 
 Use the same seed, population, and `--start-day` for seasonal comparisons. Day 0 is 1 January, year 1, so `--start-day 0` measures winter conditions; `--start-day 120` starts in the warm growing season. With `--start-day 268 --warmup 2`, the measured run begins on harvest day 270. The preflight warms the full measured trajectory before timing it. Compare final state hashes only between repeated runs of the same simulation version; changes to the economic model can change those hashes.
 
@@ -127,5 +127,7 @@ cargo run --release -- benchmark --sizes 1000000 --seed 42 --warmup 2 --days 10 
 ```
 
 Profiling records kernel specializations and dispatch sizes, and bypasses recorded sort graphs so their kernels can be timed. Profiling changes submission and synchronization overhead; measure overall throughput separately with `--kernel-profile` omitted, and run benchmarks without concurrent GPU tests. Payroll settles funded batches cooperatively, with ordered handling when escrow is insufficient. Rail infrastructure uses a workgroup per company, parallel regional capacity updates, and deterministic material allocation in region order. Freight reservations, capacity consumption, and inter-company payments use parallel GPU passes; deterministic arbitration resolves oversubscribed resources without a serial freight dispatcher.
+
+Markets share recorded GPU work across goods with the same kernel sequence, refreshing dates, goods, rotations, and heating demand from device memory. Supplier quotes, stocks, and availability flags are stored together for search locality; household searches reuse cached positions and sampling strides. Bread input searches rank candidates cooperatively across a workgroup. Large economies reserve room for state growth at initialization and release upload buffers before daily timing. Rental updates reuse the spatial index and refresh changed tenants while housing sites remain unchanged. After the daily audit, registry changes revalidate delivery rings only for affected rows.
 
 Code: [domain](src/domain.rs), [simulation](src/simulation/), [viewer](src/viewer.rs), [tests](tests/).

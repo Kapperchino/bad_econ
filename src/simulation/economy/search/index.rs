@@ -2,6 +2,16 @@ use super::*;
 
 const FIELDS: usize = 8;
 pub(super) const BLOCK: u32 = 32;
+pub(super) const HOUSEHOLD_STRIDE_FIELD: u32 = 6;
+pub(super) const HOUSEHOLD_X_FIELD: u32 = 8;
+pub(super) const HOUSEHOLD_Y_FIELD: u32 = 9;
+
+#[derive(Clone, Copy, Debug, Hash, PartialEq, Eq)]
+pub(super) enum SupplySource {
+    State,
+    Index,
+}
+
 #[derive(Clone, Copy)]
 enum BlockField {
     StockedPrice,
@@ -32,6 +42,29 @@ pub(super) struct Supply {
 
 #[cube]
 impl Supply {
+    pub fn for_search(
+        state: &mut [u32],
+        actors: &[u32],
+        config: &EconomyConfig,
+        scratch: &[u32],
+        parameters: &EconomyParameters,
+        member: u32,
+        actor: u32,
+        #[comptime] source: SupplySource,
+    ) -> Self {
+        if comptime!(
+            source == SupplySource::Index
+                || matches!(
+                    parameters.market,
+                    MarketFlag::Consumer | MarketFlag::Household
+                )
+        ) {
+            Self::load(scratch, config, member)
+        } else {
+            Self::new(state, actors, config, actor, parameters.traded_good())
+        }
+    }
+
     pub fn new(
         state: &mut [u32],
         actors: &[u32],
@@ -55,25 +88,25 @@ impl Supply {
         }
     }
 
-    fn store(&self, scratch: &mut [u32], config: &EconomyConfig, member: u32) {
-        let count = config.actors;
-        scratch[(comptime!(SupplyField::Quote as u32) * count + member) as usize] = self.quote;
-        scratch[(comptime!(SupplyField::AvailableLow as u32) * count + member) as usize] =
+    fn store(&self, scratch: &mut [u32], _config: &EconomyConfig, member: u32) {
+        let base = member * 4;
+        scratch[(base + comptime!(SupplyField::Quote as u32)) as usize] = self.quote;
+        scratch[(base + comptime!(SupplyField::AvailableLow as u32)) as usize] =
             self.available.extract(LOW_WORD);
-        scratch[(comptime!(SupplyField::AvailableHigh as u32) * count + member) as usize] =
+        scratch[(base + comptime!(SupplyField::AvailableHigh as u32)) as usize] =
             self.available.extract(HIGH_WORD);
-        scratch[(comptime!(SupplyField::Flags as u32) * count + member) as usize] =
+        scratch[(base + comptime!(SupplyField::Flags as u32)) as usize] =
             u32::cast_from(self.offered) | (u32::cast_from(self.producer) << 1);
     }
 
-    pub fn load(scratch: &[u32], config: &EconomyConfig, member: u32) -> Self {
-        let count = config.actors;
-        let flags = scratch[(comptime!(SupplyField::Flags as u32) * count + member) as usize];
+    pub fn load(scratch: &[u32], _config: &EconomyConfig, member: u32) -> Self {
+        let base = member * 4;
+        let flags = scratch[(base + comptime!(SupplyField::Flags as u32)) as usize];
         Supply {
-            quote: scratch[(comptime!(SupplyField::Quote as u32) * count + member) as usize],
+            quote: scratch[(base + comptime!(SupplyField::Quote as u32)) as usize],
             available: ticks(
-                scratch[(comptime!(SupplyField::AvailableLow as u32) * count + member) as usize],
-                scratch[(comptime!(SupplyField::AvailableHigh as u32) * count + member) as usize],
+                scratch[(base + comptime!(SupplyField::AvailableLow as u32)) as usize],
+                scratch[(base + comptime!(SupplyField::AvailableHigh as u32)) as usize],
             ),
             offered: flags & 1 != 0,
             producer: flags & 2 != 0,
@@ -102,6 +135,7 @@ pub(super) fn build(
     config: &EconomyConfig,
     spatial: &mut [u32],
     scratch: &mut [u32],
+    searches: &mut [u32],
     parameters: &EconomyParameters,
 ) {
     let cooperative = comptime!(parameters.scan == crate::simulation::parallel::ScanMode::Plane)
@@ -113,6 +147,7 @@ pub(super) fn build(
             config,
             spatial,
             scratch,
+            searches,
             parameters,
             comptime!(IndexReduction::Plane),
         );
@@ -123,6 +158,7 @@ pub(super) fn build(
             config,
             spatial,
             scratch,
+            searches,
             parameters,
             comptime!(IndexReduction::Workgroup),
         );
@@ -136,6 +172,7 @@ fn build_blocks(
     config: &EconomyConfig,
     spatial: &mut [u32],
     scratch: &mut [u32],
+    searches: &mut [u32],
     parameters: &EconomyParameters,
     #[comptime] reduction: IndexReduction,
 ) {
@@ -179,6 +216,19 @@ fn build_blocks(
             let stride = actors.len() / ActorLayout::WORDS;
             let x = actors[ActorLayout::X * stride + actor as usize];
             let y = actors[ActorLayout::Y * stride + actor as usize];
+            if comptime!(parameters.market == MarketFlag::Household) {
+                searches[(HOUSEHOLD_X_FIELD * config.actors + member) as usize] = x;
+                searches[(HOUSEHOLD_Y_FIELD * config.actors + member) as usize] = y;
+                let cell =
+                    y / config.search_radius * config.spatial_side + x / config.search_radius;
+                let begin = spatial[cell as usize];
+                let length = spatial[(cell + 1) as usize] - begin;
+                let offset = member - begin;
+                if length > HOUSEHOLD_SEARCH_SAMPLES && offset < length / 2 {
+                    searches[(HOUSEHOLD_STRIDE_FIELD * config.actors + member) as usize] =
+                        coprime_stride(length, offset);
+                }
+            }
             if comptime!(parameters.market == MarketFlag::Consumer) {
                 scratch[(5 * config.actors + member) as usize] = empty::key(config, x, y);
             }

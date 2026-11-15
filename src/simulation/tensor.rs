@@ -12,7 +12,28 @@ use cubek::{
     std::InputBinding,
 };
 
-const SNAPSHOT_PARTS: usize = 32;
+const SNAPSHOT_PARTS: usize = 4;
+
+pub(super) fn state_values(
+    values: &[u64],
+    actors: usize,
+    stride: usize,
+) -> std::borrow::Cow<'_, [u64]> {
+    match stride == actors {
+        true => std::borrow::Cow::Borrowed(values),
+        false => std::borrow::Cow::Owned(
+            values
+                .chunks_exact(actors)
+                .flat_map(|field| {
+                    field
+                        .iter()
+                        .copied()
+                        .chain(std::iter::repeat_n(0, stride - actors))
+                })
+                .collect(),
+        ),
+    }
+}
 
 pub(super) fn vector_width(device: &Device, elements: usize) -> usize {
     device
@@ -164,14 +185,15 @@ impl SnapshotCopy {
                 cubecl::calculate_cube_count_elemwise(
                     &device.client,
                     source.meta.num_elements().div_ceil(SNAPSHOT_PARTS * 4),
-                    CubeDim::new_1d(32),
+                    CubeDim::new_1d(256),
                 ),
-                CubeDim::new_1d(32),
+                CubeDim::new_1d(256),
                 SnapshotInputLaunch {
                     source: source.clone().into_buffer_arg(),
                     target: target.clone().into_buffer_arg(),
                     nonzero: nonzero.clone().into_buffer_arg(),
                     groups: source.meta.num_elements().div_ceil(SNAPSHOT_PARTS * 32 * 4) as u32,
+                    parts: SNAPSHOT_PARTS as u32,
                 },
             ),
         }
@@ -184,6 +206,8 @@ struct SnapshotInput {
     target: Box<[Vector<u32, Const<4>>]>,
     nonzero: Box<[u32]>,
     groups: u32,
+    #[cube(comptime)]
+    parts: u32,
 }
 
 struct SparseCopy;
@@ -199,12 +223,15 @@ impl GpuPass<SnapshotInput> for SparseWords {
     type Output = ();
 
     fn execute(mut input: SnapshotInput) {
-        if CUBE_POS < input.groups as usize {
-            let previous = input.nonzero[CUBE_POS];
+        let group = CUBE_POS * (CUBE_DIM as usize / 32) + UNIT_POS as usize / 32;
+        if group < input.groups as usize {
+            let previous = input.nonzero[group];
             let mut local = 0u32;
             #[unroll]
-            for part in 0..SNAPSHOT_PARTS {
-                let index = CUBE_POS * (SNAPSHOT_PARTS * 32) + part * 32 + UNIT_POS as usize;
+            for part in 0..comptime!(input.parts) {
+                let index = group * (comptime!(input.parts) as usize * 32)
+                    + part as usize * 32
+                    + UNIT_POS as usize % 32;
                 if index < input.source.len() {
                     let value = input.source[index];
                     let nonzero = value.extract(0usize)
@@ -218,8 +245,8 @@ impl GpuPass<SnapshotInput> for SparseWords {
                 }
             }
             let current = plane_max(local);
-            if UNIT_POS == 0 {
-                input.nonzero[CUBE_POS] = u32::cast_from(current != 0);
+            if UNIT_POS % 32 == 0 {
+                input.nonzero[group] = u32::cast_from(current != 0);
             }
         }
     }
@@ -328,6 +355,7 @@ mod tests {
                 target: target.clone().into_buffer_arg(),
                 nonzero: metadata.clone().into_buffer_arg(),
                 groups: 1,
+                parts: SNAPSHOT_PARTS as u32,
             },
         );
         assert_eq!(
@@ -346,6 +374,57 @@ mod tests {
 #[cfg(test)]
 mod copy_profile {
     use super::*;
+
+    #[test]
+    #[ignore]
+    fn profile_sparse_copy_on_gpu() -> Result<()> {
+        let words = 128 * 1024 * 1024;
+        let device = crate::simulation::tests::device(64)?;
+        let source = device.tensor(
+            &(0..words)
+                .map(|index| u32::from(index / 4096 % 8 == 0) * 17)
+                .collect::<Vec<_>>(),
+        );
+        let target = device.empty(words);
+        for workgroup in [32, 128, 256] {
+            for parts in [4, 8, 16, 32, 64] {
+                let groups = words.div_ceil(parts * 32 * 4);
+                let nonzero = device.tensor(&vec![1; groups]);
+                let launch = || {
+                    SparseCopy::launch(
+                        &device,
+                        cubecl::calculate_cube_count_elemwise(
+                            &device.client,
+                            words.div_ceil(parts * 4),
+                            CubeDim::new_1d(workgroup),
+                        ),
+                        CubeDim::new_1d(workgroup),
+                        SnapshotInputLaunch {
+                            source: source.clone().into_buffer_arg(),
+                            target: target.clone().into_buffer_arg(),
+                            nonzero: nonzero.clone().into_buffer_arg(),
+                            groups: groups as u32,
+                            parts: parts as u32,
+                        },
+                    )
+                };
+                launch();
+                device.sync()?;
+                let start = std::time::Instant::now();
+                for _ in 0..3 {
+                    launch();
+                    device.sync()?;
+                }
+                eprintln!(
+                    "SPARSE {workgroup} {parts} {:.3}",
+                    start.elapsed().as_secs_f64() * 1000.0 / 3.0
+                );
+                assert_eq!(device.read_range(&target, 0, 4)?, [17; 4]);
+                assert_eq!(device.read_range(&target, words - 4, 4)?, [0; 4]);
+            }
+        }
+        Ok(())
+    }
 
     #[test]
     #[ignore]
