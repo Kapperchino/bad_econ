@@ -187,9 +187,15 @@ fn proposal_and_decision_kernels_match_independent_policy_formulas() -> Result<(
                 u64::from(scenario.config().forecast_weight),
             )?;
             let good = Good::from_index(before.actors.at(firm).kind)?;
-            let excess = before
-                .get(Field::inventory(good), firm)
-                .saturating_sub(demand);
+            let daily = match good {
+                Good::Grain | Good::Flour | Good::Bread => (u128::from(demand) * 5).div_ceil(4),
+                _ => u128::from(demand),
+            };
+            let target = daily * u128::from(scenario.config().coverage)
+                + u128::from(scenario.technique(firm).output_ticks - 1);
+            let excess = u64::try_from(
+                u128::from(before.get(Field::inventory(good), firm)).saturating_sub(target),
+            )?;
             let price = arithmetic::price(
                 before.get(Field::Price, firm),
                 before.get(Field::Unfilled, firm),

@@ -130,7 +130,11 @@ pub(super) fn inventory_target(
     demand: Ticks,
     day: u32,
 ) -> Ticks {
-    multiply(control, demand, 365 - elapsed(config, day))
+    multiply(
+        control,
+        production_target(control, demand),
+        365 - elapsed(config, day),
+    )
 }
 
 #[cube]

@@ -1,6 +1,60 @@
 use super::*;
 use crate::domain::enterprise::{EnterpriseModel, EnterpriseState};
 
+#[repr(u32)]
+enum InventoryPolicy {
+    Producer,
+    Distributor,
+    Seasonal,
+}
+
+#[cube]
+pub(super) fn inventory_target(
+    state: &mut [u32],
+    config: &EconomyConfig,
+    control: &[Atomic<u32>],
+    firm: u32,
+    good: u32,
+    demand: Ticks,
+    day: u32,
+) -> Ticks {
+    let policy = select(
+        farming::farm(state, config, firm, good),
+        comptime!(InventoryPolicy::Seasonal as u32),
+        select(
+            number(
+                state,
+                config,
+                comptime!(Field::EnterpriseModel as u32),
+                firm,
+            ) == comptime!(EnterpriseModel::Distributor as u32),
+            comptime!(InventoryPolicy::Distributor as u32),
+            comptime!(InventoryPolicy::Producer as u32),
+        ),
+    );
+    match policy {
+        0 => {
+            let daily = select(
+                good <= comptime!(Good::Bread as u32),
+                farming::production_target(control, demand),
+                demand,
+            );
+            let batch = number(state, config, comptime!(Field::OutputTicks as u32), firm);
+            add_checked(
+                control,
+                multiply(control, daily, config.coverage),
+                ticks(max(batch, 1) - 1, 0),
+            )
+        }
+        1 => multiply(
+            control,
+            demand,
+            number(state, config, comptime!(Field::StockCoverage as u32), firm) + config.ring,
+        ),
+        _ => farming::inventory_target(config, control, demand, day),
+    }
+}
+
 #[cube]
 pub(super) fn stocked(state: &mut [u32], config: &EconomyConfig, actor: u32, good: u32) -> bool {
     good == comptime!(Good::Housing as u32)

@@ -37,7 +37,7 @@ pub use resources::{ProductionSite, ResourceMap, ResourceRegion};
 
 pub const SCENARIO_VERSION: u32 = 2;
 const CHECKPOINT_VERSION: u32 = 21;
-pub const STATE_HASH_VERSION: &str = "bad-econ/state/CubekV2/v22";
+pub const STATE_HASH_VERSION: &str = "bad-econ/state/CubekV2/v23";
 pub const USED_FIELDS: usize = Field::OpeningGrossIncome as usize + 1;
 pub const TRANSIT_FIELDS: usize = USED_FIELDS + Good::COUNT;
 pub const CONSUMPTION_FIELDS: usize = TRANSIT_FIELDS + Good::COUNT;

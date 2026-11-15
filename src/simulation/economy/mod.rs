@@ -558,10 +558,15 @@ fn local(
                         config.forecast_weight,
                         control,
                     );
-                    let mut target = demand;
-                    if farming::farm(state, config, id, k.output()) {
-                        target = farming::inventory_target(config, control, demand, parameters.day);
-                    }
+                    let target = pricing::inventory_target(
+                        state,
+                        config,
+                        control,
+                        id,
+                        k.output(),
+                        demand,
+                        parameters.day,
+                    );
                     let excess = positive(value(state, config, k.output(), id), target);
                     let unfilled = value(state, config, comptime!(Field::Unfilled as u32), id);
                     let positive_sign = !lt(unfilled, excess);

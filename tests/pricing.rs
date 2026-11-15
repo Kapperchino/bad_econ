@@ -56,6 +56,69 @@ fn pricing_scenario() -> Result<Scenario> {
 }
 
 #[test]
+fn planned_inventory_buffers_do_not_trigger_clearance_prices_on_gpu() -> Result<()> {
+    let mut config = pricing_scenario()?.config().clone();
+    config.coverage = 6;
+    for (firm, stock) in config
+        .population
+        .as_mut()
+        .unwrap()
+        .firms
+        .iter_mut()
+        .zip([3000, 90, 130])
+    {
+        firm.inventories[firm.good as usize - 1] = stock;
+    }
+    let scenario = Scenario::new(config)?;
+    let mut initial = scenario.initial()?;
+    for firm in 1..4 {
+        initial.set(Field::Demand, firm, 10);
+    }
+    let mut simulation =
+        Simulation::from_checkpoint(Checkpoint::new(&scenario, &initial)?, support::device(64)?)?;
+    for _ in 0..4 {
+        simulation.advance()?;
+    }
+    let state = simulation.download()?;
+    for firm in 1..4 {
+        assert_eq!(
+            state.get(Field::Price, firm),
+            initial.get(Field::Price, firm)
+        );
+    }
+    assert_eq!(simulation.snapshot.cash, initial.initial_cash);
+    simulation.checkpoint()?.restore()?;
+    Ok(())
+}
+
+#[test]
+fn distributor_delivery_reserves_do_not_trigger_clearance_prices_on_gpu() -> Result<()> {
+    let mut config = pricing_scenario()?.config().clone();
+    config.distributors = vec![Distributor {
+        firm: 4,
+        good: Good::Bread,
+        handling_minutes: 20,
+        units_per_shift: 24,
+        reserve_days: 3,
+        margin_per_mille: 1000,
+    }];
+    config.population.as_mut().unwrap().firms[2].inventories[Good::Bread as usize - 1] = 40;
+    let scenario = Scenario::new(config)?;
+    let mut initial = scenario.initial()?;
+    initial.set(Field::Demand, 3, 10);
+    let mut simulation =
+        Simulation::from_checkpoint(Checkpoint::new(&scenario, &initial)?, support::device(64)?)?;
+    for _ in 0..4 {
+        simulation.advance()?;
+    }
+    let state = simulation.download()?;
+    assert_eq!(state.get(Field::Price, 3), initial.get(Field::Price, 3));
+    assert_eq!(simulation.snapshot.cash, initial.initial_cash);
+    simulation.checkpoint()?.restore()?;
+    Ok(())
+}
+
+#[test]
 fn surplus_prices_fall_below_costs_and_refresh_without_purchases_on_gpu() -> Result<()> {
     let scenario = pricing_scenario()?;
     let opening = scenario.initial()?;
