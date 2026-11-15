@@ -70,7 +70,7 @@ impl GpuPass<PayrollInput> for SettlePayroll {
                         &input.control,
                         0,
                         actor + input.parameters.offset,
-                        input.config.actors,
+                        input.config.state_stride,
                         comptime!(Posting::CheckActor),
                     ));
                     let base = (actor + input.parameters.offset) as usize * ProposalLayout::WORDS;
@@ -105,7 +105,7 @@ impl GpuPass<PayrollInput> for SettlePayroll {
                         &input.control,
                         0,
                         actor + input.parameters.offset,
-                        input.config.actors,
+                        input.config.state_stride,
                         comptime!(Posting::ApplyActor),
                     ));
                 }

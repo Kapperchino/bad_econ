@@ -90,7 +90,6 @@ impl EnterpriseManagement {
 fn assign(state: &mut [u32], config: &EconomyConfig, firms: &[u32], groups: u32, day: u32) {
     let group = ABSOLUTE_POS as u32;
     if group < groups && comptime!(config.home_mode == Feature::Enabled) {
-        let count = config.actors;
         let owner = firms[(group * 3) as usize];
         let start = firms[(group * 3 + 1) as usize];
         let end = firms[(group * 3 + 2) as usize];
@@ -100,26 +99,32 @@ fn assign(state: &mut [u32], config: &EconomyConfig, firms: &[u32], groups: u32,
             let firm = firms[(start + (offset + day) % (end - start)) as usize];
             let status = load(
                 state,
-                comptime!(Field::EnterpriseStatus as u32) * count + firm,
+                comptime!(Field::EnterpriseStatus as u32) * config.state_stride + firm,
             )
             .extract(0usize);
             if status != comptime!(EnterpriseState::Closed as u32) && active == 0 {
                 active = firm + 1;
             }
-            let cash = load(state, comptime!(Field::Cash as u32) * count + firm);
+            let cash = load(
+                state,
+                comptime!(Field::Cash as u32) * config.state_stride + firm,
+            );
             let reserve = load(
                 state,
-                comptime!(Field::OperatingReserve as u32) * count + firm,
+                comptime!(Field::OperatingReserve as u32) * config.state_stride + firm,
             );
             let available = select(
                 status == comptime!(EnterpriseState::Operating as u32),
                 positive(cash, reserve),
                 cash,
             );
-            let wage = load(state, comptime!(Field::Wage as u32) * count + firm);
+            let wage = load(
+                state,
+                comptime!(Field::Wage as u32) * config.state_stride + firm,
+            );
             let remaining = load(
                 state,
-                comptime!(Field::ConstructionRemaining as u32) * count + firm,
+                comptime!(Field::ConstructionRemaining as u32) * config.state_stride + firm,
             );
             let building = status == comptime!(EnterpriseState::Forming as u32)
                 || status == comptime!(EnterpriseState::Operating as u32);
@@ -129,12 +134,12 @@ fn assign(state: &mut [u32], config: &EconomyConfig, firms: &[u32], groups: u32,
         }
         let living = load(
             state,
-            comptime!(Field::LivingMembers as u32) * count + owner,
+            comptime!(Field::LivingMembers as u32) * config.state_stride + owner,
         );
         let selected = select(construction > 0, construction, active);
         store(
             state,
-            comptime!(Field::InvestmentFirm as u32) * count + owner,
+            comptime!(Field::InvestmentFirm as u32) * config.state_stride + owner,
             ticks(select(equal(living, zero()), 0, selected), 0),
         );
     }

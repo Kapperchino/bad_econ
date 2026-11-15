@@ -132,6 +132,7 @@ pub(super) fn copy_contiguous(device: &Device, source: &CubeTensor, target: &Cub
     }
 }
 
+#[derive(Clone)]
 pub(super) enum SnapshotCopy {
     Full,
     Sparse { nonzero: CubeTensor },

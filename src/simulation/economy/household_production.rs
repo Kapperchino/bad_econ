@@ -151,16 +151,38 @@ pub(super) fn produce(
         target,
         value(state, config, comptime!(Field::Bread as u32), actor),
     );
+    let milling = food::Conversion::milling(config);
+    let baking = food::Conversion::baking(config);
+    let milling_remainder = number(
+        state,
+        config,
+        comptime!(Field::MillingRemainder as u32),
+        actor,
+    );
+    let baking_remainder = number(
+        state,
+        config,
+        comptime!(Field::BakingRemainder as u32),
+        actor,
+    );
     let flour_needed = positive(
-        bread_needed,
+        baking.required(control, bread_needed, baking_remainder),
         value(state, config, comptime!(Field::Flour as u32), actor),
     );
     let milled = minimum(
         minimum(
-            flour_needed,
+            milling.required(control, flour_needed, milling_remainder),
             value(state, config, comptime!(Field::Grain as u32), actor),
         ),
         ticks(time / max(config.home.milling_minutes, 1), 0),
+    );
+    let flour_output = milling.process(control, milled, milling_remainder);
+    set32(
+        state,
+        config,
+        comptime!(Field::MillingRemainder as u32),
+        actor,
+        flour_output.remainder,
     );
     let milled_minutes = milled.extract(LOW_WORD) * config.home.milling_minutes;
     time -= milled_minutes;
@@ -179,14 +201,22 @@ pub(super) fn produce(
         control,
         actor,
         comptime!(Good::Flour as u32),
-        milled,
+        flour_output.quantity,
     );
     let baked = minimum(
         minimum(
-            bread_needed,
+            baking.required(control, bread_needed, baking_remainder),
             value(state, config, comptime!(Field::Flour as u32), actor),
         ),
         ticks(time / max(config.home.baking_minutes, 1), 0),
+    );
+    let bread_output = baking.process(control, baked, baking_remainder);
+    set32(
+        state,
+        config,
+        comptime!(Field::BakingRemainder as u32),
+        actor,
+        bread_output.remainder,
     );
     time -= baked.extract(LOW_WORD) * config.home.baking_minutes;
     let flour = value(state, config, comptime!(Field::Flour as u32), actor);
@@ -212,7 +242,7 @@ pub(super) fn produce(
         control,
         actor,
         comptime!(Good::Bread as u32),
-        baked,
+        bread_output.quantity,
     );
     let wood = add_checked(
         control,

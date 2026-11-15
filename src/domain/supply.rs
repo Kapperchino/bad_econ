@@ -6,6 +6,7 @@ pub(super) struct StartingReserves {
     pub wood: u64,
     days: u32,
     buffer_days: u32,
+    food: Option<super::food::FoodPolicy>,
 }
 
 impl StartingReserves {
@@ -25,6 +26,7 @@ impl StartingReserves {
             wood: u64::from(heat % 2) * u64::from(days),
             days,
             buffer_days: config.buffer_days,
+            food: config.food,
         }
     }
 
@@ -33,13 +35,16 @@ impl StartingReserves {
             Good::Flour | Good::Bread => self.days,
             _ => self.buffer_days,
         };
-        daily * u64::from(days)
+        let quantity = daily * u64::from(days);
+        self.food
+            .map_or(quantity, |food| food.inputs(output, quantity))
     }
 }
 
 pub(super) struct StartingDemand {
     pub daily: [u64; Good::COUNT],
     food: u64,
+    calibration: Option<super::food::FoodPolicy>,
 }
 
 impl StartingDemand {
@@ -79,7 +84,9 @@ impl StartingDemand {
                         .count() as u64,
                     None => u64::from(config.households.div_ceil(2)),
                 };
-                (plots * u64::from(annual_yield_per_plot) / 365).min(
+                let grain = plots * u64::from(annual_yield_per_plot);
+                let bread = config.food.map_or(grain, |food| food.bread(grain));
+                (bread / 365).min(
                     (farming_households * u64::from(config.household_need) * requirements)
                         .div_ceil(1000),
                 )
@@ -88,6 +95,7 @@ impl StartingDemand {
         let mut demand = Self {
             daily: [0; Good::COUNT],
             food,
+            calibration: config.food,
         };
         demand.include(Good::Bread, food.saturating_sub(harvest));
         let population = households * u64::from(members);
@@ -118,16 +126,22 @@ impl StartingDemand {
     }
 
     pub fn production(&self, good: Good) -> u64 {
-        match good {
-            Good::Grain | Good::Flour | Good::Bread => (self.food * 5).div_ceil(4),
+        let bread = (self.food * 5).div_ceil(4);
+        match (self.calibration, good) {
+            (Some(food), Good::Grain) => food.inputs(Good::Flour, food.inputs(Good::Bread, bread)),
+            (Some(food), Good::Flour) => food.inputs(Good::Bread, bread),
+            (_, Good::Grain | Good::Flour | Good::Bread) => bread,
             _ => self.daily[good as usize - 1],
         }
     }
 
     fn include(&mut self, good: Good, quantity: u64) {
         self.daily[good as usize - 1] += quantity;
+        let required = self
+            .calibration
+            .map_or(quantity, |food| food.inputs(good, quantity));
         for input in good.inputs().into_iter().flatten() {
-            self.include(input, quantity);
+            self.include(input, required);
         }
     }
 }

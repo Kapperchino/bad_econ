@@ -138,9 +138,13 @@ fn mild_underheating_does_not_accumulate_dangerous_cold_exposure_on_gpu() -> Res
 }
 
 #[test]
-fn generated_population_survives_its_first_winter_on_gpu() -> Result<()> {
+fn generated_population_with_funded_food_survives_its_first_winter_on_gpu() -> Result<()> {
     for (households, seed) in [(1000, 7), (1000, 42), (1000, 43), (10000, 42)] {
-        let scenario = Scenario::industrial(households, seed, Experiment::Baseline)?;
+        let mut config = Scenario::industrial(households, seed, Experiment::Baseline)?
+            .config()
+            .clone();
+        config.household_cash *= 100;
+        let scenario = Scenario::new(config)?;
         let mut simulation = Simulation::new(scenario.clone(), support::device(64)?)?;
         let initial = simulation.download()?;
         simulation.advance()?;

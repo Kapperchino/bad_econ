@@ -22,8 +22,14 @@ struct Bindings {
 
 struct RecordedMarket {
     key: MarketKey,
-    graph: Graph,
     source: u32,
+    recording: Recording,
+}
+
+enum Recording {
+    Unseen,
+    Prepared,
+    Recorded { graph: Graph },
 }
 
 #[derive(Clone, Copy, PartialEq, Eq)]
@@ -108,54 +114,61 @@ impl MarketGraphs {
                 stream: StreamId::current(),
             });
         }
-        match self.entries.iter().find(|entry| entry.key == key) {
-            Some(recorded) => {
-                unsafe { recorded.graph.replay() }?;
-                self.replays += 1;
-                Ok(recorded.source)
-            }
-            None => {
-                device.client.graph_prepare()?;
-                let source = encode()?;
-                device.client.start_capture()?;
-                let recorded = encode();
-                let graph = device.client.stop_capture()?;
-                let recorded = recorded?;
-                match source == recorded {
-                    true => {
-                        self.records += 1;
-                        self.entries.push(RecordedMarket { key, graph, source });
-                        Ok(source)
+        match self.entries.iter().position(|entry| entry.key == key) {
+            Some(index) => match &self.entries[index].recording {
+                Recording::Unseen => {
+                    let source = encode()?;
+                    match source == self.entries[index].source {
+                        true => {
+                            self.entries[index].recording = Recording::Prepared;
+                            Ok(source)
+                        }
+                        false => Err(anyhow::anyhow!("market graph changed its sort output")),
                     }
-                    false => Err(anyhow::anyhow!("market graph changed its sort output")),
                 }
+                Recording::Recorded { graph } => {
+                    unsafe { graph.replay() }?;
+                    self.replays += 1;
+                    Ok(self.entries[index].source)
+                }
+                Recording::Prepared => {
+                    device.client.graph_prepare()?;
+                    let source = encode()?;
+                    device.client.start_capture()?;
+                    let recorded = encode();
+                    let graph = device.client.stop_capture()?;
+                    let recorded = recorded?;
+                    match source == recorded && source == self.entries[index].source {
+                        true => {
+                            self.records += 1;
+                            self.entries[index].recording = Recording::Recorded { graph };
+                            Ok(source)
+                        }
+                        false => Err(anyhow::anyhow!("market graph changed its sort output")),
+                    }
+                }
+            },
+            None => {
+                let source = encode()?;
+                self.entries.push(RecordedMarket {
+                    key,
+                    source,
+                    recording: Recording::Prepared,
+                });
+                Ok(source)
             }
         }
     }
 
-    pub(super) fn prerecord(
-        &mut self,
-        device: &Device,
-        key: MarketKey,
-        expected: u32,
-        mut encode: impl FnMut() -> Result<u32>,
-    ) -> Result<()> {
+    pub(super) fn prepare(&mut self, key: MarketKey, source: u32) {
         match self.entries.iter().any(|entry| entry.key == key) {
-            true => Ok(()),
+            true => (),
             false => {
-                device.client.graph_prepare()?;
-                device.client.start_capture()?;
-                let source = encode();
-                let graph = device.client.stop_capture()?;
-                let source = source?;
-                match source == expected {
-                    true => {
-                        self.records += 1;
-                        self.entries.push(RecordedMarket { key, graph, source });
-                        Ok(())
-                    }
-                    false => Err(anyhow::anyhow!("market graph changed its sort output")),
-                }
+                self.entries.push(RecordedMarket {
+                    key,
+                    source,
+                    recording: Recording::Unseen,
+                });
             }
         }
     }
@@ -168,6 +181,65 @@ mod tests {
     use crate::simulation::{
         FreightActivity, Simulation, Trace, economy::sorting::MarketSort, encode,
     };
+    use cubecl::prelude::*;
+
+    #[cube(launch)]
+    fn increment(counter: &mut [u32]) {
+        if ABSOLUTE_POS == 0 {
+            counter[0usize] += 1;
+        }
+    }
+
+    #[test]
+    fn lazy_graph_capture_executes_each_call_once_and_leaves_the_stream_ready() -> Result<()> {
+        let mut device = crate::simulation::tests::device(64)?;
+        unsafe {
+            device.client.set_stream(StreamId::current());
+        }
+        let counter = device.tensor(&[0]);
+        let mut graphs = MarketGraphs::default();
+        let key = MarketKey {
+            market: crate::domain::Market::Household,
+            phase: Phase::ProvisionPurchase,
+            preparation: Preparation::First,
+            routing: crate::simulation::economy::railway::RouteAvailability::Dormant,
+        };
+        let fallback = MarketKey {
+            routing: crate::simulation::economy::railway::RouteAvailability::Available,
+            ..key
+        };
+        let run = |graphs: &mut MarketGraphs, key, counter: &CubeTensor| {
+            graphs.run(&device, key, vec![counter.clone()], || {
+                increment::launch(
+                    &device.client,
+                    CubeCount::Static(1, 1, 1),
+                    CubeDim::new_1d(32),
+                    counter.clone().into_buffer_arg(),
+                );
+                Ok(7)
+            })
+        };
+        for expected in 1..=3 {
+            assert_eq!(run(&mut graphs, key, &counter)?, 7);
+            graphs.prepare(fallback, 7);
+            assert!(!device.client.is_capturing());
+            assert_eq!(device.read(&counter)?, [expected]);
+            assert_eq!(graphs.records, usize::from(expected >= 2));
+            assert_eq!(graphs.replays, usize::from(expected == 3));
+        }
+        assert_eq!(run(&mut graphs, fallback, &counter)?, 7);
+        assert_eq!(device.read(&counter)?, [4]);
+        assert_eq!(graphs.records, 1);
+        assert!(!device.client.is_capturing());
+        let replacement = device.tensor(&[10]);
+        assert_eq!(run(&mut graphs, key, &replacement)?, 7);
+        assert_eq!(device.read(&replacement)?, [11]);
+        assert_eq!(device.read(&counter)?, [4]);
+        assert_eq!(graphs.invalidations, 2);
+        assert_eq!(graphs.records, 1);
+        assert!(!device.client.is_capturing());
+        Ok(())
+    }
 
     #[test]
     fn dormant_rail_markets_match_full_freight_searches_and_accounts_on_gpu() -> Result<()> {
@@ -219,7 +291,12 @@ mod tests {
     #[test]
     fn market_graphs_refresh_dates_heat_and_rotations_and_replace_bindings_on_gpu() -> Result<()> {
         let device = crate::simulation::tests::device(64)?;
-        let scenario = Scenario::industrial(4097, 42, Experiment::Baseline)?;
+        let mut config = Scenario::industrial(4097, 42, Experiment::Baseline)?
+            .config()
+            .clone();
+        config.entrepreneurship.interested_per_mille = 0;
+        config.demography.annual_births_per_million_fertile_women = 0;
+        let scenario = Scenario::new(config)?;
         let mut actual = Simulation::new(scenario.clone(), device.clone())?;
         let mut expected = Simulation::new(scenario, device)?;
         expected.market_sort = MarketSort::Profiled;

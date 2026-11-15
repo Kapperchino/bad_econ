@@ -747,15 +747,15 @@ fn candidate_supply(
                     let need = number(state, config, comptime!(Field::FoodNeed as u32), id);
                     let bread = number(state, config, comptime!(Field::Bread as u32), id);
                     let missing = max(need, bread) - bread;
-                    let minutes =
-                        missing * (config.home.milling_minutes + config.home.baking_minutes);
+                    let preparation = food::household_work(state, config, control, id, missing);
+                    let minutes = preparation.minutes;
                     let time = number(state, config, comptime!(Field::Time as u32), id);
                     let remaining = max(time, duration) - duration
                         + number(state, config, comptime!(Field::HomeTime as u32), id);
                     let self_provision = missing > 0
                         && !lt(
                             value(state, config, comptime!(Field::Grain as u32), id),
-                            ticks(missing, 0),
+                            preparation.grain,
                         );
                     let paid = times32(
                         wage,

@@ -131,7 +131,7 @@ impl EntryPlan {
 
 #[cube]
 fn number(state: &mut [u32], config: &EconomyConfig, actor: u32, field: u32) -> u32 {
-    load(state, field * config.actors + actor).extract(0usize)
+    load(state, field * config.state_stride + actor).extract(0usize)
 }
 
 #[cube]
@@ -176,7 +176,7 @@ fn input_price(
         for sample in 0..min(32u32, firms(spatial, config)) {
             let supplier = firm_at(spatial, config, site + day * 17 + sample);
             let kind = actors[A::KIND * (actors.len() / A::WORDS) + supplier as usize];
-            let stock = load(state, good * config.actors + supplier);
+            let stock = load(state, good * config.state_stride + supplier);
             if kind == good
                 && number(
                     state,
@@ -212,8 +212,10 @@ pub(in crate::simulation) fn discover(
     owner: u32,
     day: u32,
 ) -> u32 {
-    let count = config.actors;
-    let cash = load(state, comptime!(Field::Cash as u32) * count + owner);
+    let cash = load(
+        state,
+        comptime!(Field::Cash as u32) * config.state_stride + owner,
+    );
     let investment = divide(cash, 2);
     let wage = config.starting_wage;
     let mut selected = 0;
@@ -310,7 +312,7 @@ pub(in crate::simulation) fn discover(
                     }
                 }
             }
-            let stock = load(state, kind * count + source);
+            let stock = load(state, kind * config.state_stride + source);
             let consumer = kind == comptime!(Good::Bread as u32)
                 || kind == comptime!(Good::Wood as u32)
                 || kind == comptime!(Good::Coal as u32)
@@ -342,12 +344,12 @@ pub(in crate::simulation) fn discover(
     if selected > 0 {
         store(
             state,
-            comptime!(Field::ReplacementCost as u32) * count + owner,
+            comptime!(Field::ReplacementCost as u32) * config.state_stride + owner,
             ticks(first_cost, 0),
         );
         store(
             state,
-            comptime!(Field::SecondInputCost as u32) * count + owner,
+            comptime!(Field::SecondInputCost as u32) * config.state_stride + owner,
             ticks(second_cost, 0),
         );
     }

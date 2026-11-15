@@ -177,7 +177,11 @@ impl Device {
     pub(super) fn state_buffer(&self, words: usize) -> CubeTensor {
         match words * WORD_BYTES {
             bytes if bytes >= STATE_BUFFER_BYTES => {
-                let capacity = bytes.next_multiple_of(STATE_BUFFER_BYTES);
+                let granularity = (bytes / 16).next_power_of_two().max(STATE_BUFFER_BYTES);
+                let capacity = bytes
+                    .next_multiple_of(granularity)
+                    .min(self.client.properties().memory.max_page_size as usize)
+                    .max(bytes);
                 let handle = self
                     .client
                     .memory_persistent_allocation(capacity, |capacity| self.client.empty(capacity))

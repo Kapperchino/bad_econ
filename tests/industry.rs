@@ -117,7 +117,11 @@ fn industrial_food_production_is_more_efficient_than_subsistence_on_gpu() -> Res
         for firm in firms {
             let output = state.get(Field::OutputTicks, firm);
             let minutes = state.get(Field::LaborMinutes, firm);
-            assert_eq!(output * home_minutes, minutes * advantage);
+            let home_work = match good {
+                Good::Grain => output * home_minutes,
+                _ => state.get(Field::InputTicks, firm) * home_minutes,
+            };
+            assert!(home_work >= minutes * advantage);
             assert_eq!(minutes * state.get(Field::Wage, firm), 240);
         }
     }

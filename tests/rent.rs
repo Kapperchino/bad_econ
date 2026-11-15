@@ -173,11 +173,18 @@ fn daily_rent_conserves_cash_and_replays_arrears_on_gpu() -> Result<()> {
 }
 
 #[test]
-fn industrial_paycheck_households_avoid_famine_with_next_day_delivery_on_gpu() -> Result<()> {
+fn legacy_industrial_paycheck_households_avoid_famine_with_next_day_delivery_on_gpu() -> Result<()>
+{
     let households = 1_000;
     let mut config = Scenario::industrial(households, 42, Experiment::Baseline)?
         .config()
         .clone();
+    config.food = None;
+    config.prices = [12, 24, 36];
+    config.household_cash = 7
+        * (u64::from(config.demography.initial_household_members) * u64::from(config.prices[2])
+            + u64::from(config.rent.map_or(0, |rent| rent.household_daily)));
+    config.household_production = HouseholdProduction::industrial();
     config.shipment_speed = config.search_radius;
     config.expansion = enterprise::ExpansionPolicy {
         small_business_per_mille: 0,

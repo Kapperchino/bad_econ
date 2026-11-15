@@ -232,7 +232,12 @@ impl EncodedResearch {
             let firm = actor_index(lab.owner)?;
             let good = Good::from_index(initial.actors.at(firm).kind)?;
             for method in &lab.methods {
-                let recipe = method.recipe(good, scenario.technique(firm));
+                let recipe = crate::domain::food::upgraded_recipe(
+                    scenario.config(),
+                    *method,
+                    good,
+                    scenario.technique(firm),
+                );
                 methods.push(MethodLayout {
                     identity: *method as u32,
                     requirements: method.technology() as u32,
@@ -412,6 +417,7 @@ impl EncodedResearch {
 #[derive(Clone)]
 pub struct ResearchRuntime {
     header: Header,
+    state_stride: u32,
     configuration: CubeTensor,
     state: CubeTensor,
     audited: CubeTensor,
@@ -458,6 +464,7 @@ impl ResearchRuntime {
             .collect::<Result<Arc<[_]>>>()?;
         let runtime = Self {
             header: encoded.header,
+            state_stride: initial.actors.len() as u32,
             configuration: device.tensor(&encoded.configuration[Header::WORDS..]),
             state: device.tensor(&encoded.state),
             audited: device.empty(encoded.state.len()),
@@ -573,7 +580,7 @@ impl ResearchRuntime {
                 main: argument(launch.main),
                 state: argument(launch.state),
                 config: KernelResearchConfigLaunch {
-                    parameters: self.header.launch(),
+                    parameters: self.header.launch(self.state_stride),
                     records: self.configuration.clone().into_buffer_arg(),
                 },
                 table: argument(&self.table),
@@ -609,7 +616,11 @@ impl ResearchRuntime {
         Ok(())
     }
 
-    pub(super) fn with_actors(&self, actors: &crate::domain::ActorRows) -> Result<Self> {
+    pub(super) fn with_actors(
+        &self,
+        actors: &crate::domain::ActorRows,
+        state_stride: u32,
+    ) -> Result<Self> {
         let unchanged = self
             .capacity_limits
             .iter()
@@ -621,6 +632,7 @@ impl ResearchRuntime {
             ))?,
         }
         Ok(Self {
+            state_stride,
             header: Header {
                 actors: u32::try_from(actors.len())?,
                 ..self.header
@@ -791,7 +803,7 @@ mod tests {
         let mut addition = actors.at(firms[0]);
         addition.identity = actors.identities().iter().max().copied().unwrap_or(0) + 1;
         actors.extend([addition]);
-        let grown = runtime.with_actors(&actors)?;
+        let grown = runtime.with_actors(&actors, actors.len() as u32)?;
         assert_eq!(grown.header.actors as usize, actors.len());
         assert_eq!(grown.readback_bytes(), readback);
         assert_eq!(runtime.readback_bytes(), readback);
@@ -802,7 +814,7 @@ mod tests {
             let mut actor = changed.at(firm);
             actor.capacity += 1;
             changed.set(firm, actor);
-            assert!(grown.with_actors(&changed).is_err());
+            assert!(grown.with_actors(&changed, changed.len() as u32).is_err());
         }
         Ok(())
     }

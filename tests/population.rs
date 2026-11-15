@@ -348,18 +348,16 @@ mod compute {
         assert_eq!(
             simulation.snapshot.markets[0].prices,
             QuoteDistribution {
-                count: 3,
-                minimum: 10,
-                maximum: 30,
-                total: 60,
-                squares: 1400
+                count: 1,
+                minimum: 20,
+                maximum: 20,
+                total: 20,
+                squares: 400
             }
         );
+        assert_eq!(simulation.snapshot.markets[0].wages.count, 3);
         assert_eq!(simulation.snapshot.markets[0].prices.mean(), 20.0);
-        assert!(
-            (simulation.snapshot.markets[0].prices.deviation() - (200.0f64 / 3.0).sqrt()).abs()
-                < 1e-12
-        );
+        assert_eq!(simulation.snapshot.markets[0].prices.deviation(), 0.0);
         assert_eq!(
             simulation.snapshot,
             ObservationSnapshot::from_state(&scenario, &state)?

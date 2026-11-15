@@ -730,7 +730,7 @@ fn routes(state: &mut [u32], config: &mut EconomyConfig) {
                     let firm = config.railway.companies[owner as usize * COMPANY_WORDS];
                     let operating = load(
                         state,
-                        comptime!(Field::RailOperating as u32) * config.actors + firm,
+                        comptime!(Field::RailOperating as u32) * config.state_stride + firm,
                     )
                     .extract(0usize);
                     let connected = config.railway.access_rights
@@ -1027,7 +1027,7 @@ fn regional_cell(config: &EconomyConfig, region: u32, #[comptime] field: RailCap
     let row = config.railway.region_base
         + comptime!(field as u32) * config.railway.region_blocks
         + region / config.railway.initial_actors;
-    row * config.actors + region % config.railway.initial_actors
+    row * config.state_stride + region % config.railway.initial_actors
 }
 
 #[cube]

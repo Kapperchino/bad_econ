@@ -125,15 +125,19 @@ enum Source {
     Cash,
     Inventory,
     Produced,
-    Firm,
+    QuotedFirm,
     Distributor,
     Closure,
-    Square,
+    QuoteSquare,
     Homeless,
     Labor,
     ActiveFirm,
     BusinessType,
     BusinessState,
+    QuoteField,
+    PriceField,
+    PriceSquare,
+    PricedFirm,
 }
 
 pub(in crate::simulation) struct AuditBuffers {
@@ -172,6 +176,10 @@ impl AuditBuffers {
                         definition.source = Source::BusinessState as u32;
                         definition.field = metric - S::BUSINESS_STATES;
                         definition.kind = Good::COUNT as u32 + 1;
+                    }
+                    metric if metric >= S::PRICE_COUNTS => {
+                        definition.kind = metric - S::PRICE_COUNTS + 1;
+                        definition.source = Source::PricedFirm as u32;
                     }
                     metric if metric >= S::FIRM_CASH => {
                         let group = (metric - S::FIRM_CASH) / Good::COUNT as u32;
@@ -219,6 +227,10 @@ impl AuditBuffers {
                     }
                     S::MINIMUM_WAGE | S::MAXIMUM_WAGE | S::MINIMUM_PRICE | S::MAXIMUM_PRICE => {
                         definition.kind = Good::COUNT as u32 + 1;
+                        definition.source = match metric {
+                            S::MINIMUM_WAGE | S::MAXIMUM_WAGE => Source::QuoteField,
+                            _ => Source::PriceField,
+                        } as u32;
                         definition.field = match metric {
                             S::MINIMUM_WAGE | S::MAXIMUM_WAGE => Field::Wage as u32,
                             _ => Field::Price as u32,
@@ -276,9 +288,13 @@ impl AuditBuffers {
                                     _ => Field::Price as u32,
                                 };
                                 definition.source = match start {
-                                    S::FIRMS_BY_GOOD => Source::Firm,
-                                    S::WAGE_SQUARES | S::PRICE_SQUARES => Source::Square,
-                                    _ => Source::Field,
+                                    S::FIRMS_BY_GOOD => Source::QuotedFirm,
+                                    S::WAGE_SQUARES => Source::QuoteSquare,
+                                    S::PRICE_SQUARES => Source::PriceSquare,
+                                    S::WAGE_MINIMA | S::WAGE_MAXIMA | S::WAGE_TOTALS => {
+                                        Source::QuoteField
+                                    }
+                                    _ => Source::PriceField,
                                 } as u32;
                                 definition.operation = match start {
                                     S::WAGE_MINIMA | S::PRICE_MINIMA => 1,
@@ -382,7 +398,7 @@ impl AuditBuffers {
 
 #[cube]
 fn value(state: &[Ticks], config: &EconomyConfig, field: u32, actor: u32) -> Ticks {
-    state[(field * config.actors + actor) as usize]
+    state[(field * config.state_stride + actor) as usize]
 }
 
 #[cube]
@@ -468,9 +484,28 @@ fn summarize_metrics(input: &mut SummaryInput) {
                 }
             };
             let actor_kind = kind(actors, actor).bits();
-            let selected = selected_kind == NO_ACTOR
+            let selected_kind = selected_kind == NO_ACTOR
                 || selected_kind == actor_kind
                 || (selected_kind == Good::COUNT as u32 + 1 && actor_kind > 0);
+            let priced = source >= comptime!(Source::PriceField as u32);
+            let quoted = priced
+                || source == comptime!(Source::QuoteField as u32)
+                || source == comptime!(Source::QuoteSquare as u32)
+                || source == comptime!(Source::QuotedFirm as u32);
+            let status = number(
+                state,
+                config,
+                comptime!(Field::EnterpriseStatus as u32),
+                actor,
+            );
+            let trading = status
+                > comptime!(crate::domain::enterprise::EnterpriseState::Forming as u32)
+                && status
+                    < comptime!(crate::domain::enterprise::EnterpriseState::Liquidating as u32);
+            let stocked = actor_kind == comptime!(Good::Housing as u32)
+                || actor_kind == comptime!(Good::Railway as u32)
+                || native(value(state, config, actor_kind, actor)) > 0;
+            let selected = selected_kind && (!quoted || trading) && (!priced || stocked);
             if selected {
                 let mut amount = native(value(state, config, field, actor));
                 match source {
@@ -517,7 +552,7 @@ fn summarize_metrics(input: &mut SummaryInput) {
                             );
                         }
                     }
-                    4 => amount = 1,
+                    4 | 16 => amount = 1,
                     5 => {
                         amount = u64::cast_from(
                             number(
@@ -546,7 +581,7 @@ fn summarize_metrics(input: &mut SummaryInput) {
                             ) == 4,
                         )
                     }
-                    7 => {
+                    7 | 15 => {
                         amount &= 0xffff_ffff;
                         amount *= amount;
                     }

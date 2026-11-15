@@ -243,10 +243,11 @@ fn payments(
         let firm = share.extract(0usize);
         let units = share.extract(1usize);
         let actors = config.actors;
-        let cash = state[(comptime!(Field::Cash as u32) * actors + firm) as usize];
+        let cash = state[(comptime!(Field::Cash as u32) * config.state_stride + firm) as usize];
         let kind = actor_rows[comptime!(ActorLayout::KIND) * actors as usize + firm as usize];
         let reserve = maximum(
-            state[(comptime!(Field::OperatingReserve as u32) * actors + firm) as usize],
+            state
+                [(comptime!(Field::OperatingReserve as u32) * config.state_stride + firm) as usize],
             select(
                 kind == comptime!(Good::Housing as u32),
                 zero(),
@@ -281,7 +282,7 @@ fn distribute(
             accrued.faults.record(control);
             total = accrued.value;
         }
-        let coordinate = comptime!(Field::Cash as u32) * config.actors + actor;
+        let coordinate = comptime!(Field::Cash as u32) * config.state_stride + actor;
         state[coordinate as usize] = account_balance(
             state[coordinate as usize],
             total,
@@ -325,12 +326,15 @@ fn original_distribute(
             let firm = shares[cursor];
             let count = shares[cursor + 1];
             cursor += 2;
-            let cash = load(state, comptime!(Field::Cash as u32) * actors + firm);
+            let cash = load(
+                state,
+                comptime!(Field::Cash as u32) * config.state_stride + firm,
+            );
             let kind = actor_rows[comptime!(ActorLayout::KIND) * actors as usize + firm as usize];
             let reserve = maximum(
                 load(
                     state,
-                    comptime!(Field::OperatingReserve as u32) * actors + firm,
+                    comptime!(Field::OperatingReserve as u32) * config.state_stride + firm,
                 ),
                 select(
                     kind == comptime!(Good::Housing as u32),
@@ -347,12 +351,15 @@ fn original_distribute(
                 cursor += 2;
                 let payment = ratio(amount.value, units, 1_000_000);
                 payment.faults.record(control);
-                let prior = load(state, comptime!(Field::Cash as u32) * actors + owner);
+                let prior = load(
+                    state,
+                    comptime!(Field::Cash as u32) * config.state_stride + owner,
+                );
                 let next = plus(prior, payment.value);
                 next.faults.record(control);
                 store(
                     state,
-                    comptime!(Field::Cash as u32) * actors + owner,
+                    comptime!(Field::Cash as u32) * config.state_stride + owner,
                     next.value,
                 );
                 let accrued = plus(distributed, payment.value);
@@ -361,7 +368,7 @@ fn original_distribute(
             }
             store(
                 state,
-                comptime!(Field::Cash as u32) * actors + firm,
+                comptime!(Field::Cash as u32) * config.state_stride + firm,
                 minus(cash, distributed),
             );
         }

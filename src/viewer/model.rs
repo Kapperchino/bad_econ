@@ -130,6 +130,12 @@ pub enum Chart {
     Taxes,
     Research,
 }
+
+#[derive(Clone, Copy)]
+pub(super) enum ValueFormat {
+    Money,
+    Quantity,
+}
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub enum Menu {
     #[default]
@@ -210,6 +216,20 @@ impl Menu {
     }
 }
 impl Chart {
+    pub(super) fn value_format(self) -> ValueFormat {
+        match self {
+            Self::Money
+            | Self::Prices
+            | Self::Profits
+            | Self::Accounts
+            | Self::Wages
+            | Self::Debt
+            | Self::Rent
+            | Self::Arrears
+            | Self::Taxes => ValueFormat::Money,
+            _ => ValueFormat::Quantity,
+        }
+    }
     pub const ALL: [Self; 29] = [
         Self::Employment,
         Self::Unemployment,
@@ -280,7 +300,7 @@ impl Chart {
             Self::Unemployment => "Unemployment rate",
             Self::Cash => "Households by cash bracket",
             Self::Money => "Spendable cash by sector",
-            Self::Prices => "Mean asking prices by good",
+            Self::Prices => "Mean asking prices, rounded to whole units",
             Self::Production => "Goods produced per day",
             Self::Consumption => "Final consumption per day",
             Self::Inputs => "Goods used as inputs per day",
@@ -293,7 +313,7 @@ impl Chart {
             Self::Industries => "Open business sites by industry",
             Self::Businesses => "Business lifecycle",
             Self::BusinessChanges => "Business entries and closures per day",
-            Self::Wages => "Mean offered wages by industry",
+            Self::Wages => "Mean offered wages, rounded to whole units",
             Self::Occupations => "Population by occupation",
             Self::Population => "Living population",
             Self::Demography => "Daily demographic change",

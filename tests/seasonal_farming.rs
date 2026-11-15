@@ -134,6 +134,74 @@ fn winter_farms_preserve_crops_without_hiring_or_producing_on_gpu() -> Result<()
     Ok(())
 }
 
+struct HarvestPricingCase {
+    harvest_start: u32,
+    harvest_days: u32,
+}
+
+#[test]
+fn crop_prices_can_remain_below_labor_cost_in_every_season_on_gpu() -> Result<()> {
+    let cases = [
+        HarvestPricingCase {
+            harvest_start: 270,
+            harvest_days: 30,
+        },
+        HarvestPricingCase {
+            harvest_start: 350,
+            harvest_days: 30,
+        },
+        HarvestPricingCase {
+            harvest_start: 270,
+            harvest_days: 300,
+        },
+        HarvestPricingCase {
+            harvest_start: 270,
+            harvest_days: 364,
+        },
+        HarvestPricingCase {
+            harvest_start: 270,
+            harvest_days: 365,
+        },
+    ];
+    let device = support::device(64)?;
+    for case in cases {
+        let home = HouseholdProduction::Available {
+            milling_minutes: 30,
+            baking_minutes: 30,
+            cultivation_minutes: 10,
+            harvest_start: case.harvest_start,
+            harvest_days: case.harvest_days,
+            annual_yield_per_plot: 730,
+        };
+        let mut config = farming_scenario(home)?.config().clone();
+        config.behavior.wage_increment = 0;
+        for firm in &mut config.population.as_mut().unwrap().firms {
+            firm.technique = Technique {
+                labor_minutes: 20,
+                input_ticks: 0,
+                output_ticks: 20,
+            };
+            firm.wage = 12;
+            firm.price = 1;
+        }
+        let mut simulation = Simulation::new(Scenario::new(config)?, device.clone())?;
+        simulation.advance()?;
+        let state = simulation.download()?;
+        for farm in 12..16 {
+            assert_eq!(
+                state.get(Field::Price, farm),
+                1,
+                "crop {farm}, harvest start {}, harvest days {}",
+                case.harvest_start,
+                case.harvest_days,
+            );
+        }
+        assert_eq!(state.get(Field::Price, 16), 1);
+        simulation.checkpoint()?.restore()?;
+    }
+    Ok(())
+}
+
 #[test]
 fn cashless_farms_keep_unharvested_crops_until_the_season_changes_on_gpu() -> Result<()> {
     let scenario = farming_scenario(HouseholdProduction::industrial())?;
@@ -263,7 +331,11 @@ fn generated_food_reserves_and_capacity_cover_the_population_on_gpu() -> Result<
             .iter()
             .map(|&farm| initial.get(Field::Grain, farm))
             .sum::<u64>();
-        assert!(stored >= (daily_food * 5).div_ceil(4) * 365);
+        let food = scenario.config().food.unwrap();
+        let bread = (daily_food * 5).div_ceil(4);
+        let flour = food.inputs(Good::Bread, bread);
+        let grain = food.inputs(Good::Flour, flour);
+        assert!(stored >= grain * 365);
         for good in [Good::Grain, Good::Flour, Good::Bread] {
             let capacity = initial
                 .actors
@@ -276,7 +348,12 @@ fn generated_food_reserves_and_capacity_cover_the_population_on_gpu() -> Result<
                     u64::from(actor.capacity) * initial.get(Field::OutputTicks, index)
                 })
                 .sum::<u64>();
-            assert!(capacity >= (daily_food * 5).div_ceil(4));
+            let required = match good {
+                Good::Grain => grain,
+                Good::Flour => flour,
+                _ => bread,
+            };
+            assert!(capacity >= required);
         }
         simulation.advance()?;
         let selling = simulation.download()?;

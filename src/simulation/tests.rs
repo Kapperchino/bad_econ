@@ -644,8 +644,16 @@ fn gpu_firm_growth_matches_full_rebuild_with_births_and_migration() -> Result<()
             &entries.transitions,
         )?
         .expect("supported transitions");
+        let previous_state = gpu.state.clone();
+        let previous_audited = gpu.audited.clone();
+        let previous_stride = gpu.config.state_stride;
         gpu.commit_entries(&entries, plan, &pending.records)
             .context("GPU growth")?;
+        if gpu.actors().len() <= previous_stride as usize {
+            assert!(market_graphs::same_buffer(&previous_state, &gpu.state));
+            assert!(market_graphs::same_buffer(&previous_audited, &gpu.audited));
+        }
+        assert!(gpu.config.state_stride as usize > gpu.actors().len());
         let mut expected = reference.download()?;
         expected.people = reference
             .demography
@@ -663,7 +671,15 @@ fn gpu_firm_growth_matches_full_rebuild_with_births_and_migration() -> Result<()
         assert_eq!(gpu.download()?, reference.download()?, "day {day}");
         assert_eq!(gpu.snapshot, reference.snapshot, "day {day}");
     }
-    gpu.checkpoint()?.restore()?;
+    let before = gpu.download()?;
+    let mut restored = Simulation::from_checkpoint(gpu.checkpoint()?, device(64)?)?;
+    assert_eq!(restored.download()?, before);
+    let mut corrupted = gpu.device.read(&gpu.state)?;
+    let cash = Field::Cash as usize * gpu.config.state_stride as usize * TICK_WORDS;
+    corrupted[cash..cash + TICK_WORDS].fill(u32::MAX);
+    gpu.device.write(&gpu.state, &corrupted);
+    assert!(gpu.advance().is_err());
+    assert_eq!(gpu.download()?, before);
     Ok(())
 }
 
@@ -1196,7 +1212,14 @@ fn partitioned_audits_match_original_tiles_extrema_and_overflow_on_gpu() -> Resu
             };
             initial.set(Field::Wage, index, wage);
             initial.set(Field::Price, index, (1u64 << 41) + index as u64);
-            initial.set(Field::EnterpriseStatus, index, 4 * (index % 2) as u64);
+            initial.set(
+                Field::EnterpriseStatus,
+                index,
+                match index % 2 {
+                    0 => crate::domain::enterprise::EnterpriseState::Operating as u64,
+                    _ => crate::domain::enterprise::EnterpriseState::Closed as u64,
+                },
+            );
             initial.set(Field::EnterpriseModel, index, (index % 2) as u64);
             initial.set(Field::HousingStatus, index, (index % 2) as u64);
             initial.set(Field::LivingMembers, index, (index % 3) as u64);
@@ -1218,6 +1241,11 @@ fn partitioned_audits_match_original_tiles_extrema_and_overflow_on_gpu() -> Resu
             if let Amounts::Overflow = amounts {
                 for index in 0..initial.actors.len() {
                     initial.set(Field::Wage, index, u64::from(u32::MAX));
+                    initial.set(
+                        Field::EnterpriseStatus,
+                        index,
+                        crate::domain::enterprise::EnterpriseState::Operating as u64,
+                    );
                 }
             }
             simulation.device.write(

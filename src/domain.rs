@@ -14,6 +14,7 @@ pub mod diagnostics;
 mod employment;
 pub mod enterprise;
 pub mod finance;
+pub mod food;
 mod households;
 pub mod industry;
 pub mod landlords;
@@ -35,9 +36,9 @@ pub use population::{
 pub use resources::{ProductionSite, ResourceMap, ResourceRegion};
 
 pub const SCENARIO_VERSION: u32 = 2;
-const CHECKPOINT_VERSION: u32 = 20;
-pub const STATE_HASH_VERSION: &str = "bad-econ/state/CubekV2/v21";
-pub const USED_FIELDS: usize = Field::HeatingServed as usize + 1;
+const CHECKPOINT_VERSION: u32 = 21;
+pub const STATE_HASH_VERSION: &str = "bad-econ/state/CubekV2/v22";
+pub const USED_FIELDS: usize = Field::OpeningGrossIncome as usize + 1;
 pub const TRANSIT_FIELDS: usize = USED_FIELDS + Good::COUNT;
 pub const CONSUMPTION_FIELDS: usize = TRANSIT_FIELDS + Good::COUNT;
 pub const PRODUCTION_FIELDS: usize = CONSUMPTION_FIELDS + Good::COUNT;
@@ -176,6 +177,12 @@ pub enum Field {
     RailCapacity,
     HeatingNeed,
     HeatingServed,
+    NutritionNeed,
+    MillingRemainder,
+    BakingRemainder,
+    FarmHectares,
+    HarvestedThisYear,
+    OpeningGrossIncome,
 }
 impl Field {
     pub fn inventory(good: Good) -> Self {
@@ -416,6 +423,8 @@ pub struct ScenarioConfig {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub producer_buffer_days: Option<u32>,
     pub household_need: u32,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub food: Option<food::FoodPolicy>,
     pub capacity: u32,
     pub packet_output: u32,
     pub packet_minutes: u32,
@@ -506,7 +515,15 @@ impl Scenario {
         config.packet_minutes = 20;
         config.packet_output = 20;
         config.wage = 12;
-        config.prices = [12, 24, 36];
+        config.prices = food::FoodPolicy::PRICES;
+        config.food = Some(food::FoodPolicy::default());
+        if let enterprise::HouseholdProduction::Available {
+            annual_yield_per_plot,
+            ..
+        } = &mut config.household_production
+        {
+            *annual_yield_per_plot = food::FoodPolicy::default().wheat_kg_per_hectare;
+        }
         config.household_cash = 7
             * (u64::from(config.household_need)
                 * u64::from(config.demography.initial_household_members)
@@ -514,7 +531,7 @@ impl Scenario {
                 + u64::from(config.rent.map_or(0, |rent| rent.household_daily)));
         config.household_liquidity = HouseholdLiquidity::PaycheckToPaycheck;
         config.behavior.wage_increment = 0;
-        config.behavior.price_response = 100;
+        config.behavior.price_response = 1000;
         config.distributors = (0..config.firms)
             .filter(|&firm| generated_good(&config, firm as usize) == Good::Bread && firm % 3 == 0)
             .map(|firm| enterprise::Distributor {
@@ -644,6 +661,8 @@ impl Scenario {
             .collect()
     }
     pub fn new(mut config: ScenarioConfig) -> Result<Self> {
+        config.minimum_price = 1;
+        config.food = config.food.map(food::FoodPolicy::new).transpose()?;
         config.property = config
             .property
             .take()
@@ -762,11 +781,13 @@ impl Scenario {
                     std::array::from_fn(|good| match (Good::ALL[good], config.economy) {
                         (Good::Housing | Good::Railway, _) => 0,
                         (_, Economy::Agrarian) => config.capacity,
-                        (_, Economy::Industrial) => {
-                            (production[good].div_ceil(config.packet_output.into()) as u32)
-                                .max(1)
-                                .min(config.capacity)
-                        }
+                        (_, Economy::Industrial) => (production[good].div_ceil(
+                            food::technique(&config, Good::ALL[good])
+                                .output_ticks
+                                .into(),
+                        ) as u32)
+                            .max(1)
+                            .min(config.capacity),
                     });
                 let starting_stocks =
                     std::array::from_fn(|good| match (Good::ALL[good], config.economy) {
@@ -963,6 +984,7 @@ impl Scenario {
             buffer_days: 4,
             producer_buffer_days: None,
             household_need: 1,
+            food: None,
             capacity: 100,
             packet_output: 3,
             packet_minutes: 360,
@@ -1182,21 +1204,10 @@ impl Scenario {
             _ if self.actor(index).kind == Good::Housing as u32 => {
                 Technique::housing(landlords::DEFAULT_HOUSING_UNITS).expect("housing recipe")
             }
-            _ => Technique {
-                labor_minutes: self.config.packet_minutes,
-                input_ticks: match index.checked_sub(self.config.households as usize) {
-                    Some(_)
-                        if Good::from_index(self.actor(index).kind)
-                            .expect("firm good")
-                            .inputs()[0]
-                            .is_none() =>
-                    {
-                        0
-                    }
-                    _ => self.config.packet_output,
-                },
-                output_ticks: self.config.packet_output,
-            },
+            _ => food::technique(
+                &self.config,
+                Good::from_index(self.actor(index).kind).unwrap_or(Good::Bread),
+            ),
         }
     }
     pub fn production_recipe(
@@ -1218,7 +1229,7 @@ impl Scenario {
                     .iter()
                     .any(|lab| lab.owner == actor.identity && lab.methods.contains(&method))
             }) {
-                true => Ok(method.recipe(good, technique)),
+                true => Ok(food::upgraded_recipe(&self.config, method, good, technique)),
                 false => Err(anyhow!("production method is not configured for this firm")),
             },
         }
@@ -1395,6 +1406,21 @@ impl Scenario {
             property.initialize(&mut state)?;
         }
         landlords::initialize(self, &mut state)?;
+        if let (Some(food), None) = (self.config.food, &self.config.property) {
+            let mut land = food::FarmLand::new(self.config.land_access.as_ref());
+            let farms = (self.config.households as usize..state.actors.len())
+                .filter(|&actor| {
+                    state.actors.at(actor).kind == Good::Grain as u32
+                        && state.get(Field::EnterpriseModel, actor) == 0
+                })
+                .collect::<Vec<_>>();
+            for actor in farms {
+                let hectares = land.allocate(
+                    food.hectares(state.actors.at(actor).capacity, self.technique(actor)),
+                );
+                state.set(Field::FarmHectares, actor, hectares);
+            }
+        }
         Ok(state)
     }
     fn actor(&self, index: usize) -> Actor {
@@ -2408,24 +2434,38 @@ impl ObservationSnapshot {
                                     != enterprise::EnterpriseState::Closed as u64,
                         );
                         let j = kind as usize - 1;
-                        snapshot.markets[j]
-                            .wages
-                            .include(state.get(Field::Wage, i))?;
-                        snapshot.markets[j]
-                            .prices
-                            .include(state.get(Field::Price, i))?;
+                        let trading = matches!(
+                            enterprise::EnterpriseState::from_index(
+                                state.get(Field::EnterpriseStatus, i),
+                            )?,
+                            enterprise::EnterpriseState::Operating
+                                | enterprise::EnterpriseState::Dormant
+                        );
+                        if trading {
+                            snapshot.markets[j]
+                                .wages
+                                .include(state.get(Field::Wage, i))?;
+                            snapshot.minimum_wage =
+                                snapshot.minimum_wage.min(state.get(Field::Wage, i));
+                            snapshot.maximum_wage =
+                                snapshot.maximum_wage.max(state.get(Field::Wage, i));
+                            let stocked = kind == Good::Housing as u32
+                                || kind == Good::Railway as u32
+                                || state.get(Field::inventory(Good::from_index(kind)?), i) > 0;
+                            if stocked {
+                                snapshot.markets[j]
+                                    .prices
+                                    .include(state.get(Field::Price, i))?;
+                                snapshot.minimum_price =
+                                    snapshot.minimum_price.min(state.get(Field::Price, i));
+                                snapshot.maximum_price =
+                                    snapshot.maximum_price.max(state.get(Field::Price, i));
+                            }
+                        }
                         snapshot.produced[j] =
                             add(snapshot.produced[j], state.get(Field::Produced, i))?;
                         snapshot.inventories[j] =
                             add(snapshot.inventories[j], state.get(Field::Pipeline, i))?;
-                        snapshot.minimum_wage =
-                            snapshot.minimum_wage.min(state.get(Field::Wage, i));
-                        snapshot.maximum_wage =
-                            snapshot.maximum_wage.max(state.get(Field::Wage, i));
-                        snapshot.minimum_price =
-                            snapshot.minimum_price.min(state.get(Field::Price, i));
-                        snapshot.maximum_price =
-                            snapshot.maximum_price.max(state.get(Field::Price, i));
                     }
                 }
                 let in_ring = (0..scenario.ring() * Good::COUNT).try_fold(0, |total, slot| {
@@ -2442,6 +2482,14 @@ impl ObservationSnapshot {
                     )),
                 }
             })?;
+        snapshot.minimum_wage = match snapshot.minimum_wage {
+            u64::MAX => 0,
+            value => value,
+        };
+        snapshot.minimum_price = match snapshot.minimum_price {
+            u64::MAX => 0,
+            value => value,
+        };
         if let Some(finance) = &scenario.config.finance {
             let view = finance::FinanceStateView::new(
                 finance,
@@ -2583,6 +2631,8 @@ impl<'a> AuditedState<'a> {
                     <= enterprise::EnterpriseModel::Distributor as u64
                 && state.get(Field::FoodAccess, i)
                     <= enterprise::FoodAccess::MatchingFailure as u64
+                && state.get(Field::MillingRemainder, i) < c.food.map_or(1, |_| 5)
+                && state.get(Field::BakingRemainder, i) < c.food.map_or(1, |_| 25)
                 && state.get(Field::Fatigue, i) <= 1000
                 && state.get(Field::Time, i) <= 1440
                 && state.get(Field::Hours, i) <= 1440
@@ -2768,11 +2818,25 @@ impl<'a> AuditedState<'a> {
                 && recipe
                 && accounting
         });
+        let commercial_land = c.food.map_or(0, |food| {
+            (c.households as usize..scenario.actors())
+                .filter(|&index| {
+                    scenario.actor(index).kind == Good::Grain as u32
+                        && !scenario
+                            .retailers
+                            .contains_key(&scenario.actor(index).identity)
+                })
+                .map(|index| {
+                    food.hectares(scenario.actor(index).capacity, scenario.technique(index))
+                })
+                .sum::<u64>()
+        });
         let land_limit = match &c.land_access {
             Some(land) => u64::from(land.total_plots),
             None => {
                 u64::from(c.households.div_ceil(2))
                     * u64::from(c.demography.initial_household_members.div_ceil(2))
+                    + commercial_land
             }
         };
         let land = (0..state.actors.len())
@@ -2780,6 +2844,7 @@ impl<'a> AuditedState<'a> {
                 let consolidated = match (&c.property, state.actors.at(index).kind) {
                     (None, kind) if kind == Good::Grain as u32 => {
                         state.get(Field::OccupiedPlots, index)
+                            + state.get(Field::FarmHectares, index)
                     }
                     _ => 0,
                 };
@@ -2913,6 +2978,7 @@ impl TryFrom<ScenarioDocument> for ScenarioConfig {
             buffer_days: current.buffer_days,
             producer_buffer_days: current.producer_buffer_days,
             household_need: current.household_need,
+            food: current.food,
             capacity: current.capacity,
             packet_output: current.packet_output,
             packet_minutes: current.packet_minutes,
@@ -2977,6 +3043,8 @@ struct CurrentScenario {
     #[serde(default)]
     pub producer_buffer_days: Option<u32>,
     pub household_need: u32,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub food: Option<food::FoodPolicy>,
     pub capacity: u32,
     pub packet_output: u32,
     pub packet_minutes: u32,

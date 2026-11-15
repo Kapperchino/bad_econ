@@ -330,10 +330,8 @@ fn summary_tiles(input: &[Ticks], output: &mut [Ticks], control: &[Atomic<u32>],
             stride /= 2;
         }
         if UNIT_POS == 0 {
-            output[metric as usize] = ticks(
-                u32::cast_from(shared[0usize]),
-                u32::cast_from(shared[0usize] >> 32),
-            );
+            let value = select(minimum && shared[0usize] == u64::MAX, 0u64, shared[0usize]);
+            output[metric as usize] = ticks(u32::cast_from(value), u32::cast_from(value >> 32));
         }
     }
 }

@@ -628,27 +628,6 @@ pub(super) fn operating_plan(
             );
         }
         let demand = value(state, config, comptime!(Field::Demand as u32), firm);
-        let overhead = rent::unit_price(config.firm_rent, demand, output);
-        let packet_cost = add_checked(control, ticks(labor, 0), input_cost);
-        let unit_cost = add_checked(
-            control,
-            divide(
-                add_checked(control, packet_cost, ticks(output - 1, 0)),
-                output,
-            ),
-            ticks(overhead, 0),
-        );
-        let quote = maximum(
-            value(state, config, comptime!(Field::Price as u32), firm),
-            unit_cost,
-        );
-        set(
-            state,
-            config,
-            comptime!(Field::Price as u32),
-            firm,
-            minimum(quote, ticks(config.maximum_price, 0)),
-        );
         let packets = maximum(
             divide(add_checked(control, demand, ticks(output - 1, 0)), output),
             ticks(1, 0),

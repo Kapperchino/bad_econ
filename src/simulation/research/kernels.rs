@@ -55,7 +55,7 @@ fn write(state: &mut [u32], position: usize, value: Ticks) {
 
 #[cube]
 fn main_coordinate(config: &KernelResearchConfig, field: u32, actor: u32) -> usize {
-    ((field * config.parameters.actors + actor) * 2) as usize
+    ((field * config.parameters.state_stride + actor) * 2) as usize
 }
 
 #[cube]

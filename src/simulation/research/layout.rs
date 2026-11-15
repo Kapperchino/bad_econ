@@ -46,7 +46,7 @@ impl Header {
 
 #[derive(CubeType, CubeLaunch)]
 pub struct ResearchParameters {
-    pub actors: u32,
+    pub state_stride: u32,
     pub lab_count: u32,
     pub project_count: u32,
     pub machine_count: u32,
@@ -66,9 +66,9 @@ pub struct ResearchParameters {
     pub strike_state: u32,
 }
 impl Header {
-    pub fn launch(self) -> ResearchParametersLaunch {
+    pub fn launch(self, state_stride: u32) -> ResearchParametersLaunch {
         ResearchParametersLaunch {
-            actors: self.actors,
+            state_stride,
             lab_count: self.lab_count,
             project_count: self.project_count,
             machine_count: self.machine_count,

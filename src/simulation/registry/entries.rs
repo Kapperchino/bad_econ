@@ -120,7 +120,7 @@ impl EntryBatch {
             state,
             &values,
             &indices,
-            metadata.actors.len(),
+            state.meta.num_elements() / (scenario.fields() * TICK_WORDS),
             Transfer::Gather,
         );
         let words = device.read(&values)?;
@@ -224,28 +224,38 @@ impl EntryBatch {
         })
     }
 
-    pub fn grow(
-        &self,
-        device: &Device,
-        previous: &CubeTensor,
-        before: usize,
-        fields: usize,
-    ) -> CubeTensor {
-        let grown = device.state_buffer(self.metadata.actors.len() * fields * TICK_WORDS);
-        transfer(
-            device,
-            previous,
-            &grown,
-            &self.indices,
-            before,
-            Transfer::Grow,
-        );
+    pub fn stride(&self, previous: usize) -> usize {
+        let count = self.metadata.actors.len();
+        match count <= previous {
+            true => previous,
+            false => count.next_multiple_of((count / 64).next_power_of_two().clamp(64, 16_384)),
+        }
+    }
+
+    pub fn grow(&self, device: &Device, previous: &CubeTensor, fields: usize) -> CubeTensor {
+        let before = previous.meta.num_elements() / (fields * TICK_WORDS);
+        let stride = self.stride(before);
+        let grown = match stride == before {
+            true => previous.clone(),
+            false => {
+                let grown = device.state_buffer(stride * fields * TICK_WORDS);
+                transfer(
+                    device,
+                    previous,
+                    &grown,
+                    &self.indices,
+                    before,
+                    Transfer::Grow,
+                );
+                grown
+            }
+        };
         transfer(
             device,
             &self.values,
             &grown,
             &self.indices,
-            self.metadata.actors.len(),
+            stride,
             Transfer::Scatter,
         );
         grown

@@ -82,7 +82,7 @@ fn event_settlement(
         control,
         0,
         id + parameters.offset,
-        config.actors,
+        config.state_stride,
         posting,
     )
 }

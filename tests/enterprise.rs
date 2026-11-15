@@ -143,7 +143,10 @@ fn household_surplus_finances_construction_and_subsequent_paid_work() -> Result<
                     position: Position { x: 500, y: 500 },
                     owner: 2,
                     good,
-                    cash: 0,
+                    cash: match good {
+                        Good::Tools | Good::Wood => 60,
+                        _ => 0,
+                    },
                     inventories,
                     capacity: 1,
                     technique: Technique {

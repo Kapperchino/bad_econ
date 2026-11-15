@@ -1,7 +1,7 @@
 use super::{
     Chart, Dashboard, Display,
     graph::{self, GraphRenderer},
-    model::{ChartRange, Menu, Period, SeriesSelection},
+    model::{ChartRange, Menu, Period, SeriesSelection, ValueFormat},
     ui::{
         self, ActorSelection, ChartTab, FirmMarker, Label, Legend, MapMarkers, Plot, Region,
         UiAction,
@@ -82,7 +82,7 @@ fn draw(
         let chart = dashboard.chart;
         labels.iter_mut().for_each(|(kind, mut label)| {
             let value = match kind {
-                Label::Resources => format!("Population {}     Paid households {}     Cash {}     Firms {}", number(s.population.living), number(s.employed), number(s.cash), number(s.firms)),
+                Label::Resources => format!("Population {}     Paid households {}     Cash {}     Firms {}", number(s.population.living), number(s.employed), s.cash, number(s.firms)),
                 Label::Date => format!("{} | {} | {}°C\nDAY {:04} | {} | {}", s.weather.date, s.weather.season, s.weather.temperature_celsius, s.day, display.status.label(), display.speed.label()),
                 Label::Title => chart.menu().label().into(),
                 Label::Subtitle => chart.menu().description().into(),
@@ -245,7 +245,7 @@ fn draw_plot(
             .entity(entity)
             .despawn_children()
             .with_children(|plot| {
-                draw_axes(plot, &range, area);
+                draw_axes(plot, &range, area, chart.value_format());
                 plot.spawn((
                     Node {
                         position_type: PositionType::Absolute,
@@ -351,7 +351,7 @@ fn summary(menu: Menu, s: &ObservationSnapshot) -> String {
             "Paid households    {}\nUnmet bread    {} ticks\nTotal cash    {}\nIn transit    {} goods ticks",
             number(s.employed),
             number(s.shortages),
-            number(s.cash),
+            s.cash,
             number(
                 s.transit
                     .iter()
@@ -393,14 +393,14 @@ fn summary(menu: Menu, s: &ObservationSnapshot) -> String {
         ),
         Menu::Finance => format!(
             "Bank & support cash    {}\nLoan principal / interest    {} / {}\nIncome tax / employee charges    {} / {}\nPayroll reserves    {}\nRent collected / arrears    {} / {}",
-            number(s.financial_cash),
-            number(s.loan_principal),
-            number(s.loan_interest),
-            number(s.income_tax),
-            number(s.employee_charges),
-            number(s.payroll_reserves),
-            number(s.rent_collected),
-            number(s.rent_arrears)
+            s.financial_cash,
+            s.loan_principal,
+            s.loan_interest,
+            s.income_tax,
+            s.employee_charges,
+            s.payroll_reserves,
+            s.rent_collected,
+            s.rent_arrears
         ),
     }
 }
@@ -442,16 +442,22 @@ pub(super) fn chart_color(chart: Chart, series: usize) -> Color {
     }
 }
 
-fn draw_axes(parent: &mut ChildSpawnerCommands, range: &ChartRange, area: Vec2) {
+fn draw_axes(
+    parent: &mut ChildSpawnerCommands,
+    range: &ChartRange,
+    area: Vec2,
+    format: ValueFormat,
+) {
     (0..=4).for_each(|row| {
         let value = range.maximum - (range.maximum - range.minimum) * row as f64 / 4.0;
-        let caption = match value {
-            value if value.abs() >= 1000.0 => format!(
+        let caption = match (format, value) {
+            (ValueFormat::Money, _) => format!("{value:.0}"),
+            (_, value) if value.abs() >= 1000.0 => format!(
                 "{}{:.1}k",
                 if value < 0.0 { "-" } else { "" },
                 value.abs() / 1000.0
             ),
-            value if value.abs() >= 10.0 => format!("{value:.0}"),
+            (_, value) if value.abs() >= 10.0 => format!("{value:.0}"),
             _ => format!("{value:.1}"),
         };
         parent.spawn((
@@ -553,10 +559,11 @@ fn inspection_text(display: &Display) -> String {
                 .unwrap_or_else(|| "Select a household or firm to inspect its accounts, property and production.".into())
 }
 
-fn exact_value(value: f64) -> String {
-    match value {
-        value if !value.is_finite() => "unavailable".into(),
-        value if value.fract().abs() < 0.000_001 => format!("{value:.0}"),
+fn exact_value(value: f64, format: ValueFormat) -> String {
+    match (format, value) {
+        (_, value) if !value.is_finite() => "unavailable".into(),
+        (ValueFormat::Money, _) => format!("{value:.0}"),
+        (_, value) if value.fract().abs() < 0.000_001 => format!("{value:.0}"),
         _ => format!("{value:.3}"),
     }
 }
@@ -623,10 +630,13 @@ fn draw_readout(
                         .and_then(|values| values.get(series))
                         .filter(|prior| prior.is_finite() && value.is_finite())
                         .map_or_else(String::new, |prior| {
+                            let change = match chart.value_format() {
+                                ValueFormat::Money => format!("{:+.0}", value - prior),
+                                ValueFormat::Quantity => format!("{:+.3}", value - prior),
+                            };
                             format!(
-                                " | reference {} | change {:+.3}",
-                                exact_value(*prior),
-                                value - prior
+                                " | reference {} | change {change}",
+                                exact_value(*prior, chart.value_format()),
                             )
                         });
                     let people = match chart {
@@ -635,7 +645,10 @@ fn draw_readout(
                         }
                         _ => String::new(),
                     };
-                    format!("{name}  {}{people}{comparison}", exact_value(value))
+                    format!(
+                        "{name}  {}{people}{comparison}",
+                        exact_value(value, chart.value_format())
+                    )
                 })
                 .collect::<Vec<_>>()
                 .join("\n");

@@ -75,7 +75,6 @@ fn requests(
     let actor = ABSOLUTE_POS as u32;
     let mut action = 0u32;
     if actor < config.actors {
-        let count = config.actors;
         if comptime!(config.home_mode == Feature::Enabled)
             && actors[ActorLayout::KIND * (actors.len() / ActorLayout::WORDS) + actor as usize] == 0
         {
@@ -83,12 +82,24 @@ fn requests(
         }
         let target = load(
             state,
-            comptime!(Field::InvestmentGood as u32) * count + actor,
+            comptime!(Field::InvestmentGood as u32) * config.state_stride + actor,
         );
-        let tools = load(state, comptime!(Field::Tools as u32) * count + actor);
-        let wood = load(state, comptime!(Field::Wood as u32) * count + actor);
-        let cash = load(state, comptime!(Field::Cash as u32) * count + actor);
-        let arrears = load(state, comptime!(Field::RentArrears as u32) * count + actor);
+        let tools = load(
+            state,
+            comptime!(Field::Tools as u32) * config.state_stride + actor,
+        );
+        let wood = load(
+            state,
+            comptime!(Field::Wood as u32) * config.state_stride + actor,
+        );
+        let cash = load(
+            state,
+            comptime!(Field::Cash as u32) * config.state_stride + actor,
+        );
+        let arrears = load(
+            state,
+            comptime!(Field::RentArrears as u32) * config.state_stride + actor,
+        );
         let funded = !lt(cash, ticks(10_000, 0))
             && (comptime!(config.property_mode == Feature::Enabled)
                 || (!lt(tools, ticks(2, 0)) && !lt(wood, ticks(5, 0))))
@@ -97,11 +108,11 @@ fn requests(
             actors[ActorLayout::KIND * (actors.len() / ActorLayout::WORDS) + actor as usize] == 0;
         let invested = load(
             state,
-            comptime!(Field::InvestmentFirm as u32) * count + actor,
+            comptime!(Field::InvestmentFirm as u32) * config.state_stride + actor,
         );
         let living = load(
             state,
-            comptime!(Field::LivingMembers as u32) * count + actor,
+            comptime!(Field::LivingMembers as u32) * config.state_stride + actor,
         );
         let eligible = comptime!(config.home_mode == Feature::Enabled)
             && household
@@ -124,16 +135,26 @@ fn requests(
         }
         store(
             state,
-            comptime!(Field::InvestmentGood as u32) * count + actor,
+            comptime!(Field::InvestmentGood as u32) * config.state_stride + actor,
             ticks(proposal, 0),
         );
-        let split = load(state, comptime!(Field::SplitPerson as u32) * count + actor);
+        let split = load(
+            state,
+            comptime!(Field::SplitPerson as u32) * config.state_stride + actor,
+        );
         if !equal(split, zero()) && !lt(cash, ticks(5000, 0)) {
             action = 0x01000001u32;
         }
-        let moving = load(state, comptime!(Field::MoveDue as u32) * count + actor).extract(0usize);
-        let destination =
-            load(state, comptime!(Field::MoveTarget as u32) * count + actor).extract(0usize);
+        let moving = load(
+            state,
+            comptime!(Field::MoveDue as u32) * config.state_stride + actor,
+        )
+        .extract(0usize);
+        let destination = load(
+            state,
+            comptime!(Field::MoveTarget as u32) * config.state_stride + actor,
+        )
+        .extract(0usize);
         if destination > 0 && moving == 0 && !lt(cash, ticks(100, 0)) {
             action = 0x02000000u32 + destination;
         }
@@ -143,12 +164,12 @@ fn requests(
         let kind = actors[ActorLayout::KIND * (actors.len() / ActorLayout::WORDS) + actor as usize];
         let status = load(
             state,
-            comptime!(Field::EnterpriseStatus as u32) * count + actor,
+            comptime!(Field::EnterpriseStatus as u32) * config.state_stride + actor,
         )
         .extract(0usize);
         let living = load(
             state,
-            comptime!(Field::LivingMembers as u32) * count + actor,
+            comptime!(Field::LivingMembers as u32) * config.state_stride + actor,
         )
         .extract(0usize);
         if kind == 0 && living == 0 && (action <= Good::COUNT as u32 || action >> 24 >= 8) {
@@ -156,7 +177,7 @@ fn requests(
         }
         let estate = load(
             state,
-            comptime!(Field::EstateSettled as u32) * count + actor,
+            comptime!(Field::EstateSettled as u32) * config.state_stride + actor,
         )
         .extract(0usize);
         if kind > 0 && status == comptime!(EnterpriseState::Liquidating as u32) {
@@ -167,12 +188,12 @@ fn requests(
         }
         let pending = load(
             state,
-            comptime!(Field::PendingCapacity as u32) * count + actor,
+            comptime!(Field::PendingCapacity as u32) * config.state_stride + actor,
         )
         .extract(0usize);
         let construction = load(
             state,
-            comptime!(Field::ConstructionRemaining as u32) * count + actor,
+            comptime!(Field::ConstructionRemaining as u32) * config.state_stride + actor,
         )
         .extract(0usize);
         if kind > 0
@@ -184,7 +205,7 @@ fn requests(
         }
         let invested = load(
             state,
-            comptime!(Field::EquityInvested as u32) * count + actor,
+            comptime!(Field::EquityInvested as u32) * config.state_stride + actor,
         );
         if action == 0
             && kind == 0
@@ -194,48 +215,63 @@ fn requests(
             && day % 30 == 0
         {
             for sample in 0..16u32 {
-                let candidate = (actor + day * 17 + sample * 31) % count;
+                let candidate = (actor + day * 17 + sample * 31) % config.actors;
                 let candidate_kind = actors
                     [ActorLayout::KIND * (actors.len() / ActorLayout::WORDS) + candidate as usize];
                 let status = load(
                     state,
-                    comptime!(Field::EnterpriseStatus as u32) * count + candidate,
+                    comptime!(Field::EnterpriseStatus as u32) * config.state_stride + candidate,
                 )
                 .extract(0usize);
-                let sales = load(state, comptime!(Field::Sales as u32) * count + candidate);
-                let demand = load(state, comptime!(Field::Demand as u32) * count + candidate);
+                let sales = load(
+                    state,
+                    comptime!(Field::Sales as u32) * config.state_stride + candidate,
+                );
+                let demand = load(
+                    state,
+                    comptime!(Field::Demand as u32) * config.state_stride + candidate,
+                );
                 let operating = load(
                     state,
-                    comptime!(Field::OperatingReserve as u32) * count + candidate,
+                    comptime!(Field::OperatingReserve as u32) * config.state_stride + candidate,
                 );
-                let funds = load(state, comptime!(Field::Cash as u32) * count + candidate);
-                let price =
-                    load(state, comptime!(Field::Price as u32) * count + candidate).extract(0usize);
-                let wage =
-                    load(state, comptime!(Field::Wage as u32) * count + candidate).extract(0usize);
+                let funds = load(
+                    state,
+                    comptime!(Field::Cash as u32) * config.state_stride + candidate,
+                );
+                let price = load(
+                    state,
+                    comptime!(Field::Price as u32) * config.state_stride + candidate,
+                )
+                .extract(0usize);
+                let wage = load(
+                    state,
+                    comptime!(Field::Wage as u32) * config.state_stride + candidate,
+                )
+                .extract(0usize);
                 let labor = load(
                     state,
-                    comptime!(Field::LaborMinutes as u32) * count + candidate,
+                    comptime!(Field::LaborMinutes as u32) * config.state_stride + candidate,
                 )
                 .extract(0usize);
                 let output = load(
                     state,
-                    comptime!(Field::OutputTicks as u32) * count + candidate,
+                    comptime!(Field::OutputTicks as u32) * config.state_stride + candidate,
                 )
                 .extract(0usize);
                 let inputs = load(
                     state,
-                    comptime!(Field::InputTicks as u32) * count + candidate,
+                    comptime!(Field::InputTicks as u32) * config.state_stride + candidate,
                 )
                 .extract(0usize);
                 let first_cost = load(
                     state,
-                    comptime!(Field::FirstInputCost as u32) * count + candidate,
+                    comptime!(Field::FirstInputCost as u32) * config.state_stride + candidate,
                 )
                 .extract(0usize);
                 let second_cost = load(
                     state,
-                    comptime!(Field::SecondInputCost as u32) * count + candidate,
+                    comptime!(Field::SecondInputCost as u32) * config.state_stride + candidate,
                 )
                 .extract(0usize);
                 let packet_cost = plus(

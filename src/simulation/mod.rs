@@ -172,7 +172,8 @@ impl Simulation {
         let start = actors.firm_indices().next().unwrap_or(actors.len());
         let statuses = decode(&self.device.read_range(
             &self.state,
-            (Field::EnterpriseStatus as usize * actors.len() + start) * TICK_WORDS,
+            (Field::EnterpriseStatus as usize * self.config.state_stride as usize + start)
+                * TICK_WORDS,
             (actors.len() - start) * TICK_WORDS,
         )?);
         self.readback_bytes += (statuses.len() * TICK_BYTES) as u64;
@@ -459,7 +460,8 @@ impl Simulation {
                 let first = self.metadata.actors.firm_indices().next().unwrap_or(count);
                 let words = self.device.read_range(
                     &self.state,
-                    (Field::RailOperating as usize * count + first) * TICK_WORDS,
+                    (Field::RailOperating as usize * self.config.state_stride as usize + first)
+                        * TICK_WORDS,
                     (count - first) * TICK_WORDS,
                 )?;
                 self.readback_bytes += (words.len() * WORD_BYTES) as u64;
@@ -920,7 +922,12 @@ impl Simulation {
         )?;
         checkpoint("EntryBatch");
         let count = batch.metadata.actors.len();
-        let additional = count as u64 * self.scenario.fields() as u64 * 16 + count as u64 * 192;
+        let stride = batch.stride(self.config.state_stride as usize);
+        let state_bytes = match stride == self.config.state_stride as usize {
+            true => 0,
+            false => stride as u64 * self.scenario.fields() as u64 * 16,
+        };
+        let additional = state_bytes + count as u64 * 192;
         self.device.reclaim_memory(additional)?;
         match self
             .memory_usage()
@@ -931,12 +938,7 @@ impl Simulation {
             true => (),
             false => Err(anyhow!("registry growth exceeds the device memory budget"))?,
         }
-        let state = batch.grow(
-            &self.device,
-            &self.state,
-            self.metadata.actors.len(),
-            self.scenario.fields(),
-        );
+        let state = batch.grow(&self.device, &self.state, self.scenario.fields());
         checkpoint("GrowState");
         plan.migrations
             .extend_households(&batch.metadata.actors, &batch.formations);
@@ -965,12 +967,13 @@ impl Simulation {
             metadata.ownership = ownership.clone();
         }
         let started = Instant::now();
-        let config = self.config.updated(
+        let mut config = self.config.updated(
             &self.device,
             &self.scenario,
             &self.metadata.actors,
             &metadata,
         );
+        config.state_stride = stride as u32;
         if std::env::var_os("BAD_ECON_PROFILE_STAGES").is_some() {
             eprintln!(
                 "CONFIG {} {:.3}",
@@ -1050,7 +1053,7 @@ impl Simulation {
         let research = self
             .research
             .as_ref()
-            .map(|research| research.with_actors(&metadata.actors))
+            .map(|research| research.with_actors(&metadata.actors, stride as u32))
             .transpose()?;
         let scratch_words = markets::scratch_words(count);
         let event_words = count.div_ceil(economy::audit::TILE_ACTORS) * SummaryLayout::WORDS;
@@ -1080,13 +1083,19 @@ impl Simulation {
             audited_day: self.audited_day,
             next_phase: self.next_phase,
             state,
-            audited: self
-                .device
-                .state_buffer(count * self.scenario.fields() * TICK_WORDS),
-            snapshot_copy: tensor::SnapshotCopy::new(
-                &self.device,
-                count * self.scenario.fields() * TICK_WORDS,
-            ),
+            audited: match stride == self.config.state_stride as usize {
+                true => self.audited.clone(),
+                false => self
+                    .device
+                    .state_buffer(stride * self.scenario.fields() * TICK_WORDS),
+            },
+            snapshot_copy: match stride == self.config.state_stride as usize {
+                true => self.snapshot_copy.clone(),
+                false => tensor::SnapshotCopy::new(
+                    &self.device,
+                    stride * self.scenario.fields() * TICK_WORDS,
+                ),
+            },
             actors,
             config,
             spatial,
@@ -1122,7 +1131,7 @@ impl Simulation {
         };
         checkpoint("Buffers");
         match settlement {
-            Some(batch) => batch.apply(&next.device, &next.state, count),
+            Some(batch) => batch.apply(&next.device, &next.state, stride),
             None => registry::apply(
                 &next.device,
                 &next.state,
@@ -1295,7 +1304,7 @@ impl Simulation {
         }
         match &settlement {
             Some(batch) => {
-                batch.apply(&self.device, &self.state, self.metadata.actors.len());
+                batch.apply(&self.device, &self.state, self.config.state_stride as usize);
                 self.readback_bytes += batch.readback_bytes;
             }
             None => registry::apply(
@@ -1469,6 +1478,14 @@ impl Simulation {
             bytemuck::cast_slice(&[ObservationControlLayout::zeroed()]),
         );
         let parameters = self.parameters(phase, Market::Labor, 0, self.metadata.actors.len())?;
+        if matches!(phase, Phase::Proposal | Phase::AccountsDecisions) {
+            self.economy(
+                EconomyStage::InputQuotes,
+                self.metadata.actors.len(),
+                &parameters,
+                &self.proposals,
+            );
+        }
         if let Phase::Opening = phase {
             self.feedback_operation(
                 EconomyStage::ClearFeedback,
@@ -2062,18 +2079,12 @@ impl Simulation {
                 });
                 let result = result.and_then(|source| match (regional_transport, key.routing) {
                     (true, economy::railway::RouteAvailability::Dormant) => {
-                        let routing = self.config.railway.replace_route_availability(
-                            economy::railway::RouteAvailability::Available,
-                        );
                         let available = market_graphs::MarketKey {
                             routing: economy::railway::RouteAvailability::Available,
                             ..key
                         };
-                        let recorded = graphs.prerecord(&device, available, source, || {
-                            self.device_market_prefix(market, trace, parameters, &device_profile)
-                        });
-                        self.config.railway.replace_route_availability(routing);
-                        recorded.map(|_| source)
+                        graphs.prepare(available, source);
+                        Ok(source)
                     }
                     _ => Ok(source),
                 });
@@ -2548,25 +2559,28 @@ impl Simulation {
             maximum_price: totals.maximum_price.into(),
             markets: std::array::from_fn(|good| {
                 let count = u64::from(totals.firms_by_good[good]);
-                match count {
-                    0 => MarketObservation::default(),
-                    _ => MarketObservation {
-                        wages: QuoteDistribution {
-                            count,
-                            minimum: totals.wage_minima[good].into(),
-                            maximum: totals.wage_maxima[good].into(),
-                            total: totals.wage_totals[good].into(),
-                            squares: totals.wage_squares[good].into(),
-                        },
-                        prices: QuoteDistribution {
-                            count,
-                            minimum: totals.price_minima[good].into(),
-                            maximum: totals.price_maxima[good].into(),
-                            total: totals.price_totals[good].into(),
-                            squares: totals.price_squares[good].into(),
-                        },
+                let wages = match count {
+                    0 => QuoteDistribution::default(),
+                    _ => QuoteDistribution {
+                        count,
+                        minimum: totals.wage_minima[good].into(),
+                        maximum: totals.wage_maxima[good].into(),
+                        total: totals.wage_totals[good].into(),
+                        squares: totals.wage_squares[good].into(),
                     },
-                }
+                };
+                let count = u64::from(totals.price_counts[good]);
+                let prices = match count {
+                    0 => QuoteDistribution::default(),
+                    _ => QuoteDistribution {
+                        count,
+                        minimum: totals.price_minima[good].into(),
+                        maximum: totals.price_maxima[good].into(),
+                        total: totals.price_totals[good].into(),
+                        squares: totals.price_squares[good].into(),
+                    },
+                };
+                MarketObservation { wages, prices }
             }),
             wealth_bins: control.wealth_bins.iter().map(|&n| u64::from(n)).collect(),
             regions: control.regions.iter().map(|&n| u64::from(n)).collect(),
@@ -2586,9 +2600,25 @@ impl Simulation {
             }
         }
     }
-    pub fn download(&mut self) -> Result<State> {
-        let values = decode(&self.device.read(&self.state)?);
+    fn read_state(&mut self, direction: CopyDirection) -> Result<Vec<u64>> {
+        let source = match direction {
+            CopyDirection::Save => &self.state,
+            CopyDirection::Restore => &self.audited,
+        };
+        let mut values = decode(&self.device.read(source)?);
         self.readback_bytes += (values.len() * TICK_BYTES) as u64;
+        let count = self.metadata.actors.len();
+        let stride = self.config.state_stride as usize;
+        if stride != count {
+            for field in 1..self.scenario.fields() {
+                values.copy_within(field * stride..field * stride + count, field * count);
+            }
+            values.truncate(count * self.scenario.fields());
+        }
+        Ok(values)
+    }
+    pub fn download(&mut self) -> Result<State> {
+        let values = self.read_state(CopyDirection::Save)?;
         let research = self
             .research
             .as_ref()
@@ -2713,8 +2743,7 @@ impl Simulation {
         Ok(())
     }
     pub fn checkpoint(&mut self) -> Result<Checkpoint> {
-        let values = decode(&self.device.read(&self.audited)?);
-        self.readback_bytes += (values.len() * TICK_BYTES) as u64;
+        let values = self.read_state(CopyDirection::Restore)?;
         let research = self
             .research
             .as_ref()

@@ -11,12 +11,12 @@ use cubecl::prelude::*;
 
 #[cube]
 fn get(state: &mut [u32], config: &EconomyConfig, field: u32, actor: u32) -> u32 {
-    load(state, field * config.actors + actor).extract(0usize)
+    load(state, field * config.state_stride + actor).extract(0usize)
 }
 
 #[cube]
 fn put(state: &mut [u32], config: &EconomyConfig, field: u32, actor: u32, value: u32) {
-    store(state, field * config.actors + actor, ticks(value, 0));
+    store(state, field * config.state_stride + actor, ticks(value, 0));
 }
 
 #[cube]
@@ -263,12 +263,67 @@ pub fn step(
                 household,
                 select(moving, 0, household_time - available),
             );
+            let gross = load(
+                state,
+                comptime!(Field::GrossIncome as u32) * config.state_stride + household,
+            );
+            let previous = load(
+                state,
+                comptime!(Field::OpeningGrossIncome as u32) * config.state_stride + household,
+            );
+            let salary = positive(gross, previous);
+            store(
+                state,
+                comptime!(Field::OpeningGrossIncome as u32) * config.state_stride + household,
+                gross,
+            );
+            let target = crate::simulation::economy::food::bread_target(
+                config,
+                salary,
+                (demand + 999) / 1000,
+                living,
+            );
             put(
                 state,
                 config,
                 comptime!(Field::FoodNeed as u32),
                 household,
-                (demand + 999) / 1000,
+                target,
+            );
+            put(
+                state,
+                config,
+                comptime!(Field::NutritionNeed as u32),
+                household,
+                select(
+                    config.food_medium_salary > 0,
+                    living * config.household_need,
+                    (demand + 999) / 1000,
+                ),
+            );
+        }
+        if comptime!(stage == Stage::Diet) {
+            let gross = load(
+                state,
+                comptime!(Field::GrossIncome as u32) * config.state_stride + household,
+            );
+            let opening = load(
+                state,
+                comptime!(Field::OpeningGrossIncome as u32) * config.state_stride + household,
+            );
+            let salary = positive(gross, opening);
+            let target = crate::simulation::economy::food::bread_target(
+                config,
+                salary,
+                living * config.household_need,
+                living,
+            );
+            put(
+                state,
+                config,
+                comptime!(Field::FoodNeed as u32),
+                household,
+                target,
             );
         }
         if comptime!(stage == Stage::Requirements) {
@@ -288,12 +343,38 @@ pub fn step(
                     comptime!(Field::FoodFraction as u32),
                     household,
                 );
+            let gross = load(
+                state,
+                comptime!(Field::GrossIncome as u32) * config.state_stride + household,
+            );
+            let opening = load(
+                state,
+                comptime!(Field::OpeningGrossIncome as u32) * config.state_stride + household,
+            );
+            let salary = positive(gross, opening);
+            let target = crate::simulation::economy::food::bread_target(
+                config,
+                salary,
+                total / 1000,
+                living,
+            );
             put(
                 state,
                 config,
                 comptime!(Field::FoodNeed as u32),
                 household,
-                total / 1000,
+                target,
+            );
+            put(
+                state,
+                config,
+                comptime!(Field::NutritionNeed as u32),
+                household,
+                select(
+                    config.food_medium_salary > 0,
+                    living * config.household_need,
+                    total / 1000,
+                ),
             );
             put(
                 state,
@@ -304,9 +385,16 @@ pub fn step(
             );
         }
         if comptime!(stage == Stage::Mortality) {
-            let need = get(state, config, comptime!(Field::FoodNeed as u32), household);
-            let deficit = get(state, config, comptime!(Field::Shortage as u32), household) * 1000
-                / max(need, 1);
+            let target = get(state, config, comptime!(Field::FoodNeed as u32), household);
+            let consumed =
+                target - get(state, config, comptime!(Field::Shortage as u32), household);
+            let need = get(
+                state,
+                config,
+                comptime!(Field::NutritionNeed as u32),
+                household,
+            );
+            let deficit = (need - min(need, consumed)) * 1000 / max(need, 1);
             let freezing_need = get(
                 state,
                 config,
@@ -422,7 +510,7 @@ pub fn step(
                     if independent && (day + people[base + P::IDENTITY]) % 365 == 0 && living > 1 {
                         store(
                             state,
-                            comptime!(Field::SplitPerson as u32) * config.actors + household,
+                            comptime!(Field::SplitPerson as u32) * config.state_stride + household,
                             ticks(people[base + P::IDENTITY], people[base + P::IDENTITY + 1]),
                         );
                     }

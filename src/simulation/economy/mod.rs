@@ -35,10 +35,12 @@ mod clearing;
 mod consumption;
 pub(super) mod enterprises;
 mod farming;
+pub(in crate::simulation) mod food;
 mod household_production;
 pub(super) mod indexing;
 pub(in crate::simulation) mod landlords;
 pub(super) mod opening;
+mod pricing;
 pub(in crate::simulation) mod property;
 pub(in crate::simulation) mod railway;
 mod rent;
@@ -51,7 +53,7 @@ pub(super) use systems::{EconomyInputLaunch, EconomySystem};
 
 #[cube]
 fn at(config: &EconomyConfig, field: u32, actor: u32) -> u32 {
-    field * config.actors + actor
+    field * config.state_stride + actor
 }
 
 #[cube]
@@ -449,8 +451,15 @@ fn local(
                 _ => {
                     let mut output = value(state, config, comptime!(Field::Pipeline as u32), id);
                     if farming::farm(state, config, id, k.output()) {
-                        output =
-                            farming::harvest(state, config, control, id, parameters.day, output);
+                        output = farming::harvest(
+                            state,
+                            config,
+                            control,
+                            id,
+                            parameters.day,
+                            output,
+                            k.output(),
+                        );
                     }
                     increase(
                         state,
@@ -604,29 +613,6 @@ fn local(
                             1u32,
                         ),
                     );
-                    if number(state, config, comptime!(Field::EnterpriseModel as u32), id) == 1 {
-                        let replacement =
-                            number(state, config, comptime!(Field::ReplacementCost as u32), id);
-                        let margin =
-                            number(state, config, comptime!(Field::RetailMargin as u32), id);
-                        let labor = number(state, config, comptime!(Field::Wage as u32), id)
-                            * number(state, config, comptime!(Field::LaborMinutes as u32), id);
-                        let output = max(
-                            number(state, config, comptime!(Field::OutputTicks as u32), id),
-                            1,
-                        );
-                        let overhead = rent::unit_price(config.firm_rent, demand, output);
-                        let quote = replacement * (1000 + margin) / 1000
-                            + ceildiv(labor, output)
-                            + overhead;
-                        set32(
-                            state,
-                            config,
-                            comptime!(Field::Price as u32),
-                            id,
-                            min(max(quote, config.minimum_price), config.maximum_price),
-                        );
-                    }
                     let wage = number(state, config, comptime!(Field::Wage as u32), id);
                     let unstaffed = number(state, config, comptime!(Field::Slots as u32), id) > 0;
                     let increment = config.wage_increment;
@@ -1162,9 +1148,10 @@ fn propose(
                                                 id,
                                             );
                                             let missing = max(need, bread) - bread;
-                                            let minutes = missing
-                                                * (config.home.milling_minutes
-                                                    + config.home.baking_minutes);
+                                            let preparation = food::household_work(
+                                                state, config, control, id, missing,
+                                            );
+                                            let minutes = preparation.minutes;
                                             let time = number(
                                                 state,
                                                 config,
@@ -1186,7 +1173,7 @@ fn propose(
                                                         comptime!(Field::Grain as u32),
                                                         id,
                                                     ),
-                                                    ticks(missing, 0),
+                                                    preparation.grain,
                                                 );
                                             let paid = times32(
                                                 wage,
@@ -2071,66 +2058,83 @@ fn summarize(
                             0,
                         ),
                     );
-                    let good = k.output() - 1;
-                    let wage = value(state, config, comptime!(Field::Wage as u32), actor);
-                    let price = value(state, config, comptime!(Field::Price as u32), actor);
-                    totals[(SummaryLayout::FIRMS_BY_GOOD + good) as usize] = add_checked(
-                        control,
-                        totals[(SummaryLayout::FIRMS_BY_GOOD + good) as usize],
-                        ticks(1, 0),
+                    let status = number(
+                        state,
+                        config,
+                        comptime!(Field::EnterpriseStatus as u32),
+                        actor,
                     );
-                    totals[(SummaryLayout::WAGE_MINIMA + good) as usize] =
-                        minimum(totals[(SummaryLayout::WAGE_MINIMA + good) as usize], wage);
-                    totals[(SummaryLayout::WAGE_MAXIMA + good) as usize] =
-                        maximum(totals[(SummaryLayout::WAGE_MAXIMA + good) as usize], wage);
-                    totals[(SummaryLayout::WAGE_TOTALS + good) as usize] = add_checked(
-                        control,
-                        totals[(SummaryLayout::WAGE_TOTALS + good) as usize],
-                        wage,
-                    );
-                    totals[(SummaryLayout::WAGE_SQUARES + good) as usize] = add_checked(
-                        control,
-                        totals[(SummaryLayout::WAGE_SQUARES + good) as usize],
-                        times32(wage.extract(LOW_WORD), wage.extract(LOW_WORD)),
-                    );
-                    totals[(SummaryLayout::PRICE_MINIMA + good) as usize] =
-                        minimum(totals[(SummaryLayout::PRICE_MINIMA + good) as usize], price);
-                    totals[(SummaryLayout::PRICE_MAXIMA + good) as usize] =
-                        maximum(totals[(SummaryLayout::PRICE_MAXIMA + good) as usize], price);
-                    totals[(SummaryLayout::PRICE_TOTALS + good) as usize] = add_checked(
-                        control,
-                        totals[(SummaryLayout::PRICE_TOTALS + good) as usize],
-                        price,
-                    );
-                    totals[(SummaryLayout::PRICE_SQUARES + good) as usize] = add_checked(
-                        control,
-                        totals[(SummaryLayout::PRICE_SQUARES + good) as usize],
-                        times32(price.extract(LOW_WORD), price.extract(LOW_WORD)),
-                    );
-                    totals[SummaryLayout::MINIMUM_WAGE as usize] = minimum(
-                        totals[SummaryLayout::MINIMUM_WAGE as usize],
-                        value(state, config, comptime!(Field::Wage as u32), actor),
-                    );
-                    totals[SummaryLayout::MAXIMUM_WAGE as usize] = select(
-                        lt(
-                            totals[SummaryLayout::MAXIMUM_WAGE as usize],
+                    let trading = status
+                        > comptime!(crate::domain::enterprise::EnterpriseState::Forming as u32)
+                        && status
+                            < comptime!(
+                                crate::domain::enterprise::EnterpriseState::Liquidating as u32
+                            );
+                    if trading {
+                        let good = k.output() - 1;
+                        let wage = value(state, config, comptime!(Field::Wage as u32), actor);
+                        totals[(SummaryLayout::FIRMS_BY_GOOD + good) as usize] = add_checked(
+                            control,
+                            totals[(SummaryLayout::FIRMS_BY_GOOD + good) as usize],
+                            ticks(1, 0),
+                        );
+                        totals[(SummaryLayout::WAGE_MINIMA + good) as usize] =
+                            minimum(totals[(SummaryLayout::WAGE_MINIMA + good) as usize], wage);
+                        totals[(SummaryLayout::WAGE_MAXIMA + good) as usize] =
+                            maximum(totals[(SummaryLayout::WAGE_MAXIMA + good) as usize], wage);
+                        totals[(SummaryLayout::WAGE_TOTALS + good) as usize] = add_checked(
+                            control,
+                            totals[(SummaryLayout::WAGE_TOTALS + good) as usize],
+                            wage,
+                        );
+                        totals[(SummaryLayout::WAGE_SQUARES + good) as usize] = add_checked(
+                            control,
+                            totals[(SummaryLayout::WAGE_SQUARES + good) as usize],
+                            times32(wage.extract(LOW_WORD), wage.extract(LOW_WORD)),
+                        );
+                        totals[SummaryLayout::MINIMUM_WAGE as usize] = minimum(
+                            totals[SummaryLayout::MINIMUM_WAGE as usize],
                             value(state, config, comptime!(Field::Wage as u32), actor),
-                        ),
-                        value(state, config, comptime!(Field::Wage as u32), actor),
-                        totals[SummaryLayout::MAXIMUM_WAGE as usize],
-                    );
-                    totals[SummaryLayout::MINIMUM_PRICE as usize] = minimum(
-                        totals[SummaryLayout::MINIMUM_PRICE as usize],
-                        value(state, config, comptime!(Field::Price as u32), actor),
-                    );
-                    totals[SummaryLayout::MAXIMUM_PRICE as usize] = select(
-                        lt(
-                            totals[SummaryLayout::MAXIMUM_PRICE as usize],
-                            value(state, config, comptime!(Field::Price as u32), actor),
-                        ),
-                        value(state, config, comptime!(Field::Price as u32), actor),
-                        totals[SummaryLayout::MAXIMUM_PRICE as usize],
-                    );
+                        );
+                        totals[SummaryLayout::MAXIMUM_WAGE as usize] = select(
+                            lt(
+                                totals[SummaryLayout::MAXIMUM_WAGE as usize],
+                                value(state, config, comptime!(Field::Wage as u32), actor),
+                            ),
+                            value(state, config, comptime!(Field::Wage as u32), actor),
+                            totals[SummaryLayout::MAXIMUM_WAGE as usize],
+                        );
+                        if pricing::stocked(state, config, actor, k.output()) {
+                            let price = value(state, config, comptime!(Field::Price as u32), actor);
+                            totals[(SummaryLayout::PRICE_COUNTS + good) as usize] = add_checked(
+                                control,
+                                totals[(SummaryLayout::PRICE_COUNTS + good) as usize],
+                                ticks(1, 0),
+                            );
+                            totals[(SummaryLayout::PRICE_MINIMA + good) as usize] = minimum(
+                                totals[(SummaryLayout::PRICE_MINIMA + good) as usize],
+                                price,
+                            );
+                            totals[(SummaryLayout::PRICE_MAXIMA + good) as usize] = maximum(
+                                totals[(SummaryLayout::PRICE_MAXIMA + good) as usize],
+                                price,
+                            );
+                            totals[(SummaryLayout::PRICE_TOTALS + good) as usize] = add_checked(
+                                control,
+                                totals[(SummaryLayout::PRICE_TOTALS + good) as usize],
+                                price,
+                            );
+                            totals[(SummaryLayout::PRICE_SQUARES + good) as usize] = add_checked(
+                                control,
+                                totals[(SummaryLayout::PRICE_SQUARES + good) as usize],
+                                times32(price.extract(LOW_WORD), price.extract(LOW_WORD)),
+                            );
+                            totals[SummaryLayout::MINIMUM_PRICE as usize] =
+                                minimum(totals[SummaryLayout::MINIMUM_PRICE as usize], price);
+                            totals[SummaryLayout::MAXIMUM_PRICE as usize] =
+                                maximum(totals[SummaryLayout::MAXIMUM_PRICE as usize], price);
+                        }
+                    }
                 }
             }
             match k.bits() {
@@ -2335,6 +2339,7 @@ pub enum EconomyStage {
     GroupCompactFill,
     GroupRadixLocal,
     GroupRadixScatter,
+    InputQuotes,
 }
 
 #[cube]
@@ -2375,6 +2380,9 @@ pub fn economy(
     );
     if !guarded || control[LATCH_WORD].load() == 0 {
         match stage {
+            EconomyStage::InputQuotes => {
+                pricing::refresh(state, actors, config, spatial, control, parameters, id)
+            }
             EconomyStage::MarketStart
             | EconomyStage::InputMarketStart
             | EconomyStage::InputMarketPrepare

@@ -192,7 +192,7 @@ impl SettlementBatch {
             state,
             &values,
             &indices,
-            metadata.actors.len(),
+            state.meta.num_elements() / (scenario.fields() * TICK_WORDS),
             Transfer::Gather,
         );
         let words = device.read(&values)?;

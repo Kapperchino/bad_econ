@@ -106,6 +106,7 @@ impl Policy {
 enum Stage {
     Observation,
     Requirements,
+    Diet,
     Mortality,
 }
 
@@ -274,6 +275,9 @@ impl DemographyRuntime {
         day: u64,
     ) -> Result<()> {
         match phase {
+            Phase::WorkPayment if config.food_medium_salary > 0 => {
+                self.launch(device, state, actors, config, day, Stage::Diet)
+            }
             Phase::PhysicalClose => {
                 self.launch(device, state, actors, config, day, Stage::Mortality)
             }

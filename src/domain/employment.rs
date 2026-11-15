@@ -65,7 +65,10 @@ impl InitialEmployment {
                             })
                             .unwrap_or(
                                 daily[good]
-                                    .div_ceil(u64::from(config.packet_output))
+                                    .div_ceil(u64::from(
+                                        super::food::technique(config, super::Good::ALL[good])
+                                            .output_ticks,
+                                    ))
                                     .max(1)
                                     .min(u64::from(capacities[good]))
                                     as usize,

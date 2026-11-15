@@ -217,6 +217,7 @@ pub struct SummaryLayout {
     pub business_opening: [TickLayout; Good::COUNT],
     pub business_closing: [TickLayout; Good::COUNT],
     pub business_revenue: [TickLayout; Good::COUNT],
+    pub price_counts: [TickLayout; Good::COUNT],
 }
 impl SummaryLayout {
     pub const CASH: u32 = (offset_of!(Self, cash) / TICK_BYTES) as u32;
@@ -244,6 +245,7 @@ impl SummaryLayout {
     pub const MINIMUM_PRICE: u32 = (offset_of!(Self, minimum_price) / TICK_BYTES) as u32;
     pub const MAXIMUM_PRICE: u32 = (offset_of!(Self, maximum_price) / TICK_BYTES) as u32;
     pub const FIRMS_BY_GOOD: u32 = (offset_of!(Self, firms_by_good) / TICK_BYTES) as u32;
+    pub const PRICE_COUNTS: u32 = (offset_of!(Self, price_counts) / TICK_BYTES) as u32;
     pub const WAGE_MINIMA: u32 = (offset_of!(Self, wage_minima) / TICK_BYTES) as u32;
     pub const WAGE_MAXIMA: u32 = (offset_of!(Self, wage_maxima) / TICK_BYTES) as u32;
     pub const WAGE_TOTALS: u32 = (offset_of!(Self, wage_totals) / TICK_BYTES) as u32;

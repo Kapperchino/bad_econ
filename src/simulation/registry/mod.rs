@@ -223,12 +223,15 @@ fn transition(
         }
         if comptime!(stage == Stage::Apply) {
             let received = times32(incoming[actor as usize].load(), 100);
-            let cash = load(state, comptime!(Field::Cash as u32) * count + actor);
+            let cash = load(
+                state,
+                comptime!(Field::Cash as u32) * config.state_stride + actor,
+            );
             let available = plus(cash, received).value;
             let moving_cost = select(kind == 2, ticks(100, 0), zero());
             store(
                 state,
-                comptime!(Field::Cash as u32) * count + actor,
+                comptime!(Field::Cash as u32) * config.state_stride + actor,
                 minus(available, moving_cost),
             );
             if kind == 2 {
@@ -239,14 +242,20 @@ fn transition(
                 let arrived = requests[destination as usize] >> 24 == 3 && destination < actor;
                 let dx = select(
                     arrived,
-                    load(state, comptime!(Field::MoveX as u32) * count + destination)
-                        .extract(0usize),
+                    load(
+                        state,
+                        comptime!(Field::MoveX as u32) * config.state_stride + destination,
+                    )
+                    .extract(0usize),
                     actors[A::X * stride + destination as usize],
                 );
                 let dy = select(
                     arrived,
-                    load(state, comptime!(Field::MoveY as u32) * count + destination)
-                        .extract(0usize),
+                    load(
+                        state,
+                        comptime!(Field::MoveY as u32) * config.state_stride + destination,
+                    )
+                    .extract(0usize),
                     actors[A::Y * stride + destination as usize],
                 );
                 let distance = max(x, dx) - min(x, dx) + max(y, dy) - min(y, dy);
@@ -254,39 +263,39 @@ fn transition(
                 let duration = max((distance + speed - 1) / speed, 1);
                 store(
                     state,
-                    comptime!(Field::PreviousX as u32) * count + actor,
+                    comptime!(Field::PreviousX as u32) * config.state_stride + actor,
                     ticks(x, 0),
                 );
                 store(
                     state,
-                    comptime!(Field::PreviousY as u32) * count + actor,
+                    comptime!(Field::PreviousY as u32) * config.state_stride + actor,
                     ticks(y, 0),
                 );
                 store(
                     state,
-                    comptime!(Field::MoveX as u32) * count + actor,
+                    comptime!(Field::MoveX as u32) * config.state_stride + actor,
                     ticks(dx, 0),
                 );
                 store(
                     state,
-                    comptime!(Field::MoveY as u32) * count + actor,
+                    comptime!(Field::MoveY as u32) * config.state_stride + actor,
                     ticks(dy, 0),
                 );
                 store(
                     state,
-                    comptime!(Field::MoveDue as u32) * count + actor,
+                    comptime!(Field::MoveDue as u32) * config.state_stride + actor,
                     ticks(day + duration, 0),
                 );
             }
             if kind == 3 {
                 store(
                     state,
-                    comptime!(Field::MoveDue as u32) * count + actor,
+                    comptime!(Field::MoveDue as u32) * config.state_stride + actor,
                     zero(),
                 );
                 store(
                     state,
-                    comptime!(Field::MoveTarget as u32) * count + actor,
+                    comptime!(Field::MoveTarget as u32) * config.state_stride + actor,
                     zero(),
                 );
             }
@@ -297,26 +306,26 @@ fn transition(
             {
                 store(
                     state,
-                    comptime!(Field::LandPlots as u32) * count + actor,
+                    comptime!(Field::LandPlots as u32) * config.state_stride + actor,
                     zero(),
                 );
                 store(
                     state,
-                    comptime!(Field::CropWork as u32) * count + actor,
+                    comptime!(Field::CropWork as u32) * config.state_stride + actor,
                     zero(),
                 );
             }
             if kind == 6 {
                 store(
                     state,
-                    comptime!(Field::PendingCapacity as u32) * count + actor,
+                    comptime!(Field::PendingCapacity as u32) * config.state_stride + actor,
                     zero(),
                 );
             }
             if kind == 5 {
                 store(
                     state,
-                    comptime!(Field::EstateSettled as u32) * count + actor,
+                    comptime!(Field::EstateSettled as u32) * config.state_stride + actor,
                     ticks(2, 0),
                 );
             }

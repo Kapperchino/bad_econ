@@ -9,6 +9,32 @@ enum CropStage {
     Continuous,
 }
 
+#[derive(CubeType)]
+pub(super) struct HarvestYield {
+    multiplier: u32,
+    divisor: u32,
+}
+
+#[cube]
+impl HarvestYield {
+    pub fn new(config: &EconomyConfig) -> Self {
+        HarvestYield {
+            multiplier: select(config.home.harvest_days == 365, 1u32, 365u32),
+            divisor: max(growing_days(config), 1),
+        }
+    }
+
+    fn quantity(&self, control: &[Atomic<u32>], completed: Ticks) -> Ticks {
+        let whole = divide(completed, self.divisor);
+        let remainder = minus(completed, multiply(control, whole, self.divisor));
+        add_checked(
+            control,
+            multiply(control, whole, self.multiplier),
+            divide(multiply(control, remainder, self.multiplier), self.divisor),
+        )
+    }
+}
+
 #[cube]
 pub(super) fn growing_days(config: &EconomyConfig) -> u32 {
     min(211, 365 - config.home.harvest_days)
@@ -115,6 +141,7 @@ pub(super) fn harvest(
     actor: u32,
     day: u32,
     completed: Ticks,
+    good: u32,
 ) -> Ticks {
     let pending = add_checked(
         control,
@@ -124,15 +151,8 @@ pub(super) fn harvest(
     let ready = harvesting(config, day);
     let mut yield_ticks = zero();
     if ready {
-        let denominator = max(growing_days(config), 1);
-        let multiplier = select(config.home.harvest_days == 365, 1u32, 365u32);
-        let whole = divide(pending, denominator);
-        let remainder = minus(pending, multiply(control, whole, denominator));
-        yield_ticks = add_checked(
-            control,
-            multiply(control, whole, multiplier),
-            divide(multiply(control, remainder, multiplier), denominator),
-        );
+        yield_ticks = HarvestYield::new(config).quantity(control, pending);
+        yield_ticks = wheat_harvest(state, config, control, actor, day, good, yield_ticks);
     }
     set(
         state,
@@ -142,4 +162,57 @@ pub(super) fn harvest(
         select(ready, zero(), pending),
     );
     yield_ticks
+}
+
+#[cube]
+fn wheat_harvest(
+    state: &mut [u32],
+    config: &EconomyConfig,
+    control: &[Atomic<u32>],
+    actor: u32,
+    day: u32,
+    good: u32,
+    available: Ticks,
+) -> Ticks {
+    let mut quantity = available;
+    let metric_crop = select(config.wheat_kg_per_hectare > 0, good, 0u32);
+    if metric_crop == comptime!(Good::Grain as u32) {
+        let hectares = add_checked(
+            control,
+            value(state, config, comptime!(Field::FarmHectares as u32), actor),
+            value(state, config, comptime!(Field::OccupiedPlots as u32), actor),
+        );
+        let harvest_year = year(config, day);
+        let previous_year = number(state, config, comptime!(Field::HarvestYear as u32), actor);
+        let previous = select(
+            previous_year == harvest_year,
+            value(
+                state,
+                config,
+                comptime!(Field::HarvestedThisYear as u32),
+                actor,
+            ),
+            zero(),
+        );
+        let method = number(state, config, comptime!(Field::ActiveMethod as u32), actor);
+        let yield_per_hectare = config.wheat_kg_per_hectare * select(method > 0, 2u32, 1u32);
+        let maximum = multiply(control, hectares, yield_per_hectare);
+        quantity = minimum(quantity, positive(maximum, previous));
+        set32(
+            state,
+            config,
+            comptime!(Field::HarvestYear as u32),
+            actor,
+            harvest_year,
+        );
+        let total = add_checked(control, previous, quantity);
+        set(
+            state,
+            config,
+            comptime!(Field::HarvestedThisYear as u32),
+            actor,
+            total,
+        );
+    }
+    quantity
 }
