@@ -4,7 +4,7 @@ use crate::simulation::{
     parallel,
     parameters::*,
     pass::GpuPass,
-    system::{System, gpu_passes},
+    system::{AsBufferArg, System, gpu_passes},
     words::ceildiv,
 };
 use cubecl::prelude::*;
@@ -129,13 +129,11 @@ pub(in crate::simulation) fn prepare_dispatch_for(
     capacity: usize,
     preparation: PreparationWorkgroup,
 ) {
-    DispatchPreparation::launch(
+    DispatchPreparation::launch_single(
         device,
-        cubecl::CubeCount::Static(1, 1, 1),
-        cubecl::CubeDim::new_1d(1),
         DispatchInputLaunch {
-            control: control.clone().into_buffer_arg(),
-            dispatches: dispatches.clone().into_buffer_arg(),
+            control: control.buffer_arg(),
+            dispatches: dispatches.buffer_arg(),
             workgroup: device.workgroup,
             histogram_span: device.workgroup
                 * parallel::ActiveScanTile::new(
@@ -568,13 +566,11 @@ pub(in crate::simulation) fn feedback_boundary(
     feedback: &burn_wgpu::CubeTensor,
     source: FeedbackSource,
 ) {
-    FeedbackBoundary::launch(
+    FeedbackBoundary::launch_single(
         device,
-        cubecl::CubeCount::Static(1, 1, 1),
-        cubecl::CubeDim::new_1d(1),
         FeedbackInputLaunch {
-            control: control.clone().into_buffer_arg(),
-            feedback: feedback.clone().into_buffer_arg(),
+            control: control.buffer_arg(),
+            feedback: feedback.buffer_arg(),
             source,
         },
     );

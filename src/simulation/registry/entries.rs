@@ -389,20 +389,17 @@ pub(super) fn transfer(
     actors: usize,
     stage: Transfer,
 ) {
-    let argument = |tensor: &CubeTensor| tensor.clone().into_buffer_arg();
     let count = match stage {
         Transfer::Scatter => source.meta.shape()[0],
         _ => target.meta.shape()[0],
     };
-    let cube_count = device.count(count / TICK_WORDS);
-    RegistryTransfers::launch(
+    RegistryTransfers::launch_elements(
         device,
-        cube_count,
-        CubeDim::new_1d(device.workgroup),
+        count / TICK_WORDS,
         TransferInputLaunch {
-            source: argument(source),
-            target: argument(target),
-            indices: argument(indices),
+            source: source.buffer_arg(),
+            target: target.buffer_arg(),
+            indices: indices.buffer_arg(),
             actors: actors as u32,
             stage,
         },

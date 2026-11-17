@@ -81,8 +81,8 @@ pub(super) fn finish(
             let peer = spatial[(cells + 1 + member) as usize];
             count = successes[markets::filtered_count(config.actors, peer) as usize].load();
         }
-        let total = parallel::reduce(count, comptime!(Reduction::Sum));
-        let maximum = !parallel::reduce(!count, comptime!(Reduction::Minimum));
+        let total = parallel::reduce::<u32>(count, comptime!(Reduction::Sum));
+        let maximum = parallel::reduce::<u32>(count, comptime!(Reduction::Maximum));
         if UNIT_POS == 0 {
             control[COMPLETED_WORD].fetch_add(total);
             control[PROGRESS_WORD].fetch_max(maximum);

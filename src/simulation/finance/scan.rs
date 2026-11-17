@@ -1,50 +1,35 @@
 use super::*;
-use crate::simulation::{flags::KernelFaults, parallel::ScanMode};
-
-struct ScanLevel {
-    offset: usize,
-    count: usize,
-    blocks: usize,
-}
+use crate::simulation::{
+    flags::KernelFaults,
+    parallel::{
+        ScanHierarchy, ScanMode,
+        workgroup::{TickTree, WorkgroupTree},
+    },
+};
 
 pub(super) struct Scan {
-    levels: Vec<ScanLevel>,
+    hierarchy: ScanHierarchy,
     channels: usize,
     cube_dim: CubeDim,
-    words: usize,
     mode: ScanMode,
 }
 
 impl Scan {
     pub(super) fn new(device: &Device, count: usize, channels: usize) -> Self {
-        let mut levels = Vec::new();
-        let mut offset = 0;
-        let mut count = count;
-        while count > 1 {
-            let blocks = count.div_ceil(device.workgroup as usize);
-            levels.push(ScanLevel {
-                offset,
-                count,
-                blocks,
-            });
-            offset += count * channels;
-            count = blocks;
-        }
         Self {
-            levels,
+            hierarchy: ScanHierarchy::new(0, count, device.workgroup, channels),
             channels,
             cube_dim: CubeDim::new_1d(device.workgroup),
-            words: (offset + count * channels).max(1) * TICK_WORDS,
             mode: ScanMode::new(device),
         }
     }
 
     pub(super) fn words(&self) -> usize {
-        self.words
+        self.hierarchy.end.max(1) * TICK_WORDS
     }
 
     pub(super) fn run(&self, device: &Device, buffer: &CubeTensor, control: &CubeTensor) {
-        for level in &self.levels {
+        for level in &self.hierarchy.levels {
             TickBlockScan::launch(
                 device,
                 cubecl::calculate_cube_count_elemwise(
@@ -54,8 +39,8 @@ impl Scan {
                 ),
                 self.cube_dim,
                 TickScanInputLaunch {
-                    buffer: argument(buffer),
-                    control: argument(control),
+                    buffer: buffer.buffer_arg(),
+                    control: control.buffer_arg(),
                     offset: level.offset as u32,
                     count: level.count as u32,
                     channels: self.channels as u32,
@@ -63,7 +48,7 @@ impl Scan {
                 },
             );
         }
-        for level in self.levels.iter().rev().filter(|level| level.blocks > 1) {
+        for level in self.hierarchy.offset_levels().iter().rev() {
             TickBlockOffsets::launch(
                 device,
                 cubecl::calculate_cube_count_elemwise(
@@ -73,8 +58,8 @@ impl Scan {
                 ),
                 self.cube_dim,
                 TickScanInputLaunch {
-                    buffer: argument(buffer),
-                    control: argument(control),
+                    buffer: buffer.buffer_arg(),
+                    control: control.buffer_arg(),
                     offset: level.offset as u32,
                     count: level.count as u32,
                     channels: self.channels as u32,
@@ -190,36 +175,12 @@ fn tick_prefix(value: Ticks, #[comptime] mode: ScanMode) -> TickPrefix {
 
 #[cube]
 fn shared_tick_prefix(value: Ticks) -> TickPrefix {
-    let mut values = Shared::<[Ticks]>::new_slice(256usize);
-    values[UNIT_POS as usize] = value;
-    sync_cube();
-    let mut faults = KernelFaults::none();
-    let mut stride = 1u32;
-    while stride < CUBE_DIM {
-        let index = (UNIT_POS + 1) * stride * 2 - 1;
-        if index < CUBE_DIM {
-            let sum = plus(values[index as usize], values[(index - stride) as usize]);
-            values[index as usize] = sum.value;
-            faults.insert(sum.faults);
-        }
-        sync_cube();
-        stride *= 2;
-    }
-    stride = CUBE_DIM / 4;
-    while stride > 0 {
-        let index = (UNIT_POS + 1) * stride * 2 - 1;
-        if index + stride < CUBE_DIM {
-            let sum = plus(values[(index + stride) as usize], values[index as usize]);
-            values[(index + stride) as usize] = sum.value;
-            faults.insert(sum.faults);
-        }
-        sync_cube();
-        stride /= 2;
-    }
+    let mut tree = TickTree::new(value);
+    WorkgroupTree::inclusive_scan::<TickTree>(&mut tree);
     TickPrefix {
-        inclusive: values[UNIT_POS as usize],
-        total: values[CUBE_DIM as usize - 1],
-        faults,
+        inclusive: tree.values[UNIT_POS as usize],
+        total: tree.values[CUBE_DIM as usize - 1],
+        faults: tree.faults,
     }
 }
 

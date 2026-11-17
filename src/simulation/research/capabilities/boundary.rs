@@ -3,7 +3,7 @@ use crate::simulation::{
     Device,
     analytics::SparseMatrix,
     pass::GpuPass,
-    system::{System, gpu_passes},
+    system::{AsBufferArg, System, gpu_passes},
 };
 use anyhow::{Result, anyhow};
 use burn_wgpu::CubeTensor;
@@ -71,13 +71,12 @@ impl DeviceCapabilityGraph {
                     .collect::<Vec<_>>();
                 let input = device.tensor(padded(&records));
                 let adjacency = device.tensor(&vec![0; (nodes * row_words).max(1)]);
-                PositiveSupport::launch(
+                PositiveSupport::launch_elements(
                     device,
-                    count(device, matrix.entries().len()),
-                    CubeDim::new_1d(device.workgroup),
+                    matrix.entries().len(),
                     PositiveSupportInputLaunch {
-                        input: argument(&input),
-                        output: argument(&adjacency),
+                        input: input.buffer_arg(),
+                        output: adjacency.buffer_arg(),
                         entries: matrix.entries().len() as u32,
                         row_words: row_words as u32,
                     },
@@ -103,13 +102,12 @@ impl DeviceCapabilityGraph {
                 crate::simulation::tensor::copy(device, &self.adjacency, &adjacency);
                 crate::simulation::tensor::copy(device, &self.labels, &labels);
                 for pivot in retained..self.nodes {
-                    BoundaryElimination::launch(
+                    BoundaryElimination::launch_elements(
                         device,
-                        count(device, self.nodes),
-                        CubeDim::new_1d(device.workgroup),
+                        self.nodes,
                         BoundaryEliminationInputLaunch {
-                            adjacency: argument(&adjacency),
-                            labels: argument(&labels),
+                            adjacency: adjacency.buffer_arg(),
+                            labels: labels.buffer_arg(),
                             nodes: self.nodes as u32,
                             row_words: self.row_words as u32,
                             pivot: pivot as u32,
@@ -123,15 +121,14 @@ impl DeviceCapabilityGraph {
                     nodes: retained,
                     row_words,
                 };
-                BoundaryProjection::launch(
+                BoundaryProjection::launch_elements(
                     device,
-                    count(device, retained),
-                    CubeDim::new_1d(device.workgroup),
+                    retained,
                     BoundaryProjectionInputLaunch {
-                        input: argument(&adjacency),
-                        labels: argument(&labels),
-                        output: argument(&result.adjacency),
-                        reduced_labels: argument(&result.labels),
+                        input: adjacency.buffer_arg(),
+                        labels: labels.buffer_arg(),
+                        output: result.adjacency.buffer_arg(),
+                        reduced_labels: result.labels.buffer_arg(),
                         old_stride: self.row_words as u32,
                         nodes: retained as u32,
                         row_words: row_words as u32,
@@ -150,14 +147,13 @@ impl DeviceCapabilityGraph {
         let mut progress = ClosureProgress::Propagating;
         while round < self.nodes.saturating_sub(1) && progress == ClosureProgress::Propagating {
             device.write(&changed, &[0]);
-            BoundaryPropagation::launch(
+            BoundaryPropagation::launch_elements(
                 device,
-                count(device, self.nodes),
-                CubeDim::new_1d(device.workgroup),
+                self.nodes,
                 BoundaryPropagationInputLaunch {
-                    adjacency: argument(&self.adjacency),
-                    labels: argument(&labels),
-                    changed: argument(&changed),
+                    adjacency: self.adjacency.buffer_arg(),
+                    labels: labels.buffer_arg(),
+                    changed: changed.buffer_arg(),
                     nodes: self.nodes as u32,
                     row_words: self.row_words as u32,
                 },
@@ -182,14 +178,6 @@ impl DeviceCapabilityGraph {
             labels: device.read_range(&self.labels, 0, self.nodes)?,
         })
     }
-}
-
-fn argument(tensor: &CubeTensor) -> BufferArg {
-    tensor.clone().into_buffer_arg()
-}
-
-fn count(device: &Device, items: usize) -> CubeCount {
-    device.count(items)
 }
 
 #[cube]

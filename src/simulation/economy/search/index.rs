@@ -125,7 +125,7 @@ enum IndexReduction {
 #[cube]
 fn reduce_minimum(value: u32, #[comptime] reduction: IndexReduction) -> u32 {
     match comptime!(reduction) {
-        IndexReduction::Workgroup => parallel::reduce(value, comptime!(Reduction::Minimum)),
+        IndexReduction::Workgroup => parallel::reduce::<u32>(value, comptime!(Reduction::Minimum)),
         IndexReduction::Plane => plane_min(value),
     }
 }
@@ -310,13 +310,13 @@ fn build_blocks(
     if comptime!(matches!(parameters.market, MarketFlag::Input(_)))
         && good == comptime!(Good::Bread as u32)
     {
-        let minimum = parallel::reduce(minimum_eligible, comptime!(Reduction::Minimum));
+        let minimum = parallel::reduce::<u32>(minimum_eligible, comptime!(Reduction::Minimum));
         if UNIT_POS == 0 && minimum < control[INPUT_MINIMUM_QUOTE_WORD].load() {
             control[INPUT_MINIMUM_QUOTE_WORD].fetch_min(minimum);
         }
     }
     if good == comptime!(Good::Bread as u32) {
-        let minimum = parallel::reduce(minimum_quote, comptime!(Reduction::Minimum));
+        let minimum = parallel::reduce::<u32>(minimum_quote, comptime!(Reduction::Minimum));
         if UNIT_POS == 0 && CUBE_POS as u32 * DISCOVERY_BLOCK < count {
             let base = 3 * (cells + 1 + config.actors);
             spatial[(base + CUBE_POS as u32) as usize] = minimum;

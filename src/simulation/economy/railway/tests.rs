@@ -632,14 +632,13 @@ fn cached_quotes_match_exhaustive_carriers_on_gpu() -> Result<()> {
             simulation.fault_check()?;
             let mismatches = device.tensor(&[0]);
             let count = simulation.metadata.actors.len();
-            QuoteCheck::launch(
+            QuoteCheck::launch_elements(
                 &device,
-                device.count(count * count),
-                CubeDim::new_1d(device.workgroup),
+                count * count,
                 QuoteCheckInputLaunch {
-                    actors: simulation.actors.clone().into_buffer_arg(),
+                    actors: simulation.actors.buffer_arg(),
                     config: simulation.config.launch(),
-                    mismatches: mismatches.clone().into_buffer_arg(),
+                    mismatches: mismatches.buffer_arg(),
                 },
             );
             assert_eq!(device.read(&mismatches)?, [0]);
@@ -680,13 +679,13 @@ fn repeated_input_initialization_resets_prior_suppliers_and_preserves_faults_on_
                 device.count(count),
                 CubeDim::new_1d(workgroup),
                 EconomyInputLaunch {
-                    state: simulation.state.clone().into_buffer_arg(),
-                    actors: simulation.actors.clone().into_buffer_arg(),
+                    state: simulation.state.buffer_arg(),
+                    actors: simulation.actors.buffer_arg(),
                     config: simulation.config.launch(),
-                    spatial: simulation.spatial.clone().into_buffer_arg(),
-                    proposals: simulation.proposals.clone().into_buffer_arg(),
-                    bundles: simulation.scratch.clone().into_buffer_arg(),
-                    control: simulation.control.clone().into_buffer_arg(),
+                    spatial: simulation.spatial.buffer_arg(),
+                    proposals: simulation.proposals.buffer_arg(),
+                    bundles: simulation.scratch.buffer_arg(),
+                    control: simulation.control.buffer_arg(),
                     parameters: parameters.launch(),
                     stage,
                 },

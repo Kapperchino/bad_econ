@@ -1,7 +1,10 @@
 pub mod boundary;
 mod systems;
 
-use super::super::{Device, system::System};
+use super::super::{
+    Device,
+    system::{AsBufferArg, System},
+};
 use anyhow::{Context, Result, anyhow};
 use burn_wgpu::CubeTensor;
 use cubecl::prelude::*;
@@ -93,15 +96,13 @@ impl CapabilityGraph {
                 let mut current = device.empty(self.nodes.max(1));
                 let mut next = device.empty(self.nodes.max(1));
                 let changed = device.tensor(&[0]);
-                let argument = |tensor: &CubeTensor| tensor.clone().into_buffer_arg();
-                ClosureInitialization::launch(
+                ClosureInitialization::launch_elements(
                     device,
-                    device.count(self.nodes),
-                    CubeDim::new_1d(device.workgroup),
+                    self.nodes,
                     ClosureInitializationInputLaunch {
-                        seed: argument(&seed),
-                        mask: argument(&mask),
-                        output: argument(&current),
+                        seed: seed.buffer_arg(),
+                        mask: mask.buffer_arg(),
+                        output: current.buffer_arg(),
                         nodes: self.nodes as u32,
                         direction,
                     },
@@ -112,18 +113,17 @@ impl CapabilityGraph {
                     && progress == ClosureProgress::Propagating
                 {
                     device.write(&changed, &[0]);
-                    ClosurePropagation::launch(
+                    ClosurePropagation::launch_elements(
                         device,
-                        device.count(self.nodes),
-                        CubeDim::new_1d(device.workgroup),
+                        self.nodes,
                         ClosurePropagationInputLaunch {
-                            seed: argument(&seed),
-                            mask: argument(&mask),
-                            offsets: argument(&offsets),
-                            sources: argument(&sources),
-                            previous: argument(&current),
-                            next: argument(&next),
-                            changed: argument(&changed),
+                            seed: seed.buffer_arg(),
+                            mask: mask.buffer_arg(),
+                            offsets: offsets.buffer_arg(),
+                            sources: sources.buffer_arg(),
+                            previous: current.buffer_arg(),
+                            next: next.buffer_arg(),
+                            changed: changed.buffer_arg(),
                             nodes: self.nodes as u32,
                             direction,
                         },

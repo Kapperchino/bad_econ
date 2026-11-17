@@ -3,11 +3,11 @@ use crate::simulation::configuration::{Configuration, EconomyConfig, Feature};
 use crate::simulation::{
     Device,
     pass::GpuPass,
-    system::{System, gpu_passes},
+    system::{AsBufferArg, System, gpu_passes},
     words::*,
 };
 use burn_wgpu::CubeTensor;
-use cubecl::{CubeDim, prelude::*};
+use cubecl::prelude::*;
 use std::collections::BTreeMap;
 
 pub(in crate::simulation) struct EnterpriseManagement {
@@ -69,15 +69,13 @@ impl EnterpriseManagement {
 
     pub fn assign(&self, device: &Device, state: &CubeTensor, config: &Configuration, day: u32) {
         if self.groups > 0 {
-            let argument = |tensor: &CubeTensor| tensor.clone().into_buffer_arg();
-            Self::launch(
+            Self::launch_elements(
                 device,
-                device.count(self.groups as usize),
-                CubeDim::new_1d(device.workgroup),
+                self.groups as usize,
                 AssignmentInputLaunch {
-                    state: argument(state),
+                    state: state.buffer_arg(),
                     config: config.launch(),
-                    firms: argument(&self.firms),
+                    firms: self.firms.buffer_arg(),
                     groups: self.groups,
                     day,
                 },

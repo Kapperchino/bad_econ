@@ -94,14 +94,13 @@ fn parcel_index(
     let side = config.map_size.div_ceil(size);
     let cells = side * side;
     let parcels = device.empty((cells + 1 + config.actors) as usize);
-    ParcelIndex::launch(
+    ParcelIndex::launch_elements(
         device,
-        device.count(config.actors.max(cells + 1) as usize),
-        CubeDim::new_1d(device.workgroup),
+        config.actors.max(cells + 1) as usize,
         ParcelIndexInputLaunch {
-            actors: actors.clone().into_buffer_arg(),
-            spatial: spatial.clone().into_buffer_arg(),
-            parcels: parcels.clone().into_buffer_arg(),
+            actors: actors.buffer_arg(),
+            spatial: spatial.buffer_arg(),
+            parcels: parcels.buffer_arg(),
             count: config.actors,
             source: 3 * (config.spatial_side * config.spatial_side + 1 + config.actors)
                 + config.actors.div_ceil(DISCOVERY_BLOCK)
@@ -205,11 +204,11 @@ pub(in crate::simulation) fn launch(
             device.count(count),
             CubeDim::new_1d(workgroup),
             PropertyInputLaunch {
-                state: state.clone().into_buffer_arg(),
-                actors: actors.clone().into_buffer_arg(),
-                spatial: spatial.clone().into_buffer_arg(),
+                state: state.buffer_arg(),
+                actors: actors.buffer_arg(),
+                spatial: spatial.buffer_arg(),
                 config: config.launch(),
-                control: control.clone().into_buffer_arg(),
+                control: control.buffer_arg(),
                 stage,
             },
         );
@@ -284,48 +283,6 @@ fn consolidate(
             );
         }
     }
-}
-
-#[cube]
-fn sum_plots(amount: u64) -> u64 {
-    let mut plots = Shared::<[u64]>::new_slice(256usize);
-    plots[UNIT_POS as usize] = amount;
-    sync_cube();
-    let mut stride = CUBE_DIM / 2;
-    while stride > 0 {
-        if UNIT_POS < stride {
-            plots[UNIT_POS as usize] += plots[(UNIT_POS + stride) as usize];
-        }
-        sync_cube();
-        stride /= 2;
-    }
-    plots[0usize]
-}
-
-#[cube]
-fn prefix_plots(amount: u64) -> u64 {
-    let mut plots = Shared::<[u64]>::new_slice(256usize);
-    plots[UNIT_POS as usize] = amount;
-    sync_cube();
-    let mut stride = 1;
-    while stride < CUBE_DIM {
-        let index = (UNIT_POS + 1) * stride * 2 - 1;
-        if index < CUBE_DIM {
-            plots[index as usize] += plots[(index - stride) as usize];
-        }
-        sync_cube();
-        stride *= 2;
-    }
-    stride = CUBE_DIM / 4;
-    while stride > 0 {
-        let index = (UNIT_POS + 1) * stride * 2 - 1;
-        if index + stride < CUBE_DIM {
-            plots[(index + stride) as usize] += plots[index as usize];
-        }
-        sync_cube();
-        stride /= 2;
-    }
-    plots[UNIT_POS as usize]
 }
 
 #[cube]
@@ -415,7 +372,7 @@ fn nearby_plots(
             member += CUBE_DIM;
         }
     }
-    sum_plots(plots)
+    parallel::reduce::<u64>(plots, comptime!(Reduction::Sum))
 }
 
 #[cube]
@@ -463,7 +420,9 @@ fn consolidate_farm(
                 boundary += select(trip == radius, plots, u64::new(0));
             }
         }
-        let preceding = sum_plots(closer) + prefix_plots(boundary) - boundary;
+        let preceding = parallel::reduce::<u64>(closer, comptime!(Reduction::Sum))
+            + parallel::prefix_sum::<u64>(boundary).inclusive
+            - boundary;
         let mut cutoff = Shared::<[u32]>::new_slice(1usize);
         if UNIT_POS == 0 {
             cutoff[0] = config.actors;
@@ -536,7 +495,7 @@ fn consolidate_farm(
                 member += CUBE_DIM;
             }
         }
-        let total = sum_plots(acquired);
+        let total = parallel::reduce::<u64>(acquired, comptime!(Reduction::Sum));
         sync_storage();
         if UNIT_POS == 0 {
             increase(

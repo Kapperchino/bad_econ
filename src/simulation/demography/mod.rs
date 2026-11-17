@@ -4,7 +4,11 @@ mod kernels;
 mod remapping_tests;
 mod systems;
 use super::registry::records::PendingRecord;
-use super::{Device, layout::WORD_BYTES, system::System};
+use super::{
+    Device,
+    layout::WORD_BYTES,
+    system::{AsBufferArg, System},
+};
 use crate::domain::{Phase, Scenario, State, demography::*};
 use anyhow::{Context, Result, anyhow};
 use burn_wgpu::CubeTensor;
@@ -116,11 +120,11 @@ impl Policy {
     fn launch(&self) -> DemographyPolicyLaunch {
         DemographyPolicyLaunch {
             parameters: self.parameters.launch(),
-            food: self.food.clone().into_buffer_arg(),
-            background: self.background.clone().into_buffer_arg(),
-            occupational: self.occupational.clone().into_buffer_arg(),
-            vulnerability: self.vulnerability.clone().into_buffer_arg(),
-            cold_vulnerability: self.cold_vulnerability.clone().into_buffer_arg(),
+            food: self.food.buffer_arg(),
+            background: self.background.buffer_arg(),
+            occupational: self.occupational.buffer_arg(),
+            vulnerability: self.vulnerability.buffer_arg(),
+            cold_vulnerability: self.cold_vulnerability.buffer_arg(),
         }
     }
 }
@@ -332,9 +336,7 @@ impl DemographyRuntime {
         day: u64,
         stage: Stage,
     ) -> Result<()> {
-        let argument = |tensor: &CubeTensor| tensor.clone().into_buffer_arg();
         let count = self.births.meta.shape()[0];
-        let cube_count = device.count(count);
         let samples = match stage {
             Stage::Mortality => super::random::samples(
                 device,
@@ -346,19 +348,18 @@ impl DemographyRuntime {
             _ => super::tensor::empty(device, [0]),
         };
         *self.snapshot.lock().expect("person snapshot state") = PersonSnapshot::Dirty;
-        HouseholdDemography::launch(
+        HouseholdDemography::launch_elements(
             device,
-            cube_count,
-            CubeDim::new_1d(device.workgroup),
+            count,
             DemographyInputLaunch {
-                state: argument(state),
-                actors: argument(actors),
+                state: state.buffer_arg(),
+                actors: actors.buffer_arg(),
                 config: config.launch(),
-                people: argument(&self.people),
-                ranges: argument(&self.ranges),
+                people: self.people.buffer_arg(),
+                ranges: self.ranges.buffer_arg(),
                 policy: self.policy.launch(),
-                births: argument(&self.births),
-                samples: samples.clone().into_buffer_arg(),
+                births: self.births.buffer_arg(),
+                samples: samples.buffer_arg(),
                 day: u32::try_from(day)?,
                 stage,
             },
@@ -462,18 +463,15 @@ impl DemographyRuntime {
     ) -> Result<PopulationObservation> {
         let shards = device.tensor(&[0; OBSERVATION_SHARDS * OBSERVATION_METRICS]);
         let output = device.empty(OBSERVATION_METRICS);
-        let argument = |tensor: &CubeTensor| tensor.clone().into_buffer_arg();
-        let cube_count = device.count(self.count);
-        PopulationCounting::launch(
+        PopulationCounting::launch_elements(
             device,
-            cube_count,
-            CubeDim::new_1d(device.workgroup),
+            self.count,
             PopulationInputLaunch {
-                state: argument(state),
+                state: state.buffer_arg(),
                 config: config.launch(),
-                people: argument(&self.people),
+                people: self.people.buffer_arg(),
                 policy: self.policy.launch(),
-                output: argument(&shards),
+                output: shards.buffer_arg(),
                 count: self.count as u32,
             },
         );
@@ -495,7 +493,7 @@ impl DemographyRuntime {
             CubeDim::new_1d(device.workgroup),
             PopulationTotalsInputLaunch {
                 sums: sums.into_arg().into_buffer_arg(),
-                output: argument(&output),
+                output: output.buffer_arg(),
             },
         );
         let totals = device.read(&output)?;
@@ -539,16 +537,15 @@ impl DemographyRuntime {
                 true => WorkerRemapping::Formations,
                 false => WorkerRemapping::Births,
             };
-            WorkerRemappingSystem::launch(
+            WorkerRemappingSystem::launch_elements(
                 device,
-                device.count(self.range_counts.len()),
-                CubeDim::new_1d(device.workgroup),
+                self.range_counts.len(),
                 WorkerRemappingInputLaunch {
-                    state: state.clone().into_buffer_arg(),
-                    previous_people: previous.people.clone().into_buffer_arg(),
-                    people: self.people.clone().into_buffer_arg(),
-                    previous_ranges: previous.ranges.clone().into_buffer_arg(),
-                    ranges: self.ranges.clone().into_buffer_arg(),
+                    state: state.buffer_arg(),
+                    previous_people: previous.people.buffer_arg(),
+                    people: self.people.buffer_arg(),
+                    previous_ranges: previous.ranges.buffer_arg(),
+                    ranges: self.ranges.buffer_arg(),
                     stride,
                     minimum_age: self.policy.parameters.minimum_age,
                     retirement_age: self.policy.parameters.retirement_age,
@@ -591,15 +588,14 @@ impl DemographyRuntime {
             initial_population: self.initial_population,
             seed: self.seed,
         };
-        let argument = |tensor: &CubeTensor| tensor.clone().into_buffer_arg();
         let cube_count = device.count(actors);
         BirthCounting::launch(
             device,
             cube_count.clone(),
             CubeDim::new_1d(device.workgroup),
             BirthCountInputLaunch {
-                births: argument(&self.births),
-                scratch: argument(scratch),
+                births: self.births.buffer_arg(),
+                scratch: scratch.buffer_arg(),
             },
         );
         super::parallel::scan(
@@ -613,22 +609,21 @@ impl DemographyRuntime {
             cube_count.clone(),
             CubeDim::new_1d(device.workgroup),
             BirthRangeInputLaunch {
-                old: argument(&self.ranges),
-                births: argument(&self.births),
-                scratch: argument(scratch),
-                ranges: argument(&grown.ranges),
+                old: self.ranges.buffer_arg(),
+                births: self.births.buffer_arg(),
+                scratch: scratch.buffer_arg(),
+                ranges: grown.ranges.buffer_arg(),
             },
         );
-        PopulationGrowth::launch(
+        PopulationGrowth::launch_elements(
             device,
-            device.count(self.count * PersonLayout::WORDS / 4),
-            CubeDim::new_1d(device.workgroup),
+            self.count * PersonLayout::WORDS / 4,
             PopulationGrowthInputLaunch {
-                source: argument(&self.people),
-                target: argument(&grown.people),
-                audited: argument(&grown.audited),
-                old_ranges: argument(&self.ranges),
-                new_ranges: argument(&grown.ranges),
+                source: self.people.buffer_arg(),
+                target: grown.people.buffer_arg(),
+                audited: grown.audited.buffer_arg(),
+                old_ranges: self.ranges.buffer_arg(),
+                new_ranges: grown.ranges.buffer_arg(),
                 people: self.count as u32,
             },
         );
@@ -637,11 +632,11 @@ impl DemographyRuntime {
             cube_count,
             CubeDim::new_1d(device.workgroup),
             NewbornInputLaunch {
-                target: argument(&grown.people),
-                audited: argument(&grown.audited),
-                old_ranges: argument(&self.ranges),
-                new_ranges: argument(&grown.ranges),
-                births: argument(&self.births),
+                target: grown.people.buffer_arg(),
+                audited: grown.audited.buffer_arg(),
+                old_ranges: self.ranges.buffer_arg(),
+                new_ranges: grown.ranges.buffer_arg(),
+                births: self.births.buffer_arg(),
                 next_low: next_identity as u32,
                 next_high: (next_identity >> 32) as u32,
             },
@@ -692,17 +687,16 @@ impl DemographyRuntime {
             initial_population: self.initial_population,
             seed: self.seed,
         };
-        let argument = |tensor: &CubeTensor| tensor.clone().into_buffer_arg();
         let cube_count = device.count(births.len());
         kernels::original_grow::launch(
             &device.client,
             cube_count,
             CubeDim::new_1d(device.workgroup),
-            argument(&self.people),
-            argument(&grown.people),
-            argument(&self.ranges),
-            argument(&grown.ranges),
-            argument(&self.births),
+            self.people.buffer_arg(),
+            grown.people.buffer_arg(),
+            self.ranges.buffer_arg(),
+            grown.ranges.buffer_arg(),
+            self.births.buffer_arg(),
             next_identity as u32,
             (next_identity >> 32) as u32,
         );
@@ -715,14 +709,13 @@ impl DemographyRuntime {
         self.range_counts.resize(count, 0);
         let ranges = device.empty(count * 2);
         let births = device.empty(count);
-        FirmRegistryExtension::launch(
+        FirmRegistryExtension::launch_elements(
             device,
-            device.count(count),
-            CubeDim::new_1d(device.workgroup),
+            count,
             FirmExtensionInputLaunch {
-                previous: self.ranges.clone().into_buffer_arg(),
-                ranges: ranges.clone().into_buffer_arg(),
-                births: births.clone().into_buffer_arg(),
+                previous: self.ranges.buffer_arg(),
+                ranges: ranges.buffer_arg(),
+                births: births.buffer_arg(),
                 people: self.count as u32,
             },
         );

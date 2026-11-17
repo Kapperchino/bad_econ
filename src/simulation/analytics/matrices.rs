@@ -133,11 +133,10 @@ impl DeviceMatrix {
                 let width = tensor::vector_width(device, elements);
                 VectorRescaling::launch_vectorized(
                     device,
-                    count(device, elements / width),
-                    CubeDim::new_1d(device.workgroup),
+                    elements / width,
                     RescaleInputLaunch {
-                        values: argument(&output.data),
-                        control: argument(&control),
+                        values: output.data.buffer_arg(),
+                        control: control.buffer_arg(),
                         scale: self.scale as f32,
                         length: elements as u32,
                     },
@@ -212,16 +211,15 @@ impl DeviceMatrix {
                 let column_factors = device.tensor(&encode(columns));
                 let output = Self::empty(device, self.rows, self.columns, self.scale)?;
                 let control = device.tensor(&[0; CONTROL_WORDS]);
-                MatrixUnits::launch(
+                MatrixUnits::launch_elements(
                     device,
-                    count(device, self.rows * self.columns),
-                    CubeDim::new_1d(device.workgroup),
+                    self.rows * self.columns,
                     MatrixUnitsInputLaunch {
-                        input: argument(&self.data),
-                        row_factors: argument(&row_factors),
-                        column_factors: argument(&column_factors),
-                        output: argument(&output.data),
-                        control: argument(&control),
+                        input: self.data.buffer_arg(),
+                        row_factors: row_factors.buffer_arg(),
+                        column_factors: column_factors.buffer_arg(),
+                        output: output.data.buffer_arg(),
+                        control: control.buffer_arg(),
                         rows: self.rows as u32,
                         columns: self.columns as u32,
                     },
@@ -281,13 +279,12 @@ impl DeviceOperator {
                 budget,
             )?;
             match solution.values(device)? {
-                Diagnostic::Available(values) => MatrixColumn::launch(
+                Diagnostic::Available(values) => MatrixColumn::launch_elements(
                     device,
-                    count(device, self.rows),
-                    CubeDim::new_1d(device.workgroup),
+                    self.rows,
                     MatrixColumnInputLaunch {
-                        input: argument(&values.data),
-                        output: argument(&output.data),
+                        input: values.data.buffer_arg(),
+                        output: output.data.buffer_arg(),
                         rows: self.rows as u32,
                         columns: self.columns as u32,
                         column: column as u32,
@@ -395,15 +392,14 @@ impl DeviceSignedVector {
     pub fn read(&self, device: &Device) -> Result<Vec<SignedInterval>> {
         let output = device.empty((self.positive.length * 6).max(6));
         let control = device.tensor(&[0; CONTROL_WORDS]);
-        SignedVectorRead::launch(
+        SignedVectorRead::launch_elements(
             device,
-            count(device, self.positive.length),
-            CubeDim::new_1d(device.workgroup),
+            self.positive.length,
             SignedVectorReadInputLaunch {
-                positive: argument(&self.positive.data),
-                negative: argument(&self.negative.data),
-                output: argument(&output),
-                control: argument(&control),
+                positive: self.positive.data.buffer_arg(),
+                negative: self.negative.data.buffer_arg(),
+                output: output.buffer_arg(),
+                control: control.buffer_arg(),
                 length: self.positive.length as u32,
             },
         );

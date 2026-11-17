@@ -327,6 +327,7 @@ mod tests {
     use super::*;
     use crate::simulation::configuration::{Configuration, TaxBracket};
     use crate::simulation::layout::HIGH_WORD;
+    use crate::simulation::system::AsBufferArg;
     use crate::{
         ledger::TickLayout,
         simulation::{
@@ -472,15 +473,14 @@ mod tests {
         let output = device.empty(cases.len() * 2);
         let config = fixture.configuration(&device)?;
         let control = device.tensor(&[0; CONTROL_WORDS]);
-        let argument = |tensor: &burn_wgpu::CubeTensor| tensor.clone().into_buffer_arg();
         income_probe::launch(
             &device.client,
             device.count(cases.len()),
             CubeDim::new_1d(device.workgroup),
-            argument(&input),
-            argument(&output),
+            input.buffer_arg(),
+            output.buffer_arg(),
             config.launch(),
-            argument(&control),
+            control.buffer_arg(),
         );
         let actual = device.read(&output)?;
         assert_eq!(device.read(&control)?[FAULT_WORD], 0);

@@ -88,6 +88,7 @@ impl PayrollAccrual {
 mod tests {
     use super::*;
     use crate::simulation::configuration::{Configuration, TaxBracket};
+    use crate::simulation::system::AsBufferArg;
     use crate::simulation::{
         flags::{CONTROL_WORDS, FAULT_WORD},
         policy::{KernelStarts, proposed_starts},
@@ -140,15 +141,14 @@ mod tests {
         let gross = device.tensor(&[8000, 0, 10_000, 0, 11_080, 0]);
         let output = device.empty(4 * TICK_WORDS);
         let control = device.tensor(&[0; CONTROL_WORDS]);
-        let argument = |tensor: &burn_wgpu::CubeTensor| tensor.clone().into_buffer_arg();
         teaching_cases::launch(
             &device.client,
             CubeCount::Static(1, 1, 1),
             CubeDim::new_1d(device.workgroup),
-            argument(&gross),
-            argument(&output),
+            gross.buffer_arg(),
+            output.buffer_arg(),
             config.launch(),
-            argument(&control),
+            control.buffer_arg(),
         );
         let actual = device.read(&output)?;
         assert_eq!(actual, [6800, 0, 8500, 0, 9202, 0, 15, 0]);

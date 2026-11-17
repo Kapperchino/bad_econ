@@ -5,12 +5,12 @@ use crate::simulation::{
     Device,
     flags::FaultFlags,
     pass::GpuPass,
-    system::{System, gpu_passes},
+    system::{AsBufferArg, System, gpu_passes},
     words::*,
 };
 use anyhow::{Context, Result};
 use burn_wgpu::CubeTensor;
-use cubecl::{CubeDim, prelude::*};
+use cubecl::prelude::*;
 use std::collections::HashMap;
 
 enum IdentityIndex<'a> {
@@ -126,33 +126,30 @@ impl OwnershipRuntime {
         actors: &CubeTensor,
         config: &Configuration,
     ) -> Result<()> {
-        let argument = |tensor: &CubeTensor| tensor.clone().into_buffer_arg();
         device.write(&self.control, &[0; 4]);
-        OwnershipPayments::launch(
+        OwnershipPayments::launch_elements(
             device,
-            device.count(self.shares.meta.num_elements() / 2),
-            CubeDim::new_1d(device.workgroup),
+            self.shares.meta.num_elements() / 2,
             PaymentInputLaunch {
-                state: argument(state),
-                actors: argument(actors),
+                state: state.buffer_arg(),
+                actors: actors.buffer_arg(),
                 config: config.launch(),
-                shares: argument(&self.shares),
-                payments: argument(&self.payments),
-                control: argument(&self.control),
+                shares: self.shares.buffer_arg(),
+                payments: self.payments.buffer_arg(),
+                control: self.control.buffer_arg(),
             },
         );
-        OwnershipDistribution::launch(
+        OwnershipDistribution::launch_elements(
             device,
-            device.count(config.actors as usize),
-            CubeDim::new_1d(device.workgroup),
+            config.actors as usize,
             DistributionInputLaunch {
-                state: argument(state),
+                state: state.buffer_arg(),
                 config: config.launch(),
-                shares: argument(&self.shares),
-                offsets: argument(&self.offsets),
-                entries: argument(&self.entries),
-                payments: argument(&self.payments),
-                control: argument(&self.control),
+                shares: self.shares.buffer_arg(),
+                offsets: self.offsets.buffer_arg(),
+                entries: self.entries.buffer_arg(),
+                payments: self.payments.buffer_arg(),
+                control: self.control.buffer_arg(),
             },
         );
         FaultFlags::read(&device.read(&self.control)?)?.into_result()
@@ -473,11 +470,11 @@ mod tests {
                     &device.client,
                     CubeCount::Static(1, 1, 1),
                     CubeDim::new_1d(workgroup),
-                    expected.clone().into_buffer_arg(),
-                    actors.clone().into_buffer_arg(),
+                    expected.buffer_arg(),
+                    actors.buffer_arg(),
                     config.launch(),
-                    original.clone().into_buffer_arg(),
-                    control.clone().into_buffer_arg(),
+                    original.buffer_arg(),
+                    control.buffer_arg(),
                 );
                 let result = runtime.distribute(&device, &actual, &actors, &config);
                 let expected_faults = FaultFlags::read(&device.read(&control)?)?;

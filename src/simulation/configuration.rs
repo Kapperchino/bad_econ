@@ -1,5 +1,6 @@
 use super::layout::WORD_BITS;
 use super::negotiation::BargainingConfig;
+use crate::simulation::system::AsBufferArg;
 use crate::{
     arithmetic::PRICE_TABLE,
     domain::{Good, Scenario, State},
@@ -461,11 +462,11 @@ impl Configuration {
             heating_per_person: self.heating_per_person,
             small_business_expansion: self.small_business_expansion,
             industrial_expansion: self.industrial_expansion,
-            rental_accounts: self.rental_accounts.clone().into_buffer_arg(),
+            rental_accounts: self.rental_accounts.buffer_arg(),
             rental_businesses: self.rental_businesses,
             property_mode: self.property_mode,
-            property_regions: self.property_regions.clone().into_buffer_arg(),
-            grain_farms: self.grain_farms.clone().into_buffer_arg(),
+            property_regions: self.property_regions.buffer_arg(),
+            grain_farms: self.grain_farms.buffer_arg(),
             actors: self.actors,
             state_stride: self.state_stride,
             fields: self.fields,
@@ -482,7 +483,7 @@ impl Configuration {
             wheat_kg_per_hectare: self.wheat_kg_per_hectare,
             economy: self.economy,
             home: self.home.launch(),
-            consumption_intervals: self.consumption_intervals.clone().into_buffer_arg(),
+            consumption_intervals: self.consumption_intervals.buffer_arg(),
             work_cap: self.work_cap,
             reserved_minutes: self.reserved_minutes,
             forecast_weight: self.forecast_weight,
@@ -508,7 +509,7 @@ impl Configuration {
             fatigue_response: self.fatigue_response,
             rest_minutes: self.rest_minutes,
             bargaining: self.bargaining.launch(),
-            price_table: self.price_table.clone().into_buffer_arg(),
+            price_table: self.price_table.buffer_arg(),
             home_mode: self.home_mode,
             tax_brackets: self
                 .tax_brackets

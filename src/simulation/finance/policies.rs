@@ -243,14 +243,13 @@ impl FinancePolicies {
         let input = device.record_tensor(&records);
         let output = device.empty(inputs.len().max(1) * TICK_WORDS);
         let control = device.tensor(&[0; CONTROL_WORDS]);
-        LendingEvaluation::launch(
+        LendingEvaluation::launch_elements(
             device,
-            count(device, inputs.len()),
-            CubeDim::new_1d(device.workgroup),
+            inputs.len(),
             PolicyInputLaunch {
-                input: argument(&input),
-                output: argument(&output),
-                control: argument(&control),
+                input: input.buffer_arg(),
+                output: output.buffer_arg(),
+                control: control.buffer_arg(),
                 count: inputs.len() as u32,
             },
         );
@@ -283,15 +282,14 @@ impl FinancePolicies {
         let flows = device.record_tensor(&flows);
         let output = device.empty(inputs.len().max(1) * 2 * TICK_WORDS);
         let control = device.tensor(&[0; CONTROL_WORDS]);
-        FundingEvaluation::launch(
+        FundingEvaluation::launch_elements(
             device,
-            count(device, inputs.len()),
-            CubeDim::new_1d(device.workgroup),
+            inputs.len(),
             FlowInputLaunch {
-                plans: argument(&records),
-                flows: argument(&flows),
-                output: argument(&output),
-                control: argument(&control),
+                plans: records.buffer_arg(),
+                flows: flows.buffer_arg(),
+                output: output.buffer_arg(),
+                control: control.buffer_arg(),
                 count: inputs.len() as u32,
             },
         );
@@ -326,15 +324,14 @@ impl FinancePolicies {
         let input = device.record_tensor(&demands);
         let output = device.empty(demands.len().max(1) * TICK_WORDS);
         let remaining = device.empty(inputs.len().max(1) * TICK_WORDS);
-        PoolAllocation::launch(
+        PoolAllocation::launch_elements(
             device,
-            count(device, inputs.len()),
-            CubeDim::new_1d(device.workgroup),
+            inputs.len(),
             PoolInputLaunch {
-                plans: argument(&metadata),
-                demands: argument(&input),
-                output: argument(&output),
-                remaining: argument(&remaining),
+                plans: metadata.buffer_arg(),
+                demands: input.buffer_arg(),
+                output: output.buffer_arg(),
+                remaining: remaining.buffer_arg(),
                 count: inputs.len() as u32,
             },
         );
@@ -586,14 +583,13 @@ impl FinancePolicies {
         let input = device.record_tensor(&records);
         let output = device.empty(inputs.len().max(1) * 2 * TICK_WORDS);
         let control = device.tensor(&[0; CONTROL_WORDS]);
-        BudgetEvaluation::launch(
+        BudgetEvaluation::launch_elements(
             device,
-            count(device, inputs.len()),
-            CubeDim::new_1d(device.workgroup),
+            inputs.len(),
             PolicyInputLaunch {
-                input: argument(&input),
-                output: argument(&output),
-                control: argument(&control),
+                input: input.buffer_arg(),
+                output: output.buffer_arg(),
+                control: control.buffer_arg(),
                 count: inputs.len() as u32,
             },
         );
@@ -631,15 +627,14 @@ impl FinancePolicies {
         let flows = device.record_tensor(&flows);
         let output = device.empty(inputs.len().max(1) * 4 * TICK_WORDS);
         let control = device.tensor(&[0; CONTROL_WORDS]);
-        DiscountEvaluation::launch(
+        DiscountEvaluation::launch_elements(
             device,
-            count(device, inputs.len()),
-            CubeDim::new_1d(device.workgroup),
+            inputs.len(),
             FlowInputLaunch {
-                plans: argument(&records),
-                flows: argument(&flows),
-                output: argument(&output),
-                control: argument(&control),
+                plans: records.buffer_arg(),
+                flows: flows.buffer_arg(),
+                output: output.buffer_arg(),
+                control: control.buffer_arg(),
                 count: inputs.len() as u32,
             },
         );

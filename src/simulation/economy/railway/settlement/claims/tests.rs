@@ -104,7 +104,7 @@ fn concurrent_demand_totals_preserve_high_word_carry_overflow_and_zero_additions
             device.count(count),
             CubeDim::new_1d(workgroup),
             claims.into_buffer_arg(),
-            resources.clone().into_buffer_arg(),
+            resources.buffer_arg(),
             count as u32,
         );
         let actual = device.read(&resources)?;
@@ -333,8 +333,8 @@ fn sorted_gpu_prefixes_match_wide_reference_with_repeated_visits_and_overflow() 
             &device.client,
             device.count(records.len()),
             CubeDim::new_1d(workgroup),
-            buffers.claims.clone().into_buffer_arg(),
-            buffers.resources.clone().into_buffer_arg(),
+            buffers.claims.buffer_arg(),
+            buffers.resources.buffer_arg(),
             records.len() as u32,
         );
         for stage in [Stage::SortClaims, Stage::ClaimOffsets, Stage::Resolve] {

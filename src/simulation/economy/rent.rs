@@ -402,10 +402,10 @@ mod tests {
                 &device.client,
                 device.count(initial.actors.len()),
                 CubeDim::new_1d(workgroup),
-                state.clone().into_buffer_arg(),
+                state.buffer_arg(),
                 actors.into_buffer_arg(),
                 config.launch(),
-                control.clone().into_buffer_arg(),
+                control.buffer_arg(),
             );
             let mut actual = initial.clone();
             actual.values = decode(&device.read(&state)?);
@@ -637,10 +637,10 @@ mod tests {
                 &device.client,
                 device.count(initial.actors.len()),
                 CubeDim::new_1d(workgroup),
-                state.clone().into_buffer_arg(),
+                state.buffer_arg(),
                 actors.into_buffer_arg(),
                 config.launch(),
-                control.clone().into_buffer_arg(),
+                control.buffer_arg(),
             );
             let mut actual = initial.clone();
             actual.values = decode(&device.read(&state)?);

@@ -51,7 +51,7 @@ fn empty_indirect_queues_skip_work_after_active_dispatches_on_gpu() -> Result<()
             dispatch(&buffers.dispatches, SORT_DISPATCH),
             CubeDim::new_1d(device.workgroup),
             DispatchProbeInputLaunch {
-                executed: executed.clone().into_buffer_arg(),
+                executed: executed.buffer_arg(),
             },
         );
         expected += active.div_ceil(device.workgroup);
@@ -102,20 +102,19 @@ fn compaction_and_ranges_preserve_buffers_after_unlatched_faults_on_gpu() -> Res
         assert_eq!(simulation.device.read(&simulation.control)?, control);
         assert_eq!(simulation.device.read(&simulation.proposals)?, proposals);
     }
-    search::MarketSearch::launch(
+    search::MarketSearch::launch_elements(
         &simulation.device,
-        simulation.device.count(count),
-        CubeDim::new_1d(simulation.device.workgroup),
+        count,
         search::SearchInputLaunch {
-            state: simulation.state.clone().into_buffer_arg(),
-            actors: simulation.actors.clone().into_buffer_arg(),
+            state: simulation.state.buffer_arg(),
+            actors: simulation.actors.buffer_arg(),
             config: simulation.config.launch(),
-            spatial: simulation.spatial.clone().into_buffer_arg(),
-            proposals: simulation.proposals.clone().into_buffer_arg(),
-            searches: simulation.searches.requests.clone().into_buffer_arg(),
-            successes: simulation.searches.successes.clone().into_buffer_arg(),
-            scratch: simulation.scratch.clone().into_buffer_arg(),
-            control: simulation.control.clone().into_buffer_arg(),
+            spatial: simulation.spatial.buffer_arg(),
+            proposals: simulation.proposals.buffer_arg(),
+            searches: simulation.searches.requests.buffer_arg(),
+            successes: simulation.searches.successes.buffer_arg(),
+            scratch: simulation.scratch.buffer_arg(),
+            control: simulation.control.buffer_arg(),
             parameters: parameters.launch(),
             stage: search::SearchStage::Compact,
             status_reset: search::StatusReset::Full,
@@ -424,11 +423,11 @@ impl ProposalCase {
                 dispatch,
                 CubeDim::new_1d(device.workgroup),
                 ProposalInputLaunch {
-                    proposals: proposals.clone().into_buffer_arg(),
-                    searches: searches.clone().into_buffer_arg(),
-                    successes: successes.clone().into_buffer_arg(),
-                    scratch: buffers.scratch.clone().into_buffer_arg(),
-                    control: buffers.control.clone().into_buffer_arg(),
+                    proposals: proposals.buffer_arg(),
+                    searches: searches.buffer_arg(),
+                    successes: successes.buffer_arg(),
+                    scratch: buffers.scratch.buffer_arg(),
+                    control: buffers.control.buffer_arg(),
                     parameters: parameters.launch(),
                     stage,
                 },

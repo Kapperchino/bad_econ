@@ -4,7 +4,7 @@ use crate::simulation::{
     Device,
     layout::ActorLayout,
     pass::GpuPass,
-    system::{System, gpu_passes},
+    system::{AsBufferArg, System, gpu_passes},
     tensor,
 };
 use burn_wgpu::CubeTensor;
@@ -57,13 +57,12 @@ pub(in crate::simulation) fn patch_actors(
     let output = device.empty(source.meta.num_elements());
     tensor::copy(device, source, &output);
     let records = device.tensor(bytemuck::cast_slice(&patches));
-    MetadataPatching::launch(
+    MetadataPatching::launch_elements(
         device,
-        device.count(patches.len()),
-        CubeDim::new_1d(device.workgroup),
+        patches.len(),
         PatchInputLaunch {
             patches: records.into_buffer_arg(),
-            actors: output.clone().into_buffer_arg(),
+            actors: output.buffer_arg(),
         },
     );
     output

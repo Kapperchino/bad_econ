@@ -1,5 +1,6 @@
 use super::*;
 use crate::domain::ActorRows;
+use crate::simulation::parallel::reduction::{checked_sum, combine_metrics, reduce_metric};
 use crate::simulation::{Device, configuration::Configuration};
 use anyhow::Result;
 use burn_wgpu::CubeTensor;
@@ -287,7 +288,6 @@ impl AuditBuffers {
 
     pub fn summarize(&self, device: &Device, input: AuditInput<'_>) -> Result<()> {
         let count = input.actors.meta.num_elements() / ActorLayout::WORDS;
-        let argument = |tensor: &CubeTensor| tensor.clone().into_buffer_arg();
         let ring_tracking = match input.ring_mask {
             Some(_) => RingTracking::Observed,
             None => RingTracking::Untracked,
@@ -329,11 +329,11 @@ impl AuditBuffers {
             ),
             CubeDim::new_1d(validation_workgroup),
             ValidationInputLaunch {
-                state: argument(input.state),
-                actors: argument(input.actors),
+                state: input.state.buffer_arg(),
+                actors: input.actors.buffer_arg(),
                 config: input.config.launch(),
-                control: argument(input.control),
-                ring_mask: argument(ring_mask),
+                control: input.control.buffer_arg(),
+                ring_mask: ring_mask.buffer_arg(),
                 ring_tracking: actor_ring_tracking,
             },
         );
@@ -350,11 +350,11 @@ impl AuditBuffers {
                 ),
                 CubeDim::new_1d(device.workgroup),
                 SelectedValidationInputLaunch {
-                    state: argument(input.state),
-                    indices: argument(indices),
+                    state: input.state.buffer_arg(),
+                    indices: indices.buffer_arg(),
                     config: input.config.launch(),
-                    control: argument(input.control),
-                    ring_mask: argument(ring_mask),
+                    control: input.control.buffer_arg(),
+                    ring_mask: ring_mask.buffer_arg(),
                     ring_tracking,
                 },
             );
@@ -376,14 +376,14 @@ impl AuditBuffers {
                 dispatch(device, set.groups, set.ids.meta.num_elements()),
                 CubeDim::new_1d(device.workgroup),
                 SummaryInputLaunch {
-                    state: argument(input.state),
-                    actors: argument(input.actors),
+                    state: input.state.buffer_arg(),
+                    actors: input.actors.buffer_arg(),
                     config: input.config.launch(),
-                    spatial: argument(input.spatial),
-                    metrics: argument(&self.metrics),
-                    ids: argument(&set.ids),
-                    output: argument(input.partials),
-                    control: argument(input.control),
+                    spatial: input.spatial.buffer_arg(),
+                    metrics: self.metrics.buffer_arg(),
+                    ids: set.ids.buffer_arg(),
+                    output: input.partials.buffer_arg(),
+                    control: input.control.buffer_arg(),
                     groups: set.groups as u32,
                     population: set.population,
                 },
@@ -407,15 +407,6 @@ fn value(state: &[Ticks], config: &EconomyConfig, field: u32, actor: u32) -> Tic
 #[cube]
 fn number(state: &[Ticks], config: &EconomyConfig, field: u32, actor: u32) -> u32 {
     value(state, config, field, actor).extract(LOW_WORD)
-}
-
-#[cube]
-fn checked_sum(a: u64, b: u64, control: &[Atomic<u32>]) -> u64 {
-    let total = a + b;
-    if total < a {
-        KernelFaults::new(comptime!(FaultFlags::ARITHMETIC_OVERFLOW)).record(control);
-    }
-    total
 }
 
 #[cube]
@@ -689,37 +680,14 @@ fn summarize_metrics(input: &mut SummaryInput) {
                     }
                     _ => (),
                 }
-                total = match operation {
-                    1 => min(total, amount),
-                    2 => max(total, amount),
-                    _ => checked_sum(total, amount, control),
-                };
+                total = combine_metrics(total, amount, operation, control);
             }
             member += CUBE_DIM;
         }
-        let mut shared = Shared::<[u64]>::new_slice(256usize);
-        shared[UNIT_POS as usize] = total;
-        sync_cube();
-        let mut stride = CUBE_DIM / 2;
-        while stride > 0 {
-            if UNIT_POS < stride {
-                let a = shared[UNIT_POS as usize];
-                let b = shared[(UNIT_POS + stride) as usize];
-                shared[UNIT_POS as usize] = match operation {
-                    1 => min(a, b),
-                    2 => max(a, b),
-                    _ => checked_sum(a, b, control),
-                };
-            }
-            sync_cube();
-            stride /= 2;
-        }
+        let total = reduce_metric(total, operation, control);
         if UNIT_POS == 0 {
             let base = group * SummaryLayout::METRICS as u32 + metric;
-            input.output[base as usize] = ticks(
-                u32::cast_from(shared[0usize]),
-                u32::cast_from(shared[0usize] >> 32),
-            );
+            input.output[base as usize] = ticks(u32::cast_from(total), u32::cast_from(total >> 32));
         }
     }
 }
@@ -1068,11 +1036,11 @@ mod tests {
                 ),
                 CubeDim::new_1d(workgroup),
                 ValidationInputLaunch {
-                    state: simulation.state.clone().into_buffer_arg(),
-                    actors: simulation.actors.clone().into_buffer_arg(),
+                    state: simulation.state.buffer_arg(),
+                    actors: simulation.actors.buffer_arg(),
                     config: simulation.config.launch(),
-                    control: simulation.control.clone().into_buffer_arg(),
-                    ring_mask: mask.clone().into_buffer_arg(),
+                    control: simulation.control.buffer_arg(),
+                    ring_mask: mask.buffer_arg(),
                     ring_tracking: tracking,
                 },
             );
@@ -1094,11 +1062,11 @@ mod tests {
                 ),
                 CubeDim::new_1d(workgroup),
                 SelectedValidationInputLaunch {
-                    state: simulation.state.clone().into_buffer_arg(),
+                    state: simulation.state.buffer_arg(),
                     indices: indices.into_buffer_arg(),
                     config: simulation.config.launch(),
-                    control: simulation.control.clone().into_buffer_arg(),
-                    ring_mask: mask.clone().into_buffer_arg(),
+                    control: simulation.control.buffer_arg(),
+                    ring_mask: mask.buffer_arg(),
                     ring_tracking: RingTracking::Observed,
                 },
             );

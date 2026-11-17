@@ -1,9 +1,12 @@
-use super::{Device, flags::FaultFlags, layout::WORD_BYTES, system::System};
+use super::{
+    Device,
+    flags::FaultFlags,
+    layout::WORD_BYTES,
+    system::{AsBufferArg, System},
+};
 use crate::ledger::TickLayout;
 use anyhow::{Result, anyhow};
-use burn_wgpu::CubeTensor;
 use bytemuck::{Pod, Zeroable};
-use cubecl::CubeDim;
 use std::mem::offset_of;
 
 mod kernels;
@@ -240,15 +243,13 @@ pub fn evaluate(device: &Device, requests: &[BargainingRequest]) -> Result<Vec<B
     let input = device.record_tensor(&encoded);
     let output = device.empty(requests.len().max(1) * ResultLayout::WORDS);
     let control = device.tensor(&[0; 4]);
-    let argument = |tensor: &CubeTensor| tensor.clone().into_buffer_arg();
-    kernels::BargainingEvaluation::launch(
+    kernels::BargainingEvaluation::launch_elements(
         device,
-        device.count(requests.len()),
-        CubeDim::new_1d(device.workgroup),
+        requests.len(),
         kernels::BargainingInputLaunch {
-            requests: argument(&input),
-            output: argument(&output),
-            control: argument(&control),
+            requests: input.buffer_arg(),
+            output: output.buffer_arg(),
+            control: control.buffer_arg(),
             count: requests.len() as u32,
         },
     );

@@ -872,8 +872,8 @@ pub fn observation_totals(sums: &[u64], output: &mut [u32]) {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::simulation::system::AsBufferArg;
     use anyhow::Result;
-    use burn_wgpu::CubeTensor;
 
     #[cube(launch)]
     fn probe(input: &[u32], output: &mut [u32]) {
@@ -938,13 +938,12 @@ mod tests {
         ];
         let input = device.tensor(bytemuck::cast_slice(&cases));
         let output = device.empty(cases.len() * 4);
-        let argument = |tensor: &CubeTensor| tensor.clone().into_buffer_arg();
         famine_probe::launch(
             &device.client,
             CubeCount::Static(1, 1, 1),
             CubeDim::new_1d(64),
-            argument(&input),
-            argument(&output),
+            input.buffer_arg(),
+            output.buffer_arg(),
         );
         let words = device.read(&output)?;
         let rows = words.chunks_exact(4).collect::<Vec<_>>();
@@ -988,13 +987,12 @@ mod tests {
         ];
         let input = device.tensor(bytemuck::cast_slice(&cases));
         let output = device.empty(cases.len() * 6);
-        let argument = |tensor: &CubeTensor| tensor.clone().into_buffer_arg();
         probe::launch(
             &device.client,
             CubeCount::Static(1, 1, 1),
             CubeDim::new_1d(64),
-            argument(&input),
-            argument(&output),
+            input.buffer_arg(),
+            output.buffer_arg(),
         );
         let words = device.read(&output)?;
         let risks = words
@@ -1124,7 +1122,7 @@ pub(super) fn birth_prefix(births: &[u32], scratch: &mut [u32]) {
     if actor < births.len() {
         present = u32::cast_from(births[actor] > 0);
     }
-    let prefix = crate::simulation::parallel::prefix_sum(present);
+    let prefix = crate::simulation::parallel::prefix_sum::<u32>(present);
     if actor < births.len() {
         scratch[actor] = prefix.inclusive;
     }

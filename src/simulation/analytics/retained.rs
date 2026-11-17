@@ -29,14 +29,12 @@ impl DeviceVector {
             true => {
                 let output = Self::empty(device, 1);
                 let control = device.tensor(&[0; CONTROL_WORDS]);
-                retained_kernels::ReciprocalReference::launch(
+                retained_kernels::ReciprocalReference::launch_single(
                     device,
-                    CubeCount::Static(1, 1, 1),
-                    CubeDim::new_1d(1),
                     retained_kernels::ReciprocalInputLaunch {
-                        values: argument(&self.data),
-                        output: argument(&output.data),
-                        control: argument(&control),
+                        values: self.data.buffer_arg(),
+                        output: output.data.buffer_arg(),
+                        control: control.buffer_arg(),
                         reference: reference as u32,
                         scale,
                     },

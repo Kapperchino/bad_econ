@@ -10,7 +10,7 @@ use super::{
     flags::{CONTROL_WORDS, FaultFlags},
     layout::{TICK_WORDS, WORD_BYTES},
     pass::GpuPass,
-    system::{System, gpu_passes},
+    system::{AsBufferArg, System, gpu_passes},
     words::*,
 };
 use crate::{domain::finance::*, ledger::Coordinate};
@@ -268,17 +268,16 @@ impl FinanceRuntime {
     ) -> Result<()> {
         self.check_state(state)?;
         self.clear(device);
-        BankAccounting::launch(
+        BankAccounting::launch_elements(
             device,
-            count(device, self.bank_count),
-            CubeDim::new_1d(device.workgroup),
+            self.bank_count,
             BankInputLaunch {
-                state: argument(state),
-                banks: argument(&self.banks),
-                loans: argument(&self.loans),
-                output: argument(&self.scanned),
-                decisions: argument(&self.decisions),
-                control: argument(&self.control),
+                state: state.buffer_arg(),
+                banks: self.banks.buffer_arg(),
+                loans: self.loans.buffer_arg(),
+                output: self.scanned.buffer_arg(),
+                decisions: self.decisions.buffer_arg(),
+                control: self.control.buffer_arg(),
                 day,
                 count: self.bank_count as u32,
                 stage,
@@ -298,28 +297,26 @@ impl FinanceRuntime {
         match self.support_mode {
             SupportMode::Absent => (),
             SupportMode::Present => {
-                SupportNeeds::launch(
+                SupportNeeds::launch_elements(
                     device,
-                    count(device, self.support_count),
-                    CubeDim::new_1d(device.workgroup),
+                    self.support_count,
                     SupportNeedsInputLaunch {
-                        state: argument(state),
-                        recipients: argument(&self.support),
-                        output: argument(&self.scanned),
+                        state: state.buffer_arg(),
+                        recipients: self.support.buffer_arg(),
+                        output: self.scanned.buffer_arg(),
                         count: self.support_count as u32,
                     },
                 );
                 let scanned = self.scan(device, &self.support_scan)?;
-                SupportPlanning::launch(
+                SupportPlanning::launch_elements(
                     device,
-                    count(device, self.support_count + 1),
-                    CubeDim::new_1d(device.workgroup),
+                    self.support_count + 1,
                     SupportPlanInputLaunch {
-                        state: argument(state),
-                        recipients: argument(&self.support),
-                        scanned: argument(scanned),
-                        output: argument(&self.output),
-                        control: argument(&self.control),
+                        state: state.buffer_arg(),
+                        recipients: self.support.buffer_arg(),
+                        scanned: scanned.buffer_arg(),
+                        output: self.output.buffer_arg(),
+                        control: self.control.buffer_arg(),
                         count: self.support_count as u32,
                         treasury: self.layout.treasury,
                     },
@@ -329,14 +326,13 @@ impl FinanceRuntime {
                 self.last_event_count
                     .set(super::flags::ControlLayout::new(&control)?.phase_data as usize);
                 self.last_support_count.set(self.last_event_count.get());
-                SupportPosting::launch(
+                SupportPosting::launch_elements(
                     device,
-                    count(device, self.support_count + 1),
-                    CubeDim::new_1d(device.workgroup),
+                    self.support_count + 1,
                     SupportPostInputLaunch {
-                        state: argument(state),
-                        recipients: argument(&self.support),
-                        output: argument(&self.output),
+                        state: state.buffer_arg(),
+                        recipients: self.support.buffer_arg(),
+                        output: self.output.buffer_arg(),
                         count: self.support_count as u32,
                         treasury: self.layout.treasury,
                     },
@@ -444,14 +440,6 @@ impl FinanceRuntime {
     pub fn decision_readback_bytes(&self) -> u64 {
         (self.loan_count * WORD_BYTES) as u64
     }
-}
-
-fn argument(tensor: &CubeTensor) -> BufferArg {
-    tensor.clone().into_buffer_arg()
-}
-
-fn count(device: &Device, length: usize) -> CubeCount {
-    device.count(length)
 }
 
 fn padded(device: &Device, words: &[u32]) -> CubeTensor {

@@ -4,7 +4,7 @@ use super::{
     memory::MemoryBudget,
     parameters::{EconomyParameters, SchedulerParameters},
     scheduler::{self, SchedulerStage},
-    system::System,
+    system::{AsBufferArg, System},
 };
 use anyhow::{Context, Result, anyhow};
 use burn::{
@@ -14,7 +14,8 @@ use burn::{
 use burn_wgpu::{CubeBackend, CubeTensor, WgpuSetup, wgpu};
 use cubecl::{CubeCount, CubeDim, client::Client};
 
-const WORKGROUP_SIZES: [u32; 4] = [32, 64, 128, 256];
+pub(super) const MAX_WORKGROUP_SIZE: u32 = 256;
+const WORKGROUP_SIZES: [u32; 4] = [32, 64, 128, MAX_WORKGROUP_SIZE];
 const DEDICATED_BUFFER_BYTES: usize = 1024 * 1024;
 const STATE_BUFFER_BYTES: usize = 16 * 1024 * 1024;
 const MAX_READBACK_WORDS: usize = 4 * 1024 * 1024;
@@ -332,7 +333,6 @@ impl EconomyOps for CubeBackend {
         buffers: EconomyBuffers<'_>,
         parameters: &EconomyParameters,
     ) {
-        let argument = |tensor: &CubeTensor| tensor.clone().into_buffer_arg();
         match (stage, parameters.phase) {
             (EconomyStage::Local, crate::domain::Phase::Opening) => economy::opening::launch(
                 device,
@@ -341,18 +341,17 @@ impl EconomyOps for CubeBackend {
                 buffers.control,
                 parameters.day,
             ),
-            _ => economy::EconomySystem::launch(
+            _ => economy::EconomySystem::launch_elements(
                 device,
-                device.count(count),
-                CubeDim::new_1d(device.workgroup),
+                count,
                 economy::EconomyInputLaunch {
-                    state: argument(buffers.state),
-                    actors: argument(buffers.actors),
+                    state: buffers.state.buffer_arg(),
+                    actors: buffers.actors.buffer_arg(),
                     config: buffers.config.launch(),
-                    spatial: argument(buffers.spatial),
-                    proposals: argument(buffers.proposals),
-                    bundles: argument(buffers.events),
-                    control: argument(buffers.control),
+                    spatial: buffers.spatial.buffer_arg(),
+                    proposals: buffers.proposals.buffer_arg(),
+                    bundles: buffers.events.buffer_arg(),
+                    control: buffers.control.buffer_arg(),
                     parameters: parameters.launch(),
                     stage,
                 },
@@ -366,17 +365,15 @@ impl EconomyOps for CubeBackend {
         buffers: SchedulerBuffers<'_>,
         parameters: SchedulerParameters,
     ) {
-        let argument = |tensor: &CubeTensor| tensor.clone().into_buffer_arg();
-        scheduler::EventScheduling::launch(
+        scheduler::EventScheduling::launch_elements(
             device,
-            device.count(count),
-            CubeDim::new_1d(device.workgroup),
+            count,
             scheduler::ScheduleInputLaunch {
-                balances: argument(buffers.state),
-                events: argument(buffers.events),
-                scratch: argument(buffers.scratch),
-                control: argument(buffers.control),
-                links: argument(buffers.links),
+                balances: buffers.state.buffer_arg(),
+                events: buffers.events.buffer_arg(),
+                scratch: buffers.scratch.buffer_arg(),
+                control: buffers.control.buffer_arg(),
+                links: buffers.links.buffer_arg(),
                 params: parameters.launch(),
                 stage,
             },

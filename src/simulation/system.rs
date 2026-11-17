@@ -1,4 +1,5 @@
 use super::{Device, pass::GpuPass};
+use burn_wgpu::CubeTensor;
 use cubecl::prelude::*;
 use std::marker::PhantomData;
 
@@ -41,9 +42,51 @@ impl<Input: CubeType, First: GpuPass<Input>, Next: GpuPass<First::Output>> GpuPa
     }
 }
 
+pub(super) trait AsBufferArg {
+    fn buffer_arg(&self) -> BufferArg;
+}
+
+impl AsBufferArg for CubeTensor {
+    fn buffer_arg(&self) -> BufferArg {
+        assert!(
+            !self.meta.is_tiled(),
+            "kernel buffer arguments require untiled tensors"
+        );
+        TensorBinding {
+            handle: self.handle.clone().binding(),
+            shape: self.meta.shape.clone(),
+            strides: self.meta.strides.clone(),
+            tiling: self.meta.tiling,
+        }
+        .into_buffer_arg()
+    }
+}
+
 pub trait System: Sized + Send + Sync + 'static {
     type Input: LaunchArg;
     type Passes: GpuPass<Self::Input, Output = ()>;
+
+    fn launch_elements(
+        device: &Device,
+        elements: usize,
+        input: <Self::Input as LaunchArg>::RuntimeArg,
+    ) {
+        Self::launch(
+            device,
+            device.count(elements),
+            CubeDim::new_1d(device.workgroup),
+            input,
+        );
+    }
+
+    fn launch_single(device: &Device, input: <Self::Input as LaunchArg>::RuntimeArg) {
+        Self::launch(
+            device,
+            CubeCount::Static(1, 1, 1),
+            CubeDim::new_1d(1),
+            input,
+        );
+    }
 
     fn launch(
         device: &Device,

@@ -300,9 +300,9 @@ pub fn comparator(
                 CubeCount::Static(1, 1, 1),
                 CubeDim::new_1d(device.workgroup),
                 ValueComparisonInputLaunch {
-                    requirement: argument(&requirement.data),
-                    output: argument(&output),
-                    control: argument(&control),
+                    requirement: requirement.data.buffer_arg(),
+                    output: output.buffer_arg(),
+                    control: control.buffer_arg(),
                     living_low: living as u32,
                     living_high: (living >> 32) as u32,
                     scale,

@@ -1,146 +1,73 @@
 pub(super) mod reduction;
 mod systems;
-use super::{Device, system::System, words::ceildiv};
+pub(super) mod workgroup;
+use super::{
+    Device,
+    system::{AsBufferArg, System},
+    words::ceildiv,
+};
 use burn_wgpu::CubeTensor;
 use cubecl::prelude::*;
 use systems::*;
+pub(super) use workgroup::{PrefixSum, Reduction, prefix_sum, reduce, sum_wide};
 
-#[derive(CubeType)]
-pub(super) struct PrefixSum {
-    pub inclusive: u32,
-    pub total: u32,
+pub(super) struct ScanLevel {
+    pub offset: usize,
+    pub count: usize,
+    pub blocks: usize,
 }
 
-#[cube]
-pub(super) fn prefix_sum(value: u32) -> PrefixSum {
-    let mut values = Shared::<[u32]>::new_slice(256usize);
-    let lane = UNIT_POS as usize;
-    values[lane] = value;
-    sync_cube();
-    let mut stride = 1u32;
-    while stride < CUBE_DIM {
-        let index = (UNIT_POS + 1) * stride * 2 - 1;
-        if index < CUBE_DIM {
-            values[index as usize] += values[(index - stride) as usize];
+pub(super) struct ScanHierarchy {
+    pub levels: Vec<ScanLevel>,
+    pub end: usize,
+}
+
+impl ScanHierarchy {
+    pub fn new(mut offset: usize, mut count: usize, span: u32, channels: usize) -> Self {
+        assert!(span > 1, "a scan block must cover at least two values");
+        let mut levels = Vec::new();
+        while count > 1 {
+            let blocks = count.div_ceil(span as usize);
+            levels.push(ScanLevel {
+                offset,
+                count,
+                blocks,
+            });
+            offset += count * channels;
+            count = blocks;
         }
-        sync_cube();
-        stride *= 2;
-    }
-    stride = CUBE_DIM / 4;
-    while stride > 0 {
-        let index = (UNIT_POS + 1) * stride * 2 - 1;
-        if index + stride < CUBE_DIM {
-            values[(index + stride) as usize] += values[index as usize];
+        Self {
+            levels,
+            end: offset + count * channels,
         }
-        sync_cube();
-        stride /= 2;
     }
-    PrefixSum {
-        inclusive: values[lane],
-        total: values[CUBE_DIM as usize - 1],
+
+    pub fn offset_levels(&self) -> &[ScanLevel] {
+        &self.levels[..self.levels.len().saturating_sub(1)]
     }
-}
-
-#[derive(Clone, Copy, PartialEq, Eq)]
-pub(super) enum Reduction {
-    Sum,
-    Minimum,
-}
-
-#[derive(CubeType)]
-pub(super) struct WideSum {
-    pub value: u64,
-    pub overflow: u32,
-}
-
-#[cube]
-pub(super) fn sum_wide(value: u64) -> WideSum {
-    let mut values = Shared::<[u64]>::new_slice(256usize);
-    let mut overflows = Shared::<[u32]>::new_slice(256usize);
-    let lane = UNIT_POS as usize;
-    values[lane] = value;
-    overflows[lane] = 0;
-    sync_cube();
-    let mut stride = CUBE_DIM / 2;
-    while stride > 0 {
-        if UNIT_POS < stride {
-            let sum = values[lane] + values[lane + stride as usize];
-            overflows[lane] |=
-                overflows[lane + stride as usize] | u32::cast_from(sum < values[lane]);
-            values[lane] = sum;
-        }
-        sync_cube();
-        stride /= 2;
-    }
-    let result = WideSum {
-        value: values[0],
-        overflow: overflows[0],
-    };
-    sync_cube();
-    result
-}
-
-#[cube]
-pub(super) fn reduce(value: u32, #[comptime] operation: Reduction) -> u32 {
-    let mut values = Shared::<[u32]>::new_slice(256usize);
-    let lane = UNIT_POS as usize;
-    values[lane] = value;
-    sync_cube();
-    let mut stride = CUBE_DIM / 2;
-    while stride > 0 {
-        if UNIT_POS < stride {
-            values[lane] = match comptime!(operation) {
-                Reduction::Sum => values[lane] + values[lane + stride as usize],
-                Reduction::Minimum => min(values[lane], values[lane + stride as usize]),
-            };
-        }
-        sync_cube();
-        stride /= 2;
-    }
-    values[0]
-}
-
-struct ScanLevel {
-    offset: usize,
-    count: usize,
-    blocks: usize,
-    divisor: u32,
 }
 
 pub(super) fn scan(device: &Device, buffer: &CubeTensor, offset: usize, count: usize) {
     let mode = ScanMode::new(device);
-    let mut levels = Vec::new();
-    let mut offset = offset;
-    let mut count = count;
-    while count > 1 {
-        let blocks = count.div_ceil(device.workgroup as usize);
-        BlockScan::launch(
+    let hierarchy = ScanHierarchy::new(offset, count, device.workgroup, 1);
+    for level in &hierarchy.levels {
+        BlockScan::launch_elements(
             device,
-            device.count(count),
-            CubeDim::new_1d(device.workgroup),
+            level.count,
             BlockScanInputLaunch {
-                buffer: buffer.clone().into_buffer_arg(),
-                offset: offset as u32,
-                count: count as u32,
+                buffer: buffer.buffer_arg(),
+                offset: level.offset as u32,
+                count: level.count as u32,
                 mode,
             },
         );
-        levels.push(ScanLevel {
-            offset,
-            count,
-            blocks,
-            divisor: 1,
-        });
-        offset += count;
-        count = blocks;
     }
-    for level in levels.into_iter().rev().filter(|level| level.blocks > 1) {
-        BlockOffsets::launch(
+    for level in hierarchy.offset_levels().iter().rev() {
+        BlockOffsets::launch_elements(
             device,
-            device.count(level.count),
-            CubeDim::new_1d(device.workgroup),
+            level.count,
             BlockOffsetInputLaunch {
-                buffer: buffer.clone().into_buffer_arg(),
+                buffer: buffer.buffer_arg(),
                 offset: level.offset as u32,
                 count: level.count as u32,
             },
@@ -211,7 +138,7 @@ mod tests {
                         device.count(count),
                         CubeDim::new_1d(workgroup),
                         BlockScanInputLaunch {
-                            buffer: buffer.clone().into_buffer_arg(),
+                            buffer: buffer.buffer_arg(),
                             offset: offset as u32,
                             count: count as u32,
                             mode,
@@ -425,46 +352,33 @@ pub(super) fn scan_histogram(
     let items = ActiveScanTile::new(device, count).items();
     let mode = ScanMode::new(device);
     let span = device.workgroup * items;
-    let mut levels = Vec::new();
-    let mut offset = offset;
-    let mut count = count;
-    let mut divisor = 1u32;
-    while count > 1 {
-        let blocks = count.div_ceil(span as usize);
+    let hierarchy = ScanHierarchy::new(offset, count, span, 1);
+    for (index, level) in hierarchy.levels.iter().enumerate() {
         ActiveBlockScan::launch(
             device,
             crate::simulation::markets::dispatch(
                 dispatches,
-                crate::simulation::markets::HISTOGRAM_DISPATCH + levels.len() * 3,
+                crate::simulation::markets::HISTOGRAM_DISPATCH + index * 3,
             ),
             CubeDim::new_1d(device.workgroup),
             ActiveScanInputLaunch {
-                buffer: buffer.clone().into_buffer_arg(),
-                control: control.clone().into_buffer_arg(),
-                offset: offset as u32,
-                bound: count as u32,
-                divisor,
+                buffer: buffer.buffer_arg(),
+                control: control.buffer_arg(),
+                offset: level.offset as u32,
+                bound: level.count as u32,
+                divisor: span.pow(index as u32),
                 items,
                 mode,
                 histogram_bins: layout.bins,
                 source_workgroup: layout.source_workgroup,
             },
         );
-        levels.push(ScanLevel {
-            offset,
-            count,
-            blocks,
-            divisor,
-        });
-        offset += count;
-        count = blocks;
-        divisor *= span;
     }
-    for (index, level) in levels
-        .into_iter()
+    for (index, level) in hierarchy
+        .offset_levels()
+        .iter()
         .enumerate()
         .rev()
-        .filter(|(_, level)| level.blocks > 1)
         .filter(|(index, _)| match output {
             HistogramScan::Complete => true,
             HistogramScan::BlockLocal => *index > 0,
@@ -478,11 +392,11 @@ pub(super) fn scan_histogram(
             ),
             CubeDim::new_1d(device.workgroup),
             ActiveOffsetInputLaunch {
-                buffer: buffer.clone().into_buffer_arg(),
-                control: control.clone().into_buffer_arg(),
+                buffer: buffer.buffer_arg(),
+                control: control.buffer_arg(),
                 offset: level.offset as u32,
                 bound: level.count as u32,
-                divisor: level.divisor,
+                divisor: span.pow(index as u32),
                 items,
                 histogram_bins: layout.bins,
                 source_workgroup: layout.source_workgroup,
@@ -594,9 +508,9 @@ impl ScanMode {
 }
 
 #[cube]
-pub(super) fn scan_prefix(value: u32, #[comptime] mode: ScanMode) -> PrefixSum {
+pub(super) fn scan_prefix(value: u32, #[comptime] mode: ScanMode) -> PrefixSum<u32> {
     match mode {
-        ScanMode::Shared => prefix_sum(value),
+        ScanMode::Shared => prefix_sum::<u32>(value),
         ScanMode::Plane => {
             let inclusive = plane_inclusive_sum(value);
             let mut planes = Shared::<[u32]>::new_slice(256usize);

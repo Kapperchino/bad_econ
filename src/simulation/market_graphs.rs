@@ -218,6 +218,7 @@ impl MarketGraphs {
 mod tests {
     use super::*;
     use crate::domain::{Experiment, Field, Phase, Scenario};
+    use crate::simulation::system::AsBufferArg;
     use crate::simulation::{
         FreightActivity, Simulation, Trace,
         economy::sorting::MarketSort,
@@ -282,7 +283,7 @@ mod tests {
                             &device.client,
                             CubeCount::Static(1, 1, 1),
                             CubeDim::new_1d(32),
-                            counter.clone().into_buffer_arg(),
+                            counter.buffer_arg(),
                             parameters.launch(),
                         );
                         Ok(7)
@@ -326,7 +327,7 @@ mod tests {
                     &device.client,
                     CubeCount::Static(1, 1, 1),
                     CubeDim::new_1d(32),
-                    counter.clone().into_buffer_arg(),
+                    counter.buffer_arg(),
                 );
                 Ok(7)
             })

@@ -49,6 +49,7 @@ pub fn sigmoid(score: i32, table: &[u32]) -> u32 {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::simulation::system::AsBufferArg;
     use crate::{arithmetic::hex, domain::research::RESEARCH_TABLE_HASH, simulation::Device};
     use anyhow::Result;
     use sha2::{Digest, Sha256};
@@ -71,13 +72,12 @@ mod tests {
         );
         let table = device.tensor(&HAZARD_TABLE);
         let output = device.empty(25002);
-        let argument = |tensor: &burn_wgpu::CubeTensor| tensor.clone().into_buffer_arg();
         probe::launch(
             &device.client,
             device.count(16001),
             CubeDim::new_1d(device.workgroup),
-            argument(&table),
-            argument(&output),
+            table.buffer_arg(),
+            output.buffer_arg(),
         );
         let values = device.read(&output)?;
         assert_eq!(values[0], 0);

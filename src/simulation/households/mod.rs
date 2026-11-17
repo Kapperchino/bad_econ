@@ -1,10 +1,13 @@
 mod kernels;
-use super::{Device, flags::FaultFlags, layout::WORD_BYTES, system::System};
+use super::{
+    Device,
+    flags::FaultFlags,
+    layout::WORD_BYTES,
+    system::{AsBufferArg, System},
+};
 use crate::ledger::TickLayout;
 use anyhow::{Result, anyhow};
-use burn_wgpu::CubeTensor;
 use bytemuck::{Pod, Zeroable};
-use cubecl::CubeDim;
 pub use kernels::{
     KernelCapacity, KernelDeficit, KernelFatigue, KernelObservation, available_minutes,
     next_fatigue, observed_blend, service_deficit,
@@ -205,17 +208,14 @@ pub fn evaluate(
     let services = device.record_tensor(&services);
     let output = device.empty(requests.len().max(1) * ResultLayout::WORDS);
     let control = device.tensor(&[0; 4]);
-    let argument = |tensor: &CubeTensor| tensor.clone().into_buffer_arg();
-    let cube_count = device.count(count as usize);
-    kernels::HouseholdPolicy::launch(
+    kernels::HouseholdPolicy::launch_elements(
         device,
-        cube_count,
-        CubeDim::new_1d(device.workgroup),
+        count as usize,
         kernels::HouseholdInputLaunch {
-            requests: argument(&input),
-            services: argument(&services),
-            output: argument(&output),
-            control: argument(&control),
+            requests: input.buffer_arg(),
+            services: services.buffer_arg(),
+            output: output.buffer_arg(),
+            control: control.buffer_arg(),
             count,
         },
     );

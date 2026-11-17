@@ -11,13 +11,16 @@ use super::{
     layout::*,
     markets::{LATCH_WORD, RANGE_SLOTS_WORD},
     negotiation::{NegotiationRequest, NegotiationStatus, legal_grid_rate, negotiate},
-    parallel::{self, Reduction},
+    parallel::{
+        self, Reduction,
+        workgroup::{self, TickTree, WorkgroupTree},
+    },
     parameters::{Discovery, EconomyParameters},
     pass::GpuPass,
     payroll::PayrollAccrual,
     policy::*,
     scheduler::apply,
-    system::{System, gpu_passes},
+    system::{AsBufferArg, System, gpu_passes},
     words::*,
 };
 use crate::simulation::configuration::{EconomyConfig, Feature};
@@ -2585,7 +2588,7 @@ pub fn economy(
                             != NO_ACTOR,
                     );
                 }
-                let total = parallel::reduce(active, comptime!(Reduction::Sum));
+                let total = parallel::reduce::<u32>(active, comptime!(Reduction::Sum));
                 if UNIT_POS == 0 && total != 0 {
                     control[CONSTRUCTED_EVENTS_WORD].fetch_add(total);
                 }
@@ -2696,7 +2699,7 @@ fn group_initialize(
             [(parameters.offset + id) as usize * ProposalLayout::WORDS + ProposalLayout::ACTOR];
         KernelEventStatus::new(comptime!(EventStatus::Inactive)).store(scratch, 4 * count + id);
     }
-    let prefix = parallel::prefix_sum(u32::cast_from(peer != NO_ACTOR));
+    let prefix = parallel::prefix_sum::<u32>(u32::cast_from(peer != NO_ACTOR));
     let mut first = Shared::<u32>::new();
     if UNIT_POS == 0 {
         *first = control[CONSTRUCTED_EVENTS_WORD].fetch_add(prefix.total);
@@ -3031,7 +3034,7 @@ fn index_prices(state: &mut [u32], config: &EconomyConfig, spatial: &mut [u32]) 
         );
         member += CUBE_DIM;
     }
-    let minimum = parallel::reduce(quote, comptime!(Reduction::Minimum));
+    let minimum = parallel::reduce::<u32>(quote, comptime!(Reduction::Minimum));
     if UNIT_POS == 0 && block * DISCOVERY_BLOCK < count {
         let base = 3 * (cells + 1 + config.actors);
         spatial[(base + block) as usize] = minimum;

@@ -113,15 +113,14 @@ pub(in crate::simulation) fn launch(
             }
             _ => config.rental_businesses as usize,
         };
-        RentalBusinesses::launch(
+        RentalBusinesses::launch_elements(
             device,
-            device.count(count),
-            CubeDim::new_1d(device.workgroup),
+            count,
             RentalInputLaunch {
-                state: state.clone().into_buffer_arg(),
-                actors: actors.clone().into_buffer_arg(),
+                state: state.buffer_arg(),
+                actors: actors.buffer_arg(),
                 config: config.launch(),
-                control: control.clone().into_buffer_arg(),
+                control: control.buffer_arg(),
                 stage,
                 scan: parallel::ScanMode::new(device),
             },
@@ -359,25 +358,13 @@ fn receipts(
         );
         entry += CUBE_DIM;
     }
-    let mut cash = Shared::<[Ticks]>::new_slice(256usize);
-    cash[UNIT_POS as usize] = receipts;
-    sync_cube();
-    let mut stride = CUBE_DIM / 2;
-    while stride > 0 {
-        if UNIT_POS < stride {
-            cash[UNIT_POS as usize] = add_checked(
-                control,
-                cash[UNIT_POS as usize],
-                cash[(UNIT_POS + stride) as usize],
-            );
-        }
-        sync_cube();
-        stride /= 2;
-    }
+    let mut cash = TickTree::new(receipts);
+    WorkgroupTree::reduce::<TickTree>(&mut cash);
+    cash.faults.record(control);
     RentalReceipts {
-        cash: cash[0],
-        households: parallel::reduce(households, comptime!(Reduction::Sum)),
-        served: parallel::reduce(served, comptime!(Reduction::Sum)),
+        cash: cash.values[0],
+        households: parallel::reduce::<u32>(households, comptime!(Reduction::Sum)),
+        served: parallel::reduce::<u32>(served, comptime!(Reduction::Sum)),
     }
 }
 

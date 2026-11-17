@@ -409,27 +409,26 @@ impl FitFixture {
         let simulation = &self.simulation;
         let device = &simulation.device;
         let buffers = &simulation.config.railway.freight;
-        FitCheck::launch(
+        FitCheck::launch_elements(
             device,
-            device.count(self.workers as usize),
-            CubeDim::new_1d(device.workgroup),
+            self.workers as usize,
             FitCheckInputLaunch {
                 freight: InputLaunch {
-                    state: simulation.state.clone().into_buffer_arg(),
-                    actors: simulation.actors.clone().into_buffer_arg(),
-                    spatial: simulation.spatial.clone().into_buffer_arg(),
+                    state: simulation.state.buffer_arg(),
+                    actors: simulation.actors.buffer_arg(),
+                    spatial: simulation.spatial.buffer_arg(),
                     config: simulation.config.launch(),
-                    proposals: simulation.proposals.clone().into_buffer_arg(),
-                    scratch: simulation.scratch.clone().into_buffer_arg(),
-                    control: simulation.control.clone().into_buffer_arg(),
-                    resources: buffers.resources.clone().into_buffer_arg(),
-                    accounts: buffers.accounts.clone().into_buffer_arg(),
-                    bookings: self.output.clone().into_buffer_arg(),
-                    queue: buffers.queue.clone().into_buffer_arg(),
-                    claims: buffers.claims.clone().into_buffer_arg(),
+                    proposals: simulation.proposals.buffer_arg(),
+                    scratch: simulation.scratch.buffer_arg(),
+                    control: simulation.control.buffer_arg(),
+                    resources: buffers.resources.buffer_arg(),
+                    accounts: buffers.accounts.buffer_arg(),
+                    bookings: self.output.buffer_arg(),
+                    queue: buffers.queue.buffer_arg(),
+                    claims: buffers.claims.buffer_arg(),
                     claim_source: claims::settlement_source(buffers),
                     claim_offsets: claims::offsets_start(buffers.claim_capacity),
-                    progress: buffers.progress.clone().into_buffer_arg(),
+                    progress: buffers.progress.buffer_arg(),
                     parameters: self.parameters.launch(),
                     stage: Stage::Propose,
                     execution: Execution::Immediate,
@@ -578,13 +577,12 @@ fn monotone_segment_regions_bound_every_route_resource_multiplicity_on_gpu() -> 
                     simulation.config.railway.company_count * simulation.config.railway.nodes.pow(2)
                 }
             };
-            RouteGeometry::launch(
+            RouteGeometry::launch_elements(
                 device,
-                device.count(count as usize),
-                CubeDim::new_1d(device.workgroup),
+                count as usize,
                 GeometryInputLaunch {
                     config: simulation.config.launch(),
-                    failures: failures.clone().into_buffer_arg(),
+                    failures: failures.buffer_arg(),
                     check,
                 },
             );

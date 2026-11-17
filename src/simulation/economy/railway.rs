@@ -457,17 +457,17 @@ impl Network {
             segment_count: self.segment_count,
             speed_multiplier: self.speed_multiplier,
             length_unit: self.length_unit,
-            stations: self.stations.clone().into_buffer_arg(),
-            access: self.access.clone().into_buffer_arg(),
-            companies: self.companies.clone().into_buffer_arg(),
-            station_companies: self.station_companies.clone().into_buffer_arg(),
-            access_rights: self.access_rights.clone().into_buffer_arg(),
-            segments: self.segments.clone().into_buffer_arg(),
-            materials: self.materials.clone().into_buffer_arg(),
-            routes: self.routes.clone().into_buffer_arg(),
-            quotes: self.quotes.clone().into_buffer_arg(),
-            regions: self.regions.clone().into_buffer_arg(),
-            segment_regions: self.segment_regions.clone().into_buffer_arg(),
+            stations: self.stations.buffer_arg(),
+            access: self.access.buffer_arg(),
+            companies: self.companies.buffer_arg(),
+            station_companies: self.station_companies.buffer_arg(),
+            access_rights: self.access_rights.buffer_arg(),
+            segments: self.segments.buffer_arg(),
+            materials: self.materials.buffer_arg(),
+            routes: self.routes.buffer_arg(),
+            quotes: self.quotes.buffer_arg(),
+            regions: self.regions.buffer_arg(),
+            segment_regions: self.segment_regions.buffer_arg(),
             region_count: self.region_count,
             region_base: self.region_base,
             region_blocks: self.region_blocks,
@@ -560,15 +560,14 @@ pub fn launch(
                 RailPass::Quotes => config.railway.nodes * config.railway.nodes * config.ring,
                 RailPass::PrepareRoutes | RailPass::CompleteQuotes => 1,
             };
-            RailSystem::launch(
+            RailSystem::launch_elements(
                 device,
-                device.count(count as usize),
-                CubeDim::new_1d(device.workgroup),
+                count as usize,
                 RailInputLaunch {
-                    state: state.clone().into_buffer_arg(),
-                    actors: actors.clone().into_buffer_arg(),
+                    state: state.buffer_arg(),
+                    actors: actors.buffer_arg(),
                     config: config.launch(),
-                    control: control.clone().into_buffer_arg(),
+                    control: control.buffer_arg(),
                     stage,
                 },
             );
@@ -665,8 +664,8 @@ fn infrastructure(
             }
             region += CUBE_DIM;
         }
-        units = parallel::reduce(units, comptime!(Reduction::Sum));
-        next = parallel::reduce(next, comptime!(Reduction::Sum));
+        units = parallel::reduce::<u32>(units, comptime!(Reduction::Sum));
+        next = parallel::reduce::<u32>(next, comptime!(Reduction::Sum));
         let mut built_count = Shared::<u32>::new();
         let mut service = Shared::<u32>::new();
         let mut budget = Shared::<u32>::new();
@@ -747,7 +746,7 @@ fn infrastructure(
                     );
                 }
             }
-            let prefix = parallel::prefix_sum(requested);
+            let prefix = parallel::prefix_sum::<u32>(requested);
             level += u32::cast_from(requested > 0 && prefix.inclusive <= remaining);
             let applied = min(remaining, prefix.total);
             remaining -= applied;

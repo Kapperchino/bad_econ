@@ -1,7 +1,7 @@
 use super::{
     Device,
     pass::GpuPass,
-    system::{System, gpu_passes},
+    system::{AsBufferArg, System, gpu_passes},
 };
 use anyhow::{Result, anyhow};
 use burn::tensor::{DType, Shape};
@@ -22,12 +22,11 @@ pub(super) enum RingMaskState {
 }
 
 pub(super) fn reset_ring_mask(device: &Device, mask: &CubeTensor, state: RingMaskState) {
-    RingMaskReset::launch(
+    RingMaskReset::launch_elements(
         device,
-        device.count(mask.meta.num_elements()),
-        CubeDim::new_1d(device.workgroup),
+        mask.meta.num_elements(),
         RingMaskInputLaunch {
-            mask: mask.clone().into_buffer_arg(),
+            mask: mask.buffer_arg(),
             state,
         },
     );
@@ -187,13 +186,12 @@ pub(super) fn copy(device: &Device, source: &CubeTensor, target: &CubeTensor) {
 
 pub(super) fn copy_contiguous(device: &Device, source: &CubeTensor, target: &CubeTensor) {
     match source.meta.num_elements().is_multiple_of(4) {
-        true => ContiguousCopy::launch(
+        true => ContiguousCopy::launch_elements(
             device,
-            device.count(source.meta.num_elements().div_ceil(32)),
-            CubeDim::new_1d(device.workgroup),
+            source.meta.num_elements().div_ceil(32),
             CopyInputLaunch {
-                source: source.clone().into_buffer_arg(),
-                target: target.clone().into_buffer_arg(),
+                source: source.buffer_arg(),
+                target: target.buffer_arg(),
                 copies: 8,
             },
         ),
@@ -285,10 +283,10 @@ impl SnapshotCopy {
                 ),
                 CubeDim::new_1d(workgroup),
                 SnapshotInputLaunch {
-                    source: source.clone().into_buffer_arg(),
-                    target: target.clone().into_buffer_arg(),
-                    nonzero: nonzero.clone().into_buffer_arg(),
-                    current: current.clone().into_buffer_arg(),
+                    source: source.buffer_arg(),
+                    target: target.buffer_arg(),
+                    nonzero: nonzero.buffer_arg(),
+                    current: current.buffer_arg(),
                     groups: source.meta.num_elements().div_ceil(SNAPSHOT_PARTS * 32 * 4) as u32,
                     parts: SNAPSHOT_PARTS as u32,
                     ring_start: ring_start as u32,
@@ -498,8 +496,8 @@ mod tests {
             CubeDim::new_1d(32),
             SnapshotInputLaunch {
                 source: source.into_buffer_arg(),
-                target: target.clone().into_buffer_arg(),
-                nonzero: metadata.clone().into_buffer_arg(),
+                target: target.buffer_arg(),
+                nonzero: metadata.buffer_arg(),
                 current: current.into_buffer_arg(),
                 groups: 1,
                 parts: SNAPSHOT_PARTS as u32,

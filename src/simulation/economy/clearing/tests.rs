@@ -167,17 +167,16 @@ fn direct_goods_buyers_match_event_fields_rejections_and_faults_on_gpu() -> Resu
                 let state = device.tensor(bytemuck::cast_slice(&encode(&state.values)));
                 let control = device.tensor(&vec![0; CONTROL_WORDS]);
                 let statuses = device.empty(64);
-                BuyerProbe::launch(
+                BuyerProbe::launch_elements(
                     &device,
-                    device.count(64),
-                    CubeDim::new_1d(device.workgroup),
+                    64,
                     BuyerProbeInputLaunch {
-                        state: state.clone().into_buffer_arg(),
-                        actors: simulation.actors.clone().into_buffer_arg(),
+                        state: state.buffer_arg(),
+                        actors: simulation.actors.buffer_arg(),
                         config: simulation.config.launch(),
-                        proposals: proposals.clone().into_buffer_arg(),
-                        control: control.clone().into_buffer_arg(),
-                        statuses: statuses.clone().into_buffer_arg(),
+                        proposals: proposals.buffer_arg(),
+                        control: control.buffer_arg(),
+                        statuses: statuses.buffer_arg(),
                         parameters: parameters.launch(),
                         execution,
                         posting,
@@ -361,17 +360,16 @@ fn empty_consumer_seller_checks_preserve_unit_bulk_and_wide_faults_on_gpu() -> R
             let state = device.tensor(bytemuck::cast_slice(&encode(&state.values)));
             let control = device.tensor(&vec![0; CONTROL_WORDS]);
             let statuses = device.tensor(&priors);
-            EmptySellerProbe::launch(
+            EmptySellerProbe::launch_elements(
                 &device,
-                device.count(64),
-                CubeDim::new_1d(device.workgroup),
+                64,
                 EmptySellerProbeInputLaunch {
-                    state: state.clone().into_buffer_arg(),
-                    actors: simulation.actors.clone().into_buffer_arg(),
+                    state: state.buffer_arg(),
+                    actors: simulation.actors.buffer_arg(),
                     config: simulation.config.launch(),
                     proposals: device.tensor(&requests).into_buffer_arg(),
-                    control: control.clone().into_buffer_arg(),
-                    statuses: statuses.clone().into_buffer_arg(),
+                    control: control.buffer_arg(),
+                    statuses: statuses.buffer_arg(),
                     parameters: parameters.launch(),
                     execution,
                 },
@@ -456,20 +454,19 @@ fn compacted_goods_buyers_match_event_checks_rejections_and_faults_on_gpu() -> R
                     u32::from(block >= position / markets::COMPACTION_BLOCK as usize);
             }
             device.write(&simulation.searches.successes, &successes);
-            search::MarketSearch::launch(
+            search::MarketSearch::launch_elements(
                 &device,
-                device.count(1),
-                CubeDim::new_1d(device.workgroup),
+                1,
                 search::SearchInputLaunch {
-                    state: simulation.state.clone().into_buffer_arg(),
-                    actors: simulation.actors.clone().into_buffer_arg(),
+                    state: simulation.state.buffer_arg(),
+                    actors: simulation.actors.buffer_arg(),
                     config: simulation.config.launch(),
-                    spatial: simulation.spatial.clone().into_buffer_arg(),
-                    proposals: simulation.proposals.clone().into_buffer_arg(),
-                    searches: simulation.searches.requests.clone().into_buffer_arg(),
-                    successes: simulation.searches.successes.clone().into_buffer_arg(),
-                    scratch: simulation.scratch.clone().into_buffer_arg(),
-                    control: simulation.control.clone().into_buffer_arg(),
+                    spatial: simulation.spatial.buffer_arg(),
+                    proposals: simulation.proposals.buffer_arg(),
+                    searches: simulation.searches.requests.buffer_arg(),
+                    successes: simulation.searches.successes.buffer_arg(),
+                    scratch: simulation.scratch.buffer_arg(),
+                    control: simulation.control.buffer_arg(),
                     parameters: parameters.launch(),
                     status_reset: search::StatusReset::Active,
                     stage: search::SearchStage::Compact,
@@ -477,17 +474,16 @@ fn compacted_goods_buyers_match_event_checks_rejections_and_faults_on_gpu() -> R
             );
             let expected_control = device.tensor(&vec![0; CONTROL_WORDS]);
             let expected_status = device.empty(1);
-            BuyerProbe::launch(
+            BuyerProbe::launch_elements(
                 &device,
-                device.count(1),
-                CubeDim::new_1d(device.workgroup),
+                1,
                 BuyerProbeInputLaunch {
-                    state: expected_state.clone().into_buffer_arg(),
-                    actors: simulation.actors.clone().into_buffer_arg(),
+                    state: expected_state.buffer_arg(),
+                    actors: simulation.actors.buffer_arg(),
                     config: simulation.config.launch(),
-                    proposals: simulation.proposals.clone().into_buffer_arg(),
-                    control: expected_control.clone().into_buffer_arg(),
-                    statuses: expected_status.clone().into_buffer_arg(),
+                    proposals: simulation.proposals.buffer_arg(),
+                    control: expected_control.buffer_arg(),
+                    statuses: expected_status.buffer_arg(),
                     parameters: EconomyParameters {
                         count: 1,
                         ..parameters
@@ -666,13 +662,13 @@ fn exhausted_purchase_queues_match_serial_settlement_and_faults_on_gpu() -> Resu
                         device.count(512),
                         CubeDim::new_1d(workgroup),
                         EconomyInputLaunch {
-                            state: simulation.state.clone().into_buffer_arg(),
-                            actors: simulation.actors.clone().into_buffer_arg(),
+                            state: simulation.state.buffer_arg(),
+                            actors: simulation.actors.buffer_arg(),
                             config: simulation.config.launch(),
-                            spatial: simulation.spatial.clone().into_buffer_arg(),
-                            proposals: simulation.proposals.clone().into_buffer_arg(),
-                            bundles: simulation.scratch.clone().into_buffer_arg(),
-                            control: simulation.control.clone().into_buffer_arg(),
+                            spatial: simulation.spatial.buffer_arg(),
+                            proposals: simulation.proposals.buffer_arg(),
+                            bundles: simulation.scratch.buffer_arg(),
+                            control: simulation.control.buffer_arg(),
                             parameters: parameters.launch(),
                             stage,
                         },

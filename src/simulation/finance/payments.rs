@@ -215,13 +215,12 @@ pub fn post_bank_payments(
         device.empty((payments.len() * ScratchLayout::WORDS_PER_EVENT).max(MIN_BUFFER_WORDS));
     let links = device.empty((payments.len() * LinkLayout::WORDS_PER_EVENT).max(MIN_BUFFER_WORDS));
     let control = device.tensor(bytemuck::cast_slice(&[ControlLayout::zeroed()]));
-    BankPaymentConstruction::launch(
+    BankPaymentConstruction::launch_elements(
         device,
-        count(device, payments.len()),
-        CubeDim::new_1d(device.workgroup),
+        payments.len(),
         PaymentInputLaunch {
-            input: argument(&input),
-            output: argument(&events),
+            input: input.buffer_arg(),
+            output: events.buffer_arg(),
             count: payments.len() as u32,
         },
     );

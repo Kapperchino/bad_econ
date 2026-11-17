@@ -51,22 +51,20 @@ impl PendingRecords {
             scratch,
         } = buffers;
         let actors = requests.meta.num_elements();
-        let argument = |tensor: &CubeTensor| tensor.clone().into_buffer_arg();
         parallel::scan(
             device,
             scratch,
             actors,
             actors.div_ceil(device.workgroup as usize),
         );
-        RecordCompaction::launch(
+        RecordCompaction::launch_elements(
             device,
-            device.count(actors),
-            CubeDim::new_1d(device.workgroup),
+            actors,
             RecordCompactionInputLaunch {
-                requests: argument(requests),
-                births: argument(births),
-                scratch: argument(scratch),
-                output: argument(output),
+                requests: requests.buffer_arg(),
+                births: births.buffer_arg(),
+                scratch: scratch.buffer_arg(),
+                output: output.buffer_arg(),
             },
         );
         let count = device.read_range(output, 0, 1)?[0] as usize;
@@ -91,13 +89,12 @@ pub(in crate::simulation) fn upload_requests(
             RequestStage::Clear => actors,
             RequestStage::Scatter => records.len(),
         };
-        RequestExpansion::launch(
+        RequestExpansion::launch_elements(
             device,
-            device.count(count),
-            CubeDim::new_1d(device.workgroup),
+            count,
             RequestInputLaunch {
-                records: input.clone().into_buffer_arg(),
-                requests: requests.clone().into_buffer_arg(),
+                records: input.buffer_arg(),
+                requests: requests.buffer_arg(),
                 stage,
             },
         );
@@ -305,10 +302,10 @@ mod tests {
                     device.count(count),
                     CubeDim::new_1d(workgroup),
                     RequestsInputLaunch {
-                        requests: requests.clone().into_buffer_arg(),
+                        requests: requests.buffer_arg(),
                         records: RecordCountBuffersLaunch {
-                            births: births.clone().into_buffer_arg(),
-                            scratch: scratch.clone().into_buffer_arg(),
+                            births: births.buffer_arg(),
+                            scratch: scratch.buffer_arg(),
                             scan,
                         },
                     },

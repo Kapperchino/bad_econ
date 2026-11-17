@@ -5,7 +5,7 @@ use crate::simulation::{
     parallel,
     parameters::EconomyParameters,
     pass::GpuPass,
-    system::{System, gpu_passes},
+    system::{AsBufferArg, System, gpu_passes},
     words::ceildiv,
 };
 use anyhow::Result;
@@ -429,8 +429,8 @@ fn encode_keys(
                 markets::dispatch(dispatches, markets::SORT_DISPATCH),
                 CubeDim::new_1d(layout.source_workgroup),
                 SortInputLaunch {
-                    scratch: scratch.clone().into_buffer_arg(),
-                    control: control.clone().into_buffer_arg(),
+                    scratch: scratch.buffer_arg(),
+                    control: control.buffer_arg(),
                     parameters: parameters.launch(),
                     stage,
                     histogram,
@@ -531,13 +531,11 @@ fn prepare_sort_dispatch(
     layout: parallel::HistogramLayout,
     histogram_span: u32,
 ) {
-    SortDispatch::launch(
+    SortDispatch::launch_single(
         device,
-        CubeCount::Static(1, 1, 1),
-        CubeDim::new_1d(1),
         SortDispatchInputLaunch {
-            control: control.clone().into_buffer_arg(),
-            dispatches: dispatches.clone().into_buffer_arg(),
+            control: control.buffer_arg(),
+            dispatches: dispatches.buffer_arg(),
             bins: layout.bins,
             source_workgroup: layout.source_workgroup,
             histogram_span,

@@ -236,14 +236,12 @@ pub(super) fn sort_buffered(
 ) {
     if buffers.claim_capacity > 0 {
         let dispatch = |workgroup| {
-            ClaimDispatch::launch(
+            ClaimDispatch::launch_single(
                 device,
-                CubeCount::Static(1, 1, 1),
-                CubeDim::new_1d(1),
                 DispatchInputLaunch {
-                    progress: buffers.progress.clone().into_buffer_arg(),
-                    control: control.clone().into_buffer_arg(),
-                    dispatches: buffers.dispatches.clone().into_buffer_arg(),
+                    progress: buffers.progress.buffer_arg(),
+                    control: control.buffer_arg(),
+                    dispatches: buffers.dispatches.buffer_arg(),
                     workgroup,
                     execution,
                 },
@@ -259,8 +257,8 @@ pub(super) fn sort_buffered(
                     markets::dispatch(&buffers.dispatches, SORT_DISPATCH),
                     CubeDim::new_1d(256),
                     BlockInputLaunch {
-                        claims: buffers.claims.clone().into_buffer_arg(),
-                        progress: buffers.progress.clone().into_buffer_arg(),
+                        claims: buffers.claims.buffer_arg(),
+                        progress: buffers.progress.buffer_arg(),
                         capacity: buffers.claim_capacity as u32,
                         tile,
                     },
@@ -282,8 +280,8 @@ fn merge_passes(device: &Device, buffers: &Buffers, mut width: usize) {
             markets::dispatch(&buffers.dispatches, SORT_DISPATCH),
             CubeDim::new_1d(device.workgroup),
             SortInputLaunch {
-                claims: buffers.claims.clone().into_buffer_arg(),
-                progress: buffers.progress.clone().into_buffer_arg(),
+                claims: buffers.claims.buffer_arg(),
+                progress: buffers.progress.buffer_arg(),
                 capacity: buffers.claim_capacity as u32,
                 source,
                 width: width as u32,

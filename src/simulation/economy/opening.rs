@@ -20,14 +20,13 @@ pub(in crate::simulation) fn launch(
             OpeningStage::Actors => config.actors as usize,
             OpeningStage::Goods => config.actors as usize * Good::COUNT,
         };
-        OpeningSystem::launch(
+        OpeningSystem::launch_elements(
             device,
-            device.count(count),
-            CubeDim::new_1d(device.workgroup),
+            count,
             OpeningInputLaunch {
-                state: state.clone().into_buffer_arg(),
+                state: state.buffer_arg(),
                 config: config.launch(),
-                control: control.clone().into_buffer_arg(),
+                control: control.buffer_arg(),
                 day,
                 stage,
             },

@@ -14,14 +14,17 @@ pub use request::*;
 pub use sensitivity::*;
 pub use valuation::*;
 
-use super::{Device, flags::FaultFlags, layout::WORD_BYTES, reduction, system::System, tensor};
+use super::{
+    Device,
+    flags::FaultFlags,
+    layout::WORD_BYTES,
+    reduction,
+    system::{AsBufferArg, System},
+    tensor,
+};
 use anyhow::{Context, Result, anyhow};
 use burn_wgpu::CubeTensor;
-use cubecl::{
-    CubeCount, CubeDim,
-    prelude::{BufferArg, Scalar},
-    std::tensor::TensorHandle,
-};
+use cubecl::{CubeCount, CubeDim, prelude::Scalar, std::tensor::TensorHandle};
 use cubek::reduce::components::instructions::ReduceOperationConfig;
 use serde::{Deserialize, Serialize};
 use systems::*;
@@ -345,13 +348,12 @@ impl DeviceVector {
                 let width = tensor::vector_width(device, self.length * 2);
                 VectorAddition::launch_vectorized(
                     device,
-                    count(device, self.length * 2 / width),
-                    CubeDim::new_1d(device.workgroup),
+                    self.length * 2 / width,
                     AdditionInputLaunch {
-                        left: argument(&self.data),
-                        right: argument(&other.data),
-                        output: argument(&output.data),
-                        control: argument(&control),
+                        left: self.data.buffer_arg(),
+                        right: other.data.buffer_arg(),
+                        output: output.data.buffer_arg(),
+                        control: control.buffer_arg(),
                         length: self.length as u32,
                     },
                     width,
@@ -376,11 +378,10 @@ impl DeviceVector {
                 tensor::matmul(device, &left, &right, &product)?;
                 VectorRescaling::launch_vectorized(
                     device,
-                    count(device, 1),
-                    CubeDim::new_1d(device.workgroup),
+                    1,
                     RescaleInputLaunch {
-                        values: argument(&output.data),
-                        control: argument(&control),
+                        values: output.data.buffer_arg(),
+                        control: control.buffer_arg(),
                         scale: scale as f32,
                         length: 2,
                     },
@@ -405,14 +406,13 @@ impl DeviceVector {
             true => {
                 let output = Self::empty(device, self.length);
                 let control = device.tensor(&[0; CONTROL_WORDS]);
-                VectorNormalization::launch(
+                VectorNormalization::launch_elements(
                     device,
-                    count(device, self.length),
-                    CubeDim::new_1d(device.workgroup),
+                    self.length,
                     VectorNormalizationInputLaunch {
-                        input: argument(&self.data),
-                        output: argument(&output.data),
-                        control: argument(&control),
+                        input: self.data.buffer_arg(),
+                        output: output.data.buffer_arg(),
+                        control: control.buffer_arg(),
                         length: self.length as u32,
                         reference: reference as u32,
                         scale,
@@ -472,25 +472,23 @@ impl DeviceOperator {
         let width = tensor::vector_width(device, elements);
         VectorRescaling::launch_vectorized(
             device,
-            count(device, elements / width),
-            CubeDim::new_1d(device.workgroup),
+            elements / width,
             RescaleInputLaunch {
-                values: argument(&product.data),
-                control: argument(control),
+                values: product.data.buffer_arg(),
+                control: control.buffer_arg(),
                 scale: self.matrix.scale as f32,
                 length: elements as u32,
             },
             width,
         );
         let rows = device.empty((self.rows * 2).max(2));
-        CertificateRows::launch(
+        CertificateRows::launch_elements(
             device,
-            count(device, self.rows),
-            CubeDim::new_1d(device.workgroup),
+            self.rows,
             CertificateRowsInputLaunch {
-                product: argument(&product.data),
-                weights: argument(&weights.data),
-                output: argument(&rows),
+                product: product.data.buffer_arg(),
+                weights: weights.data.buffer_arg(),
+                output: rows.buffer_arg(),
                 rows: self.rows as u32,
                 numerator: certificate.numerator,
                 denominator: certificate.denominator,
@@ -508,13 +506,11 @@ impl DeviceOperator {
             ReduceOperationConfig::All,
             u32::elem_type_native(),
         )?;
-        CertificateStatus::launch(
+        CertificateStatus::launch_single(
             device,
-            CubeCount::Static(1, 1, 1),
-            CubeDim::new_1d(1),
             CertificateStatusInputLaunch {
                 flags: flags.into_arg().into_buffer_arg(),
-                control: argument(control),
+                control: control.buffer_arg(),
             },
         );
         Ok(())
@@ -572,15 +568,14 @@ impl DeviceOperator {
                 }
                 buffers.step(device, self, rhs, &control)?;
                 let residuals = tensor::empty(device, [self.rows]);
-                SolutionResidual::launch(
+                SolutionResidual::launch_elements(
                     device,
-                    count(device, self.rows),
-                    CubeDim::new_1d(device.workgroup),
+                    self.rows,
                     SolutionResidualInputLaunch {
-                        product: argument(&buffers.next),
-                        estimate: argument(&buffers.current),
-                        weights: argument(&weights),
-                        output: argument(&residuals),
+                        product: buffers.next.buffer_arg(),
+                        estimate: buffers.current.buffer_arg(),
+                        weights: weights.buffer_arg(),
+                        output: residuals.buffer_arg(),
                         rows: self.rows as u32,
                     },
                 );
@@ -597,30 +592,27 @@ impl DeviceOperator {
                     f32::elem_type_native(),
                 )?;
                 let error = tensor::empty(device, [1]);
-                SolutionError::launch(
+                SolutionError::launch_single(
                     device,
-                    CubeCount::Static(1, 1, 1),
-                    CubeDim::new_1d(1),
                     SolutionErrorInputLaunch {
                         norm: norm.into_arg().into_buffer_arg(),
-                        error: argument(&error),
-                        control: argument(&control),
+                        error: error.buffer_arg(),
+                        control: control.buffer_arg(),
                         numerator: certificate.numerator,
                         denominator: certificate.denominator,
                         tolerance: budget.weighted_tolerance as f32,
                     },
                 );
                 let output = DeviceVector::empty(device, self.rows);
-                SolutionBounds::launch(
+                SolutionBounds::launch_elements(
                     device,
-                    count(device, self.rows),
-                    CubeDim::new_1d(device.workgroup),
+                    self.rows,
                     SolutionBoundsInputLaunch {
-                        estimate: argument(&buffers.current),
-                        weights: argument(&weights),
-                        error: argument(&error),
-                        output: argument(&output.data),
-                        control: argument(&control),
+                        estimate: buffers.current.buffer_arg(),
+                        weights: weights.buffer_arg(),
+                        error: error.buffer_arg(),
+                        output: output.data.buffer_arg(),
+                        control: control.buffer_arg(),
                         rows: self.rows as u32,
                     },
                 );
@@ -684,14 +676,6 @@ impl<T> CachedAccount<T> {
 fn padded(mut words: Vec<u32>) -> Vec<u32> {
     words.resize(words.len().max(INTERVAL_WORDS), 0);
     words
-}
-
-fn argument(tensor: &CubeTensor) -> BufferArg {
-    tensor.clone().into_buffer_arg()
-}
-
-fn count(device: &Device, items: usize) -> CubeCount {
-    device.count(items)
 }
 
 fn faults(device: &Device, control: &CubeTensor) -> Result<Vec<u32>> {

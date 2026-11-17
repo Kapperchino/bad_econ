@@ -49,7 +49,7 @@ use policy::MATCHING_ROUNDS;
 use registry::records::PendingRecord;
 use scheduler::SchedulerStage;
 use std::time::Instant;
-use system::System;
+use system::{AsBufferArg, System};
 
 const MILLISECONDS_PER_SECOND: f64 = 1000.0;
 
@@ -1854,18 +1854,17 @@ impl Simulation {
             EconomyStage::InputMarketStart | EconomyStage::InputMarketRepeat => count,
             _ => 1,
         };
-        economy::EconomySystem::launch(
+        economy::EconomySystem::launch_elements(
             &self.device,
-            self.device.count(initialization_count),
-            cubecl::CubeDim::new_1d(self.device.workgroup),
+            initialization_count,
             economy::EconomyInputLaunch {
-                state: self.state.clone().into_buffer_arg(),
-                actors: self.actors.clone().into_buffer_arg(),
+                state: self.state.buffer_arg(),
+                actors: self.actors.buffer_arg(),
                 config: self.config.launch(),
-                spatial: self.spatial.clone().into_buffer_arg(),
-                proposals: self.proposals.clone().into_buffer_arg(),
-                bundles: self.scratch.clone().into_buffer_arg(),
-                control: self.control.clone().into_buffer_arg(),
+                spatial: self.spatial.buffer_arg(),
+                proposals: self.proposals.buffer_arg(),
+                bundles: self.scratch.buffer_arg(),
+                control: self.control.buffer_arg(),
                 parameters: parameters.launch(),
                 stage: initialization,
             },
@@ -1923,13 +1922,13 @@ impl Simulation {
                     dispatch,
                     cubecl::CubeDim::new_1d(self.device.workgroup),
                     economy::EconomyInputLaunch {
-                        state: self.state.clone().into_buffer_arg(),
-                        actors: self.actors.clone().into_buffer_arg(),
+                        state: self.state.buffer_arg(),
+                        actors: self.actors.buffer_arg(),
                         config: self.config.launch(),
-                        spatial: self.spatial.clone().into_buffer_arg(),
-                        proposals: self.proposals.clone().into_buffer_arg(),
-                        bundles: self.scratch.clone().into_buffer_arg(),
-                        control: self.control.clone().into_buffer_arg(),
+                        spatial: self.spatial.buffer_arg(),
+                        proposals: self.proposals.buffer_arg(),
+                        bundles: self.scratch.buffer_arg(),
+                        control: self.control.buffer_arg(),
                         parameters: parameters.launch(),
                         stage,
                     },
@@ -1964,15 +1963,14 @@ impl Simulation {
                 count,
                 members.div_ceil(self.device.workgroup as usize),
             );
-            economy::indexing::MarketIndex::launch(
+            economy::indexing::MarketIndex::launch_elements(
                 &self.device,
-                self.device.count(members.max((side * side + 1) as usize)),
-                cubecl::CubeDim::new_1d(self.device.workgroup),
+                members.max((side * side + 1) as usize),
                 economy::indexing::IndexInputLaunch {
                     config: self.config.launch(),
-                    spatial: self.spatial.clone().into_buffer_arg(),
-                    scratch: self.scratch.clone().into_buffer_arg(),
-                    control: self.control.clone().into_buffer_arg(),
+                    spatial: self.spatial.buffer_arg(),
+                    scratch: self.scratch.buffer_arg(),
+                    control: self.control.buffer_arg(),
                     parameters: parameters.launch(),
                 },
             );
@@ -2025,15 +2023,15 @@ impl Simulation {
                 dispatch,
                 cubecl::CubeDim::new_1d(workgroup),
                 economy::search::SearchInputLaunch {
-                    state: self.state.clone().into_buffer_arg(),
-                    actors: self.actors.clone().into_buffer_arg(),
+                    state: self.state.buffer_arg(),
+                    actors: self.actors.buffer_arg(),
                     config: self.config.launch(),
-                    spatial: self.spatial.clone().into_buffer_arg(),
-                    proposals: self.proposals.clone().into_buffer_arg(),
-                    searches: self.searches.requests.clone().into_buffer_arg(),
-                    successes: self.searches.successes.clone().into_buffer_arg(),
-                    scratch: self.scratch.clone().into_buffer_arg(),
-                    control: self.control.clone().into_buffer_arg(),
+                    spatial: self.spatial.buffer_arg(),
+                    proposals: self.proposals.buffer_arg(),
+                    searches: self.searches.requests.buffer_arg(),
+                    successes: self.searches.successes.buffer_arg(),
+                    scratch: self.scratch.buffer_arg(),
+                    control: self.control.buffer_arg(),
                     parameters: parameters.launch(),
                     status_reset: match (market, trace) {
                         (Market::Input(_) | Market::Consumer(Good::Coal | Good::Wood), _) => {
@@ -2241,12 +2239,12 @@ impl Simulation {
                 markets::dispatch(&self.searches.dispatches, markets::QUEUE_DISPATCH),
                 cubecl::CubeDim::new_1d(self.device.workgroup),
                 economy::batch::payroll::PayrollInputLaunch {
-                    state: self.state.clone().into_buffer_arg(),
-                    actors: self.actors.clone().into_buffer_arg(),
+                    state: self.state.buffer_arg(),
+                    actors: self.actors.buffer_arg(),
                     config: self.config.launch(),
-                    proposals: self.proposals.clone().into_buffer_arg(),
-                    scratch: self.scratch.clone().into_buffer_arg(),
-                    control: self.control.clone().into_buffer_arg(),
+                    proposals: self.proposals.buffer_arg(),
+                    scratch: self.scratch.buffer_arg(),
+                    control: self.control.buffer_arg(),
                     parameters: parameters.launch(),
                 },
             ),
@@ -2256,10 +2254,10 @@ impl Simulation {
                     markets::dispatch(&self.searches.dispatches, markets::QUEUE_DISPATCH),
                     cubecl::CubeDim::new_1d(self.device.workgroup),
                     economy::batch::labor::LaborInputLaunch {
-                        state: self.state.clone().into_buffer_arg(),
+                        state: self.state.buffer_arg(),
                         config: self.config.launch(),
-                        scratch: self.scratch.clone().into_buffer_arg(),
-                        control: self.control.clone().into_buffer_arg(),
+                        scratch: self.scratch.buffer_arg(),
+                        control: self.control.buffer_arg(),
                         parameters: parameters.launch(),
                     },
                 )
@@ -2271,12 +2269,12 @@ impl Simulation {
                 markets::dispatch(&self.searches.dispatches, markets::QUEUE_DISPATCH),
                 cubecl::CubeDim::new_1d(self.device.workgroup),
                 economy::batch::quantity::QuantityInputLaunch {
-                    state: self.state.clone().into_buffer_arg(),
-                    actors: self.actors.clone().into_buffer_arg(),
+                    state: self.state.buffer_arg(),
+                    actors: self.actors.buffer_arg(),
                     config: self.config.launch(),
-                    proposals: self.proposals.clone().into_buffer_arg(),
-                    scratch: self.scratch.clone().into_buffer_arg(),
-                    control: self.control.clone().into_buffer_arg(),
+                    proposals: self.proposals.buffer_arg(),
+                    scratch: self.scratch.buffer_arg(),
+                    control: self.control.buffer_arg(),
                     parameters: parameters.launch(),
                 },
             ),

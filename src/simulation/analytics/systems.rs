@@ -21,8 +21,7 @@ pub(super) struct RescaleVector;
 impl VectorRescaling {
     pub(super) fn launch_vectorized(
         device: &Device,
-        count: CubeCount,
-        dimensions: CubeDim,
+        elements: usize,
         input: RescaleInputLaunch<Const<1>>,
         width: usize,
     ) {
@@ -32,19 +31,17 @@ impl VectorRescaling {
             2 => Self::launch_sized::<Const<2>>,
             _ => Self::launch_sized::<Const<1>>,
         };
-        launch(device, count, dimensions, input);
+        launch(device, elements, input);
     }
 
     fn launch_sized<N: Size>(
         device: &Device,
-        count: CubeCount,
-        dimensions: CubeDim,
+        elements: usize,
         input: RescaleInputLaunch<Const<1>>,
     ) {
-        VectorRescaling::<N>::launch(
+        VectorRescaling::<N>::launch_elements(
             device,
-            count,
-            dimensions,
+            elements,
             RescaleInputLaunch {
                 values: input.values,
                 control: input.control,
@@ -84,8 +81,7 @@ pub(super) struct AddVectors;
 impl VectorAddition {
     pub(super) fn launch_vectorized(
         device: &Device,
-        count: CubeCount,
-        dimensions: CubeDim,
+        elements: usize,
         input: AdditionInputLaunch<Const<1>>,
         width: usize,
     ) {
@@ -95,19 +91,17 @@ impl VectorAddition {
             2 => Self::launch_sized::<Const<2>>,
             _ => Self::launch_sized::<Const<1>>,
         };
-        launch(device, count, dimensions, input);
+        launch(device, elements, input);
     }
 
     fn launch_sized<N: Size>(
         device: &Device,
-        count: CubeCount,
-        dimensions: CubeDim,
+        elements: usize,
         input: AdditionInputLaunch<Const<1>>,
     ) {
-        VectorAddition::<N>::launch(
+        VectorAddition::<N>::launch_elements(
             device,
-            count,
-            dimensions,
+            elements,
             AdditionInputLaunch {
                 left: input.left,
                 right: input.right,

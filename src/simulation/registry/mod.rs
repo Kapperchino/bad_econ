@@ -9,7 +9,7 @@ use super::{
     Device,
     layout::ActorLayout as A,
     pass::GpuPass,
-    system::{System, gpu_passes},
+    system::{AsBufferArg, System, gpu_passes},
     words::*,
 };
 use crate::domain::{ActorRows, Field, Position, Scenario, State};
@@ -355,7 +355,6 @@ pub(super) fn apply(
     scratch: &CubeTensor,
     day: u32,
 ) {
-    let argument = |tensor: &CubeTensor| tensor.clone().into_buffer_arg();
     let cube_count = device.count(requests.meta.num_elements());
     for stage in [Stage::Clear, Stage::Count, Stage::Apply] {
         RegistryTransitions::launch(
@@ -363,11 +362,11 @@ pub(super) fn apply(
             cube_count.clone(),
             CubeDim::new_1d(device.workgroup),
             TransitionInputLaunch {
-                state: argument(state),
-                actors: argument(actors),
+                state: state.buffer_arg(),
+                actors: actors.buffer_arg(),
                 config: config.launch(),
-                requests: argument(requests),
-                incoming: argument(scratch),
+                requests: requests.buffer_arg(),
+                incoming: scratch.buffer_arg(),
                 day,
                 stage,
             },
@@ -381,14 +380,13 @@ pub(super) fn patch_capacity(
     requests: &CubeTensor,
 ) -> CubeTensor {
     let output = device.empty(actors.meta.num_elements());
-    CapacityPatching::launch(
+    CapacityPatching::launch_elements(
         device,
-        device.count(actors.meta.num_elements()),
-        CubeDim::new_1d(device.workgroup),
+        actors.meta.num_elements(),
         CapacityInputLaunch {
-            actors: actors.clone().into_buffer_arg(),
-            requests: requests.clone().into_buffer_arg(),
-            output: output.clone().into_buffer_arg(),
+            actors: actors.buffer_arg(),
+            requests: requests.buffer_arg(),
+            output: output.buffer_arg(),
         },
     );
     output
@@ -417,14 +415,13 @@ pub(super) fn extend_actors(
 ) -> CubeTensor {
     let additions = device.tensor(&additions.words());
     let output = device.empty(actors.meta.num_elements() + additions.meta.num_elements());
-    ActorGrowth::launch(
+    ActorGrowth::launch_elements(
         device,
-        device.count(output.meta.num_elements()),
-        CubeDim::new_1d(device.workgroup),
+        output.meta.num_elements(),
         ActorGrowthInputLaunch {
-            actors: actors.clone().into_buffer_arg(),
+            actors: actors.buffer_arg(),
             additions: additions.into_buffer_arg(),
-            output: output.clone().into_buffer_arg(),
+            output: output.buffer_arg(),
         },
     );
     output

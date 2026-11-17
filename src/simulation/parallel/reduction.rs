@@ -1,8 +1,9 @@
 use crate::simulation::{
     Device,
     flags::{FaultFlags, KernelFaults},
+    parallel::workgroup::{self, WorkgroupTree},
     pass::GpuPass,
-    system::{System, gpu_passes},
+    system::{AsBufferArg, System, gpu_passes},
     words::{Ticks, ticks},
 };
 use anyhow::{Context, Result};
@@ -204,14 +205,13 @@ pub(in crate::simulation) fn sum_ticks(
         u64::elem_type_native(),
     );
     if elements > 0 {
-        WideSum::launch(
+        WideSum::launch_elements(
             device,
-            device.count(elements),
-            CubeDim::new_1d(device.workgroup),
+            elements,
             SumInputLaunch {
                 sums: sums.into_arg().into_buffer_arg(),
                 output: output.clone().into_arg().into_buffer_arg(),
-                control: control.clone().into_buffer_arg(),
+                control: control.buffer_arg(),
             },
         );
     }
@@ -226,15 +226,14 @@ pub(in crate::simulation) fn summary(
     groups: &CubeTensor,
 ) -> Result<()> {
     use crate::simulation::layout::SummaryLayout as S;
-    SummaryReduction::launch(
+    SummaryReduction::launch_elements(
         device,
-        device.count(S::METRICS * device.workgroup as usize),
-        CubeDim::new_1d(device.workgroup),
+        S::METRICS * device.workgroup as usize,
         SummaryInputLaunch {
-            values: input.clone().into_buffer_arg(),
-            output: output.clone().into_buffer_arg(),
-            control: control.clone().into_buffer_arg(),
-            groups: groups.clone().into_buffer_arg(),
+            values: input.buffer_arg(),
+            output: output.buffer_arg(),
+            control: control.buffer_arg(),
+            groups: groups.buffer_arg(),
         },
     );
     Ok(())
@@ -270,6 +269,63 @@ impl GpuPass<SummaryInput> for SummarizeTiles {
     }
 }
 
+#[derive(CubeType)]
+struct MetricTree<'a> {
+    values: Shared<[u64]>,
+    operation: u32,
+    control: &'a [Atomic<u32>],
+}
+
+#[cube]
+impl<'a> workgroup::TreeStorage for MetricTree<'a> {
+    fn merge(&mut self, destination: usize, source: usize) {
+        self.values[destination] = combine_metrics(
+            self.values[destination],
+            self.values[source],
+            self.operation,
+            self.control,
+        );
+    }
+}
+
+#[cube]
+pub(in crate::simulation) fn checked_sum(a: u64, b: u64, control: &[Atomic<u32>]) -> u64 {
+    let sum = a + b;
+    if sum < a {
+        KernelFaults::new(comptime!(FaultFlags::ARITHMETIC_OVERFLOW)).record(control);
+    }
+    sum
+}
+
+#[cube]
+pub(in crate::simulation) fn combine_metrics(
+    a: u64,
+    b: u64,
+    operation: u32,
+    control: &[Atomic<u32>],
+) -> u64 {
+    match operation {
+        1 => min(a, b),
+        2 => max(a, b),
+        _ => checked_sum(a, b, control),
+    }
+}
+
+#[cube]
+pub(in crate::simulation) fn reduce_metric<'a>(
+    total: u64,
+    operation: u32,
+    control: &'a [Atomic<u32>],
+) -> u64 {
+    let mut tree = MetricTree::<'a> {
+        values: WorkgroupTree::lanes::<u64>(total),
+        operation,
+        control,
+    };
+    WorkgroupTree::reduce::<MetricTree<'a>>(&mut tree);
+    tree.values[0usize]
+}
+
 #[cube]
 fn summary_tiles(input: &[Ticks], output: &mut [Ticks], control: &[Atomic<u32>], groups: &[u32]) {
     use crate::simulation::layout::SummaryLayout as S;
@@ -287,43 +343,19 @@ fn summary_tiles(input: &[Ticks], output: &mut [Ticks], control: &[Atomic<u32>],
                 && metric < S::WAGE_MAXIMA + crate::domain::Good::COUNT as u32)
             || (metric >= S::PRICE_MAXIMA
                 && metric < S::PRICE_MAXIMA + crate::domain::Good::COUNT as u32);
+        let operation = select(minimum, 1u32, select(maximum, 2u32, 0u32));
         let mut total = select(minimum, u64::MAX, 0u64);
         let mut group = UNIT_POS;
         while group < groups[metric as usize] {
             let words = input[(group * S::METRICS as u32 + metric) as usize];
             let value = u64::cast_from(words.extract(0usize))
                 | (u64::cast_from(words.extract(1usize)) << 32);
-            let sum = total + value;
-            if !minimum && !maximum && sum < total {
-                KernelFaults::new(comptime!(FaultFlags::ARITHMETIC_OVERFLOW)).record(control);
-            }
-            total = select(
-                minimum,
-                min(total, value),
-                select(maximum, max(total, value), sum),
-            );
+            total = combine_metrics(total, value, operation, control);
             group += CUBE_DIM;
         }
-        let mut shared = Shared::<[u64]>::new_slice(256usize);
-        shared[UNIT_POS as usize] = total;
-        sync_cube();
-        let mut stride = CUBE_DIM / 2;
-        while stride > 0 {
-            if UNIT_POS < stride {
-                let a = shared[UNIT_POS as usize];
-                let b = shared[(UNIT_POS + stride) as usize];
-                let sum = a + b;
-                if !minimum && !maximum && sum < a {
-                    KernelFaults::new(comptime!(FaultFlags::ARITHMETIC_OVERFLOW)).record(control);
-                }
-                shared[UNIT_POS as usize] =
-                    select(minimum, min(a, b), select(maximum, max(a, b), sum));
-            }
-            sync_cube();
-            stride /= 2;
-        }
+        let total = reduce_metric(total, operation, control);
         if UNIT_POS == 0 {
-            let value = select(minimum && shared[0usize] == u64::MAX, 0u64, shared[0usize]);
+            let value = select(minimum && total == u64::MAX, 0u64, total);
             output[metric as usize] = ticks(u32::cast_from(value), u32::cast_from(value >> 32));
         }
     }

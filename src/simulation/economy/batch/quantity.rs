@@ -1,4 +1,5 @@
 use super::*;
+use workgroup::{TreeStorage, TreeStorageExpand};
 
 #[cfg(test)]
 mod tests;
@@ -17,37 +18,38 @@ struct QuantitySummary {
     ordered: u32,
 }
 
+#[derive(CubeType)]
+struct QuantityTree {
+    sums: workgroup::WideSumTree,
+    minima: Shared<[u64]>,
+}
+
+#[cube]
+impl TreeStorage for QuantityTree {
+    fn merge(&mut self, destination: usize, source: usize) {
+        self.sums.merge(destination, source);
+        self.minima[destination] = min(self.minima[destination], self.minima[source]);
+    }
+}
+
 #[cube]
 fn summarize(quantity: Ticks, prior: &KernelEventStatus) -> QuantitySummary {
-    let mut quantities = Shared::<[u64]>::new_slice(256usize);
-    let mut minima = Shared::<[u64]>::new_slice(256usize);
-    let mut flags = Shared::<[u32]>::new_slice(256usize);
-    let lane = UNIT_POS as usize;
     let amount = u64::cast_from(quantity.extract(LOW_WORD))
         | (u64::cast_from(quantity.extract(HIGH_WORD)) << 32);
     let accepted = prior.contains(comptime!(EventStatus::Accepted));
-    quantities[lane] = amount;
-    minima[lane] = select(accepted && amount > 0, amount, u64::MAX);
-    flags[lane] = u32::cast_from(!accepted || prior.contains(comptime!(EventStatus::Faulted)));
-    sync_cube();
-    let mut stride = CUBE_DIM / 2;
-    while stride > 0 {
-        if UNIT_POS < stride {
-            let other = lane + stride as usize;
-            let sum = quantities[lane] + quantities[other];
-            flags[lane] |= flags[other] | u32::cast_from(sum < quantities[lane]);
-            quantities[lane] = sum;
-            minima[lane] = min(minima[lane], minima[other]);
-        }
-        sync_cube();
-        stride /= 2;
-    }
-    let total = quantities[0usize];
-    let minimum = minima[0usize];
+    let flags = u32::cast_from(!accepted || prior.contains(comptime!(EventStatus::Faulted)));
+    let minimum = select(accepted && amount > 0, amount, u64::MAX);
+    let mut tree = QuantityTree {
+        sums: workgroup::WideSumTree::new(amount, flags),
+        minima: WorkgroupTree::lanes::<u64>(minimum),
+    };
+    WorkgroupTree::reduce::<QuantityTree>(&mut tree);
+    let total = tree.sums.values[0usize];
+    let minimum = tree.minima[0usize];
     let result = QuantitySummary {
         total: ticks(total as u32, (total >> 32) as u32),
         minimum: ticks(minimum as u32, (minimum >> 32) as u32),
-        ordered: flags[0usize],
+        ordered: tree.sums.flags[0usize],
     };
     sync_cube();
     result

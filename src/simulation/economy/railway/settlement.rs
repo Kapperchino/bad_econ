@@ -398,13 +398,11 @@ pub fn launch_buffered(
 ) {
     let buffers = &config.railway.freight;
     if let Stage::Snapshot = stage {
-        FreightDispatch::launch(
+        FreightDispatch::launch_single(
             device,
-            CubeCount::Static(1, 1, 1),
-            CubeDim::new_1d(1),
             DispatchInputLaunch {
-                control: control.clone().into_buffer_arg(),
-                dispatches: buffers.dispatches.clone().into_buffer_arg(),
+                control: control.buffer_arg(),
+                dispatches: buffers.dispatches.buffer_arg(),
                 workgroup: device.workgroup,
                 resources: config.railway.firms + config.railway.region_count,
                 good: parameters.good,
@@ -436,26 +434,22 @@ pub fn launch_buffered(
     };
     match stage {
         Stage::SortClaims => claims::sort_buffered(device, buffers, control, execution),
-        Stage::AdmitClaims => FreightAdmission::launch(
+        Stage::AdmitClaims => FreightAdmission::launch_single(
             device,
-            CubeCount::Static(1, 1, 1),
-            CubeDim::new_1d(1),
             AdmissionInputLaunch {
-                control: control.clone().into_buffer_arg(),
-                progress: buffers.progress.clone().into_buffer_arg(),
-                dispatches: buffers.dispatches.clone().into_buffer_arg(),
+                control: control.buffer_arg(),
+                progress: buffers.progress.buffer_arg(),
+                dispatches: buffers.dispatches.buffer_arg(),
                 capacity: buffers.claim_capacity as u32,
                 execution,
             },
         ),
-        Stage::Queue => FreightQueue::launch(
+        Stage::Queue => FreightQueue::launch_single(
             device,
-            CubeCount::Static(1, 1, 1),
-            CubeDim::new_1d(1),
             QueueInputLaunch {
-                progress: buffers.progress.clone().into_buffer_arg(),
-                control: control.clone().into_buffer_arg(),
-                dispatches: buffers.dispatches.clone().into_buffer_arg(),
+                progress: buffers.progress.buffer_arg(),
+                control: control.buffer_arg(),
+                dispatches: buffers.dispatches.buffer_arg(),
                 workgroup: device.workgroup,
                 execution,
             },
@@ -465,21 +459,21 @@ pub fn launch_buffered(
             dispatch,
             CubeDim::new_1d(device.workgroup),
             InputLaunch {
-                state: state.clone().into_buffer_arg(),
-                actors: actors.clone().into_buffer_arg(),
-                spatial: spatial.clone().into_buffer_arg(),
+                state: state.buffer_arg(),
+                actors: actors.buffer_arg(),
+                spatial: spatial.buffer_arg(),
                 config: config.launch(),
-                proposals: proposals.clone().into_buffer_arg(),
-                scratch: scratch.clone().into_buffer_arg(),
-                control: control.clone().into_buffer_arg(),
-                resources: buffers.resources.clone().into_buffer_arg(),
-                accounts: buffers.accounts.clone().into_buffer_arg(),
-                bookings: buffers.bookings.clone().into_buffer_arg(),
-                queue: buffers.queue.clone().into_buffer_arg(),
-                claims: buffers.claims.clone().into_buffer_arg(),
+                proposals: proposals.buffer_arg(),
+                scratch: scratch.buffer_arg(),
+                control: control.buffer_arg(),
+                resources: buffers.resources.buffer_arg(),
+                accounts: buffers.accounts.buffer_arg(),
+                bookings: buffers.bookings.buffer_arg(),
+                queue: buffers.queue.buffer_arg(),
+                claims: buffers.claims.buffer_arg(),
                 claim_source: claims::settlement_source(buffers),
                 claim_offsets: claims::offsets_start(buffers.claim_capacity),
-                progress: buffers.progress.clone().into_buffer_arg(),
+                progress: buffers.progress.buffer_arg(),
                 parameters: parameters.launch(),
                 stage,
                 execution,

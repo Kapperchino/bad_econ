@@ -91,13 +91,12 @@ fn fuel_sample_rotation_preserves_non_power_supplier_counts_and_wrapping_on_gpu(
         let count = cases.len() / 3;
         let cases_buffer = device.tensor(&cases);
         let members = device.tensor(&vec![u32::MAX; count * 2 * FUEL_ROTATION_WIDTH]);
-        FuelRotationCheck::launch(
+        FuelRotationCheck::launch_elements(
             &device,
-            device.count(count),
-            CubeDim::new_1d(device.workgroup),
+            count,
             FuelRotationInputLaunch {
                 cases: cases_buffer.into_buffer_arg(),
-                members: members.clone().into_buffer_arg(),
+                members: members.buffer_arg(),
             },
         );
         let members = device.read(&members)?;
@@ -243,16 +242,15 @@ impl EmptyPreparationBuffers {
             EmptyPreparation::Bounds => empty_bounds_invocations(capacity, mode),
             _ => self.count.max(1),
         };
-        EmptyPreparationCheck::launch(
+        EmptyPreparationCheck::launch_elements(
             device,
-            device.count(invocations),
-            CubeDim::new_1d(device.workgroup),
+            invocations,
             EmptyPreparationInputLaunch {
-                actors: simulation.actors.clone().into_buffer_arg(),
+                actors: simulation.actors.buffer_arg(),
                 config: simulation.config.launch(),
-                spatial: self.spatial.clone().into_buffer_arg(),
-                scratch: self.scratch.clone().into_buffer_arg(),
-                searches: self.searches.clone().into_buffer_arg(),
+                spatial: self.spatial.buffer_arg(),
+                scratch: self.scratch.buffer_arg(),
+                searches: self.searches.buffer_arg(),
                 preparation,
                 mode,
             },
@@ -690,20 +688,19 @@ impl SearchProbe {
             (parameters.market, execution),
             (MarketFlag::Consumer(_) | MarketFlag::Household, _) | (_, SearchExecution::Cached)
         ) {
-            MarketSearch::launch(
+            MarketSearch::launch_elements(
                 device,
-                device.count(count.div_ceil(DISCOVERY_BLOCK as usize) * device.workgroup as usize),
-                CubeDim::new_1d(device.workgroup),
+                count.div_ceil(DISCOVERY_BLOCK as usize) * device.workgroup as usize,
                 SearchInputLaunch {
-                    state: simulation.state.clone().into_buffer_arg(),
-                    actors: simulation.actors.clone().into_buffer_arg(),
+                    state: simulation.state.buffer_arg(),
+                    actors: simulation.actors.buffer_arg(),
                     config: simulation.config.launch(),
-                    spatial: simulation.spatial.clone().into_buffer_arg(),
-                    proposals: simulation.proposals.clone().into_buffer_arg(),
-                    searches: simulation.searches.requests.clone().into_buffer_arg(),
-                    successes: simulation.searches.successes.clone().into_buffer_arg(),
-                    scratch: simulation.scratch.clone().into_buffer_arg(),
-                    control: simulation.control.clone().into_buffer_arg(),
+                    spatial: simulation.spatial.buffer_arg(),
+                    proposals: simulation.proposals.buffer_arg(),
+                    searches: simulation.searches.requests.buffer_arg(),
+                    successes: simulation.searches.successes.buffer_arg(),
+                    scratch: simulation.scratch.buffer_arg(),
+                    control: simulation.control.buffer_arg(),
                     parameters: parameters.launch(),
                     status_reset: StatusReset::Full,
                     stage: SearchStage::Index,
@@ -717,20 +714,19 @@ impl SearchProbe {
                         }
                         _ => count,
                     };
-                    MarketSearch::launch(
+                    MarketSearch::launch_elements(
                         device,
-                        device.count(invocations),
-                        CubeDim::new_1d(device.workgroup),
+                        invocations,
                         SearchInputLaunch {
-                            state: simulation.state.clone().into_buffer_arg(),
-                            actors: simulation.actors.clone().into_buffer_arg(),
+                            state: simulation.state.buffer_arg(),
+                            actors: simulation.actors.buffer_arg(),
                             config: simulation.config.launch(),
-                            spatial: simulation.spatial.clone().into_buffer_arg(),
-                            proposals: simulation.proposals.clone().into_buffer_arg(),
-                            searches: simulation.searches.requests.clone().into_buffer_arg(),
-                            successes: simulation.searches.successes.clone().into_buffer_arg(),
-                            scratch: simulation.scratch.clone().into_buffer_arg(),
-                            control: simulation.control.clone().into_buffer_arg(),
+                            spatial: simulation.spatial.buffer_arg(),
+                            proposals: simulation.proposals.buffer_arg(),
+                            searches: simulation.searches.requests.buffer_arg(),
+                            successes: simulation.searches.successes.buffer_arg(),
+                            scratch: simulation.scratch.buffer_arg(),
+                            control: simulation.control.buffer_arg(),
                             parameters: parameters.launch(),
                             status_reset: StatusReset::Full,
                             stage,
@@ -740,18 +736,16 @@ impl SearchProbe {
             }
         }
         match execution {
-            SearchExecution::Serial => EconomySystem::launch(
+            SearchExecution::Serial => EconomySystem::launch_single(
                 device,
-                CubeCount::Static(1, 1, 1),
-                CubeDim::new_1d(1),
                 EconomyInputLaunch {
-                    state: simulation.state.clone().into_buffer_arg(),
-                    actors: simulation.actors.clone().into_buffer_arg(),
+                    state: simulation.state.buffer_arg(),
+                    actors: simulation.actors.buffer_arg(),
                     config: simulation.config.launch(),
-                    spatial: simulation.spatial.clone().into_buffer_arg(),
-                    proposals: simulation.proposals.clone().into_buffer_arg(),
-                    bundles: simulation.scratch.clone().into_buffer_arg(),
-                    control: simulation.control.clone().into_buffer_arg(),
+                    spatial: simulation.spatial.buffer_arg(),
+                    proposals: simulation.proposals.buffer_arg(),
+                    bundles: simulation.scratch.buffer_arg(),
+                    control: simulation.control.buffer_arg(),
                     parameters: parameters.launch(),
                     stage: EconomyStage::Propose,
                 },
@@ -766,15 +760,15 @@ impl SearchProbe {
                 },
                 CubeDim::new_1d(workgroup),
                 SearchInputLaunch {
-                    state: simulation.state.clone().into_buffer_arg(),
-                    actors: simulation.actors.clone().into_buffer_arg(),
+                    state: simulation.state.buffer_arg(),
+                    actors: simulation.actors.buffer_arg(),
                     config: simulation.config.launch(),
-                    spatial: simulation.spatial.clone().into_buffer_arg(),
-                    proposals: simulation.proposals.clone().into_buffer_arg(),
-                    searches: simulation.searches.requests.clone().into_buffer_arg(),
-                    successes: simulation.searches.successes.clone().into_buffer_arg(),
-                    scratch: simulation.scratch.clone().into_buffer_arg(),
-                    control: simulation.control.clone().into_buffer_arg(),
+                    spatial: simulation.spatial.buffer_arg(),
+                    proposals: simulation.proposals.buffer_arg(),
+                    searches: simulation.searches.requests.buffer_arg(),
+                    successes: simulation.searches.successes.buffer_arg(),
+                    scratch: simulation.scratch.buffer_arg(),
+                    control: simulation.control.buffer_arg(),
                     parameters: parameters.launch(),
                     status_reset: StatusReset::Full,
                     stage: match execution {
@@ -1305,10 +1299,8 @@ fn delivery_score_probe(good: Good, rotation: u32, case: DeliveryScoreCase) -> R
         DeliveryScoreCase::ScaledSpeedWrap => simulation.config.shipment_speed = u32::MAX,
         _ => (),
     }
-    DeliveryScoreFixture::launch(
+    DeliveryScoreFixture::launch_single(
         &simulation.device,
-        CubeCount::Static(1, 1, 1),
-        CubeDim::new_1d(1),
         DeliveryScoreFixtureInputLaunch {
             config: simulation.config.launch(),
             buyer: 0,
@@ -1943,15 +1935,15 @@ fn consumer_preparation_clears_inactive_requests_and_preserves_captured_retries_
                     dispatch,
                     CubeDim::new_1d(workgroup),
                     SearchInputLaunch {
-                        state: simulation.state.clone().into_buffer_arg(),
-                        actors: simulation.actors.clone().into_buffer_arg(),
+                        state: simulation.state.buffer_arg(),
+                        actors: simulation.actors.buffer_arg(),
                         config: simulation.config.launch(),
-                        spatial: simulation.spatial.clone().into_buffer_arg(),
-                        proposals: simulation.proposals.clone().into_buffer_arg(),
-                        searches: simulation.searches.requests.clone().into_buffer_arg(),
-                        successes: simulation.searches.successes.clone().into_buffer_arg(),
-                        scratch: simulation.scratch.clone().into_buffer_arg(),
-                        control: simulation.control.clone().into_buffer_arg(),
+                        spatial: simulation.spatial.buffer_arg(),
+                        proposals: simulation.proposals.buffer_arg(),
+                        searches: simulation.searches.requests.buffer_arg(),
+                        successes: simulation.searches.successes.buffer_arg(),
+                        scratch: simulation.scratch.buffer_arg(),
+                        control: simulation.control.buffer_arg(),
                         parameters: parameters.launch(),
                         status_reset: StatusReset::Full,
                         stage,
@@ -2110,14 +2102,13 @@ fn station_access_floor_never_exceeds_selected_route_days_on_gpu() -> Result<()>
         }
         let findings = device.tensor(&[0; 4]);
         let count = simulation.metadata.actors.len();
-        DeliveryFloorCheck::launch(
+        DeliveryFloorCheck::launch_elements(
             &device,
-            device.count(count * count),
-            CubeDim::new_1d(device.workgroup),
+            count * count,
             DeliveryFloorInputLaunch {
-                actors: simulation.actors.clone().into_buffer_arg(),
+                actors: simulation.actors.buffer_arg(),
                 config: simulation.config.launch(),
-                findings: findings.clone().into_buffer_arg(),
+                findings: findings.buffer_arg(),
             },
         );
         let findings = device.read(&findings)?;
@@ -2338,18 +2329,17 @@ impl SearchProbe {
             &simulation.state,
             bytemuck::cast_slice(&encode(&self.state.values)),
         );
-        EconomySystem::launch(
+        EconomySystem::launch_elements(
             device,
-            device.count(count),
-            CubeDim::new_1d(device.workgroup),
+            count,
             EconomyInputLaunch {
-                state: simulation.state.clone().into_buffer_arg(),
-                actors: simulation.actors.clone().into_buffer_arg(),
+                state: simulation.state.buffer_arg(),
+                actors: simulation.actors.buffer_arg(),
                 config: simulation.config.launch(),
-                spatial: simulation.spatial.clone().into_buffer_arg(),
-                proposals: simulation.proposals.clone().into_buffer_arg(),
-                bundles: simulation.scratch.clone().into_buffer_arg(),
-                control: simulation.control.clone().into_buffer_arg(),
+                spatial: simulation.spatial.buffer_arg(),
+                proposals: simulation.proposals.buffer_arg(),
+                bundles: simulation.scratch.buffer_arg(),
+                control: simulation.control.buffer_arg(),
                 parameters: self.parameters.launch(),
                 stage: initialization,
             },
@@ -2366,15 +2356,15 @@ impl SearchProbe {
             dispatch,
             CubeDim::new_1d(device.workgroup),
             SearchInputLaunch {
-                state: simulation.state.clone().into_buffer_arg(),
-                actors: simulation.actors.clone().into_buffer_arg(),
+                state: simulation.state.buffer_arg(),
+                actors: simulation.actors.buffer_arg(),
                 config: simulation.config.launch(),
-                spatial: simulation.spatial.clone().into_buffer_arg(),
-                proposals: simulation.proposals.clone().into_buffer_arg(),
-                searches: simulation.searches.requests.clone().into_buffer_arg(),
-                successes: simulation.searches.successes.clone().into_buffer_arg(),
-                scratch: simulation.scratch.clone().into_buffer_arg(),
-                control: simulation.control.clone().into_buffer_arg(),
+                spatial: simulation.spatial.buffer_arg(),
+                proposals: simulation.proposals.buffer_arg(),
+                searches: simulation.searches.requests.buffer_arg(),
+                successes: simulation.searches.successes.buffer_arg(),
+                scratch: simulation.scratch.buffer_arg(),
+                control: simulation.control.buffer_arg(),
                 parameters: self.parameters.launch(),
                 status_reset: StatusReset::Active,
                 stage,

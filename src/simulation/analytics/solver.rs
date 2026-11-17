@@ -61,14 +61,13 @@ fn update<N: Size>(
     scale: f32,
 ) {
     let length = values.meta.num_elements();
-    IterationUpdate::<N>::launch(
+    IterationUpdate::<N>::launch_elements(
         device,
-        device.count(length / N::value()),
-        CubeDim::new_1d(device.workgroup),
+        length / N::value(),
         IterationInputLaunch {
-            values: argument(values),
-            rhs: argument(rhs),
-            control: argument(control),
+            values: values.buffer_arg(),
+            rhs: rhs.buffer_arg(),
+            control: control.buffer_arg(),
             scale,
             length: length as u32,
         },

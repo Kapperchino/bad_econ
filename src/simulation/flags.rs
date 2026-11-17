@@ -295,6 +295,7 @@ pub fn record_dependency(control: &[Atomic<u32>], #[comptime] flag: DependencyFl
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::simulation::system::AsBufferArg;
     use crate::simulation::{Device, ops::TEST_WORKGROUP};
 
     #[cube(launch)]
@@ -328,7 +329,7 @@ mod tests {
             &device.client,
             CubeCount::Static(8, 1, 1),
             CubeDim::new_1d(TEST_WORKGROUP),
-            control.clone().into_buffer_arg(),
+            control.buffer_arg(),
         );
         let result = SchedulerControl::new(&device.read(&control)?)?;
         assert_eq!(result.faults, FaultFlags::all());

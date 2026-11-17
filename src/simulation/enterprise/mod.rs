@@ -10,7 +10,7 @@ use super::{
     registry::records::{
         CountRecords, ProposedRecord, RecordBuffers, RecordCountBuffers, RecordCountBuffersLaunch,
     },
-    system::{System, gpu_passes},
+    system::{AsBufferArg, System, gpu_passes},
     words::*,
 };
 use crate::domain::{
@@ -400,17 +400,16 @@ fn propose_quotes(
     day: u32,
     quote_mode: opportunities::EntryQuoteMode,
 ) {
-    let argument = |tensor: &CubeTensor| tensor.clone().into_buffer_arg();
     let cube_count = device.count(records.requests.meta.num_elements());
     let input = || ProposalInputLaunch {
-        state: argument(state),
-        actors: argument(actors),
+        state: state.buffer_arg(),
+        actors: actors.buffer_arg(),
         config: config.launch(),
-        spatial: argument(spatial),
-        output: argument(records.requests),
+        spatial: spatial.buffer_arg(),
+        output: records.requests.buffer_arg(),
         records: RecordCountBuffersLaunch {
-            births: argument(records.births),
-            scratch: argument(records.scratch),
+            births: records.births.buffer_arg(),
+            scratch: records.scratch.buffer_arg(),
             scan: super::parallel::ScanMode::new(device),
         },
         day,

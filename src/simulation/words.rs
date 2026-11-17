@@ -208,6 +208,7 @@ pub fn store(values: &mut [u32], coordinate: u32, value: Ticks) {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::simulation::system::AsBufferArg;
     use crate::{
         arithmetic::DrawKey,
         ledger::TickLayout,
@@ -357,8 +358,8 @@ mod tests {
             &device.client,
             device.count(cases.len()),
             CubeDim::new_1d(TEST_WORKGROUP),
-            input.clone().into_buffer_arg(),
-            output.clone().into_buffer_arg(),
+            input.buffer_arg(),
+            output.buffer_arg(),
         );
         let actual = device.read(&output)?;
         for (case, output) in cases
@@ -476,7 +477,7 @@ mod tests {
                 device.count(cases.len()),
                 CubeDim::new_1d(workgroup),
                 input.into_buffer_arg(),
-                output.clone().into_buffer_arg(),
+                output.buffer_arg(),
             );
             let actual = device.read(&output)?;
             for (case, actual) in cases

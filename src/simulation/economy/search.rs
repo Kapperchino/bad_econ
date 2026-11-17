@@ -1239,7 +1239,8 @@ fn search(
                                     distance(actors, id, seller) <= radius && supply.offered,
                                 );
                             }
-                            seen_supply = parallel::reduce(offered, comptime!(Reduction::Sum)) > 0;
+                            seen_supply =
+                                parallel::reduce::<u32>(offered, comptime!(Reduction::Sum)) > 0;
                             offset += 32;
                         }
                     }
@@ -1388,7 +1389,7 @@ fn search(
                             );
                             if comptime!(parameters.market == MarketFlag::Household) {
                                 seen_supply = seen_supply
-                                    || parallel::reduce(
+                                    || parallel::reduce::<u32>(
                                         candidates[lane * 9 + 1] * included,
                                         comptime!(Reduction::Sum),
                                     ) > 0;
@@ -1707,6 +1708,25 @@ struct CandidateRank {
     score: Ticks,
 }
 
+#[derive(CubeType)]
+struct CandidateTree {
+    scores: Shared<[u64]>,
+    lanes: Shared<[u32]>,
+}
+
+#[cube]
+impl workgroup::TreeStorage for CandidateTree {
+    fn merge(&mut self, destination: usize, source: usize) {
+        let preferred = self.scores[source] < self.scores[destination]
+            || (self.scores[source] == self.scores[destination]
+                && self.lanes[source] < self.lanes[destination]);
+        if preferred {
+            self.scores[destination] = self.scores[source];
+            self.lanes[destination] = self.lanes[source];
+        }
+    }
+}
+
 #[cube]
 fn group_winner(rank: CandidateRank, #[comptime] mode: parallel::ScanMode) -> u32 {
     let mut winner = u32::new(comptime!(i64::from(NO_ACTOR)));
@@ -1744,29 +1764,14 @@ fn group_winner(rank: CandidateRank, #[comptime] mode: parallel::ScanMode) -> u3
         }
         sync_cube();
     } else {
-        let mut scores = Shared::<[u64]>::new_slice(256usize);
-        let mut lanes = Shared::<[u32]>::new_slice(256usize);
-        let lane = UNIT_POS as usize;
         let score = u64::cast_from(rank.score.extract(LOW_WORD))
             | (u64::cast_from(rank.score.extract(HIGH_WORD)) << 32);
-        scores[lane] = select(rank.active > 0, score, u64::MAX);
-        lanes[lane] = select(rank.active > 0, UNIT_POS, NO_ACTOR);
-        sync_cube();
-        let mut stride = CUBE_DIM / 2;
-        while stride > 0 {
-            if UNIT_POS < stride {
-                let other = lane + stride as usize;
-                let preferred = scores[other] < scores[lane]
-                    || (scores[other] == scores[lane] && lanes[other] < lanes[lane]);
-                if preferred {
-                    scores[lane] = scores[other];
-                    lanes[lane] = lanes[other];
-                }
-            }
-            sync_cube();
-            stride /= 2;
-        }
-        winner = lanes[0usize];
+        let mut tree = CandidateTree {
+            scores: WorkgroupTree::lanes::<u64>(select(rank.active > 0, score, u64::MAX)),
+            lanes: WorkgroupTree::lanes::<u32>(select(rank.active > 0, UNIT_POS, NO_ACTOR)),
+        };
+        WorkgroupTree::reduce::<CandidateTree>(&mut tree);
+        winner = tree.lanes[0usize];
         sync_cube();
     }
     winner

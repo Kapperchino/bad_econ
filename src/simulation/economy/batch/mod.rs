@@ -263,11 +263,11 @@ pub(in crate::simulation) fn settle_consumers(
     parameters: &crate::simulation::parameters::EconomyParameters,
 ) {
     let input = || SettlementInputLaunch {
-        state: state.clone().into_buffer_arg(),
-        actors: actors.clone().into_buffer_arg(),
+        state: state.buffer_arg(),
+        actors: actors.buffer_arg(),
         config: config.launch(),
-        scratch: scratch.clone().into_buffer_arg(),
-        control: control.clone().into_buffer_arg(),
+        scratch: scratch.buffer_arg(),
+        control: control.buffer_arg(),
         parameters: parameters.launch(),
     };
     ConsumerPrefix::launch(
@@ -526,11 +526,11 @@ mod tests {
                 CubeCount::Static(1, 1, 1),
                 CubeDim::new_1d(64),
                 SettlementInputLaunch {
-                    state: expected.state.clone().into_buffer_arg(),
-                    actors: expected.actors.clone().into_buffer_arg(),
+                    state: expected.state.buffer_arg(),
+                    actors: expected.actors.buffer_arg(),
                     config: expected.config.launch(),
-                    scratch: expected.scratch.clone().into_buffer_arg(),
-                    control: expected.control.clone().into_buffer_arg(),
+                    scratch: expected.scratch.buffer_arg(),
+                    control: expected.control.buffer_arg(),
                     parameters: parameters.launch(),
                 },
             );
@@ -738,13 +738,13 @@ mod tests {
                     device.count(case.length),
                     CubeDim::new_1d(workgroup),
                     EconomyInputLaunch {
-                        state: expected.state.clone().into_buffer_arg(),
-                        actors: expected.actors.clone().into_buffer_arg(),
+                        state: expected.state.buffer_arg(),
+                        actors: expected.actors.buffer_arg(),
                         config: expected.config.launch(),
-                        spatial: expected.spatial.clone().into_buffer_arg(),
-                        proposals: expected.proposals.clone().into_buffer_arg(),
-                        bundles: expected.scratch.clone().into_buffer_arg(),
-                        control: expected.control.clone().into_buffer_arg(),
+                        spatial: expected.spatial.buffer_arg(),
+                        proposals: expected.proposals.buffer_arg(),
+                        bundles: expected.scratch.buffer_arg(),
+                        control: expected.control.buffer_arg(),
                         parameters: original.launch(),
                         stage: EconomyStage::GroupExecute,
                     },

@@ -90,14 +90,13 @@ impl DeviceSignedVector {
 
     pub fn absolute(&self, device: &Device) -> Result<DeviceVector> {
         let output = DeviceVector::empty(device, self.positive.length);
-        AbsoluteValue::launch(
+        AbsoluteValue::launch_elements(
             device,
-            count(device, self.positive.length),
-            CubeDim::new_1d(device.workgroup),
+            self.positive.length,
             AbsoluteValueInputLaunch {
-                positive_input: argument(&self.positive.data),
-                negative_input: argument(&self.negative.data),
-                output: argument(&output.data),
+                positive_input: self.positive.data.buffer_arg(),
+                negative_input: self.negative.data.buffer_arg(),
+                output: output.data.buffer_arg(),
                 length: self.positive.length as u32,
             },
         );
@@ -264,17 +263,16 @@ impl Sensitivity {
                 let positive = DeviceVector::empty(device, beta.length);
                 let negative = DeviceVector::empty(device, beta.length);
                 let control = device.tensor(&[0; CONTROL_WORDS]);
-                NormalizedDerivative::launch(
+                NormalizedDerivative::launch_elements(
                     device,
-                    count(device, beta.length),
-                    CubeDim::new_1d(device.workgroup),
+                    beta.length,
                     NormalizedDerivativeInputLaunch {
-                        beta: argument(&beta.data),
-                        change_positive: argument(&beta_change.positive.data),
-                        change_negative: argument(&beta_change.negative.data),
-                        positive_output: argument(&positive.data),
-                        negative_output: argument(&negative.data),
-                        control: argument(&control),
+                        beta: beta.data.buffer_arg(),
+                        change_positive: beta_change.positive.data.buffer_arg(),
+                        change_negative: beta_change.negative.data.buffer_arg(),
+                        positive_output: positive.data.buffer_arg(),
+                        negative_output: negative.data.buffer_arg(),
+                        control: control.buffer_arg(),
                         length: beta.length as u32,
                         reference: reference as u32,
                         scale,
@@ -457,14 +455,13 @@ impl LaborTruncation {
                         }
                         let weighted = tensor::empty(device, [2, labor.rows, labor.columns]);
                         let weighted_tail = DeviceVector::empty(device, 1);
-                        WeightedValues::launch(
+                        WeightedValues::launch_elements(
                             device,
-                            count(device, labor.rows * labor.columns),
-                            CubeDim::new_1d(device.workgroup),
+                            labor.rows * labor.columns,
                             WeightedValuesInputLaunch {
-                                labor: argument(&labor.data),
-                                weights: argument(&weights),
-                                output: argument(&weighted),
+                                labor: labor.data.buffer_arg(),
+                                weights: weights.buffer_arg(),
+                                output: weighted.buffer_arg(),
                                 rows: labor.rows as u32,
                                 columns: labor.columns as u32,
                             },
@@ -493,14 +490,12 @@ impl LaborTruncation {
                             ReduceOperationConfig::Max,
                             f32::elem_type_native(),
                         )?;
-                        TailBound::launch(
+                        TailBound::launch_single(
                             device,
-                            CubeCount::Static(1, 1, 1),
-                            CubeDim::new_1d(1),
                             TailBoundInputLaunch {
                                 norms: norm.into_arg().into_buffer_arg(),
-                                output: argument(&weighted_tail.data),
-                                control: argument(&control),
+                                output: weighted_tail.data.buffer_arg(),
+                                control: control.buffer_arg(),
                                 numerator: contraction.numerator,
                                 denominator: contraction.denominator,
                                 terms: terms.0,
@@ -508,16 +503,15 @@ impl LaborTruncation {
                         );
                         let enclosure =
                             DeviceMatrix::empty(device, labor.rows, labor.columns, labor.scale)?;
-                        TailEnclosure::launch(
+                        TailEnclosure::launch_elements(
                             device,
-                            count(device, labor.rows * labor.columns),
-                            CubeDim::new_1d(device.workgroup),
+                            labor.rows * labor.columns,
                             TailEnclosureInputLaunch {
-                                partial: argument(&partial.data),
-                                tail: argument(&weighted_tail.data),
-                                weights: argument(&weights),
-                                output: argument(&enclosure.data),
-                                control: argument(&control),
+                                partial: partial.data.buffer_arg(),
+                                tail: weighted_tail.data.buffer_arg(),
+                                weights: weights.buffer_arg(),
+                                output: enclosure.data.buffer_arg(),
+                                control: control.buffer_arg(),
                                 rows: labor.rows as u32,
                                 columns: labor.columns as u32,
                             },

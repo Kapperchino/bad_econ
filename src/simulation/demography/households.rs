@@ -1,4 +1,5 @@
 use super::*;
+use crate::simulation::system::AsBufferArg;
 use crate::simulation::{enterprise::HouseholdFormation, pass::GpuPass, system::gpu_passes};
 
 #[repr(C)]
@@ -73,17 +74,16 @@ impl DemographyRuntime {
             initial_population: self.initial_population,
             seed: self.seed,
         };
-        HouseholdFormationSystem::launch(
+        HouseholdFormationSystem::launch_elements(
             device,
-            device.count(self.range_counts.len()),
-            CubeDim::new_1d(device.workgroup),
+            self.range_counts.len(),
             FormationInputLaunch {
-                source: self.people.clone().into_buffer_arg(),
-                target: next.people.clone().into_buffer_arg(),
-                previous: self.ranges.clone().into_buffer_arg(),
-                ranges: next.ranges.clone().into_buffer_arg(),
+                source: self.people.buffer_arg(),
+                target: next.people.buffer_arg(),
+                previous: self.ranges.buffer_arg(),
+                ranges: next.ranges.buffer_arg(),
                 formations: records.into_buffer_arg(),
-                faults: faults.clone().into_buffer_arg(),
+                faults: faults.buffer_arg(),
             },
         );
         match device.read(&faults)?[0] {

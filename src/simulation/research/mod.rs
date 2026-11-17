@@ -1,4 +1,5 @@
 use crate::domain::Good;
+use crate::simulation::system::AsBufferArg;
 pub mod capabilities;
 mod kernels;
 mod layout;
@@ -18,7 +19,6 @@ use crate::domain::{Phase, Scenario, State, research::*};
 use anyhow::{Context, Result, anyhow};
 use burn_wgpu::CubeTensor;
 use bytemuck::Zeroable;
-use cubecl::CubeDim;
 pub use kernels::{AttemptOutcome, Participation};
 use sha2::{Digest, Sha256};
 use std::cell::Cell;
@@ -579,30 +579,28 @@ impl ResearchRuntime {
             )?,
             _ => super::tensor::empty(device, [0]),
         };
-        let argument = |tensor: &CubeTensor| tensor.clone().into_buffer_arg();
         let count = match launch.stage {
             ResearchStage::Summary => self.summary_shards.meta.shape()[0] / 2,
             _ => launch.count,
         };
-        let cube_count = device.count(count);
-        ResearchSystem::launch(
+        ResearchSystem::launch_elements(
             device,
-            cube_count,
-            CubeDim::new_1d(device.workgroup),
+            count,
             ResearchInputLaunch {
-                main: argument(launch.main),
-                state: argument(launch.state),
+                main: launch.main.buffer_arg(),
+                state: launch.state.buffer_arg(),
                 config: KernelResearchConfigLaunch {
                     parameters: self.header.launch(self.state_stride),
-                    records: self.configuration.clone().into_buffer_arg(),
+                    records: self.configuration.buffer_arg(),
                 },
-                table: argument(&self.table),
-                samples: argument(&samples),
-                output: argument(match launch.stage {
+                table: self.table.buffer_arg(),
+                samples: samples.buffer_arg(),
+                output: match launch.stage {
                     ResearchStage::Summary => &self.summary_shards,
                     _ => launch.output,
-                }),
-                control: argument(&self.control),
+                }
+                .buffer_arg(),
+                control: self.control.buffer_arg(),
                 stage: launch.stage,
             },
         );

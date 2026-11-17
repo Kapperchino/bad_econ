@@ -39,23 +39,21 @@ pub(in crate::simulation) fn extend(
     let words = 3 * (cells + 1 + count) + count.div_ceil(DISCOVERY_BLOCK as usize) + 1 + count;
     let added = device.tensor(&SpatialIndex::from_actors(scenario, additions).words);
     let output = device.empty(words);
-    SpatialClearing::launch(
+    SpatialClearing::launch_elements(
         device,
-        device.count(words),
-        CubeDim::new_1d(device.workgroup),
+        words,
         SpatialClearInputLaunch {
-            output: output.clone().into_buffer_arg(),
+            output: output.buffer_arg(),
         },
     );
-    SpatialGrowthSystem::launch(
+    SpatialGrowthSystem::launch_elements(
         device,
-        device.count(count.max(cells + 1)),
-        CubeDim::new_1d(device.workgroup),
+        count.max(cells + 1),
         SpatialGrowthInputLaunch {
-            prior: prior.clone().into_buffer_arg(),
+            prior: prior.buffer_arg(),
             additions: added.into_buffer_arg(),
-            actors: actors.clone().into_buffer_arg(),
-            output: output.clone().into_buffer_arg(),
+            actors: actors.buffer_arg(),
+            output: output.buffer_arg(),
             growth: SpatialGrowthLaunch {
                 before: growth.before,
                 added: growth.added,
@@ -272,12 +270,11 @@ pub(in crate::simulation) fn migrate(
     let words =
         3 * (cells as usize + 1 + count) + count.div_ceil(DISCOVERY_BLOCK as usize) + 1 + count;
     let output = device.empty(words);
-    SpatialClearing::launch(
+    SpatialClearing::launch_elements(
         device,
-        device.count(words),
-        CubeDim::new_1d(device.workgroup),
+        words,
         SpatialClearInputLaunch {
-            output: output.clone().into_buffer_arg(),
+            output: output.buffer_arg(),
         },
     );
     let arrivals = migration
@@ -367,19 +364,16 @@ pub(in crate::simulation) fn migrate(
                 }
             }
         };
-        SpatialMigrationSystem::launch(
+        SpatialMigrationSystem::launch_elements(
             device,
-            device.count(
-                (parameters.members as usize)
-                    .max(inserted_count)
-                    .max(cells as usize + 1),
-            ),
-            CubeDim::new_1d(device.workgroup),
+            (parameters.members as usize)
+                .max(inserted_count)
+                .max(cells as usize + 1),
             SpatialMigrationInputLaunch {
-                prior: migration.spatial.clone().into_buffer_arg(),
-                actors: migration.actors.clone().into_buffer_arg(),
+                prior: migration.spatial.buffer_arg(),
+                actors: migration.actors.buffer_arg(),
                 changes: changes.into_buffer_arg(),
-                output: output.clone().into_buffer_arg(),
+                output: output.buffer_arg(),
                 parameters,
                 population,
             },
