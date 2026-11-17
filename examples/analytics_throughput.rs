@@ -53,19 +53,19 @@ fn main() -> Result<()> {
         };
         let solve = || operator.solve(&device, &rhs, &certificate, budget);
         let reference = solve()?.read(&device)?;
+        let expected = 2000.0 * (1.0 - 0.5f64.powf(f64::from(budget.iterations)));
         match &reference {
-            Diagnostic::Available(values) => {
-                let expected = 2000.0 * (1.0 - 0.5f64.powf(f64::from(budget.iterations)));
-                match values.values.iter().all(|value| {
+            Diagnostic::Available(values)
+                if values.values.iter().all(|value| {
                     (value.lower as f64 - expected).abs() <= 2.0
                         && (value.upper as f64 - expected).abs() <= 2.0
-                }) {
-                    true => (),
-                    false => Err(anyhow!(
-                        "solver result differs from the independent reference"
-                    ))?,
-                }
+                }) =>
+            {
+                ()
             }
+            Diagnostic::Available(_) => Err(anyhow!(
+                "solver result differs from the independent reference"
+            ))?,
             _ => Err(anyhow!("benchmark solve was not available"))?,
         }
         let reference = serde_json::to_value(reference)?;

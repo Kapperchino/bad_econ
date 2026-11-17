@@ -76,8 +76,9 @@ impl CapabilityGraph {
                         }
                     }
                 }
-                let mut offsets = vec![0u32];
-                let mut sources = Vec::new();
+                let mut offsets = Vec::with_capacity(self.nodes + 1);
+                offsets.push(0u32);
+                let mut sources = Vec::with_capacity(self.edges.len());
                 for neighbors in &adjacency {
                     sources.extend(neighbors);
                     offsets.push(
@@ -85,10 +86,10 @@ impl CapabilityGraph {
                             .context("capability edge capacity exceeded")?,
                     );
                 }
-                let seed = device.tensor(&padded(seeds));
-                let mask = device.tensor(&padded(satisfied));
+                let seed = device.tensor(padded(seeds));
+                let mask = device.tensor(padded(satisfied));
                 let offsets = device.tensor(&offsets);
-                let sources = device.tensor(&padded(&sources));
+                let sources = device.tensor(padded(&sources));
                 let mut current = device.empty(self.nodes.max(1));
                 let mut next = device.empty(self.nodes.max(1));
                 let changed = device.tensor(&[0]);
@@ -143,10 +144,10 @@ impl CapabilityGraph {
     }
 }
 
-fn padded(values: &[u32]) -> Vec<u32> {
+fn padded(values: &[u32]) -> &[u32] {
     match values {
-        [] => vec![0],
-        values => values.to_vec(),
+        [] => &[0],
+        values => values,
     }
 }
 
@@ -157,7 +158,7 @@ pub struct CapabilityClosure {
 
 impl CapabilityClosure {
     pub fn download(&self, device: &Device) -> Result<Vec<u32>> {
-        Ok(device.read(&self.values)?[..self.nodes].to_vec())
+        device.read_range(&self.values, 0, self.nodes)
     }
 
     pub fn tensor(&self) -> &CubeTensor {

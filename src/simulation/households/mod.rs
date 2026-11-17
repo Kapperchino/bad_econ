@@ -190,7 +190,7 @@ pub fn evaluate(
     requests: &[HouseholdObservation],
 ) -> Result<Vec<HouseholdPolicyResult>> {
     let mut services = Vec::new();
-    let mut encoded = Vec::new();
+    let mut encoded = Vec::with_capacity(requests.len().max(1));
     for request in requests {
         let offset = u32::try_from(services.len())?;
         encoded.push(RequestLayout::new(request, offset)?);
@@ -223,10 +223,9 @@ pub fn evaluate(
         },
     );
     FaultFlags::read(&device.read(&control)?)?.into_result()?;
-    let output = device.read(&output)?;
+    let output = device.read_range(&output, 0, requests.len() * ResultLayout::WORDS)?;
     Ok(bytemuck::cast_slice::<u32, ResultLayout>(&output)
         .iter()
-        .take(requests.len())
         .map(|result| HouseholdPolicyResult {
             deficit_lower: result.deficit_lower,
             deficit_upper: result.deficit_upper,

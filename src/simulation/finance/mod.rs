@@ -222,33 +222,9 @@ impl FinanceRuntime {
         let bank_scan = scan::Scan::new(device, banks.len(), 5);
         let support_scan = scan::Scan::new(device, recipients.len(), 1);
         Ok(Self {
-            banks: device.tensor(
-                banks
-                    .words()
-                    .iter()
-                    .copied()
-                    .chain(std::iter::once(0))
-                    .collect::<Vec<_>>()
-                    .as_slice(),
-            ),
-            loans: device.tensor(
-                loans
-                    .words()
-                    .iter()
-                    .copied()
-                    .chain(std::iter::once(0))
-                    .collect::<Vec<_>>()
-                    .as_slice(),
-            ),
-            support: device.tensor(
-                recipients
-                    .words()
-                    .iter()
-                    .copied()
-                    .chain(std::iter::once(0))
-                    .collect::<Vec<_>>()
-                    .as_slice(),
-            ),
+            banks: padded(device, &banks.words()),
+            loans: padded(device, &loans.words()),
+            support: padded(device, &recipients.words()),
             scanned: device.empty(bank_scan.words().max(support_scan.words())),
             bank_scan,
             support_scan,
@@ -444,14 +420,13 @@ impl FinanceRuntime {
             count => device
                 .read_range(&self.decisions, 0, count)?
                 .into_iter()
-                .map(|code| match code {
-                    0 => Ok(None),
-                    1 => Ok(Some(crate::ledger::Decision::Accepted)),
-                    2 => Ok(Some(crate::ledger::Decision::Rejected)),
-                    _ => Err(anyhow!("unknown financial event decision")),
+                .filter_map(|code| match code {
+                    0 => None,
+                    1 => Some(Ok(crate::ledger::Decision::Accepted)),
+                    2 => Some(Ok(crate::ledger::Decision::Rejected)),
+                    _ => Some(Err(anyhow!("unknown financial event decision"))),
                 })
-                .collect::<Result<Vec<_>>>()
-                .map(|decisions| decisions.into_iter().flatten().collect()),
+                .collect(),
         }
     }
 
@@ -477,4 +452,14 @@ fn argument(tensor: &CubeTensor) -> BufferArg {
 
 fn count(device: &Device, length: usize) -> CubeCount {
     device.count(length)
+}
+
+fn padded(device: &Device, words: &[u32]) -> CubeTensor {
+    device.tensor(
+        &words
+            .iter()
+            .copied()
+            .chain(std::iter::once(0))
+            .collect::<Vec<_>>(),
+    )
 }

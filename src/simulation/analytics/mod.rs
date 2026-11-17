@@ -281,6 +281,7 @@ pub struct SolveBudget {
     pub weighted_tolerance: u64,
 }
 
+#[derive(Clone)]
 pub struct DeviceVector {
     data: CubeTensor,
     length: usize,

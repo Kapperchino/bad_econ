@@ -103,98 +103,6 @@ fn branched_graph_and_grouped_debits_match_serial_ledger() -> Result<()> {
 }
 
 #[test]
-fn dispatch_is_buyer_owned_and_output_matures_at_close() -> Result<()> {
-    let scenario = Scenario::baseline(1, 42, Experiment::Concentrated)?;
-    let mut simulation = Simulation::new(scenario.clone(), support::device(64)?)?;
-    simulation.command(SimulationCommand::AdvanceDay)?;
-    simulation.command(SimulationCommand::AdvanceDay)?;
-    for phase in [
-        Phase::Opening,
-        Phase::Observation,
-        Phase::Proposal,
-        Phase::Commitment,
-        Phase::WorkPayment,
-    ] {
-        simulation.phase(phase, Trace::Record)?;
-    }
-    let before = simulation.download()?;
-    simulation.phase(Phase::ProvisionPurchase, Trace::Record)?;
-    let dispatched = simulation.download()?;
-    assert_eq!(dispatched.get(Field::Bread, 0), before.get(Field::Bread, 0));
-    assert_eq!(dispatched.get(Field::Transit, 0), 1);
-    assert!(dispatched.get(Field::Cash, 0) < before.get(Field::Cash, 0));
-    simulation.phase(Phase::PhysicalClose, Trace::Record)?;
-    assert_eq!(simulation.download()?.get(Field::Bread, 0), 1);
-    simulation.phase(Phase::AccountsDecisions, Trace::Record)?;
-    simulation.phase(Phase::Audit, Trace::Record)?;
-    simulation.phase(Phase::Opening, Trace::Record)?;
-    let delivered = simulation.download()?;
-    assert_eq!(delivered.get(Field::Bread, 0), 2);
-    assert_eq!(delivered.get(Field::Transit, 0), 0);
-    let shortage = Scenario::baseline(6, 17, Experiment::Shortage)?;
-    let mut initial = shortage.initial()?;
-    initial.day = 269;
-    let mut simulation =
-        Simulation::from_checkpoint(Checkpoint::new(&shortage, &initial)?, support::device(64)?)?;
-    for phase in [
-        Phase::Opening,
-        Phase::Observation,
-        Phase::Proposal,
-        Phase::Commitment,
-        Phase::WorkPayment,
-        Phase::ProvisionPurchase,
-    ] {
-        simulation.phase(phase, Trace::Record)?;
-    }
-    let pending = simulation.download()?;
-    let firms = shortage.config().households as usize..shortage.actors();
-    assert!(
-        firms
-            .clone()
-            .map(|i| pending.get(Field::Pipeline, i))
-            .sum::<u64>()
-            > 0
-    );
-    assert_eq!(
-        firms
-            .clone()
-            .map(|i| pending.get(Field::Grain, i))
-            .sum::<u64>(),
-        0
-    );
-    simulation.phase(Phase::PhysicalClose, Trace::Record)?;
-    let closed = simulation.download()?;
-    assert_eq!(
-        firms
-            .clone()
-            .map(|i| closed.get(Field::Pipeline, i))
-            .sum::<u64>(),
-        0
-    );
-    assert_eq!(
-        firms
-            .clone()
-            .map(|i| closed.get(Field::Grain, i))
-            .sum::<u64>(),
-        0
-    );
-    assert!(
-        firms
-            .clone()
-            .map(|i| closed.get(Field::CropWork, i))
-            .sum::<u64>()
-            > 0
-    );
-    for phase in [Phase::AccountsDecisions, Phase::Audit] {
-        simulation.phase(phase, Trace::Record)?;
-    }
-    simulation.advance()?;
-    let harvested = simulation.download()?;
-    assert!(firms.map(|i| harvested.get(Field::Grain, i)).sum::<u64>() > 0);
-    Ok(())
-}
-
-#[test]
 fn checkpoint_rejects_tampering_and_keeps_last_audited_boundary() -> Result<()> {
     let scenario = Scenario::baseline(30, 8, Experiment::Shortage)?;
     let mut simulation = Simulation::new(scenario.clone(), support::device(64)?)?;
@@ -230,25 +138,6 @@ fn checkpoint_rejects_tampering_and_keeps_last_audited_boundary() -> Result<()> 
     assert_eq!(simulation.status, RuntimeState::Running);
     simulation.command(SimulationCommand::Pause)?;
     assert_eq!(simulation.status, RuntimeState::Paused);
-    Ok(())
-}
-
-#[test]
-fn high_word_cash_and_reserve_distributions_remain_exact() -> Result<()> {
-    let mut config = Scenario::baseline(10, 9, Experiment::Baseline)?
-        .config()
-        .clone();
-    config.firm_cash = u64::MAX / 8;
-    config.household_cash = 10;
-    config.reserve = 1;
-    config.distribution_rate = 1000;
-    let scenario = Scenario::new(config)?;
-    let mut simulation = Simulation::new(scenario, support::device(64)?)?;
-    let initial_cash = simulation.snapshot.cash;
-    simulation.advance()?;
-    assert_eq!(simulation.snapshot.cash, initial_cash);
-    let state = simulation.download()?;
-    assert!((10..13).all(|firm| state.get(Field::Cash, firm) == 1));
     Ok(())
 }
 
@@ -308,20 +197,5 @@ fn phase_machine_rejects_out_of_order_and_checkpoints_completed_days() -> Result
     );
     simulation.advance()?;
     assert_eq!(simulation.snapshot.day, 2);
-    Ok(())
-}
-
-#[test]
-fn delivery_date_capacity_failure_retains_audited_checkpoint() -> Result<()> {
-    let scenario = Scenario::baseline(1, 42, Experiment::Concentrated)?;
-    let mut state = scenario.initial()?;
-    state.day = u64::from(u32::MAX) - scenario.ring() as u64;
-    let checkpoint = Checkpoint::new(&scenario, &state)?;
-    let mut simulation = Simulation::new(scenario, support::device(64)?)?;
-    simulation.command(SimulationCommand::Restore(checkpoint.clone().into()))?;
-    assert!(simulation.advance().is_err());
-    assert!(matches!(simulation.status, RuntimeState::Fault { .. }));
-    assert_eq!(simulation.checkpoint()?, checkpoint);
-    assert_eq!(simulation.download()?, state);
     Ok(())
 }

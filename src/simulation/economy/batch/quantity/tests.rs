@@ -13,15 +13,10 @@ enum PriorPattern {
 
 impl PriorPattern {
     fn status(self, slot: usize) -> EventStatus {
-        match self {
-            Self::Accepted => EventStatus::Accepted,
-            Self::Rejected => EventStatus::Rejected,
-            Self::Faulted => EventStatus::Faulted,
-            Self::Mixed => match slot % 7 {
-                0 => EventStatus::Rejected,
-                1 => EventStatus::Faulted,
-                _ => EventStatus::Accepted,
-            },
+        match (self, slot % 7) {
+            (Self::Accepted, _) | (Self::Mixed, 2..) => EventStatus::Accepted,
+            (Self::Rejected, _) | (Self::Mixed, 0) => EventStatus::Rejected,
+            (Self::Faulted, _) | (Self::Mixed, 1) => EventStatus::Faulted,
         }
     }
 }

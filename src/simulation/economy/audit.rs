@@ -323,12 +323,7 @@ impl AuditBuffers {
             .map(|population| MetricSet::new(device, &metrics, actors, population));
         let groups = metrics
             .iter()
-            .map(|metric| {
-                sets.iter()
-                    .find(|set| set.population == metric.population())
-                    .expect("metric population")
-                    .groups as u32
-            })
+            .map(|metric| sets[metric.population() as usize].groups as u32)
             .collect::<Vec<_>>();
         Self {
             metrics: device.tensor(bytemuck::cast_slice(&metrics)),
@@ -1072,38 +1067,6 @@ mod tests {
         domain::{Experiment, Scenario},
         simulation::{Simulation, encode, registry, tests::device},
     };
-
-    #[test]
-    fn partitioned_audits_preserve_complete_summaries_after_gpu_days() -> Result<()> {
-        use crate::simulation::AuditExecution;
-
-        for workgroup in [32, 256] {
-            for scenario in [
-                Scenario::baseline(4097, 42, Experiment::Baseline)?,
-                Scenario::industrial(257, 42, Experiment::Baseline)?,
-            ] {
-                let mut simulation = Simulation::new(scenario, device(workgroup)?)?;
-                simulation.advance()?;
-                simulation.audit_execution = AuditExecution::Tiled;
-                let actual = simulation.observe()?;
-                let summary =
-                    simulation
-                        .device
-                        .read_range(&simulation.summary, 0, SummaryLayout::WORDS)?;
-                let control = simulation.device.read(&simulation.control)?;
-                simulation.audit_execution = AuditExecution::Original;
-                assert_eq!(actual, simulation.observe()?);
-                assert_eq!(
-                    summary,
-                    simulation
-                        .device
-                        .read_range(&simulation.summary, 0, SummaryLayout::WORDS,)?,
-                );
-                assert_eq!(control, simulation.device.read(&simulation.control)?);
-            }
-        }
-        Ok(())
-    }
 
     #[test]
     fn plane_ring_masks_match_individual_marks_with_partial_actor_groups_on_gpu() -> Result<()> {

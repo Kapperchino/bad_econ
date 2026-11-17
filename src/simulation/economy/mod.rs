@@ -470,20 +470,14 @@ fn local(
                         id,
                         shortage,
                     );
-                    let mut fatigue = min(
-                        number(state, config, comptime!(Field::Fatigue as u32), id)
-                            + config.work_fatigue,
-                        POLICY_SCALE,
-                    );
+                    let previous_fatigue =
+                        number(state, config, comptime!(Field::Fatigue as u32), id);
+                    let mut fatigue = min(previous_fatigue + config.work_fatigue, POLICY_SCALE);
                     if number(state, config, comptime!(Field::Employed as u32), id) == 0u32 {
-                        fatigue = max(
-                            number(state, config, comptime!(Field::Fatigue as u32), id),
-                            config.rest_recovery,
-                        ) - config.rest_recovery;
+                        fatigue =
+                            max(previous_fatigue, config.rest_recovery) - config.rest_recovery;
                     }
                     if comptime!(config.household_policy == Feature::Enabled) {
-                        let previous_fatigue =
-                            number(state, config, comptime!(Field::Fatigue as u32), id);
                         let exertion = number(state, config, comptime!(Field::Hours as u32), id)
                             + number(state, config, comptime!(Field::ResearchMinutes as u32), id);
                         fatigue = next_fatigue(KernelFatigue {

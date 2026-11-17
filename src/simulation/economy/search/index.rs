@@ -61,7 +61,7 @@ impl Supply {
                     MarketFlag::Consumer(_) | MarketFlag::Household
                 )
         ) {
-            Self::load(scratch, config, member)
+            Self::load(scratch, member)
         } else {
             Self::new(state, actors, config, actor, parameters.traded_good())
         }
@@ -90,7 +90,7 @@ impl Supply {
         }
     }
 
-    fn store(&self, scratch: &mut [u32], _config: &EconomyConfig, member: u32) {
+    fn store(&self, scratch: &mut [u32], member: u32) {
         let base = member * 4;
         scratch[(base + comptime!(SupplyField::Quote as u32)) as usize] = self.quote;
         scratch[(base + comptime!(SupplyField::AvailableLow as u32)) as usize] =
@@ -101,7 +101,7 @@ impl Supply {
             u32::cast_from(self.offered) | (u32::cast_from(self.producer) << 1);
     }
 
-    pub fn load(scratch: &[u32], _config: &EconomyConfig, member: u32) -> Self {
+    pub fn load(scratch: &[u32], member: u32) -> Self {
         let base = member * 4;
         let flags = scratch[(base + comptime!(SupplyField::Flags as u32)) as usize];
         Supply {
@@ -222,7 +222,7 @@ fn build_blocks(
                 successes[markets::filtered_count(config.actors, actor) as usize].store(0);
             }
             let supply = Supply::new(state, actors, config, actor, good);
-            supply.store(scratch, config, member);
+            supply.store(scratch, member);
             let quote = supply.quote;
             if good == comptime!(Good::Bread as u32) {
                 minimum_quote = min(minimum_quote, quote);

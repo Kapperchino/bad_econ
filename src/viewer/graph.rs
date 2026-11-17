@@ -169,7 +169,7 @@ impl Geometry {
                 3.0 + (1.0 - range.fraction(value) as f32) * (size.y - 6.0).max(0.0),
             )
         };
-        let points = history
+        let last = history
             .iter()
             .enumerate()
             .filter(|(_, snapshot)| (range.first_day..=range.last_day).contains(&snapshot.day))
@@ -183,20 +183,20 @@ impl Geometry {
                     .map(|value| point(snapshot.day, value))
                     .collect::<Vec<_>>()
             })
-            .collect::<Vec<_>>();
-        points.windows(2).for_each(|pair| {
-            pair[0]
-                .iter()
-                .zip(&pair[1])
-                .enumerate()
-                .filter(|(series, (from, to))| {
-                    range.selection.includes(*series) && from.is_finite() && to.is_finite()
-                })
-                .for_each(|(series, (&from, &to))| {
-                    self.line(from, to, style.color(chart_color(chart, series)));
-                });
-        });
-        if let Some(last) = points.last() {
+            .reduce(|previous, current| {
+                previous
+                    .iter()
+                    .zip(&current)
+                    .enumerate()
+                    .filter(|(series, (from, to))| {
+                        range.selection.includes(*series) && from.is_finite() && to.is_finite()
+                    })
+                    .for_each(|(series, (&from, &to))| {
+                        self.line(from, to, style.color(chart_color(chart, series)));
+                    });
+                current
+            });
+        if let Some(last) = last {
             last.iter()
                 .enumerate()
                 .filter(|(series, point)| range.selection.includes(*series) && point.is_finite())

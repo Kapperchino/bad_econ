@@ -571,7 +571,6 @@ pub(super) fn scaled_output(
     actor: u32,
     output: Ticks,
 ) -> Ticks {
-    let mut scaled = output;
     let plots = number(state, config, comptime!(Field::OccupiedPlots as u32), actor);
     if plots > 1 {
         let mut bonus = 0u32;
@@ -597,7 +596,7 @@ pub(super) fn scaled_output(
             multiply(control, whole, bonus),
             ticks(fractional / 1000, 0),
         );
-        scaled = add_checked(control, output, extra);
+        let scaled = add_checked(control, output, extra);
         set32(
             state,
             config,
@@ -605,8 +604,10 @@ pub(super) fn scaled_output(
             actor,
             fractional % 1000,
         );
+        scaled
+    } else {
+        output
     }
-    scaled
 }
 
 #[cube]

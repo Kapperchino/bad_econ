@@ -184,11 +184,12 @@ pub(super) fn harvest(
         completed,
     );
     let ready = harvesting(config, day);
-    let mut yield_ticks = zero();
-    if ready {
-        yield_ticks = HarvestYield::new(config).quantity(control, pending);
-        yield_ticks = wheat_harvest(state, config, control, actor, day, good, yield_ticks);
-    }
+    let yield_ticks = if ready {
+        let available = HarvestYield::new(config).quantity(control, pending);
+        wheat_harvest(state, config, control, actor, day, good, available)
+    } else {
+        zero()
+    };
     set(
         state,
         config,
@@ -209,7 +210,6 @@ fn wheat_harvest(
     good: u32,
     available: Ticks,
 ) -> Ticks {
-    let mut quantity = available;
     let metric_crop = select(config.wheat_kg_per_hectare > 0, good, 0u32);
     if metric_crop == comptime!(Good::Grain as u32) {
         let hectares = add_checked(
@@ -232,7 +232,7 @@ fn wheat_harvest(
         let method = number(state, config, comptime!(Field::ActiveMethod as u32), actor);
         let yield_per_hectare = config.wheat_kg_per_hectare * select(method > 0, 2u32, 1u32);
         let maximum = multiply(control, hectares, yield_per_hectare);
-        quantity = minimum(quantity, positive(maximum, previous));
+        let quantity = minimum(available, positive(maximum, previous));
         set32(
             state,
             config,
@@ -248,6 +248,8 @@ fn wheat_harvest(
             actor,
             total,
         );
+        quantity
+    } else {
+        available
     }
-    quantity
 }

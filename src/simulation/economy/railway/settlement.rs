@@ -142,8 +142,8 @@ pub struct Buffers {
 }
 
 impl Buffers {
-    pub(in crate::simulation) fn graph_buffers(&self) -> Vec<CubeTensor> {
-        vec![
+    pub(in crate::simulation) fn graph_buffers(&self) -> [CubeTensor; 7] {
+        [
             self.resources.clone(),
             self.accounts.clone(),
             self.bookings.clone(),

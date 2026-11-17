@@ -168,17 +168,11 @@ impl Sensitivity {
         device: &Device,
         change: FiniteLaborChange<'_>,
     ) -> Result<DeviceSignedMatrix> {
-        let alias = |matrix: &DeviceMatrix| DeviceMatrix {
-            data: matrix.data.clone(),
-            rows: matrix.rows,
-            columns: matrix.columns,
-            scale: matrix.scale,
-        };
         let goods =
-            DeviceSignedMatrix::difference(alias(change.new_goods), alias(change.old_goods))?;
+            DeviceSignedMatrix::difference(change.new_goods.clone(), change.old_goods.clone())?;
         let direct_labor = DeviceSignedMatrix::difference(
-            alias(change.new_direct_labor),
-            alias(change.old_direct_labor),
+            change.new_direct_labor.clone(),
+            change.old_direct_labor.clone(),
         )?;
         Self::labor(
             device,
@@ -454,12 +448,7 @@ impl LaborTruncation {
                             &SparseMatrix::new(labor.rows, labor.columns, Vec::new())?,
                             labor.scale,
                         )?;
-                        let mut term = DeviceMatrix {
-                            data: labor.data.clone(),
-                            rows: labor.rows,
-                            columns: labor.columns,
-                            scale: labor.scale,
-                        };
+                        let mut term = labor.clone();
                         for retained in 0..terms.0 {
                             partial = partial.add(device, &term)?;
                             if retained + 1 < terms.0 {

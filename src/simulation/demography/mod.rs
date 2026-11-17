@@ -48,6 +48,23 @@ impl PersonLayout {
     const FATIGUE: usize = offset_of!(Self, fatigue) / WORD_BYTES;
     const EXPOSURE: usize = offset_of!(Self, exposure) / WORD_BYTES;
     const COOLDOWN: usize = offset_of!(Self, cooldown) / WORD_BYTES;
+
+    fn living_state(&self) -> Result<LivingState> {
+        let cause = match self.cause {
+            0 => None,
+            1 => Some(DeathCause::Background),
+            2 => Some(DeathCause::Occupational),
+            3 => Some(DeathCause::Famine),
+            4 => Some(DeathCause::Cold),
+            _ => Err(anyhow!("invalid mortality cause"))?,
+        };
+        Ok(
+            cause.map_or(LivingState::Living, |cause| LivingState::Deceased {
+                day: self.death_day.into(),
+                cause,
+            }),
+        )
+    }
 }
 
 #[derive(CubeType, CubeLaunch, Clone, Copy)]
@@ -415,26 +432,7 @@ impl DemographyRuntime {
             .iter()
             .take(self.count)
             .map(|person| {
-                let cause = match person.cause {
-                    0 => LivingState::Living,
-                    1 => LivingState::Deceased {
-                        day: person.death_day.into(),
-                        cause: DeathCause::Background,
-                    },
-                    2 => LivingState::Deceased {
-                        day: person.death_day.into(),
-                        cause: DeathCause::Occupational,
-                    },
-                    3 => LivingState::Deceased {
-                        day: person.death_day.into(),
-                        cause: DeathCause::Famine,
-                    },
-                    4 => LivingState::Deceased {
-                        day: person.death_day.into(),
-                        cause: DeathCause::Cold,
-                    },
-                    _ => Err(anyhow!("invalid mortality cause"))?,
-                };
+                let living_state = person.living_state()?;
                 Ok(Person {
                     identity: u64::from(person.identity[0]) | (u64::from(person.identity[1]) << 32),
                     household: state.actors.at(person.household as usize).identity,
@@ -443,7 +441,7 @@ impl DemographyRuntime {
                         0 => Sex::Female,
                         _ => Sex::Male,
                     },
-                    state: cause,
+                    state: living_state,
                     employer: person
                         .employer
                         .checked_sub(1)

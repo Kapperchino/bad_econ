@@ -20,7 +20,7 @@ impl EntryRequests {
             .copied()
             .filter(|record| Self::is_entry(record.request))
             .collect::<Vec<_>>();
-        let sources = requests.iter().all(|record| match record.request >> 24 {
+        let sources = entries.iter().all(|record| match record.request >> 24 {
             8 | 9 => (1..=actors as u32).contains(&(record.request & 0x00ffffff)),
             _ => true,
         });
@@ -169,6 +169,12 @@ impl EntryBatch {
         }
         enterprise::enter(&mut compact, scenario, &compact_requests)?;
         let before = metadata.actors.len();
+        let global_actor = |index: usize| {
+            selected
+                .get(index)
+                .copied()
+                .unwrap_or_else(|| before + index - selected.len())
+        };
         let formations = enterprise::form_households(&mut compact, scenario, &compact_requests)?
             .into_iter()
             .map(|formation| enterprise::HouseholdFormation {
@@ -207,10 +213,7 @@ impl EntryBatch {
         grown
             .actors
             .extend(compact.actors.iter_from(selected.len()).map(|mut actor| {
-                actor.owner = match (actor.owner as usize) < selected.len() {
-                    true => selected[actor.owner as usize] as u32,
-                    false => (before + actor.owner as usize - selected.len()) as u32,
-                };
+                actor.owner = global_actor(actor.owner as usize) as u32;
                 actor
             }));
         grown.next_identity = compact.next_identity;
@@ -239,10 +242,7 @@ impl EntryBatch {
         }
         let indices = patches
             .iter()
-            .map(|&index| match index < selected.len() {
-                true => selected[index] as u32,
-                false => (before + index - selected.len()) as u32,
-            })
+            .map(|&index| global_actor(index) as u32)
             .collect::<Vec<_>>();
         let compact_values = &compact.values;
         let compact_count = compact.actors.len();

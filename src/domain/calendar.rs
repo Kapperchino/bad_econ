@@ -86,10 +86,8 @@ impl CalendarDate {
     pub fn new(year: u64, month: Month, day: u32) -> Result<Self> {
         match year {
             0 => Err(anyhow!("calendar years start at 1")),
-            _ => match (1..=month.days()).contains(&day) {
-                true => Ok(Self { year, month, day }),
-                false => Err(anyhow!("day is outside the selected month")),
-            },
+            _ if (1..=month.days()).contains(&day) => Ok(Self { year, month, day }),
+            _ => Err(anyhow!("day is outside the selected month")),
         }
     }
 

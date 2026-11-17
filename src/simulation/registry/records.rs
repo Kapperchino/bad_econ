@@ -71,14 +71,7 @@ impl PendingRecords {
         );
         let count = device.read_range(output, 0, 1)?[0] as usize;
         let words = device.read_range(output, 1, count * 3)?;
-        let records = words
-            .chunks_exact(3)
-            .map(|row| PendingRecord {
-                actor: row[0],
-                request: row[1],
-                birth: row[2],
-            })
-            .collect();
+        let records = bytemuck::cast_slice::<u32, PendingRecord>(&words).to_vec();
         Ok(Self {
             records,
             readback_bytes: ((1 + count * 3) * size_of::<u32>()) as u64,

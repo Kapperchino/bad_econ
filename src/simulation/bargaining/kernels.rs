@@ -292,9 +292,8 @@ fn evaluate(input: &[u32], output: &mut [u32], control: &[Atomic<u32>], count: u
             replacements: input[base + RequestLayout::REPLACEMENTS],
         });
         let available = !lt(wages.maximum, wages.minimum);
-        let mut second = zero();
-        if available {
-            second = second_offer(
+        let second = if available {
+            second_offer(
                 read(input, base + RequestLayout::FIRST),
                 read(input, base + RequestLayout::DESIRED),
                 weight,
@@ -302,8 +301,10 @@ fn evaluate(input: &[u32], output: &mut [u32], control: &[Atomic<u32>], count: u
                 wages.maximum,
                 input[base + RequestLayout::QUANTUM],
                 control,
-            );
-        }
+            )
+        } else {
+            zero()
+        };
         write(output, target + ResultLayout::GROSS, gross);
         write(
             output,

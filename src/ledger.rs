@@ -269,46 +269,57 @@ pub enum Decision {
 pub struct Schedule {
     pub frontiers: Vec<Vec<usize>>,
 }
-impl Schedule {
-    pub fn new(events: &[Bundle]) -> Result<Self> {
+
+struct OrderedEvents<'a> {
+    bundles: &'a [Bundle],
+}
+
+impl<'a> OrderedEvents<'a> {
+    fn new(events: &'a [Bundle]) -> Result<Self> {
         match events.windows(2).all(|pair| pair[0].key < pair[1].key) {
             false => Err(anyhow!(
                 "event identities must be unique and canonically ordered"
             )),
-            true => {
-                let mut incidences = events
-                    .iter()
-                    .enumerate()
-                    .flat_map(|(index, bundle)| {
-                        bundle.legs.iter().map(move |leg| (leg.coordinate, index))
-                    })
-                    .collect::<Vec<_>>();
-                incidences.sort_unstable();
-                let mut predecessors = vec![Vec::<usize>::new(); events.len()];
-                incidences
-                    .windows(2)
-                    .filter(|pair| pair[0].0 == pair[1].0)
-                    .for_each(|pair| predecessors[pair[1].1].push(pair[0].1));
-                let mut levels = vec![0; events.len()];
-                (0..events.len()).for_each(|event| {
-                    levels[event] = predecessors[event]
-                        .iter()
-                        .map(|&p| levels[p] + 1)
-                        .max()
-                        .unwrap_or(0)
-                });
-                let mut frontiers = vec![Vec::new(); levels.iter().max().map_or(0, |n| n + 1)];
-                levels
-                    .iter()
-                    .enumerate()
-                    .for_each(|(event, &level)| frontiers[level].push(event));
-                Ok(Self { frontiers })
-            }
+            true => Ok(Self { bundles: events }),
         }
     }
 }
 
+impl Schedule {
+    pub fn new(events: &[Bundle]) -> Result<Self> {
+        let events = OrderedEvents::new(events)?.bundles;
+        let mut incidences = events
+            .iter()
+            .enumerate()
+            .flat_map(|(index, bundle)| bundle.legs.iter().map(move |leg| (leg.coordinate, index)))
+            .collect::<Vec<_>>();
+        incidences.sort_unstable();
+        let mut predecessors = vec![Vec::<usize>::new(); events.len()];
+        incidences
+            .windows(2)
+            .filter(|pair| pair[0].0 == pair[1].0)
+            .for_each(|pair| predecessors[pair[1].1].push(pair[0].1));
+        let mut levels = vec![0; events.len()];
+        (0..events.len()).for_each(|event| {
+            levels[event] = predecessors[event]
+                .iter()
+                .map(|&p| levels[p] + 1)
+                .max()
+                .unwrap_or(0)
+        });
+        let mut frontiers = vec![Vec::new(); levels.iter().max().map_or(0, |n| n + 1)];
+        levels
+            .iter()
+            .enumerate()
+            .for_each(|(event, &level)| frontiers[level].push(event));
+        Ok(Self { frontiers })
+    }
+}
+
 pub fn serial(state: &mut [u64], events: &[Bundle]) -> Result<Vec<Decision>> {
-    let _schedule = Schedule::new(events)?;
-    events.iter().map(|event| event.apply(state)).collect()
+    OrderedEvents::new(events)?
+        .bundles
+        .iter()
+        .map(|event| event.apply(state))
+        .collect()
 }

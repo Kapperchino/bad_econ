@@ -27,13 +27,12 @@ impl FuelSearchRotation {
     pub(super) fn member(&self, sample: u32) -> u32 {
         let offset = sample * (self.length / self.samples)
             + sample * (self.length % self.samples) / self.samples;
-        let rotated = if self.origin <= u32::MAX - (max(self.length, 1) - 1) {
+        if self.origin <= u32::MAX - (max(self.length, 1) - 1) {
             let shifted = self.rotation + offset;
             select(shifted < self.length, shifted, shifted - self.length)
         } else {
             (offset + self.origin) % self.length
-        };
-        rotated
+        }
     }
 }
 
@@ -56,7 +55,6 @@ pub(super) fn durable_target(
     good: u32,
     budget: Ticks,
 ) -> Ticks {
-    let mut target = ticks(1, 0);
     if scaled_luxury(config, good) {
         let quote = pricing::replacement_quote(
             state, actors, config, spatial, control, parameters, household, good,
@@ -68,21 +66,22 @@ pub(super) fn durable_target(
             divide(budget, 180),
             interval + config.coverage + config.ring,
         );
-        target = maximum(divide(allowance, max(price, 1)), target);
+        maximum(divide(allowance, max(price, 1)), ticks(1, 0))
+    } else {
+        ticks(1, 0)
     }
-    target
 }
 
 #[cube]
 pub(super) fn durable_use(config: &EconomyConfig, stock: Ticks, good: u32, day: u32) -> Ticks {
-    let mut used = minimum(stock, ticks(1, 0));
     if scaled_luxury(config, good) {
         let interval = max(config.consumption_intervals[good as usize - 1], 1);
         let whole = divide(stock, interval);
         let remainder = minus(stock, times(whole, interval).value).extract(LOW_WORD);
-        used = plus(whole, ticks(u32::cast_from(day % interval < remainder), 0)).value;
+        plus(whole, ticks(u32::cast_from(day % interval < remainder), 0)).value
+    } else {
+        minimum(stock, ticks(1, 0))
     }
-    used
 }
 
 #[cube]
@@ -161,7 +160,6 @@ pub(super) fn budget(
             0u32,
         ),
     );
-    let mut available = cash;
     if basic > 0 {
         let stock = add_checked(
             control,
@@ -184,9 +182,10 @@ pub(super) fn budget(
                 config.coverage + config.ring,
             ),
         );
-        available = select(equal(stock, zero()), zero(), positive(cash, reserve));
+        select(equal(stock, zero()), zero(), positive(cash, reserve))
+    } else {
+        cash
     }
-    available
 }
 
 #[cube]

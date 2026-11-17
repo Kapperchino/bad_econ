@@ -209,15 +209,16 @@ pub struct Configuration {
 }
 impl Configuration {
     pub(super) fn graph_buffers(&self) -> Vec<burn_wgpu::CubeTensor> {
-        let mut buffers = vec![
+        [
             self.consumption_intervals.clone(),
             self.price_table.clone(),
             self.property_regions.clone(),
             self.grain_farms.clone(),
             self.rental_accounts.clone(),
-        ];
-        buffers.extend(self.railway.graph_buffers());
-        buffers
+        ]
+        .into_iter()
+        .chain(self.railway.graph_buffers())
+        .collect()
     }
 
     pub fn new(device: &super::Device, scenario: &Scenario, state: &State) -> Self {

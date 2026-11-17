@@ -748,9 +748,7 @@ pub fn observe(
             category = select(selected && owner, 2u32, category);
             category = select(dependent, 4u32, category);
             output[shard + 8 + category as usize].fetch_add(1);
-            output[shard + 1].fetch_add(u32::cast_from(
-                age < policy.parameters.minimum_age || age >= policy.parameters.retirement_age,
-            ));
+            output[shard + 1].fetch_add(u32::cast_from(dependent));
         } else {
             match cause {
                 1 => {

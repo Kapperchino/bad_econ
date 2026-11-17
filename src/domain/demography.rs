@@ -196,12 +196,6 @@ impl DemographicPolicy {
         let households = state
             .actors
             .iter()
-            .filter(|actor| actor.kind == 0)
-            .map(|actor| actor.identity)
-            .collect::<BTreeSet<_>>();
-        let fatigue = state
-            .actors
-            .iter()
             .enumerate()
             .filter(|(_, actor)| actor.kind == 0)
             .map(|(index, actor)| {
@@ -213,7 +207,7 @@ impl DemographicPolicy {
             .collect::<std::collections::BTreeMap<_, _>>();
         let seeds = match self.people.is_empty() {
             true => households
-                .iter()
+                .keys()
                 .enumerate()
                 .flat_map(|(index, &household)| {
                     (0..self.initial_household_members).map(move |member| PersonSeed {
@@ -244,7 +238,7 @@ impl DemographicPolicy {
             .map(|actor| actor.identity)
             .collect::<BTreeSet<_>>();
         let valid = seeds.iter().all(|person| {
-            households.contains(&person.household)
+            households.contains_key(&person.household)
                 && person.age_days <= 150 * DAYS_PER_YEAR
                 && (1..u64::MAX).contains(&person.identity)
         }) && identities.len() == seeds.len()
@@ -260,7 +254,7 @@ impl DemographicPolicy {
                     state: LivingState::Living,
                     employer: None,
                     work_minutes: 0,
-                    fatigue: fatigue[&seed.household],
+                    fatigue: households[&seed.household],
                     famine_exposure: 0,
                     cold_exposure: 0,
                     birth_cooldown: 0,
@@ -388,10 +382,7 @@ impl PopulationObservation {
                             _ => Occupation::OtherAdult,
                         };
                         observation.occupations[category as usize] += 1;
-                        observation.dependents += u64::from(
-                            person.age_days < policy.minimum_work_age_years * DAYS_PER_YEAR
-                                || person.age_days >= policy.retirement_age_years * DAYS_PER_YEAR,
-                        );
+                        observation.dependents += u64::from(category == Occupation::Dependent);
                     }
                     LivingState::Deceased { cause, .. } => {
                         observation.deaths[cause as usize - 1] += 1

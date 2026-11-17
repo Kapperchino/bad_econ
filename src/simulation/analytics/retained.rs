@@ -155,10 +155,7 @@ impl InventoryHorizon {
                 let initial = regime.labor_requirements.apply(device, opening)?;
                 let reconciled_hours = DeviceSignedVector::difference(
                     final_and_project_hours.add(device, &terminal)?,
-                    DeviceVector {
-                        data: initial.data.clone(),
-                        length: initial.length,
-                    },
+                    initial.clone(),
                 )?;
                 let reconciliation_residual = DeviceSignedVector::difference(
                     actual_hours.add(device, &initial)?,
@@ -261,12 +258,7 @@ impl AugmentedInverse {
                         .add(device, &goods_from_labor.product(device, &labor)?)?,
                     goods_from_labor,
                     labor_from_goods: blocks.reproduction_inverse.product(device, &labor)?,
-                    labor_from_labor: DeviceMatrix {
-                        data: blocks.reproduction_inverse.data.clone(),
-                        rows: blocks.reproduction_inverse.rows,
-                        columns: blocks.reproduction_inverse.columns,
-                        scale: blocks.reproduction_inverse.scale,
-                    },
+                    labor_from_labor: blocks.reproduction_inverse.clone(),
                 })
             }
         }

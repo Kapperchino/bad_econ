@@ -65,14 +65,20 @@ pub fn price(
 }
 pub fn table_hash() -> String {
     hex(&Sha256::digest(
-        PRICE_TABLE
-            .iter()
-            .flat_map(|v| v.to_le_bytes())
-            .collect::<Vec<_>>(),
+        PRICE_TABLE.map(u32::to_le_bytes).as_flattened(),
     ))
 }
 pub fn hex(bytes: &[u8]) -> String {
-    bytes.iter().map(|b| format!("{b:02x}")).collect()
+    const DIGITS: &[u8; 16] = b"0123456789abcdef";
+    bytes
+        .iter()
+        .flat_map(|&byte| {
+            [
+                char::from(DIGITS[usize::from(byte >> 4)]),
+                char::from(DIGITS[usize::from(byte & 15)]),
+            ]
+        })
+        .collect()
 }
 
 #[derive(Clone, Copy, Debug, Serialize, Deserialize, PartialEq, Eq)]
@@ -121,16 +127,13 @@ impl Probability {
             .checked_shl(bits)
             .filter(|_| bits <= 64)
             .context("at most 64 draw bits")?;
-        match u128::from(draw) < range {
-            true => {
-                match self.numerator {
-                    0 => Ok(false),
-                    numerator if numerator == self.denominator => Ok(true),
-                    numerator => Ok(u128::from(draw)
-                        < range * u128::from(numerator) / u128::from(self.denominator)),
-                }
+        match (u128::from(draw) < range, self.numerator) {
+            (false, _) => Err(anyhow!("draw exceeds its declared bit width")),
+            (true, 0) => Ok(false),
+            (true, numerator) if numerator == self.denominator => Ok(true),
+            (true, numerator) => {
+                Ok(u128::from(draw) < range * u128::from(numerator) / u128::from(self.denominator))
             }
-            false => Err(anyhow!("draw exceeds its declared bit width")),
         }
     }
 }

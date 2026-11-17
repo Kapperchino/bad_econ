@@ -219,13 +219,7 @@ pub fn post_bank_payments(
             amount: payment.amount.into(),
         })
         .collect::<Vec<_>>();
-    let input = device.tensor(
-        &bytemuck::cast_slice(&records)
-            .iter()
-            .copied()
-            .chain(std::iter::once(0))
-            .collect::<Vec<_>>(),
-    );
+    let input = padded(device, bytemuck::cast_slice(&records));
     let events = device.empty((payments.len() * EVENT_WORDS).max(MIN_BUFFER_WORDS));
     let scratch =
         device.empty((payments.len() * ScratchLayout::WORDS_PER_EVENT).max(MIN_BUFFER_WORDS));

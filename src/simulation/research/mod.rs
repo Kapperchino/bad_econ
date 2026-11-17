@@ -62,6 +62,19 @@ pub struct StrikeObservation {
     pub participation: Participation,
 }
 
+impl From<&SummaryLayout> for ResearchSummary {
+    fn from(summary: &SummaryLayout) -> Self {
+        Self {
+            consumed: summary.consumed.map(u64::from),
+            attempts: summary.attempts.into(),
+            discoveries: summary.discoveries.into(),
+            remaining_service: summary.remaining_service.into(),
+            natural_stock: summary.natural_stock.into(),
+            striking: summary.striking.into(),
+        }
+    }
+}
+
 struct SnapshotOffsets {
     projects: usize,
     machines: usize,
@@ -251,7 +264,7 @@ impl EncodedResearch {
             labs.push(LabLayout {
                 first_method,
                 method_count: methods.len() as u32 - first_method,
-                owner: actor_index(lab.owner)? as u32,
+                owner: firm as u32,
                 researcher: actor_index(lab.researcher)? as u32,
                 first_project: projects.len() as u32,
                 project_count: lab.projects.len() as u32,
@@ -690,14 +703,7 @@ impl ResearchRuntime {
         self.readback_bytes
             .set(self.readback_bytes.get() + (SummaryLayout::WORDS * 4) as u64);
         let summary: &SummaryLayout = bytemuck::from_bytes(bytemuck::cast_slice(&words));
-        Ok(ResearchSummary {
-            consumed: summary.consumed.map(u64::from),
-            attempts: summary.attempts.into(),
-            discoveries: summary.discoveries.into(),
-            remaining_service: summary.remaining_service.into(),
-            natural_stock: summary.natural_stock.into(),
-            striking: summary.striking.into(),
-        })
+        Ok(summary.into())
     }
 
     pub fn snapshot(&self, device: &Device) -> Result<ResearchSnapshot> {
@@ -737,14 +743,7 @@ impl ResearchRuntime {
             table_hash: RESEARCH_TABLE_HASH.into(),
             configuration_hash: self.configuration_hash.clone(),
             words: device.read(&self.audited)?,
-            summary: ResearchSummary {
-                consumed: summary.consumed.map(u64::from),
-                attempts: summary.attempts.into(),
-                discoveries: summary.discoveries.into(),
-                remaining_service: summary.remaining_service.into(),
-                natural_stock: summary.natural_stock.into(),
-                striking: summary.striking.into(),
-            },
+            summary: summary.into(),
         })
     }
 

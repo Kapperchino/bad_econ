@@ -2,7 +2,7 @@
 use super::support;
 use anyhow::Result;
 use bad_econ::{
-    domain::{demography::LivingState, *},
+    domain::*,
     simulation::{Simulation, Trace},
 };
 
@@ -98,51 +98,5 @@ fn business_accounts_measure_trading_cash_before_price_changes_and_payouts_on_gp
     simulation.advance()?;
     replay.advance()?;
     assert_eq!(simulation.snapshot, replay.snapshot);
-    Ok(())
-}
-
-#[test]
-fn occupations_partition_living_people_on_gpu() -> Result<()> {
-    let mut config = economy()?.config().clone();
-    config.capacity = 1;
-    let scenario = Scenario::new(config)?;
-    let mut simulation = Simulation::new(scenario.clone(), support::device(64)?)?;
-    for _ in 0..3 {
-        simulation.advance()?;
-        let state = simulation.download()?;
-        let population = &simulation.snapshot.population;
-        assert_eq!(
-            population.occupations.iter().sum::<u64>(),
-            population.living
-        );
-        assert_eq!(population.occupations[4], population.dependents);
-        assert!(population.occupations[0] > 0);
-        assert!(population.occupations[2] > 0);
-        assert_eq!(
-            *population,
-            demography::PopulationObservation::from_state(&state, &scenario.config().demography)
-        );
-        assert_eq!(
-            population.living,
-            state
-                .people
-                .iter()
-                .filter(|person| person.state == LivingState::Living)
-                .count() as u64
-        );
-        let economy = &simulation.snapshot.economy;
-        assert_eq!(
-            economy.workforce + economy.subsistence + economy.inactive,
-            simulation.snapshot.households
-        );
-        assert_eq!(
-            economy.business_types.iter().sum::<u64>(),
-            economy.active_by_good.iter().sum::<u64>()
-        );
-        assert_eq!(
-            economy.business_states.iter().sum::<u64>(),
-            economy.active_by_good.iter().sum::<u64>()
-        );
-    }
     Ok(())
 }

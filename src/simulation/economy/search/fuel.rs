@@ -207,7 +207,7 @@ pub(super) fn search(
                                     }
                                 };
                                 let firm = spatial[(side * side + 1 + member) as usize];
-                                let supply = index::Supply::load(scratch, config, member);
+                                let supply = index::Supply::load(scratch, member);
                                 let distance =
                                     if comptime!(parameters.market == MarketFlag::Household) {
                                         let seller_x = searches[(index::HOUSEHOLD_X_FIELD

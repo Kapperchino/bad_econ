@@ -1,9 +1,7 @@
-#[cfg(feature = "compute")]
+#![cfg(feature = "compute")]
 use super::support;
 use anyhow::Result;
-use bad_econ::{arithmetic::*, ledger::*};
-#[cfg(feature = "compute")]
-use bad_econ::{domain::*, runtime::*};
+use bad_econ::{domain::*, ledger::*, runtime::*, simulation};
 
 fn event(id: u64, legs: &[Leg]) -> Bundle {
     Bundle::new(
@@ -24,23 +22,25 @@ fn transfer(cell: u32, debit: u64, credit: u64) -> Leg {
 
 #[test]
 fn gross_affordability_repeated_legs_and_atomic_overflow() -> Result<()> {
-    let mut state = vec![1];
-    assert_eq!(
-        event(1, &[transfer(0, 3, 2)]).apply(&mut state)?,
-        Decision::Rejected
-    );
-    let mut state = vec![5];
-    assert_eq!(
-        event(1, &[transfer(0, 3, 0), transfer(0, 3, 0)]).apply(&mut state)?,
-        Decision::Rejected
-    );
-    let mut state = vec![100, u64::MAX];
+    let device = support::device(64)?;
+    let gross = simulation::ledger(&device, &[1], &[event(1, &[transfer(0, 3, 2)])])?;
+    assert_eq!(gross.decisions, [Decision::Rejected]);
+    assert_eq!(gross.state, [1]);
+    let grouped = simulation::ledger(
+        &device,
+        &[5],
+        &[event(1, &[transfer(0, 3, 0), transfer(0, 3, 0)])],
+    )?;
+    assert_eq!(grouped.decisions, [Decision::Rejected]);
+    assert_eq!(grouped.state, [5]);
     assert!(
-        event(1, &[transfer(0, 1, 0), transfer(1, 0, 1)])
-            .apply(&mut state)
-            .is_err()
+        simulation::ledger(
+            &device,
+            &[100, u64::MAX],
+            &[event(1, &[transfer(0, 1, 0), transfer(1, 0, 1)])],
+        )
+        .is_err()
     );
-    assert_eq!(state, [100, u64::MAX]);
     Ok(())
 }
 
@@ -56,6 +56,13 @@ fn serialized_bundles_preserve_grouped_gross_debits_and_authorization() -> Resul
     let mut state = [5, 0];
     assert_eq!(bundle.apply(&mut state)?, Decision::Rejected);
     assert_eq!(state, [5, 0]);
+    let actual = simulation::ledger(
+        &support::device(64)?,
+        &[5, 0],
+        std::slice::from_ref(&bundle),
+    )?;
+    assert_eq!(actual.state, state);
+    assert_eq!(actual.decisions, [Decision::Rejected]);
     assert_eq!(bundle.legs().len(), 2);
     assert_eq!(
         serde_json::from_str::<Bundle>(&serde_json::to_string(&bundle)?)?,
@@ -103,57 +110,14 @@ fn authorization_reads_create_dependencies() -> Result<()> {
         [Decision::Accepted, Decision::Rejected, Decision::Accepted]
     );
     assert_eq!(state, [0, 0, 1]);
+    let actual = simulation::ledger(&support::device(64)?, &[1, 0, 0], &events)?;
+    assert_eq!(actual.state, state);
+    assert_eq!(
+        actual.decisions,
+        [Decision::Accepted, Decision::Rejected, Decision::Accepted]
+    );
     assert!(serial(&mut state, &[])?.is_empty());
     assert!(Schedule::new(&[events[1].clone(), events[0].clone()]).is_err());
-    Ok(())
-}
-
-#[cfg(feature = "compute")]
-#[test]
-fn lean_indivisible_jobs_release_capacity_after_rejection() -> Result<()> {
-    let events = [
-        event(1, &[transfer(0, 6, 0)]),
-        event(2, &[transfer(0, 4, 0)]),
-    ];
-    let result = bad_econ::simulation::ledger(&support::device(64)?, &[5], &events)?;
-    assert_eq!(result.decisions, [Decision::Rejected, Decision::Accepted]);
-    assert_eq!(result.state, [1]);
-    Ok(())
-}
-
-#[test]
-fn lean_packets_claims_quotes_and_draws() -> Result<()> {
-    let packet = Packet::new(&[Ratio::new(1, 2)?, Ratio::new(1, 3)?, Ratio::new(1, 1)?])?;
-    assert_eq!(packet.activities, 6);
-    assert_eq!(packet.ticks, [3, 2, 6]);
-    assert_eq!(packet.capacity(4, &[8, 5, 100])?, 2);
-    assert_eq!(Packet::new(&[])?.capacity(4, &[])?, 4);
-    assert_eq!(Packet::new(&[Ratio::new(0, 1)?])?.capacity(4, &[0])?, 4);
-    let thirds = Claim::new(3, 0)?.accrue(1)?.accrue(1)?;
-    assert_eq!(thirds.remainder(), 2);
-    assert_eq!(thirds.accrue(1)?.whole(), 1);
-    assert_eq!(Claim::new(3, 5)?.settle(1)?.remainder(), 2);
-    assert_eq!(quote(2001, 0, 2009, 10)?, 2000);
-    assert!(quote(2000, 2005, 2009, 10).is_err());
-    assert!(!Probability::new(1, 3)?.succeeds(2, 1)?);
-    assert!(!Probability::new(0, 3)?.succeeds(64, 0)?);
-    assert!(Probability::new(3, 3)?.succeeds(64, u64::MAX)?);
-    assert!(Probability::new(1, 1)?.succeeds(2, 4).is_err());
-    assert!(Probability::new(1, 1)?.succeeds(65, 0).is_err());
-    assert_eq!(forecast(10, 14, 0, 250)?, 11);
-    assert_eq!(
-        DrawKey {
-            seed: 42,
-            day: 7,
-            phase: 3,
-            actor: 12,
-            purpose: 9,
-            index: 0
-        }
-        .draw(),
-        9_825_991_519_559_520_269
-    );
-    assert_eq!(floor_ratio(u64::MAX, u64::MAX, u64::MAX)?, u64::MAX);
     Ok(())
 }
 

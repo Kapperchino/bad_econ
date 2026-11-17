@@ -138,12 +138,13 @@ fn household_summaries(
         let summary = &mut households[group];
         summary.count += 1;
         let living = members.get(&actor.identity).copied().unwrap_or(0);
+        let cash = state.get(Field::Cash, index);
         summary.members += living;
         if living > 0 {
             summary.living_accounts += 1;
-            balances[group].push(state.get(Field::Cash, index));
+            balances[group].push(cash);
         }
-        summary.cash += state.get(Field::Cash, index);
+        summary.cash += cash;
         summary.paid += state.get(Field::Employed, index);
         summary.daily_salary += state
             .get(Field::GrossIncome, index)

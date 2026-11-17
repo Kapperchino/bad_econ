@@ -34,20 +34,17 @@ pub(super) fn actor_settlement(
             _ => status.contains(comptime!(EventStatus::Accepted)),
         };
         if eligible {
-            let mut status = KernelEventStatus::new(comptime!(EventStatus::Rejected));
-            match comptime!(parameters.market) {
+            let status = match comptime!(parameters.market) {
                 MarketFlag::Input(_) | MarketFlag::Consumer(_) | MarketFlag::Household => {
-                    status.replace(buyer_settlement(
+                    buyer_settlement(
                         state, actors, config, proposals, control, parameters, actor, other,
                         posting,
-                    ));
+                    )
                 }
-                _ => {
-                    status.replace(event_settlement(
-                        state, actors, config, proposals, control, parameters, id, posting,
-                    ));
-                }
-            }
+                _ => event_settlement(
+                    state, actors, config, proposals, control, parameters, id, posting,
+                ),
+            };
             status.store(scratch, 4 * parameters.count + id);
         }
     }

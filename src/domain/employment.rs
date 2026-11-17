@@ -112,7 +112,7 @@ impl InitialEmployment {
                                     .min(u64::from(config.capacity))
                                     as usize
                             })
-                            .unwrap_or(
+                            .unwrap_or_else(|| {
                                 daily[good]
                                     .div_ceil(u64::from(
                                         super::food::technique(config, super::Good::ALL[good])
@@ -120,8 +120,8 @@ impl InitialEmployment {
                                     ))
                                     .max(1)
                                     .min(u64::from(capacities[good]))
-                                    as usize,
-                            );
+                                    as usize
+                            });
                         slots += capacity;
                         EmployerSlots {
                             actor: config.households as usize + firm,
@@ -129,15 +129,14 @@ impl InitialEmployment {
                         }
                     })
                     .collect();
+                let settlement = InitialSettlement::new(config);
                 Self {
                     employers,
-                    workers: (config.households as usize
-                        / InitialSettlement::new(config).spacing())
-                    .min(slots),
+                    workers: (config.households as usize / settlement.spacing()).min(slots),
                     slots,
                     seasonal_days,
                     household_daily: StartingPrices::configured(config).household_daily(config),
-                    settlement: InitialSettlement::new(config),
+                    settlement,
                 }
             }
             _ => Self::default(),

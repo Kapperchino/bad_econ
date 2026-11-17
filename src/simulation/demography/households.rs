@@ -71,7 +71,10 @@ impl DemographyRuntime {
             ranges: device.tensor(&ranges),
             births: device.tensor(&vec![0; actors]),
             range_counts,
-            ..self.clone()
+            policy: self.policy.clone(),
+            count: self.count,
+            initial_population: self.initial_population,
+            seed: self.seed,
         };
         HouseholdFormationSystem::launch(
             device,

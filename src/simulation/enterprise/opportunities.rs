@@ -72,22 +72,23 @@ impl EntryPlan {
                         technique: Technique::new(60, 0, 24)?,
                         inputs: [None, None],
                     },
-                    EnterpriseModel::Producer => Recipe {
-                        technique: Technique::new(
-                            state.get(Field::BasicLaborMinutes, source) as u32,
-                            state.get(Field::BasicInputTicks, source) as u32,
-                            state.get(Field::BasicOutputTicks, source) as u32,
-                        )?,
-                        inputs: [Field::BasicFirstInput, Field::BasicSecondInput]
-                            .map(|field| match state.get(field, source) {
-                                0 => Ok(None),
-                                index => Good::from_index(index as u32).map(Some),
-                            })
-                            .into_iter()
-                            .collect::<anyhow::Result<Vec<_>>>()?
-                            .try_into()
-                            .expect("two recipe inputs"),
-                    },
+                    EnterpriseModel::Producer => {
+                        let input = |field| match state.get(field, source) {
+                            0 => Ok(None),
+                            index => Good::from_index(index as u32).map(Some),
+                        };
+                        Recipe {
+                            technique: Technique::new(
+                                state.get(Field::BasicLaborMinutes, source) as u32,
+                                state.get(Field::BasicInputTicks, source) as u32,
+                                state.get(Field::BasicOutputTicks, source) as u32,
+                            )?,
+                            inputs: [
+                                input(Field::BasicFirstInput)?,
+                                input(Field::BasicSecondInput)?,
+                            ],
+                        }
+                    }
                 };
                 Self {
                     owner,

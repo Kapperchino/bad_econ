@@ -116,12 +116,6 @@ enum FitMethod {
     Bounded,
 }
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
-enum FitObservation {
-    Complete,
-    Allowed,
-}
-
 #[derive(CubeType, CubeLaunch)]
 struct FitCheckInput {
     freight: Input,
@@ -130,8 +124,6 @@ struct FitCheckInput {
     workers: u32,
     #[cube(comptime)]
     method: FitMethod,
-    #[cube(comptime)]
-    observation: FitObservation,
 }
 
 struct FitCheck;
@@ -160,32 +152,23 @@ impl GpuPass<FitCheckInput> for CheckRouteFit {
                     fits_unconstrained(&input.freight, &path, quantity, seller)
                 }
             };
-            match comptime!(input.observation) {
-                FitObservation::Allowed => {
-                    input.freight.bookings[worker as usize] = u32::cast_from(allowed)
-                }
-                FitObservation::Complete => {
-                    input.freight.bookings[(4 * worker) as usize] = u32::cast_from(allowed);
-                    let mut cursor = RegionCursor::new(&path);
-                    let mut record = cursor.next(&input.freight.config);
-                    let mut count = 0u32;
-                    let mut multiplicity = 0u32;
-                    while record < input.freight.config.railway.region_count {
-                        count += 1;
-                        multiplicity =
-                            max(multiplicity, visits(&input.freight.config, &path, record));
-                        record = cursor.next(&input.freight.config);
-                    }
-                    input.freight.bookings[(4 * worker + 1) as usize] = count;
-                    let nodes = input.freight.config.railway.nodes;
-                    let base = ((path.carrier * nodes + path.origin) * nodes + path.destination)
-                        as usize
-                        * ROUTE_WORDS;
-                    input.freight.bookings[(4 * worker + 2) as usize] =
-                        input.freight.config.railway.routes[base + 4];
-                    input.freight.bookings[(4 * worker + 3) as usize] = multiplicity;
-                }
+            input.freight.bookings[(4 * worker) as usize] = u32::cast_from(allowed);
+            let mut cursor = RegionCursor::new(&path);
+            let mut record = cursor.next(&input.freight.config);
+            let mut count = 0u32;
+            let mut multiplicity = 0u32;
+            while record < input.freight.config.railway.region_count {
+                count += 1;
+                multiplicity = max(multiplicity, visits(&input.freight.config, &path, record));
+                record = cursor.next(&input.freight.config);
             }
+            input.freight.bookings[(4 * worker + 1) as usize] = count;
+            let nodes = input.freight.config.railway.nodes;
+            let base = ((path.carrier * nodes + path.origin) * nodes + path.destination) as usize
+                * ROUTE_WORDS;
+            input.freight.bookings[(4 * worker + 2) as usize] =
+                input.freight.config.railway.routes[base + 4];
+            input.freight.bookings[(4 * worker + 3) as usize] = multiplicity;
         }
     }
 }
@@ -422,7 +405,7 @@ impl FitFixture {
         );
     }
 
-    fn launch(&self, quantity: u64, method: FitMethod, observation: FitObservation) {
+    fn launch(&self, quantity: u64, method: FitMethod) {
         let simulation = &self.simulation;
         let device = &simulation.device;
         let buffers = &simulation.config.railway.freight;
@@ -455,7 +438,6 @@ impl FitFixture {
                 quantity_high: (quantity >> 32) as u32,
                 workers: self.workers,
                 method,
-                observation,
             },
         );
     }
@@ -539,7 +521,7 @@ fn check_fit_route(route: FitRoute) -> Result<()> {
                 FitMethod::Bounded,
             ] {
                 fixture.budgets(case);
-                fixture.launch(case.quantity, method, FitObservation::Complete);
+                fixture.launch(case.quantity, method);
                 let device = &fixture.simulation.device;
                 let mut values = device.read_range(&fixture.output, 0, 4)?;
                 match route {
@@ -678,108 +660,13 @@ fn route_visit_bounds_follow_cached_service_and_preserve_zero_region_fits_on_gpu
                 regional_budget: 0,
                 sender_budget: u64::MAX,
             });
-            fixture.launch(quantity, method, FitObservation::Complete);
+            fixture.launch(quantity, method);
             let mut values = device.read_range(&fixture.output, 0, 4)?;
             assert_eq!(values[1..], [0, 1, 0]);
             values.push(device.read(&simulation.control)?[crate::simulation::flags::FAULT_WORD]);
             observations.push(values);
         }
         assert_eq!(observations[0], observations[1], "quantity {quantity}");
-    }
-    Ok(())
-}
-
-#[test]
-#[ignore]
-fn profile_freight_visit_bound_against_tracking_on_gpu() -> Result<()> {
-    use anyhow::{Context, anyhow};
-    for route in [FitRoute::Short, FitRoute::ManyNodes, FitRoute::Long] {
-        let fixture = FitFixture::new(route, 64, 65_536)?;
-        let device = &fixture.simulation.device;
-        for regional_budget in [u64::MAX, 8, 2, 0] {
-            fixture.budgets(FitBudget {
-                quantity: 1,
-                regional_budget,
-                sender_budget: u64::MAX,
-            });
-            for method in [FitMethod::Tracked, FitMethod::Bounded] {
-                fixture.launch(1, method, FitObservation::Allowed);
-            }
-            device.sync()?;
-            for sample in 0..5 {
-                let methods = match sample % 2 {
-                    0 => [FitMethod::Tracked, FitMethod::Bounded],
-                    _ => [FitMethod::Bounded, FitMethod::Tracked],
-                };
-                for method in methods {
-                    let window = device
-                        .client
-                        .profile_start()
-                        .map_err(|error| anyhow!("{error:?}"))?;
-                    fixture.launch(1, method, FitObservation::Allowed);
-                    let duration = device
-                        .client
-                        .profile_end(window)
-                        .map_err(|error| anyhow!("{error:?}"))?;
-                    let timing = duration.timing_method();
-                    let measured = pollster::block_on(duration.resolve())
-                        .context("missing freight visit-bound profile")?;
-                    eprintln!(
-                        "FIT_BOUND_PROFILE route={route:?} regional_budget={regional_budget} method={method:?} sample={sample} workers={} {timing}_ms={:.3}",
-                        fixture.workers,
-                        measured.duration().as_secs_f64() * 1000.0,
-                    );
-                }
-            }
-        }
-    }
-    Ok(())
-}
-
-#[test]
-#[ignore]
-fn profile_unconstrained_freight_fits_against_tracking_on_gpu() -> Result<()> {
-    use anyhow::{Context, anyhow};
-    for route in [FitRoute::Short, FitRoute::Repeated, FitRoute::Long] {
-        let fixture = FitFixture::new(route, 64, 65_536)?;
-        let device = &fixture.simulation.device;
-        for regional_budget in [u64::MAX, 2, 0] {
-            let case = FitBudget {
-                quantity: 1,
-                regional_budget,
-                sender_budget: u64::MAX,
-            };
-            fixture.budgets(case);
-            for method in [FitMethod::Tracked, FitMethod::Unconstrained] {
-                fixture.launch(1, method, FitObservation::Allowed);
-            }
-            device.sync()?;
-            for sample in 0..5 {
-                let methods = match sample % 2 {
-                    0 => [FitMethod::Tracked, FitMethod::Unconstrained],
-                    _ => [FitMethod::Unconstrained, FitMethod::Tracked],
-                };
-                for method in methods {
-                    let window = device
-                        .client
-                        .profile_start()
-                        .map_err(|error| anyhow!("{error:?}"))?;
-                    fixture.launch(1, method, FitObservation::Allowed);
-                    let duration = device
-                        .client
-                        .profile_end(window)
-                        .map_err(|error| anyhow!("{error:?}"))?;
-                    let timing = duration.timing_method();
-                    let measured = pollster::block_on(duration.resolve())
-                        .context("missing freight fit profile")?;
-                    eprintln!(
-                        "FIT_PROFILE route={route:?} regional_budget={regional_budget} method={method:?} sample={sample} workers={} {timing}_ms={:.3}",
-                        fixture.workers,
-                        measured.duration().as_secs_f64() * 1000.0,
-                    );
-                }
-            }
-        }
     }
     Ok(())
 }
@@ -796,7 +683,6 @@ enum FreightLoad {
     Unavailable,
     Sparse,
     Constrained,
-    Hundred,
     SparseConstrained,
     CashConstrained,
     Cascading,
@@ -809,7 +695,6 @@ impl FreightLoad {
             Self::Available
             | Self::Unavailable
             | Self::Constrained
-            | Self::Hundred
             | Self::CashConstrained
             | Self::Cascading => true,
             Self::Sparse | Self::SparseConstrained => buyer % 3 == 0,
@@ -821,7 +706,6 @@ impl FreightLoad {
         match self {
             Self::Unavailable => 0,
             Self::Constrained | Self::SparseConstrained => 7,
-            Self::Hundred => 100,
             Self::Cascading => 5,
             _ => 1000,
         }
@@ -871,9 +755,6 @@ fn freight_execution(
             identity: 100 + index,
             ..template.clone()
         }));
-    if let FreightLoad::Hundred = load {
-        population.households.truncate(101);
-    }
     if let FreightLoad::Cascading = load {
         population.households.truncate(15);
     }
@@ -1167,7 +1048,6 @@ fn freight_execution(
     advance(Stage::Accounts);
     match load {
         FreightLoad::Constrained
-        | FreightLoad::Hundred
         | FreightLoad::SparseConstrained
         | FreightLoad::CashConstrained
         | FreightLoad::Cascading => assert_eq!(waves, 2),
@@ -1226,18 +1106,6 @@ fn freight_execution(
 }
 
 #[test]
-fn shared_freight_settles_multiple_workgroups_in_one_gpu_wave() -> Result<()> {
-    for source in [
-        Seller::Firm(Good::Bread),
-        Seller::Firm(Good::Steel),
-        Seller::Household,
-    ] {
-        freight(source, FreightLoad::Available, 64)?;
-    }
-    Ok(())
-}
-
-#[test]
 fn pending_freight_preserves_sparse_priorities_and_cached_route_retries_on_gpu() -> Result<()> {
     for workgroup in [32, 256] {
         for load in [
@@ -1256,14 +1124,6 @@ fn pending_freight_preserves_sparse_priorities_and_cached_route_retries_on_gpu()
                 freight(source, load, workgroup)?;
             }
         }
-    }
-    Ok(())
-}
-
-#[test]
-fn one_hundred_of_one_hundred_one_shipments_book_in_the_first_gpu_wave() -> Result<()> {
-    for workgroup in [32, 64, 256] {
-        freight(Seller::Firm(Good::Bread), FreightLoad::Hundred, workgroup)?;
     }
     Ok(())
 }

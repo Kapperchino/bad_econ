@@ -35,12 +35,11 @@ impl Kernel {
             Self::Plane => RoutineStrategy::Plane(BlueprintStrategy::Inferred(PlaneStrategy {
                 independent: false,
             })),
-            Self::Cube => RoutineStrategy::Cube(BlueprintStrategy::Inferred(CubeStrategy {
-                use_planes: false,
-            })),
-            Self::CubePlane => RoutineStrategy::Cube(BlueprintStrategy::Inferred(CubeStrategy {
-                use_planes: true,
-            })),
+            Self::Cube | Self::CubePlane => {
+                RoutineStrategy::Cube(BlueprintStrategy::Inferred(CubeStrategy {
+                    use_planes: matches!(self, Self::CubePlane),
+                }))
+            }
         };
         ReduceStrategy {
             routine,
@@ -97,15 +96,15 @@ impl ReductionCase {
 
     fn input(&self, device: &Device) -> TensorHandle {
         let elements = self.shape.iter().product::<usize>();
-        let bytes = match self.dtypes.input {
-            ElemType::Float(_) => bytemuck::cast_slice(&vec![1.0f32; elements]).to_vec(),
-            _ => bytemuck::cast_slice(&vec![1u32; elements]).to_vec(),
+        let handle = match self.dtypes.input {
+            ElemType::Float(_) => device
+                .client
+                .create_from_slice(bytemuck::cast_slice(&vec![1.0f32; elements])),
+            _ => device
+                .client
+                .create_from_slice(bytemuck::cast_slice(&vec![1u32; elements])),
         };
-        TensorHandle::new_contiguous(
-            self.shape.clone(),
-            device.client.create_from_slice(&bytes),
-            self.dtypes.input,
-        )
+        TensorHandle::new_contiguous(self.shape.clone(), handle, self.dtypes.input)
     }
 
     fn check(&self, bytes: &[u8]) -> Result<()> {
@@ -174,11 +173,11 @@ fn main() -> Result<()> {
             .plane
             .contains(Plane::Ops)
             && case.dtypes.accumulation.size() == 4;
-        let kernels = match plane_support {
-            true => vec![Kernel::Unit, Kernel::Plane, Kernel::Cube, Kernel::CubePlane],
-            false => vec![Kernel::Unit, Kernel::Cube],
+        let kernels: &[Kernel] = match plane_support {
+            true => &[Kernel::Unit, Kernel::Plane, Kernel::Cube, Kernel::CubePlane],
+            false => &[Kernel::Unit, Kernel::Cube],
         };
-        for kernel in kernels {
+        for &kernel in kernels {
             let launch = || {
                 cubek::reduce::reduce(
                     &device.client,

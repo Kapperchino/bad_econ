@@ -24,11 +24,9 @@ pub enum BusinessScale {
 
 impl BusinessScale {
     pub fn for_business(actor: &super::Actor, homes: u64) -> Self {
-        match actor.kind {
-            kind if kind == Good::Housing as u32 => match homes {
-                0..20 => Self::SmallBusiness,
-                _ => Self::Industrial,
-            },
+        match (actor.kind, homes) {
+            (kind, 0..20) if kind == Good::Housing as u32 => Self::SmallBusiness,
+            (kind, _) if kind == Good::Housing as u32 => Self::Industrial,
             _ => Self::from_workers(actor.capacity),
         }
     }

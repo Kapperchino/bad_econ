@@ -540,27 +540,30 @@ fn verify_clicks(
     mut input: MessageWriter<WindowEvent>,
 ) {
     verification.click = match verification.click {
-        VerificationClick::Move(action) => match windows.single() {
-            Ok((window, properties)) => match buttons.iter().find(|(candidate, node, _)| {
-                **candidate == action && node.size().min_element() > 0.0
-            }) {
-                Some((_, _, transform)) => {
-                    let position = transform.translation / properties.scale_factor();
-                    assert!(
-                        Rect::from_corners(Vec2::ZERO, properties.size()).contains(position),
-                        "{action:?} lies outside the window at {position:?}"
-                    );
-                    input.write(WindowEvent::CursorMoved(CursorMoved {
-                        window,
-                        position,
-                        delta: None,
-                    }));
-                    VerificationClick::Press(window)
-                }
-                None => VerificationClick::Move(action),
-            },
-            Err(_) => VerificationClick::Move(action),
-        },
+        VerificationClick::Move(action) => windows
+            .single()
+            .ok()
+            .and_then(|(window, properties)| {
+                buttons
+                    .iter()
+                    .find(|(candidate, node, _)| {
+                        **candidate == action && node.size().min_element() > 0.0
+                    })
+                    .map(|(_, _, transform)| {
+                        let position = transform.translation / properties.scale_factor();
+                        assert!(
+                            Rect::from_corners(Vec2::ZERO, properties.size()).contains(position),
+                            "{action:?} lies outside the window at {position:?}"
+                        );
+                        input.write(WindowEvent::CursorMoved(CursorMoved {
+                            window,
+                            position,
+                            delta: None,
+                        }));
+                        VerificationClick::Press(window)
+                    })
+            })
+            .unwrap_or(VerificationClick::Move(action)),
         VerificationClick::Press(window) => {
             input.write(WindowEvent::MouseButtonInput(MouseButtonInput {
                 window,

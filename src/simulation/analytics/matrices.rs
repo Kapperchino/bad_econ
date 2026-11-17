@@ -1,5 +1,6 @@
 use super::*;
 
+#[derive(Clone)]
 pub struct DeviceMatrix {
     pub(super) data: CubeTensor,
     pub(super) rows: usize,
@@ -71,13 +72,16 @@ impl DeviceMatrix {
     }
 
     pub(super) fn upload(device: &Device, matrix: &SparseMatrix, scale: u32) -> Self {
-        let mut values = vec![0.0; matrix.rows * matrix.columns];
-        for entry in &matrix.entries {
-            values[entry.row * matrix.columns + entry.column] =
-                entry.numerator as f32 / entry.denominator as f32 * scale as f32;
-        }
+        let cells = matrix.rows * matrix.columns;
+        let mut values = vec![0.0; cells * 2];
+        matrix.entries.iter().for_each(|entry| {
+            let index = entry.row * matrix.columns + entry.column;
+            let value = entry.numerator as f32 / entry.denominator as f32 * scale as f32;
+            values[index] = value;
+            values[cells + index] = value;
+        });
         Self {
-            data: tensor::floats(device, [2, matrix.rows, matrix.columns], &values.repeat(2)),
+            data: tensor::floats(device, [2, matrix.rows, matrix.columns], &values),
             rows: matrix.rows,
             columns: matrix.columns,
             scale,

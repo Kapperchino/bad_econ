@@ -3008,23 +3008,32 @@ impl Simulation {
         }
         Ok(values)
     }
-    pub fn download(&mut self) -> Result<State> {
-        let values = self.read_state(CopyDirection::Save)?;
+    fn state_snapshot(&mut self, direction: CopyDirection) -> Result<State> {
+        let values = self.read_state(direction)?;
         let research = self
             .research
             .as_ref()
-            .map(|research| research.snapshot(&self.device))
+            .map(|research| match direction {
+                CopyDirection::Save => research.snapshot(&self.device),
+                CopyDirection::Restore => research.audited_snapshot(&self.device),
+            })
             .transpose()?;
         self.account_research_readbacks();
         Ok(State {
             people: self
                 .demography
-                .download(&self.device, &self.metadata, CopyDirection::Save)?,
-            day: self.day,
+                .download(&self.device, &self.metadata, direction)?,
+            day: match direction {
+                CopyDirection::Save => self.day,
+                CopyDirection::Restore => self.audited_day,
+            },
             values,
             research,
             ..self.metadata.clone()
         })
+    }
+    pub fn download(&mut self) -> Result<State> {
+        self.state_snapshot(CopyDirection::Save)
     }
     fn copy_audited(&mut self, direction: CopyDirection) -> Result<()> {
         let started = Instant::now();
@@ -3196,24 +3205,7 @@ impl Simulation {
         Ok(())
     }
     pub fn checkpoint(&mut self) -> Result<Checkpoint> {
-        let values = self.read_state(CopyDirection::Restore)?;
-        let research = self
-            .research
-            .as_ref()
-            .map(|research| research.audited_snapshot(&self.device))
-            .transpose()?;
-        self.account_research_readbacks();
-        let state = State {
-            people: self.demography.download(
-                &self.device,
-                &self.metadata,
-                CopyDirection::Restore,
-            )?,
-            day: self.audited_day,
-            values,
-            research,
-            ..self.metadata.clone()
-        };
+        let state = self.state_snapshot(CopyDirection::Restore)?;
         Checkpoint::new(&self.scenario, &state)
     }
     pub fn inspect(&mut self, request: InspectionRequest) -> Result<Inspection> {

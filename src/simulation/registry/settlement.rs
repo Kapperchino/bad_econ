@@ -98,13 +98,14 @@ impl SettlementBatch {
             })
             .map(|ownership| ownership.firm)
             .collect::<BTreeSet<_>>();
-        for index in metadata.actors.firm_indices() {
-            let actor = metadata.actors.at(index);
-            if inherited.contains(&actor.identity) {
+        metadata
+            .actors
+            .firm_indices()
+            .filter(|&index| inherited.contains(&metadata.actors.at(index).identity))
+            .for_each(|index| {
                 firms.insert(index);
                 selected.insert(index);
-            }
-        }
+            });
         firms.extend(
             selected
                 .iter()
@@ -115,40 +116,48 @@ impl SettlementBatch {
             .iter()
             .flat_map(|&firm| metadata.company_sites(metadata.actors.at(firm).identity))
             .collect::<BTreeSet<_>>();
-        for index in metadata.actors.firm_indices() {
-            let actor = metadata.actors.at(index);
-            if company_sites.contains(&actor.identity) {
+        metadata
+            .actors
+            .firm_indices()
+            .filter(|&index| company_sites.contains(&metadata.actors.at(index).identity))
+            .for_each(|index| {
                 firms.insert(index);
                 selected.insert(index);
-            }
-        }
+            });
         let owned = metadata
             .ownership
             .iter()
             .map(|ownership| (ownership.firm, ownership))
             .collect::<BTreeMap<_, _>>();
-        let mut ownership = Vec::new();
+        let mut ownership = Vec::with_capacity(firms.len());
         let mut shareholders = BTreeSet::new();
         for firm in firms {
             let actor = metadata.actors.at(firm);
             let founder = actor.owner as usize;
+            let founder_identity = metadata.actors.at(founder).identity;
             selected.insert(founder);
             let issued = owned
                 .get(&actor.identity)
                 .context("settlement requires issued shares")?;
             ownership.push((*issued).clone());
-            for share in &issued.shares {
-                if share.household != metadata.actors.at(founder).identity {
-                    shareholders.insert(share.household);
-                }
-            }
+            shareholders.extend(
+                issued
+                    .shares
+                    .iter()
+                    .map(|share| share.household)
+                    .filter(|&household| household != founder_identity),
+            );
         }
         if !shareholders.is_empty() {
-            for (index, actor) in metadata.actors.iter().enumerate() {
-                if shareholders.remove(&actor.identity) {
-                    selected.insert(index);
-                }
-            }
+            selected.extend(
+                metadata
+                    .actors
+                    .iter()
+                    .enumerate()
+                    .filter_map(|(index, actor)| {
+                        shareholders.remove(&actor.identity).then_some(index)
+                    }),
+            );
         }
         match shareholders.is_empty() {
             true => (),

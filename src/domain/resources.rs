@@ -27,16 +27,17 @@ impl ResourceRegion {
             GoodKind::Manufactured => {
                 Err(anyhow!("resource regions require a natural good: {good:?}"))
             }
-            GoodKind::Natural => match lower.x < upper.x
-                && lower.y < upper.y
-                && upper.x <= map_size
-                && upper.y <= map_size
+            GoodKind::Natural
+                if lower.x < upper.x
+                    && lower.y < upper.y
+                    && upper.x <= map_size
+                    && upper.y <= map_size =>
             {
-                true => Ok(Self { good, lower, upper }),
-                false => Err(anyhow!(
-                    "{good:?} resource region must be a nonempty rectangle within map size {map_size}"
-                )),
-            },
+                Ok(Self { good, lower, upper })
+            }
+            GoodKind::Natural => Err(anyhow!(
+                "{good:?} resource region must be a nonempty rectangle within map size {map_size}"
+            )),
         }
     }
 
@@ -153,10 +154,10 @@ impl ResourceGeography {
     pub fn production_site(&self, good: Good, position: Position) -> ProductionSite {
         match good.kind() {
             GoodKind::Manufactured => ProductionSite::UnrestrictedManufacturing,
-            GoodKind::Natural => match self.has_resource(good, position) {
-                true => ProductionSite::ResourceAvailable,
-                false => ProductionSite::ResourceMissing,
-            },
+            GoodKind::Natural if self.has_resource(good, position) => {
+                ProductionSite::ResourceAvailable
+            }
+            GoodKind::Natural => ProductionSite::ResourceMissing,
         }
     }
 

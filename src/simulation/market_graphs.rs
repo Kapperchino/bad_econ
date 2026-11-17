@@ -129,19 +129,21 @@ impl MarketGraphs {
             .as_ref()
             .is_some_and(|bindings| bindings.compatible(device, &buffers));
         if !compatible {
-            if std::env::var_os("BAD_ECON_PROFILE_GRAPHS").is_some() {
-                if let Some(bindings) = &self.bindings {
-                    let changed = bindings
-                        .buffers
-                        .iter()
-                        .zip(&buffers)
-                        .enumerate()
-                        .filter_map(|(index, (recorded, current))| {
-                            (!same_buffer(recorded, current)).then_some(index)
-                        })
-                        .collect::<Vec<_>>();
-                    eprintln!("GRAPH_INVALID {:?} {changed:?}", key.market);
-                }
+            if let Some(bindings) = self
+                .bindings
+                .as_ref()
+                .filter(|_| std::env::var_os("BAD_ECON_PROFILE_GRAPHS").is_some())
+            {
+                let changed = bindings
+                    .buffers
+                    .iter()
+                    .zip(&buffers)
+                    .enumerate()
+                    .filter_map(|(index, (recorded, current))| {
+                        (!same_buffer(recorded, current)).then_some(index)
+                    })
+                    .collect::<Vec<_>>();
+                eprintln!("GRAPH_INVALID {:?} {changed:?}", key.market);
             }
             self.invalidations += 1;
             self.entries.clear();

@@ -68,6 +68,29 @@ enum Backend {
     Cpu,
     Gpu,
 }
+#[cfg(feature = "compute")]
+impl Backend {
+    fn device(self, workgroup: u32) -> Result<bad_econ::simulation::Device> {
+        use bad_econ::simulation::Device;
+        match self {
+            Self::Cpu => Device::cpu(workgroup),
+            Self::Gpu => Device::headless(workgroup),
+        }
+    }
+}
+#[cfg(feature = "compute")]
+impl Cli {
+    fn simulation(&self, scenario: Scenario) -> Result<bad_econ::simulation::Simulation> {
+        use bad_econ::simulation::Simulation;
+        let device = self.backend.device(self.workgroup)?;
+        match &self.restore {
+            Some(path) => {
+                Simulation::from_checkpoint(serde_json::from_slice(&std::fs::read(path)?)?, device)
+            }
+            None => Simulation::new(scenario, device),
+        }
+    }
+}
 #[derive(Clone, Copy, ValueEnum)]
 enum EconomyArg {
     Industrial,
@@ -132,16 +155,13 @@ fn scenario(args: &Cli) -> Result<Scenario> {
 #[cfg(feature = "compute")]
 fn analyze(args: &Cli) -> Result<()> {
     use anyhow::Context;
-    use bad_econ::simulation::{Device, analytics::AnalysisRequest};
+    use bad_econ::simulation::analytics::AnalysisRequest;
     let path = args
         .analysis
         .as_ref()
         .context("analyze requires --analysis PATH")?;
     let request: AnalysisRequest = serde_json::from_slice(&std::fs::read(path)?)?;
-    let device = match args.backend {
-        Backend::Cpu => Device::cpu(args.workgroup)?,
-        Backend::Gpu => Device::headless(args.workgroup)?,
-    };
+    let device = args.backend.device(args.workgroup)?;
     let report = request.run(&device)?;
     output(&args.output, &serde_json::to_value(report)?)
 }
@@ -151,18 +171,8 @@ fn analyze(_: &Cli) -> Result<()> {
 }
 #[cfg(feature = "compute")]
 fn run(scenario: Scenario, args: &Cli) -> Result<()> {
-    use bad_econ::simulation::{Device, Simulation};
     let startup = Instant::now();
-    let device = match args.backend {
-        Backend::Cpu => Device::cpu(args.workgroup)?,
-        Backend::Gpu => Device::headless(args.workgroup)?,
-    };
-    let mut simulation = match &args.restore {
-        Some(path) => {
-            Simulation::from_checkpoint(serde_json::from_slice(&std::fs::read(path)?)?, device)?
-        }
-        None => Simulation::new(scenario, device)?,
-    };
+    let mut simulation = args.simulation(scenario)?;
     let startup_seconds = startup.elapsed().as_secs_f64();
     use std::io::Write;
     let mut trajectory = args
@@ -239,7 +249,6 @@ fn replay(_: Scenario, _: &Cli) -> Result<()> {
 }
 #[cfg(feature = "compute")]
 fn benchmark(scenario: Scenario, args: &Cli) -> Result<()> {
-    use bad_econ::simulation::{Device, Simulation};
     match args.days {
         0 => Err(anyhow!("benchmark days must be positive")),
         _ => Ok(()),
@@ -258,16 +267,7 @@ fn benchmark(scenario: Scenario, args: &Cli) -> Result<()> {
     let mut reports = Vec::new();
     for scenario in scenarios {
         let startup = Instant::now();
-        let device = match args.backend {
-            Backend::Cpu => Device::cpu(args.workgroup)?,
-            Backend::Gpu => Device::headless(args.workgroup)?,
-        };
-        let mut simulation = match &args.restore {
-            Some(path) => {
-                Simulation::from_checkpoint(serde_json::from_slice(&std::fs::read(path)?)?, device)?
-            }
-            None => Simulation::new(scenario, device)?,
-        };
+        let mut simulation = args.simulation(scenario)?;
         let startup_seconds = startup.elapsed().as_secs_f64();
         let households = simulation.scenario.config().households;
         let estimate = simulation.scenario.memory_estimate();

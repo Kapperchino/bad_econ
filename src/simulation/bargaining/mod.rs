@@ -134,11 +134,11 @@ impl RequestLayout {
 
     fn new(request: &BargainingRequest) -> Result<Self> {
         let factors = [
-            &request.factors.mandate,
-            &request.factors.withdrawal,
-            &request.factors.alternatives,
-            &request.factors.concentration,
-            &request.factors.replacements,
+            request.factors.mandate,
+            request.factors.withdrawal,
+            request.factors.alternatives,
+            request.factors.concentration,
+            request.factors.replacements,
         ];
         let hours = request
             .household
@@ -151,12 +151,9 @@ impl RequestLayout {
         let admitted = (1..=BARGAINING_SCALE).contains(&request.income.net_slope)
             && request.income.target_net >= request.income.net_at_threshold
             && request.wage.quantum > 0
-            && request.wage.payable_hours > 0
             && hours.is_some_and(|hours| hours > 0)
             && payable.is_some_and(|payable| payable > 0)
-            && factors
-                .into_iter()
-                .all(|&factor| factor <= BARGAINING_SCALE);
+            && factors.into_iter().all(|factor| factor <= BARGAINING_SCALE);
         match admitted {
             false => Err(anyhow!(
                 "invalid bargaining domain, selected income bracket, or fixed-width denominator"
@@ -257,10 +254,9 @@ pub fn evaluate(device: &Device, requests: &[BargainingRequest]) -> Result<Vec<B
         },
     );
     FaultFlags::read(&device.read(&control)?)?.into_result()?;
-    let words = device.read(&output)?;
+    let words = device.read_range(&output, 0, requests.len() * ResultLayout::WORDS)?;
     Ok(bytemuck::cast_slice::<u32, ResultLayout>(&words)
         .iter()
-        .take(requests.len())
         .map(|result| BargainingResult {
             gross: result.gross.into(),
             required_gross: result.required_gross.into(),

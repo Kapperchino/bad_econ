@@ -253,16 +253,15 @@ impl RentalRegistry {
                     .enumerate()
                     .map(|(offset, actor)| {
                         let index = previous.len() + offset;
-                        match self.regions.get(&region(scenario, &actor)) {
-                            Some(sites) => Some(sites.account(
+                        self.regions.get(&region(scenario, &actor)).map(|sites| {
+                            sites.account(
                                 actor.position,
                                 match actor.kind {
                                     0 => index,
                                     _ => actor.owner as usize,
                                 },
-                            )),
-                            None => None,
-                        }
+                            )
+                        })
                     })
                     .collect::<Vec<_>>();
                 let mut counts = vec![0; self.accounts.len()];
@@ -674,15 +673,11 @@ pub fn initialize(scenario: &Scenario, state: &mut State) -> Result<()> {
             }
         }
         let site = account.landlord;
-        let occupied = match automatic {
-            true => match scenario.config().property {
-                Some(_) => plots,
-                None => plots.div_ceil(state.get(Field::OutputTicks, site)),
-            },
-            false => match scenario.config().property {
-                Some(_) => state.get(Field::OccupiedPlots, site),
-                None => state.get(Field::OccupiedPlots, site).max(1),
-            },
+        let occupied = match (automatic, &scenario.config().property) {
+            (true, Some(_)) => plots,
+            (true, None) => plots.div_ceil(state.get(Field::OutputTicks, site)),
+            (false, Some(_)) => state.get(Field::OccupiedPlots, site),
+            (false, None) => state.get(Field::OccupiedPlots, site).max(1),
         };
         state.set(Field::OccupiedPlots, site, occupied);
         state.set(Field::MaintenanceDays, site, MAINTENANCE_DAYS.into());

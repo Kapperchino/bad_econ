@@ -108,6 +108,7 @@ struct ScanLevel {
 }
 
 pub(super) fn scan(device: &Device, buffer: &CubeTensor, offset: usize, count: usize) {
+    let mode = ScanMode::new(device);
     let mut levels = Vec::new();
     let mut offset = offset;
     let mut count = count;
@@ -121,7 +122,7 @@ pub(super) fn scan(device: &Device, buffer: &CubeTensor, offset: usize, count: u
                 buffer: buffer.clone().into_buffer_arg(),
                 offset: offset as u32,
                 count: count as u32,
-                mode: ScanMode::new(device),
+                mode,
             },
         );
         levels.push(ScanLevel {
@@ -422,19 +423,19 @@ pub(super) fn scan_histogram(
     layout: HistogramLayout,
 ) {
     let items = ActiveScanTile::new(device, count).items();
+    let mode = ScanMode::new(device);
     let span = device.workgroup * items;
     let mut levels = Vec::new();
     let mut offset = offset;
     let mut count = count;
     let mut divisor = 1u32;
-    let mut level_index = 0usize;
     while count > 1 {
         let blocks = count.div_ceil(span as usize);
         ActiveBlockScan::launch(
             device,
             crate::simulation::markets::dispatch(
                 dispatches,
-                crate::simulation::markets::HISTOGRAM_DISPATCH + level_index * 3,
+                crate::simulation::markets::HISTOGRAM_DISPATCH + levels.len() * 3,
             ),
             CubeDim::new_1d(device.workgroup),
             ActiveScanInputLaunch {
@@ -444,7 +445,7 @@ pub(super) fn scan_histogram(
                 bound: count as u32,
                 divisor,
                 items,
-                mode: ScanMode::new(device),
+                mode,
                 histogram_bins: layout.bins,
                 source_workgroup: layout.source_workgroup,
             },
@@ -458,7 +459,6 @@ pub(super) fn scan_histogram(
         offset += count;
         count = blocks;
         divisor *= span;
-        level_index += 1;
     }
     for (index, level) in levels
         .into_iter()

@@ -218,30 +218,28 @@ fn pools(
 
 impl FinancePolicies {
     pub fn lending(device: &Device, inputs: &[LendingInput]) -> Result<Vec<LendingResult>> {
-        let admitted = inputs
+        let records = inputs
             .iter()
-            .cloned()
-            .map(LendingInput::new)
-            .collect::<Result<Vec<_>>>()?;
-        let records = admitted
-            .iter()
-            .map(|input| LendingRecord {
-                requested: input.requested.into(),
-                term: input.term,
-                rate: input.rate,
-                surplus: input.surplus.into(),
-                debt_service: input.debt_service.into(),
-                service_fraction: input.service_fraction,
-                advance: input.advance,
-                collateral: input.collateral.into(),
-                secured: input.secured.into(),
-                equity: input.equity.into(),
-                minimum_capital: input.minimum_capital,
-                risk_assets: input.risk_assets.into(),
-                risk_weight: input.risk_weight,
-                liquidity: input.liquidity.into(),
+            .map(|input| {
+                let input = LendingInput::new(input.clone())?;
+                Ok(LendingRecord {
+                    requested: input.requested.into(),
+                    term: input.term,
+                    rate: input.rate,
+                    surplus: input.surplus.into(),
+                    debt_service: input.debt_service.into(),
+                    service_fraction: input.service_fraction,
+                    advance: input.advance,
+                    collateral: input.collateral.into(),
+                    secured: input.secured.into(),
+                    equity: input.equity.into(),
+                    minimum_capital: input.minimum_capital,
+                    risk_assets: input.risk_assets.into(),
+                    risk_weight: input.risk_weight,
+                    liquidity: input.liquidity.into(),
+                })
             })
-            .collect::<Vec<_>>();
+            .collect::<Result<Vec<_>>>()?;
         let input = padded(device, bytemuck::cast_slice(&records));
         let output = device.empty(inputs.len().max(1) * TICK_WORDS);
         let control = device.tensor(&[0; CONTROL_WORDS]);
@@ -352,16 +350,6 @@ impl FinancePolicies {
             })
             .collect())
     }
-}
-
-fn padded(device: &Device, words: &[u32]) -> CubeTensor {
-    device.tensor(
-        &words
-            .iter()
-            .copied()
-            .chain(std::iter::once(0))
-            .collect::<Vec<_>>(),
-    )
 }
 
 fn read_ticks(device: &Device, tensor: &CubeTensor, length: usize) -> Result<Vec<u64>> {

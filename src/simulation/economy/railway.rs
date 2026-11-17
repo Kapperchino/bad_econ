@@ -217,8 +217,8 @@ impl Network {
         std::mem::replace(&mut self.availability, availability)
     }
 
-    pub(in crate::simulation) fn graph_buffers(&self) -> Vec<CubeTensor> {
-        let mut buffers = vec![
+    pub(in crate::simulation) fn graph_buffers(&self) -> impl Iterator<Item = CubeTensor> {
+        [
             self.stations.clone(),
             self.access.clone(),
             self.companies.clone(),
@@ -230,9 +230,9 @@ impl Network {
             self.quotes.clone(),
             self.regions.clone(),
             self.segment_regions.clone(),
-        ];
-        buffers.extend(self.freight.graph_buffers());
-        buffers
+        ]
+        .into_iter()
+        .chain(self.freight.graph_buffers())
     }
 
     pub fn new(
@@ -293,22 +293,33 @@ impl Network {
                 ]
             })
             .collect::<Vec<_>>();
-        let mut offsets = vec![stations.len() as u32 + 1];
-        let mut carriers = Vec::new();
-        for companies in station_companies {
-            carriers.extend(companies);
-            offsets.push((stations.len() + 1 + carriers.len()) as u32);
-        }
-        offsets.extend(carriers);
+        let carriers = station_companies
+            .iter()
+            .map(|companies| companies.len())
+            .sum::<usize>();
+        let mut offsets =
+            Vec::with_capacity(2 * (stations.len() + 1) + carriers + 2 * config.segments.len());
+        offsets.push(stations.len() as u32 + 1);
+        offsets.extend(
+            station_companies
+                .iter()
+                .scan(stations.len() + 1, |offset, companies| {
+                    *offset += companies.len();
+                    Some(*offset as u32)
+                }),
+        );
+        offsets.extend(station_companies.into_iter().flatten());
         let incident_start = offsets.len() + stations.len() + 1;
-        let mut incident_offsets = vec![incident_start as u32];
-        let mut edges = Vec::new();
-        for segments in incident_segments {
-            edges.extend(segments);
-            incident_offsets.push((incident_start + edges.len()) as u32);
-        }
-        offsets.extend(incident_offsets);
-        offsets.extend(edges);
+        offsets.push(incident_start as u32);
+        offsets.extend(
+            incident_segments
+                .iter()
+                .scan(incident_start, |offset, segments| {
+                    *offset += segments.len();
+                    Some(*offset as u32)
+                }),
+        );
+        offsets.extend(incident_segments.into_iter().flatten());
         Self {
             availability: RouteAvailability::Available,
             firms: state.actors.firms() as u32,
@@ -533,14 +544,14 @@ pub fn launch(
     stage: RailStage,
 ) {
     if config.railway.company_count > 0 {
-        let passes = match stage {
-            RailStage::Infrastructure => [Some(RailPass::Infrastructure), None],
-            RailStage::Access => [Some(RailPass::Access), None],
-            RailStage::Routes => [Some(RailPass::PrepareRoutes), Some(RailPass::Routes)],
-            RailStage::Quotes => [Some(RailPass::Quotes), Some(RailPass::CompleteQuotes)],
-            RailStage::Close => [Some(RailPass::Close), None],
+        let passes: &[RailPass] = match stage {
+            RailStage::Infrastructure => &[RailPass::Infrastructure],
+            RailStage::Access => &[RailPass::Access],
+            RailStage::Routes => &[RailPass::PrepareRoutes, RailPass::Routes],
+            RailStage::Quotes => &[RailPass::Quotes, RailPass::CompleteQuotes],
+            RailStage::Close => &[RailPass::Close],
         };
-        for stage in passes.into_iter().flatten() {
+        for &stage in passes {
             let count = match stage {
                 RailPass::Infrastructure => config.railway.company_count * device.workgroup,
                 RailPass::Close => config.railway.company_count,

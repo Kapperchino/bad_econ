@@ -697,14 +697,12 @@ fn reset_report_scroll(
     mut panels: Query<&mut ScrollPosition, With<Report>>,
     mut previous: Local<Option<Menu>>,
 ) {
-    if let Some(dashboard) = dashboard {
-        let menu = dashboard.chart.menu();
-        if *previous != Some(menu) {
-            panels
-                .iter_mut()
-                .for_each(|mut position| position.0 = Vec2::ZERO);
-            *previous = Some(menu);
-        }
+    let current = dashboard.map(|dashboard| dashboard.chart.menu());
+    if let Some(menu) = current.filter(|menu| Some(*menu) != *previous) {
+        panels
+            .iter_mut()
+            .for_each(|mut position| position.0 = Vec2::ZERO);
+        *previous = Some(menu);
     }
 }
 

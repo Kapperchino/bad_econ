@@ -229,15 +229,16 @@ impl Device {
         Ok(words)
     }
     pub fn write(&self, tensor: &CubeTensor, words: &[u32]) {
-        self.client.write(
-            &tensor.handle,
-            burn::tensor::Bytes::from_elems(
-                words
-                    .iter()
-                    .flat_map(|word| word.to_le_bytes())
-                    .collect::<Vec<_>>(),
-            ),
+        #[cfg(target_endian = "little")]
+        let bytes = burn::tensor::Bytes::from_elems(words.to_vec());
+        #[cfg(target_endian = "big")]
+        let bytes = burn::tensor::Bytes::from_elems(
+            words
+                .iter()
+                .flat_map(|word| word.to_le_bytes())
+                .collect::<Vec<_>>(),
         );
+        self.client.write(&tensor.handle, bytes);
     }
     pub fn sync(&self) -> Result<()> {
         pollster::block_on(self.client.sync()).map_err(Into::into)

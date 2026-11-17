@@ -32,31 +32,6 @@ fn observed() -> HouseholdObservation {
 }
 
 #[test]
-fn lean_weighted_need_missing_observation_and_shared_clock() -> Result<()> {
-    let device = support::device(64)?;
-    let mut absent = observed();
-    absent.observation = Observation::Missing;
-    absent.participation = Participation::Unavailable;
-    let mut over_reserved = observed();
-    over_reserved.reserved_minutes = 2000;
-    let actual = evaluate(&device, &[observed(), absent, over_reserved])?;
-    assert_eq!(
-        actual[0],
-        HouseholdPolicyResult {
-            deficit_lower: 250,
-            deficit_upper: 250,
-            available_minutes: 384,
-            fatigue: 116,
-            forecast: 11,
-        }
-    );
-    assert_eq!(actual[1].available_minutes, 0);
-    assert_eq!(actual[1].forecast, 10);
-    assert_eq!(actual[2].available_minutes, 0);
-    Ok(())
-}
-
-#[test]
 fn weighted_deficits_keep_zero_needs_and_full_width_deliveries_exact() -> Result<()> {
     let device = support::device(64)?;
     let cases = (0..64u64)

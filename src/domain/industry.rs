@@ -118,24 +118,28 @@ impl ProductionMethod {
     }
 
     pub fn supports(self, good: Good) -> bool {
-        Self::for_good(good).contains(&self)
+        Self::available(good) == Some(self)
     }
 
     pub fn for_good(good: Good) -> Vec<Self> {
+        Self::available(good).into_iter().collect()
+    }
+
+    fn available(good: Good) -> Option<Self> {
         match good {
-            Good::Grain | Good::Flax | Good::Cotton | Good::Dye => vec![Self::MechanicalHarvesting],
-            Good::Flour => vec![Self::SteamMilling],
-            Good::Bread => vec![Self::MechanicalBaking],
-            Good::Iron | Good::Coal => vec![Self::SteamMining],
-            Good::Steel => vec![Self::BessemerProcess],
-            Good::Linen | Good::Cloth => vec![Self::PowerLooms],
-            Good::Clothes | Good::LuxuryClothes => vec![Self::SewingMachines],
-            Good::Wood => vec![Self::Sawmills],
-            Good::Tools => vec![Self::MachineTools],
-            Good::Furniture | Good::LuxuryFurniture => vec![Self::FurnitureWorkshops],
-            Good::Glass => vec![Self::Glassworks],
-            Good::Construction => vec![Self::MechanizedConstruction],
-            Good::Housing | Good::Locomotives | Good::Railway => vec![],
+            Good::Grain | Good::Flax | Good::Cotton | Good::Dye => Some(Self::MechanicalHarvesting),
+            Good::Flour => Some(Self::SteamMilling),
+            Good::Bread => Some(Self::MechanicalBaking),
+            Good::Iron | Good::Coal => Some(Self::SteamMining),
+            Good::Steel => Some(Self::BessemerProcess),
+            Good::Linen | Good::Cloth => Some(Self::PowerLooms),
+            Good::Clothes | Good::LuxuryClothes => Some(Self::SewingMachines),
+            Good::Wood => Some(Self::Sawmills),
+            Good::Tools => Some(Self::MachineTools),
+            Good::Furniture | Good::LuxuryFurniture => Some(Self::FurnitureWorkshops),
+            Good::Glass => Some(Self::Glassworks),
+            Good::Construction => Some(Self::MechanizedConstruction),
+            Good::Housing | Good::Locomotives | Good::Railway => None,
         }
     }
 

@@ -287,7 +287,10 @@ fn sort_merges_buffered(
             execution,
         },
     );
-    let mut width = 1;
+    merge_passes(device, buffers, 1);
+}
+
+fn merge_passes(device: &Device, buffers: &Buffers, mut width: usize) {
     let mut source = (buffers.claim_capacity * FREIGHT_CLAIM_WORDS) as u32;
     while width < buffers.claim_capacity {
         ClaimSort::launch(
@@ -435,24 +438,7 @@ fn sort_blocks_buffered(
             },
         );
     }
-    let mut width = tile;
-    let mut source = (buffers.claim_capacity * FREIGHT_CLAIM_WORDS) as u32;
-    while width < buffers.claim_capacity {
-        ClaimSort::launch(
-            device,
-            markets::dispatch(&buffers.dispatches, SORT_DISPATCH),
-            CubeDim::new_1d(device.workgroup),
-            SortInputLaunch {
-                claims: buffers.claims.clone().into_buffer_arg(),
-                progress: buffers.progress.clone().into_buffer_arg(),
-                capacity: buffers.claim_capacity as u32,
-                source,
-                width: width as u32,
-            },
-        );
-        source = (buffers.claim_capacity * (2 * FREIGHT_CLAIM_WORDS + 1) - source as usize) as u32;
-        width *= 2;
-    }
+    merge_passes(device, buffers, tile);
 }
 
 #[cube]

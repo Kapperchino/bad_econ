@@ -107,10 +107,7 @@ impl AnalysisRequest {
                             &DeviceVector::from_ticks(device, &research.attempts)?,
                         )?,
                     )?,
-                    None => DeviceVector {
-                        data: final_demand.data.clone(),
-                        length: final_demand.length,
-                    },
+                    None => final_demand.clone(),
                 };
                 let gross = account.goods_requirements(
                     device,
@@ -137,14 +134,15 @@ impl AnalysisRequest {
                     Diagnostic::Inadmissible => Diagnostic::Inadmissible,
                     _ => Diagnostic::UnresolvedAccuracy,
                 };
-                let research_values = match values.values(device)? {
+                let available_values = values.values(device)?;
+                let research_values = match &available_values {
                     Diagnostic::Available(values) => {
                         account.research_values(device, values, &weights)?
                     }
                     Diagnostic::Inadmissible => Diagnostic::Inadmissible,
                     _ => Diagnostic::UnresolvedAccuracy,
                 };
-                let plan_value = match values.values(device)? {
+                let plan_value = match &available_values {
                     Diagnostic::Available(values) => {
                         let ordinary = values.dot(device, &final_demand, self.scale)?;
                         match (&self.research, &research_values) {
@@ -175,16 +173,18 @@ impl AnalysisRequest {
                     )?,
                     None => Diagnostic::Inapplicable,
                 };
-                let normalized = match &coupled {
-                    Diagnostic::Available(solution) => match solution.values(device)? {
-                        Diagnostic::Available(values) => values.normalize(
-                            device,
-                            self.goods.rows() + self.reference_occupation,
-                            self.scale,
-                        )?,
-                        Diagnostic::Inadmissible => Diagnostic::Inadmissible,
-                        _ => Diagnostic::UnresolvedAccuracy,
-                    },
+                let available_coupled = match &coupled {
+                    Diagnostic::Available(solution) => solution.values(device)?,
+                    Diagnostic::Inadmissible => Diagnostic::Inadmissible,
+                    Diagnostic::Inapplicable => Diagnostic::Inapplicable,
+                    _ => Diagnostic::UnresolvedAccuracy,
+                };
+                let normalized = match &available_coupled {
+                    Diagnostic::Available(values) => values.normalize(
+                        device,
+                        self.goods.rows() + self.reference_occupation,
+                        self.scale,
+                    )?,
                     Diagnostic::Inadmissible => Diagnostic::Inadmissible,
                     Diagnostic::Inapplicable => Diagnostic::Inapplicable,
                     _ => Diagnostic::UnresolvedAccuracy,
@@ -203,16 +203,12 @@ impl AnalysisRequest {
                     (_, Diagnostic::Inadmissible) => Diagnostic::Inadmissible,
                     _ => Diagnostic::UnresolvedAccuracy,
                 };
-                let residual_scale = match &coupled {
-                    Diagnostic::Available(solution) => match solution.values(device)? {
-                        Diagnostic::Available(values) => values.reciprocal_reference(
-                            device,
-                            self.goods.rows() + self.reference_occupation,
-                            self.scale,
-                        )?,
-                        Diagnostic::Inadmissible => Diagnostic::Inadmissible,
-                        _ => Diagnostic::UnresolvedAccuracy,
-                    },
+                let residual_scale = match &available_coupled {
+                    Diagnostic::Available(values) => values.reciprocal_reference(
+                        device,
+                        self.goods.rows() + self.reference_occupation,
+                        self.scale,
+                    )?,
                     Diagnostic::Inadmissible => Diagnostic::Inadmissible,
                     Diagnostic::Inapplicable => Diagnostic::Inapplicable,
                     _ => Diagnostic::UnresolvedAccuracy,

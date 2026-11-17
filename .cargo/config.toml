@@ -18,10 +18,6 @@ gpu-full = [
     "test", "--locked", "--features", "viewer", "--lib", "--tests", "--jobs", "2",
     "--", "--test-threads=1",
 ]
-gpu-extended = [
-    "test", "--locked", "--features", "viewer", "--lib", "--jobs", "2",
-    "--", "--test-threads=1", "--ignored", "--skip", "profile_",
-]
 
 [env]
 RUST_TEST_THREADS = "1"

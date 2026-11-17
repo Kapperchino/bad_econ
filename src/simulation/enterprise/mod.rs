@@ -707,6 +707,17 @@ mod tests {
     }
 }
 
+fn resize_values(state: &mut crate::domain::State, fields: usize, actors: usize) {
+    let before = state.actors.len();
+    let mut values = vec![0; actors * fields];
+    for field in 0..fields {
+        values[field * actors..field * actors + before]
+            .copy_from_slice(&state.values[field * before..(field + 1) * before]);
+    }
+    values.extend_from_slice(&state.values[before * fields..]);
+    state.values = values;
+}
+
 pub(super) fn enter(
     state: &mut crate::domain::State,
     scenario: &crate::domain::Scenario,
@@ -727,28 +738,24 @@ pub(super) fn enter(
         .collect::<anyhow::Result<Vec<_>>>()?;
     let before = state.actors.len();
     let after = before + entries.len();
-    let mut values = vec![0; after * scenario.fields()];
-    for field in 0..scenario.fields() {
-        values[field * after..field * after + before]
-            .copy_from_slice(&state.values[field * before..(field + 1) * before]);
-    }
-    values.extend_from_slice(&state.values[before * scenario.fields()..]);
-    state.values = values;
-    let mut actors = state.actors.iter().collect::<Vec<_>>();
-    for entry in &entries {
-        let identity = state.next_identity;
-        state.next_identity = identity
-            .checked_add(1)
-            .context("enterprise identity capacity exhausted")?;
-        actors.push(Actor {
-            identity,
-            position: entry.position,
-            kind: entry.good as u32,
-            owner: entry.owner as u32,
-            capacity: 1,
-        });
-    }
-    state.actors = actors.into_iter().collect();
+    resize_values(state, scenario.fields(), after);
+    let actors = entries
+        .iter()
+        .map(|entry| {
+            let identity = state.next_identity;
+            state.next_identity = identity
+                .checked_add(1)
+                .context("enterprise identity capacity exhausted")?;
+            Ok(Actor {
+                identity,
+                position: entry.position,
+                kind: entry.good as u32,
+                owner: entry.owner as u32,
+                capacity: 1,
+            })
+        })
+        .collect::<anyhow::Result<Vec<_>>>()?;
+    state.actors.extend(actors);
     for (offset, entry) in entries.iter().enumerate() {
         let firm = before + offset;
         let owner = entry.owner;
@@ -858,28 +865,25 @@ pub(in crate::simulation) fn form_households(
     let before = state.actors.len();
     let after = before + splits.len();
     if after > before {
-        let mut values = vec![0; after * scenario.fields()];
-        for field in 0..scenario.fields() {
-            values[field * after..field * after + before]
-                .copy_from_slice(&state.values[field * before..(field + 1) * before]);
-        }
-        values.extend_from_slice(&state.values[before * scenario.fields()..]);
-        state.values = values;
-        let mut actors = state.actors.iter().collect::<Vec<_>>();
-        for (offset, &household) in splits.iter().enumerate() {
-            let identity = state.next_identity;
-            state.next_identity = identity
-                .checked_add(1)
-                .context("household identity capacity exhausted")?;
-            actors.push(Actor {
-                identity,
-                position: actors[household].position,
-                kind: 0,
-                owner: (before + offset) as u32,
-                capacity: 1,
-            });
-        }
-        state.actors = actors.into_iter().collect();
+        resize_values(state, scenario.fields(), after);
+        let actors = splits
+            .iter()
+            .enumerate()
+            .map(|(offset, &household)| {
+                let identity = state.next_identity;
+                state.next_identity = identity
+                    .checked_add(1)
+                    .context("household identity capacity exhausted")?;
+                Ok(Actor {
+                    identity,
+                    position: state.actors.at(household).position,
+                    kind: 0,
+                    owner: (before + offset) as u32,
+                    capacity: 1,
+                })
+            })
+            .collect::<anyhow::Result<Vec<_>>>()?;
+        state.actors.extend(actors);
         for (offset, &parent) in splits.iter().enumerate() {
             let household = before + offset;
             let person_identity = state.get(Field::SplitPerson, parent);
@@ -1096,17 +1100,15 @@ pub(super) fn transitions(
                                     })
                                     .collect();
                             }
-                            let owned = state
-                                .actors
-                                .iter()
-                                .enumerate()
-                                .filter(|(_, firm)| firm.kind > 0 && firm.owner == actor as u32)
-                                .map(|(index, _)| index)
-                                .collect::<Vec<_>>();
-                            for index in owned {
+                            for index in 0..state.actors.len() {
                                 let mut firm = state.actors.at(index);
-                                firm.owner = receiver as u32;
-                                state.actors.set(index, firm);
+                                match (firm.kind, firm.owner) {
+                                    (1.., owner) if owner == actor as u32 => {
+                                        firm.owner = receiver as u32;
+                                        state.actors.set(index, firm);
+                                    }
+                                    _ => (),
+                                }
                             }
                         }
                     }

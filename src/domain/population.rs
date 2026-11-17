@@ -302,17 +302,16 @@ impl Population {
                 goods: actor.inventories,
             }))
             .try_fold(InitialTotals::default(), |total, next| {
-                Ok(InitialTotals {
-                    cash: add(total.cash, next.cash)?,
-                    goods: total
-                        .goods
-                        .into_iter()
-                        .zip(next.goods)
-                        .map(|(a, b)| add(a, b))
-                        .collect::<Result<Vec<_>>>()?
-                        .try_into()
-                        .expect("goods count"),
-                })
+                let cash = add(total.cash, next.cash)?;
+                let mut goods = total.goods;
+                goods
+                    .iter_mut()
+                    .zip(next.goods)
+                    .try_for_each(|(total, next)| {
+                        *total = add(*total, next)?;
+                        Ok::<_, anyhow::Error>(())
+                    })?;
+                Ok(InitialTotals { cash, goods })
             })
     }
 }

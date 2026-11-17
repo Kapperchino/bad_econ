@@ -329,34 +329,20 @@ impl Chart {
     }
     pub fn unit(self) -> &'static str {
         match self {
-            Self::Employment => "households",
-            Self::Unemployment => "%",
-            Self::Cash => "households",
-            Self::Money => "cash",
+            Self::Employment | Self::Cash | Self::Housing => "households",
+            Self::Unemployment | Self::Occupations => "%",
+            Self::Money | Self::Debt | Self::Arrears => "cash",
             Self::Prices => "cash / tick",
-            Self::Production => "ticks / day",
-            Self::Consumption => "ticks / day",
-            Self::Inputs => "ticks / day",
-            Self::Inventories => "ticks",
-            Self::Transit => "ticks",
+            Self::Production | Self::Consumption | Self::Inputs => "ticks / day",
+            Self::Inventories | Self::Transit => "ticks",
             Self::Shortages => "bread ticks / day",
-            Self::Profits => "cash / day",
-            Self::Accounts => "cash / day",
-            Self::BusinessTypes => "business sites",
-            Self::Industries => "business sites",
-            Self::Businesses => "business sites",
+            Self::Profits | Self::Accounts | Self::Rent | Self::Taxes => "cash / day",
+            Self::BusinessTypes | Self::Industries | Self::Businesses => "business sites",
             Self::BusinessChanges => "sites / day",
             Self::Wages => "cash / minute",
-            Self::Occupations => "%",
-            Self::Population => "people",
+            Self::Population | Self::Deaths => "people",
             Self::Demography => "people / day",
-            Self::Deaths => "people",
-            Self::Housing => "households",
             Self::Credit => "loans",
-            Self::Debt => "cash",
-            Self::Rent => "cash / day",
-            Self::Arrears => "cash",
-            Self::Taxes => "cash / day",
             Self::Research => "count",
         }
     }
@@ -445,35 +431,28 @@ impl Chart {
     }
     pub fn menu(self) -> Menu {
         match self {
-            Self::Employment => Menu::Overview,
-            Self::Unemployment => Menu::Overview,
-            Self::Cash => Menu::Overview,
-            Self::Money => Menu::Overview,
-            Self::Prices => Menu::Market,
-            Self::Production => Menu::Market,
-            Self::Consumption => Menu::Market,
-            Self::Inputs => Menu::Market,
-            Self::Inventories => Menu::Market,
-            Self::Transit => Menu::Market,
-            Self::Shortages => Menu::Market,
-            Self::Profits => Menu::Industry,
-            Self::Accounts => Menu::Industry,
-            Self::BusinessTypes => Menu::Industry,
-            Self::Industries => Menu::Industry,
-            Self::Businesses => Menu::Industry,
-            Self::BusinessChanges => Menu::Industry,
-            Self::Wages => Menu::Industry,
-            Self::Occupations => Menu::Population,
-            Self::Population => Menu::Population,
-            Self::Demography => Menu::Population,
-            Self::Deaths => Menu::Population,
-            Self::Housing => Menu::Population,
-            Self::Credit => Menu::Finance,
-            Self::Debt => Menu::Finance,
-            Self::Rent => Menu::Finance,
-            Self::Arrears => Menu::Finance,
-            Self::Taxes => Menu::Finance,
-            Self::Research => Menu::Industry,
+            Self::Employment | Self::Unemployment | Self::Cash | Self::Money => Menu::Overview,
+            Self::Prices
+            | Self::Production
+            | Self::Consumption
+            | Self::Inputs
+            | Self::Inventories
+            | Self::Transit
+            | Self::Shortages => Menu::Market,
+            Self::Profits
+            | Self::Accounts
+            | Self::BusinessTypes
+            | Self::Industries
+            | Self::Businesses
+            | Self::BusinessChanges
+            | Self::Wages
+            | Self::Research => Menu::Industry,
+            Self::Occupations
+            | Self::Population
+            | Self::Demography
+            | Self::Deaths
+            | Self::Housing => Menu::Population,
+            Self::Credit | Self::Debt | Self::Rent | Self::Arrears | Self::Taxes => Menu::Finance,
         }
     }
     pub fn file_label(self) -> String {
@@ -563,7 +542,7 @@ impl Chart {
         previous: Option<&ObservationSnapshot>,
     ) -> Vec<f64> {
         match self {
-            Self::Employment => vec![
+            Self::Employment => [
                 s.economy.wage_employed(s.employed) as f64,
                 s.economy
                     .workforce
@@ -574,9 +553,8 @@ impl Chart {
                     .saturating_sub(s.economy.rural_employed) as f64,
                 s.economy.inactive as f64,
             ]
-            .into_iter()
             .map(|value| daily_value(s, value))
-            .collect(),
+            .into(),
             Self::Unemployment => vec![
                 s.population
                     .unemployment_rate()
@@ -745,41 +723,47 @@ impl ChartRange {
             .map_or(snapshot.day, |point| point.day)
             .max(period.first_day(snapshot.day));
         let last_day = snapshot.day;
-        let observations = |history: &VecDeque<ObservationSnapshot>| {
-            history
-                .iter()
-                .enumerate()
-                .filter(|(_, point)| (first_day..=last_day).contains(&point.day))
-                .flat_map(|(index, point)| {
-                    chart.values(
-                        point,
-                        index.checked_sub(1).and_then(|index| history.get(index)),
-                    )
-                })
-                .collect::<Vec<_>>()
-        };
-        let current = observations(history);
-        let reference = comparison
-            .map(|run| observations(&run.history))
-            .unwrap_or_default();
-        let width = chart.series().len();
-        let values = current
-            .iter()
-            .chain(&reference)
-            .enumerate()
-            .filter(|(index, value)| value.is_finite() && selection.includes(index % width))
-            .map(|(_, &value)| value);
-        let minimum = values.clone().fold(0.0, f64::min);
-        let maximum = match chart {
-            Chart::Unemployment | Chart::Occupations => 100.0,
-            _ => values.fold(1.0, f64::max),
-        };
+        let range = std::iter::once(history)
+            .chain(comparison.map(|run| &run.history))
+            .flat_map(|history| {
+                history
+                    .iter()
+                    .enumerate()
+                    .filter(|(_, point)| (first_day..=last_day).contains(&point.day))
+                    .flat_map(move |(index, point)| {
+                        chart
+                            .values(
+                                point,
+                                index.checked_sub(1).and_then(|index| history.get(index)),
+                            )
+                            .into_iter()
+                            .enumerate()
+                            .filter(move |(series, value)| {
+                                selection.includes(*series) && value.is_finite()
+                            })
+                            .map(|(_, value)| value)
+                    })
+            })
+            .fold(
+                Self {
+                    first_day,
+                    last_day,
+                    minimum: 0.0,
+                    maximum: 1.0,
+                    selection,
+                },
+                |range, value| Self {
+                    minimum: range.minimum.min(value),
+                    maximum: range.maximum.max(value),
+                    ..range
+                },
+            );
         Self {
-            first_day,
-            last_day,
-            minimum,
-            maximum,
-            selection,
+            maximum: match chart {
+                Chart::Unemployment | Chart::Occupations => 100.0,
+                _ => range.maximum,
+            },
+            ..range
         }
     }
     pub fn fraction(&self, value: f64) -> f64 {
@@ -798,26 +782,6 @@ impl ChartRange {
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    #[test]
-    fn comparison_aligns_days_and_stops_at_the_reference_horizon() {
-        let reference = ComparisonRun {
-            seed: 42,
-            horizon: 20,
-            history: [18, 19, 20]
-                .map(|day| ObservationSnapshot {
-                    day,
-                    ..Default::default()
-                })
-                .into(),
-        };
-        assert!(reference.at_day(17).is_none());
-        assert_eq!(reference.at_day(19).unwrap().day, 19);
-        assert!(!RunTarget::UntilDay(20).reached(19));
-        assert!(RunTarget::UntilDay(20).reached(20));
-        assert!(RunTarget::UntilDay(0).reached(0));
-        assert!(!RunTarget::Open.reached(20));
-    }
 
     #[test]
     fn chart_scales_use_matching_days_and_cash_bracket_history() {

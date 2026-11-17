@@ -33,7 +33,13 @@ macro_rules! row_layout {
         }
         impl FromIterator<$record> for $rows {
             fn from_iter<T: IntoIterator<Item = $record>>(records: T) -> Self {
-                records.into_iter().fold(Self::default(), |mut rows, record| {
+                let records = records.into_iter();
+                let capacity = records.size_hint().0;
+                let rows = Self {
+                    $first: Vec::with_capacity(capacity),
+                    $($field: Vec::with_capacity(capacity)),*
+                };
+                records.fold(rows, |mut rows, record| {
                     rows.push(record);
                     rows
                 })

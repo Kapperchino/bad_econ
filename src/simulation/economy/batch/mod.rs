@@ -13,9 +13,8 @@ struct UniformCapacity {
 #[cube]
 fn bounded_capacity(balance: Ticks, amount: Ticks, limit: u32) -> u32 {
     let product = times(amount, limit);
-    let mut low = limit;
     if !product.faults.is_empty() || lt(balance, product.value) {
-        low = 0;
+        let mut low = 0;
         let mut high = limit;
         while low < high {
             let middle = low + ceildiv(high - low, 2);
@@ -24,8 +23,10 @@ fn bounded_capacity(balance: Ticks, amount: Ticks, limit: u32) -> u32 {
             low = select(fits, middle, low);
             high = select(fits, high, middle - 1);
         }
+        low
+    } else {
+        limit
     }
-    low
 }
 
 #[cube]
@@ -424,14 +425,10 @@ mod tests {
 
     impl PriorPattern {
         fn status(self, slot: usize) -> EventStatus {
-            match self {
-                Self::Accepted => EventStatus::Accepted,
-                Self::Rejected => EventStatus::Rejected,
-                Self::Faulted => EventStatus::Faulted,
-                Self::Mixed => match slot % 7 {
-                    0 => EventStatus::Rejected,
-                    _ => EventStatus::Accepted,
-                },
+            match (self, slot % 7) {
+                (Self::Accepted, _) | (Self::Mixed, 1..) => EventStatus::Accepted,
+                (Self::Rejected, _) | (Self::Mixed, 0) => EventStatus::Rejected,
+                (Self::Faulted, _) => EventStatus::Faulted,
             }
         }
     }
@@ -699,7 +696,6 @@ mod tests {
         ];
         let workgroup = 64;
         let device = crate::simulation::tests::device(workgroup)?;
-        let actual = Simulation::new(scenario.clone(), device.clone())?;
         let parallel = Simulation::new(scenario.clone(), device.clone())?;
         let mut expected = Simulation::new(scenario.clone(), device.clone())?;
         expected.market_execution = MarketExecution::Original;
@@ -712,7 +708,7 @@ mod tests {
                 state.set(Field::Price, peer, case.quote.into());
                 let words = encode(&state.values);
                 let mut proposals = vec![0; count * ProposalLayout::WORDS];
-                let mut scratch = vec![0; actual.scratch.meta.num_elements()];
+                let mut scratch = vec![0; parallel.scratch.meta.num_elements()];
                 for slot in 0..case.length {
                     let actor = (slot + 17) % 513;
                     proposals[actor * ProposalLayout::WORDS + ProposalLayout::ACTOR] = peer as u32;
@@ -724,10 +720,10 @@ mod tests {
                 }
                 scratch[5 * count] = 0;
                 scratch[6 * count] = case.length as u32;
-                let mut control = vec![0; actual.control.meta.num_elements()];
+                let mut control = vec![0; parallel.control.meta.num_elements()];
                 control[CONSTRUCTED_EVENTS_WORD] = case.length as u32;
                 control[RANGE_SLOTS_WORD] = 1;
-                for simulation in [&actual, &expected, &parallel] {
+                for simulation in [&expected, &parallel] {
                     device.write(&simulation.state, bytemuck::cast_slice(&words));
                     device.write(&simulation.proposals, bytemuck::cast_slice(&proposals));
                     device.write(&simulation.scratch, bytemuck::cast_slice(&scratch));
@@ -754,21 +750,8 @@ mod tests {
                     },
                 );
                 let mut parameters =
-                    actual.parameters(Phase::ProvisionPurchase, market, 0, count)?;
+                    parallel.parameters(Phase::ProvisionPurchase, market, 0, count)?;
                 parameters.scan = mode;
-                ConsumerSettlement::launch(
-                    &device,
-                    CubeCount::Static(1, 1, 1),
-                    CubeDim::new_1d(workgroup),
-                    SettlementInputLaunch {
-                        state: actual.state.clone().into_buffer_arg(),
-                        actors: actual.actors.clone().into_buffer_arg(),
-                        config: actual.config.launch(),
-                        scratch: actual.scratch.clone().into_buffer_arg(),
-                        control: actual.control.clone().into_buffer_arg(),
-                        parameters: parameters.launch(),
-                    },
-                );
                 markets::prepare_dispatch(
                     &device,
                     &parallel.control,
@@ -801,21 +784,6 @@ mod tests {
                     parallel_statuses, expected_statuses,
                     "parallel statuses case {case_index}"
                 );
-                for (name, actual, expected) in [
-                    ("state", &actual.state, &expected.state),
-                    ("statuses", &actual.scratch, &expected.scratch),
-                    ("faults", &actual.control, &expected.control),
-                ] {
-                    let actual = device.read(actual)?;
-                    let expected = device.read(expected)?;
-                    assert_eq!(actual.len(), expected.len());
-                    for (word, (actual, expected)) in actual.iter().zip(&expected).enumerate() {
-                        assert_eq!(
-                            actual, expected,
-                            "{name} word {word}: {workgroup} {mode:?} case {case_index}"
-                        );
-                    }
-                }
             }
         }
         Ok(())

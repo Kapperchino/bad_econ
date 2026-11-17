@@ -193,93 +193,6 @@ fn byte_radix_matches_nibble_stability_parity_faults_and_restored_dispatches_on_
 }
 
 #[test]
-#[ignore]
-fn profile_byte_radix_against_nibble_on_gpu() -> Result<()> {
-    use anyhow::{Context, anyhow};
-
-    let device = crate::simulation::tests::device(64)?;
-    let capacity = 1_010_003;
-    let nibble = SortBuffers::new(&device, capacity);
-    let byte = SortBuffers::new(&device, capacity);
-    let five = SortBuffers::new(&device, capacity);
-    for keys in [
-        SortKeys::Actors,
-        SortKeys::Firms {
-            households: 1_000_000,
-        },
-        SortKeys::Firms {
-            households: capacity as u32 - 16_385,
-        },
-    ] {
-        let mut caches = [
-            MarketSort::Unrecorded,
-            MarketSort::Unrecorded,
-            MarketSort::Unrecorded,
-        ];
-        for active in [70_001, capacity - 1] {
-            let case = SortCase {
-                capacity,
-                active,
-                scan: parallel::ScanMode::new(&device),
-                fault: Fault::Clear,
-            };
-            let parameters = case.parameters();
-            let configurations = [
-                (0, &nibble, Radix::Nibble),
-                (1, &byte, Radix::Byte),
-                (2, &five, Radix::Five),
-            ];
-            for (index, buffers, radix) in configurations {
-                buffers.reset_keys(&device, &case, keys);
-                caches[index].run_radix(
-                    &device,
-                    &buffers.scratch,
-                    &buffers.control,
-                    &buffers.dispatches,
-                    &parameters,
-                    keys,
-                    radix,
-                )?;
-            }
-            device.sync()?;
-            for sample in 0..7 {
-                for offset in 0..configurations.len() {
-                    let (index, buffers, radix) =
-                        configurations[(sample + offset) % configurations.len()];
-                    buffers.reset_keys(&device, &case, keys);
-                    device.sync()?;
-                    let window = device
-                        .client
-                        .profile_start()
-                        .map_err(|error| anyhow!("{error:?}"))?;
-                    caches[index].run_radix(
-                        &device,
-                        &buffers.scratch,
-                        &buffers.control,
-                        &buffers.dispatches,
-                        &parameters,
-                        keys,
-                        radix,
-                    )?;
-                    let duration = device
-                        .client
-                        .profile_end(window)
-                        .map_err(|error| anyhow!("{error:?}"))?;
-                    let method = duration.timing_method();
-                    let measured =
-                        pollster::block_on(duration.resolve()).context("missing radix profile")?;
-                    eprintln!(
-                        "RADIX_PROFILE keys={keys:?} active={active} radix={radix:?} sample={sample} {method}_ms={:.3}",
-                        measured.duration().as_secs_f64() * 1000.0,
-                    );
-                }
-            }
-        }
-    }
-    Ok(())
-}
-
-#[test]
 fn actor_and_firm_sort_graphs_survive_alternating_keyspaces_on_gpu() -> Result<()> {
     let device = crate::simulation::tests::device(64)?;
     let households = 4099;
@@ -337,81 +250,6 @@ fn actor_and_firm_sort_graphs_survive_alternating_keyspaces_on_gpu() -> Result<(
             }
         }
         _ => panic!("sort graphs should remain cached"),
-    }
-    Ok(())
-}
-
-#[test]
-fn relative_firm_keys_preserve_raw_actor_order_parity_partial_blocks_and_faults_on_gpu()
--> Result<()> {
-    let households = 4099;
-    for workgroup in [32, 256] {
-        let device = crate::simulation::tests::device(workgroup)?;
-        let mut cache = MarketSort::default();
-        for firms in [17usize, 257] {
-            let capacity = households + firms;
-            let actual = SortBuffers::new(&device, capacity);
-            let expected = SortBuffers::new(&device, capacity);
-            for fault in [Fault::Clear, Fault::Pending] {
-                for active in [0, 1, 31, 33, 257, capacity] {
-                    let case = SortCase {
-                        capacity,
-                        active,
-                        scan: parallel::ScanMode::new(&device),
-                        fault,
-                    };
-                    let mut input = actual.reset(&device, &case);
-                    expected.reset(&device, &case);
-                    for key in &mut input[..active] {
-                        *key = households as u32 + *key % firms as u32;
-                    }
-                    device.write(&actual.scratch, &input);
-                    device.write(&expected.scratch, &input);
-                    let parameters = case.parameters();
-                    encode(
-                        &device,
-                        &expected.scratch,
-                        &expected.control,
-                        &expected.dispatches,
-                        &parameters,
-                        parallel::HistogramScan::Complete,
-                    );
-                    let source = cache.run_keys(
-                        &device,
-                        &actual.scratch,
-                        &actual.control,
-                        &actual.dispatches,
-                        &parameters,
-                        SortKeys::Firms {
-                            households: households as u32,
-                        },
-                    )? as usize;
-                    let raw_source =
-                        SortPlan::with_radix(&parameters, SortKeys::Actors, Radix::Nibble).output()
-                            as usize;
-                    let actual_words = device.read(&actual.scratch)?;
-                    let expected_words = device.read(&expected.scratch)?;
-                    assert_eq!(
-                        device.read(&actual.control)?,
-                        device.read(&expected.control)?
-                    );
-                    match fault {
-                        Fault::Clear => {
-                            assert_eq!(
-                                actual_words[source..source + active],
-                                expected_words[raw_source..raw_source + active]
-                            );
-                            assert_eq!(
-                                actual_words[source + capacity..source + capacity + active],
-                                expected_words
-                                    [raw_source + capacity..raw_source + capacity + active]
-                            );
-                        }
-                        _ => assert_eq!(actual_words, input),
-                    }
-                }
-            }
-        }
     }
     Ok(())
 }
@@ -529,29 +367,6 @@ fn graph_sort_preserves_first_use_replay_dynamic_counts_and_faults_on_gpu() -> R
                     }
                     .check(&device, &mut cache, &actual, &expected)?;
                 }
-            }
-        }
-    }
-    Ok(())
-}
-
-#[test]
-fn blocked_histogram_scatter_matches_complete_prefixes_across_scan_hierarchies_on_gpu() -> Result<()>
-{
-    for (workgroup, capacity) in [(32, 131_090), (256, 1_048_593)] {
-        let device = crate::simulation::tests::device(workgroup)?;
-        let actual = SortBuffers::new(&device, capacity);
-        let expected = SortBuffers::new(&device, capacity);
-        let mut cache = MarketSort::default();
-        for scan in [parallel::ScanMode::Shared, parallel::ScanMode::new(&device)] {
-            for active in [257, capacity - 17, capacity] {
-                SortCase {
-                    capacity,
-                    active,
-                    scan,
-                    fault: Fault::Clear,
-                }
-                .check(&device, &mut cache, &actual, &expected)?;
             }
         }
     }

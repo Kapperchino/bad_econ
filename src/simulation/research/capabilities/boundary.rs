@@ -42,8 +42,8 @@ impl CapabilityGraph {
                         1 << (edge.dependent % 32);
                 }
                 Ok(DeviceCapabilityGraph {
-                    adjacency: device.tensor(&padded(&adjacency)),
-                    labels: device.tensor(&padded(labels)),
+                    adjacency: device.tensor(padded(&adjacency)),
+                    labels: device.tensor(padded(labels)),
                     nodes: self.nodes,
                     row_words,
                 })
@@ -69,7 +69,7 @@ impl DeviceCapabilityGraph {
                     .iter()
                     .flat_map(|entry| [entry.row as u32, entry.column as u32, entry.numerator])
                     .collect::<Vec<_>>();
-                let input = device.tensor(&padded(&records));
+                let input = device.tensor(padded(&records));
                 let adjacency = device.tensor(&vec![0; (nodes * row_words).max(1)]);
                 PositiveSupport::launch(
                     device,
@@ -84,7 +84,7 @@ impl DeviceCapabilityGraph {
                 );
                 Ok(Self {
                     adjacency,
-                    labels: device.tensor(&padded(labels)),
+                    labels: device.tensor(padded(labels)),
                     nodes,
                     row_words,
                 })
@@ -178,8 +178,8 @@ impl DeviceCapabilityGraph {
         Ok(BoundaryObservation {
             nodes: self.nodes,
             row_words: self.row_words,
-            adjacency: device.read(&self.adjacency)?[..self.nodes * self.row_words].to_vec(),
-            labels: device.read(&self.labels)?[..self.nodes].to_vec(),
+            adjacency: device.read_range(&self.adjacency, 0, self.nodes * self.row_words)?,
+            labels: device.read_range(&self.labels, 0, self.nodes)?,
         })
     }
 }

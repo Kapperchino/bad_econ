@@ -47,12 +47,7 @@ pub struct HouseholdPolicy {
 
 impl HouseholdPolicy {
     pub fn new(policy: Self, reserved_minutes: u32) -> Result<Self> {
-        let coefficients = [policy.fatigue_response];
-        match coefficients
-            .into_iter()
-            .all(|coefficient| coefficient <= 1000)
-            && policy.rest_minutes <= reserved_minutes
-        {
+        match policy.fatigue_response <= 1000 && policy.rest_minutes <= reserved_minutes {
             true => Ok(policy),
             false => Err(anyhow!(
                 "household coefficients must lie in 0..=1000 and rest must fit reserved time"

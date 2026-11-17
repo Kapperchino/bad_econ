@@ -349,31 +349,11 @@ impl Good {
         goods
     }
     pub fn from_index(index: u32) -> Result<Self> {
-        match index {
-            1 => Ok(Self::Grain),
-            2 => Ok(Self::Flour),
-            3 => Ok(Self::Bread),
-            4 => Ok(Self::Iron),
-            5 => Ok(Self::Coal),
-            6 => Ok(Self::Steel),
-            7 => Ok(Self::Flax),
-            8 => Ok(Self::Linen),
-            9 => Ok(Self::Cloth),
-            10 => Ok(Self::Clothes),
-            11 => Ok(Self::Wood),
-            12 => Ok(Self::Tools),
-            13 => Ok(Self::Furniture),
-            14 => Ok(Self::Cotton),
-            15 => Ok(Self::Dye),
-            16 => Ok(Self::Glass),
-            17 => Ok(Self::Construction),
-            18 => Ok(Self::Housing),
-            19 => Ok(Self::Locomotives),
-            20 => Ok(Self::Railway),
-            21 => Ok(Self::LuxuryClothes),
-            22 => Ok(Self::LuxuryFurniture),
-            _ => Err(anyhow!("invalid good")),
-        }
+        index
+            .checked_sub(1)
+            .and_then(|index| Self::ALL.get(index as usize))
+            .copied()
+            .context("invalid good")
     }
 }
 

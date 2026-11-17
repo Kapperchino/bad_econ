@@ -109,7 +109,6 @@ pub fn observed_blend(
     weight: u32,
     control: &[Atomic<u32>],
 ) -> Ticks {
-    let mut output = previous;
     if observation.kind == comptime!(ObservationKind::Observed as u32) {
         let baseline = minimum(previous, observation.value);
         let difference = minus(maximum(previous, observation.value), baseline);
@@ -121,9 +120,10 @@ pub fn observed_blend(
         let delta = ratio(difference, selected_weight, HOUSEHOLD_SCALE);
         let increased = plus(baseline, delta.value);
         delta.faults.union(increased.faults).record(control);
-        output = increased.value;
+        increased.value
+    } else {
+        previous
     }
-    output
 }
 
 #[cube]

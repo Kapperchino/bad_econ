@@ -1,6 +1,8 @@
 use super::markets;
 use crate::simulation::{
-    Device, parallel,
+    Device,
+    market_graphs::same_buffer,
+    parallel,
     parameters::EconomyParameters,
     pass::GpuPass,
     system::{System, gpu_passes},
@@ -264,26 +266,6 @@ impl SortGraph {
         }
         Ok(())
     }
-}
-
-fn same_buffer(recorded: &CubeTensor, current: &CubeTensor) -> bool {
-    (
-        recorded.handle.memory.descriptor(),
-        recorded.handle.service,
-        recorded.handle.offset_start,
-        recorded.handle.offset_end,
-        recorded.handle.size(),
-        &recorded.meta,
-        recorded.dtype,
-    ) == (
-        current.handle.memory.descriptor(),
-        current.handle.service,
-        current.handle.offset_start,
-        current.handle.offset_end,
-        current.handle.size(),
-        &current.meta,
-        current.dtype,
-    )
 }
 
 impl MarketSort {

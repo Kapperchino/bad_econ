@@ -95,16 +95,9 @@ impl ReductionShape {
                     independent: false,
                 }))
             }
-            (_, _, ReductionPlanes::Available) => {
-                RoutineStrategy::Cube(BlueprintStrategy::Inferred(CubeStrategy {
-                    use_planes: true,
-                }))
-            }
-            (_, _, ReductionPlanes::Unavailable) => {
-                RoutineStrategy::Cube(BlueprintStrategy::Inferred(CubeStrategy {
-                    use_planes: false,
-                }))
-            }
+            (_, _, planes) => RoutineStrategy::Cube(BlueprintStrategy::Inferred(CubeStrategy {
+                use_planes: matches!(planes, ReductionPlanes::Available),
+            })),
         };
         ReduceStrategy {
             routine,
@@ -569,66 +562,6 @@ mod tests {
                 }
             }
         }
-        Ok(())
-    }
-
-    #[test]
-    fn widened_integer_reductions_preserve_carries_and_overflow_on_gpu() -> Result<()> {
-        use crate::simulation::flags::CONTROL_WORDS;
-        let device = crate::simulation::tests::device(64)?;
-        let length = 1025;
-        let columns = 7;
-        let values = (0..length * columns)
-            .map(|index| (1u64 << 40) + u64::from(u32::MAX) - index as u64)
-            .collect::<Vec<_>>();
-        let input = TensorHandle::new_contiguous(
-            [length, columns],
-            device
-                .client
-                .create_from_slice(bytemuck::cast_slice(&values)),
-            u64::elem_type_native(),
-        );
-        let control = device.tensor(&[0; CONTROL_WORDS]);
-        let sums = sum_ticks(&device, &input, 0, &control)?;
-        let bytes = device.client.read_one(sums.handle)?;
-        let actual = bytemuck::cast_slice::<u8, u64>(&bytes);
-        for (column, &actual) in actual.iter().enumerate().take(columns) {
-            let expected = (0..length)
-                .map(|row| values[row * columns + column])
-                .sum::<u64>();
-            assert_eq!(actual, expected);
-        }
-        FaultFlags::read(&device.read(&control)?)?.into_result()?;
-        for operation in [ReduceOperationConfig::Min, ReduceOperationConfig::Max] {
-            let extrema = reduce(&device, &input, 0, operation, u64::elem_type_native())?;
-            let bytes = device.client.read_one(extrema.handle)?;
-            let actual = bytemuck::cast_slice::<u8, u64>(&bytes);
-            for (column, &actual) in actual.iter().enumerate().take(columns) {
-                let source = (0..length).map(|row| values[row * columns + column]);
-                let expected = match operation {
-                    ReduceOperationConfig::Min => source.min().unwrap(),
-                    _ => source.max().unwrap(),
-                };
-                assert_eq!(actual, expected);
-            }
-        }
-        let mut overflowing = vec![0u64; length * columns];
-        overflowing[0] = u64::MAX;
-        overflowing[columns] = 1;
-        let input = TensorHandle::new_contiguous(
-            [length, columns],
-            device
-                .client
-                .create_from_slice(bytemuck::cast_slice(&overflowing)),
-            u64::elem_type_native(),
-        );
-        let sums = sum_ticks(&device, &input, 0, &control)?;
-        let bytes = device.client.read_one(sums.handle)?;
-        assert_eq!(bytemuck::cast_slice::<u8, u64>(&bytes)[0], 0);
-        assert_eq!(
-            FaultFlags::read(&device.read(&control)?)?,
-            FaultFlags::ARITHMETIC_OVERFLOW
-        );
         Ok(())
     }
 

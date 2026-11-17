@@ -175,12 +175,12 @@ pub(super) fn sort(
         let end = min(start + chunk, count);
         let mut offered = 0u32;
         for member in start..end {
-            offered += u32::cast_from(index::Supply::load(&*scratch, config, member).offered);
+            offered += u32::cast_from(index::Supply::load(&*scratch, member).offered);
         }
         let prefix = parallel::scan_prefix(offered, comptime!(mode));
         let mut target = prefix.inclusive - offered;
         for member in start..end {
-            if index::Supply::load(&*scratch, config, member).offered {
+            if index::Supply::load(&*scratch, member).offered {
                 searches[(17 * config.actors + target) as usize] = member;
                 target += 1;
             }
@@ -247,18 +247,17 @@ pub(super) fn sort_scalar(
         for other in 0..count {
             let other_key = scratch[(5 * config.actors + other) as usize];
             rank += u32::cast_from(other_key < key || other_key == key && other < member);
-            stocked_rank += u32::cast_from(
-                other < member && index::Supply::load(&*scratch, config, other).offered,
-            );
+            stocked_rank +=
+                u32::cast_from(other < member && index::Supply::load(&*scratch, other).offered);
         }
         scratch[(7 * config.actors + rank) as usize] = member;
-        if index::Supply::load(&*scratch, config, member).offered {
+        if index::Supply::load(&*scratch, member).offered {
             searches[(17 * config.actors + stocked_rank) as usize] = member;
         }
         if member == 0 {
             let mut total = 0u32;
             for other in 0..count {
-                total += u32::cast_from(index::Supply::load(&*scratch, config, other).offered);
+                total += u32::cast_from(index::Supply::load(&*scratch, other).offered);
             }
             scratch[(7 * config.actors + count) as usize] = total;
         }
@@ -286,7 +285,7 @@ fn write_bound_scalar(
     let mut minimum_quote = u32::new(comptime!(i64::from(u32::MAX)));
     for position in start..end {
         let member = scratch[(7 * config.actors + position) as usize];
-        let supply = index::Supply::load(&*scratch, config, member);
+        let supply = index::Supply::load(&*scratch, member);
         stocked += u32::cast_from(supply.offered);
         if (supply.offered || supply.producer) && supply.quote > 0 {
             minimum_quote = min(minimum_quote, supply.quote);
@@ -341,7 +340,7 @@ fn write_bound_plane(
     let mut position = start + UNIT_POS_PLANE;
     while position < end {
         let member = scratch[(7 * config.actors + position) as usize];
-        let supply = index::Supply::load(&*scratch, config, member);
+        let supply = index::Supply::load(&*scratch, member);
         stocked += u32::cast_from(supply.offered);
         if (supply.offered || supply.producer) && supply.quote > 0 {
             minimum_quote = min(minimum_quote, supply.quote);
@@ -541,7 +540,7 @@ fn visit(
     let rotation = buyer.rotation % max(count, 1);
     for position in block * BLOCK..min((block + 1) * BLOCK, count) {
         let member = scratch[(7 * config.actors + position) as usize];
-        let supply = index::Supply::load(scratch, config, member);
+        let supply = index::Supply::load(scratch, member);
         let seller = spatial[(cells + 1 + member) as usize];
         if supply.producer
             && !supply.offered

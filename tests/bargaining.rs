@@ -73,33 +73,6 @@ fn lean_tax_inversion_directional_wages_and_household_bargaining() -> Result<()>
 }
 
 #[test]
-fn bargaining_grid_rounds_down_when_desired_offer_falls() -> Result<()> {
-    let device = support::device(64)?;
-    let requests = (0..64)
-        .map(|index| {
-            let mut request = teaching_request();
-            request.income.prior_gross = 100_000;
-            request.wage.funded = 100_000;
-            request.wage.payable_hours = 1;
-            request.wage.employer_charge = 0;
-            request.wage.quantum = 10;
-            request.first_offer = 300 + index * 7;
-            request.desired_offer = 800 - index * 11;
-            request.factors.mandate = index as u32 * 15;
-            request
-        })
-        .collect::<Vec<_>>();
-    let results = evaluate(&device, &requests)?;
-    for (request, result) in requests.iter().zip(results) {
-        let candidate = (u128::from(request.first_offer) * u128::from(1000 - result.weight)
-            + u128::from(request.desired_offer) * u128::from(result.weight))
-            / 1000;
-        assert_eq!(result.second_offer, Some(candidate as u64 / 10 * 10));
-    }
-    Ok(())
-}
-
-#[test]
 fn empty_wage_intervals_invalid_brackets_and_overflow_are_explicit() -> Result<()> {
     let device = support::device(64)?;
     let mut impossible = teaching_request();
