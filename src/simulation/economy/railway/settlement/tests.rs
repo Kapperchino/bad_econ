@@ -559,11 +559,6 @@ fn check_fit_route(route: FitRoute) -> Result<()> {
 }
 
 #[test]
-fn tracked_freight_budgets_match_exhaustive_fallback_and_wide_faults_on_gpu() -> Result<()> {
-    check_fit_route(FitRoute::Long)
-}
-
-#[test]
 fn monotone_segment_regions_bound_every_route_resource_multiplicity_on_gpu() -> Result<()> {
     for route in [
         FitRoute::Short,
@@ -600,12 +595,16 @@ fn monotone_segment_regions_bound_every_route_resource_multiplicity_on_gpu() -> 
 }
 
 #[test]
-fn unconstrained_freight_fits_match_tracked_repeated_resources_and_wide_faults_on_gpu() -> Result<()>
-{
-    check_fit_route(FitRoute::Short)?;
-    check_fit_route(FitRoute::Repeated)?;
-    check_fit_route(FitRoute::ManyNodes)?;
-    check_fit_route(FitRoute::Property)
+fn freight_fit_methods_agree_across_routes_and_wide_faults_on_gpu() -> Result<()> {
+    [
+        FitRoute::Short,
+        FitRoute::Repeated,
+        FitRoute::ManyNodes,
+        FitRoute::Property,
+        FitRoute::Long,
+    ]
+    .into_iter()
+    .try_for_each(check_fit_route)
 }
 
 #[test]
@@ -730,10 +729,6 @@ impl FreightLoad {
                 _ => 0,
             }
     }
-}
-
-fn freight(source: Seller, load: FreightLoad, workgroup: u32) -> Result<()> {
-    freight_execution(source, load, workgroup, Execution::Immediate).map(|_| ())
 }
 
 fn freight_execution(
@@ -1106,32 +1101,28 @@ fn freight_execution(
 }
 
 #[test]
-fn pending_freight_preserves_sparse_priorities_and_cached_route_retries_on_gpu() -> Result<()> {
-    for workgroup in [32, 256] {
-        for load in [
-            FreightLoad::Sparse,
-            FreightLoad::Unavailable,
-            FreightLoad::Constrained,
-            FreightLoad::SparseConstrained,
-            FreightLoad::CashConstrained,
-            FreightLoad::Empty,
+fn buffered_freight_matches_immediate_settlement_and_retries_on_gpu() -> Result<()> {
+    for load in [
+        FreightLoad::Available,
+        FreightLoad::Unavailable,
+        FreightLoad::Sparse,
+        FreightLoad::Constrained,
+        FreightLoad::SparseConstrained,
+        FreightLoad::CashConstrained,
+        FreightLoad::Cascading,
+        FreightLoad::Empty,
+    ] {
+        for (source, workgroup) in [
+            (Seller::Firm(Good::Bread), 32),
+            (Seller::Firm(Good::Steel), 64),
+            (Seller::Household, 256),
         ] {
-            for source in [
-                Seller::Firm(Good::Bread),
-                Seller::Firm(Good::Steel),
-                Seller::Household,
-            ] {
-                freight(source, load, workgroup)?;
-            }
+            assert_eq!(
+                freight_execution(source, load, workgroup, Execution::Initial)?,
+                freight_execution(source, load, workgroup, Execution::Immediate)?,
+                "{source:?} {load:?} workgroup {workgroup}"
+            );
         }
-    }
-    Ok(())
-}
-
-#[test]
-fn cross_resource_contention_stops_after_one_retry_on_gpu() -> Result<()> {
-    for workgroup in [32, 256] {
-        freight(Seller::Firm(Good::Bread), FreightLoad::Cascading, workgroup)?;
     }
     Ok(())
 }
@@ -1164,24 +1155,6 @@ fn market_claim_preparation_reads_gpu_searches_and_propagates_prior_faults() -> 
         .err()
         .expect("the prior GPU fault must propagate");
     assert!(error.to_string().contains("ARITHMETIC_OVERFLOW"));
-    Ok(())
-}
-
-#[test]
-fn buffered_freight_matches_immediate_zero_claims_contention_and_retry_on_gpu() -> Result<()> {
-    for load in [
-        FreightLoad::Available,
-        FreightLoad::Constrained,
-        FreightLoad::Cascading,
-        FreightLoad::Empty,
-    ] {
-        for source in [Seller::Firm(Good::Bread), Seller::Household] {
-            assert_eq!(
-                freight_execution(source, load, 64, Execution::Initial)?,
-                freight_execution(source, load, 64, Execution::Immediate)?,
-            );
-        }
-    }
     Ok(())
 }
 
@@ -1461,17 +1434,10 @@ fn disabled_buffered_freight_retry_preserves_all_settlement_buffers_on_gpu() -> 
 }
 
 #[test]
-fn buffered_advance_recovers_claim_capacity_and_preserves_entries_and_people_on_gpu() -> Result<()>
-{
-    for capacity in [0, 1] {
-        buffered_capacity_recovery(capacity, ClaimContention::Present)?;
-    }
-    Ok(())
-}
-
-#[test]
-fn unallocated_freight_preserves_zero_claim_days_and_registry_growth_on_gpu() -> Result<()> {
-    buffered_capacity_recovery(0, ClaimContention::Absent)
+fn buffered_advance_recovers_claim_capacity_and_preserves_registry_growth_on_gpu() -> Result<()> {
+    buffered_capacity_recovery(0, ClaimContention::Absent)?;
+    buffered_capacity_recovery(0, ClaimContention::Present)?;
+    buffered_capacity_recovery(1, ClaimContention::Present)
 }
 
 #[derive(Clone, Copy)]

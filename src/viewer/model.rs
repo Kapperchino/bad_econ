@@ -32,7 +32,10 @@ pub struct ComparisonRun {
 }
 impl ComparisonRun {
     pub fn at_day(&self, day: u64) -> Option<&ObservationSnapshot> {
-        self.history.iter().find(|snapshot| snapshot.day == day)
+        self.history
+            .binary_search_by_key(&day, |snapshot| snapshot.day)
+            .ok()
+            .map(|index| &self.history[index])
     }
 }
 
@@ -536,6 +539,26 @@ impl Chart {
             _ => Good::ALL.into_iter().map(|good| good.to_string()).collect(),
         }
     }
+    pub(super) fn samples(
+        self,
+        history: &VecDeque<ObservationSnapshot>,
+        first_day: u64,
+        last_day: u64,
+    ) -> impl Iterator<Item = ChartSample> {
+        let start = history.partition_point(|point| point.day < first_day);
+        history
+            .range(start..)
+            .take_while(move |point| point.day <= last_day)
+            .enumerate()
+            .map(move |(offset, snapshot)| {
+                let previous = (start + offset).checked_sub(1).map(|index| &history[index]);
+                ChartSample {
+                    day: snapshot.day,
+                    values: self.values(snapshot, previous),
+                }
+            })
+    }
+
     pub fn values(
         self,
         s: &ObservationSnapshot,
@@ -702,6 +725,11 @@ fn daily_goods(
         .collect()
 }
 
+pub(super) struct ChartSample {
+    pub day: u64,
+    pub values: Vec<f64>,
+}
+
 pub struct ChartRange {
     pub first_day: u64,
     pub last_day: u64,
@@ -725,24 +753,10 @@ impl ChartRange {
         let last_day = snapshot.day;
         let range = std::iter::once(history)
             .chain(comparison.map(|run| &run.history))
-            .flat_map(|history| {
-                history
-                    .iter()
-                    .enumerate()
-                    .filter(|(_, point)| (first_day..=last_day).contains(&point.day))
-                    .flat_map(move |(index, point)| {
-                        chart
-                            .values(
-                                point,
-                                index.checked_sub(1).and_then(|index| history.get(index)),
-                            )
-                            .into_iter()
-                            .enumerate()
-                            .filter(move |(series, value)| {
-                                selection.includes(*series) && value.is_finite()
-                            })
-                            .map(|(_, value)| value)
-                    })
+            .flat_map(|history| chart.samples(history, first_day, last_day))
+            .flat_map(|sample| sample.values.into_iter().enumerate())
+            .filter_map(|(series, value)| {
+                (selection.includes(series) && value.is_finite()).then_some(value)
             })
             .fold(
                 Self {
@@ -880,16 +894,8 @@ mod tests {
             );
             assert_eq!(range.first_day, first);
             assert_eq!(range.last_day, 2000);
+            assert_eq!(range.maximum, if first == 0 { 1_000_000.0 } else { 10.0 });
         }
-        let range = ChartRange::new(
-            Chart::Inventories,
-            snapshot,
-            &history,
-            None,
-            Period::Month,
-            SeriesSelection::All,
-        );
-        assert_eq!(range.maximum, 10.0);
         let range = ChartRange::new(
             Chart::Production,
             snapshot,

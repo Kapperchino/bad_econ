@@ -22,11 +22,8 @@ impl DemographyRuntime {
     ) -> Result<Self> {
         let required =
             (self.count.max(1) * PersonLayout::WORDS * 2 + actors * 3) as u64 * WORD_BYTES as u64;
-        device.reclaim_memory(required)?;
         match device
-            .client
-            .memory_report(cubecl::MemoryScope::Device)
-            .usage()
+            .reclaim_memory(required)?
             .bytes_reserved
             .saturating_add(required)
             <= device.memory_budget.bytes()

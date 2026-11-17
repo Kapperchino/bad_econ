@@ -190,10 +190,9 @@ pub fn evaluate(
     requests: &[HouseholdObservation],
 ) -> Result<Vec<HouseholdPolicyResult>> {
     let mut services = Vec::new();
-    let mut encoded = Vec::with_capacity(requests.len().max(1));
+    let mut encoded = Vec::with_capacity(requests.len());
     for request in requests {
-        let offset = u32::try_from(services.len())?;
-        encoded.push(RequestLayout::new(request, offset)?);
+        encoded.push(RequestLayout::new(request, u32::try_from(services.len())?)?);
         services.extend(request.services.iter().map(|service| ServiceLayout {
             need: service.need.into(),
             delivered: service.delivered.into(),
@@ -202,10 +201,8 @@ pub fn evaluate(
     }
     let count = u32::try_from(requests.len())?;
     let _ = u32::try_from(services.len())?;
-    encoded.resize(encoded.len().max(1), RequestLayout::zeroed());
-    services.resize(services.len().max(1), ServiceLayout::zeroed());
-    let input = device.tensor(bytemuck::cast_slice(&encoded));
-    let services = device.tensor(bytemuck::cast_slice(&services));
+    let input = device.record_tensor(&encoded);
+    let services = device.record_tensor(&services);
     let output = device.empty(requests.len().max(1) * ResultLayout::WORDS);
     let control = device.tensor(&[0; 4]);
     let argument = |tensor: &CubeTensor| tensor.clone().into_buffer_arg();

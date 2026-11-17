@@ -413,8 +413,13 @@ mod tests {
         config.entrepreneurship.interested_per_mille = 0;
         config.demography.annual_births_per_million_fertile_women = 0;
         let scenario = Scenario::new(config)?;
+        let initial = scenario.initial()?;
         let mut actual = Simulation::new(scenario.clone(), device.clone())?;
-        let mut expected = Simulation::new(scenario, device)?;
+        assert!(actual.config.state_stride as usize > initial.actors.len());
+        let initialized = actual.download()?;
+        assert_eq!(initialized.values, initial.values);
+        assert_eq!(actual.checkpoint()?.restore()?.state, initialized);
+        let mut expected = Simulation::from_state(scenario, initial, device)?;
         expected.market_sort = MarketSort::Profiled;
         for day in [0, 57, 120] {
             actual.day = day;

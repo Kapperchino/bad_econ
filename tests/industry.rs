@@ -1,4 +1,3 @@
-#![cfg(feature = "compute")]
 use super::support;
 
 use anyhow::Result;

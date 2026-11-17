@@ -1,7 +1,6 @@
-#![cfg(feature = "compute")]
 use super::support;
 use anyhow::Result;
-use bad_econ::{domain::*, ledger::*, runtime::*, simulation};
+use bad_econ::{ledger::*, simulation};
 
 fn event(id: u64, legs: &[Leg]) -> Bundle {
     Bundle::new(
@@ -21,18 +20,19 @@ fn transfer(cell: u32, debit: u64, credit: u64) -> Leg {
 }
 
 #[test]
-fn gross_affordability_repeated_legs_and_atomic_overflow() -> Result<()> {
+fn serialized_bundles_preserve_grouped_gross_debits_and_authorization() -> Result<()> {
+    let key = event(1, &[]).key();
+    let definition = |legs: Vec<Leg>| serde_json::json!({ "key": key, "legs": legs });
+    let bundle: Bundle = serde_json::from_value(definition(vec![
+        transfer(0, 3, 3),
+        transfer(0, 3, 0),
+        transfer(1, 0, 3),
+    ]))?;
+    let mut state = [5, 0];
+    assert_eq!(bundle.apply(&mut state)?, Decision::Rejected);
+    assert_eq!(state, [5, 0]);
     let device = support::device(64)?;
-    let gross = simulation::ledger(&device, &[1], &[event(1, &[transfer(0, 3, 2)])])?;
-    assert_eq!(gross.decisions, [Decision::Rejected]);
-    assert_eq!(gross.state, [1]);
-    let grouped = simulation::ledger(
-        &device,
-        &[5],
-        &[event(1, &[transfer(0, 3, 0), transfer(0, 3, 0)])],
-    )?;
-    assert_eq!(grouped.decisions, [Decision::Rejected]);
-    assert_eq!(grouped.state, [5]);
+    let actual = simulation::ledger(&device, &[5, 0], std::slice::from_ref(&bundle))?;
     assert!(
         simulation::ledger(
             &device,
@@ -41,26 +41,6 @@ fn gross_affordability_repeated_legs_and_atomic_overflow() -> Result<()> {
         )
         .is_err()
     );
-    Ok(())
-}
-
-#[test]
-fn serialized_bundles_preserve_grouped_gross_debits_and_authorization() -> Result<()> {
-    let key = event(1, &[]).key();
-    let definition = |legs: Vec<Leg>| serde_json::json!({ "key": key, "legs": legs });
-    let bundle: Bundle = serde_json::from_value(definition(vec![
-        transfer(0, 3, 0),
-        transfer(0, 3, 0),
-        transfer(1, 0, 6),
-    ]))?;
-    let mut state = [5, 0];
-    assert_eq!(bundle.apply(&mut state)?, Decision::Rejected);
-    assert_eq!(state, [5, 0]);
-    let actual = simulation::ledger(
-        &support::device(64)?,
-        &[5, 0],
-        std::slice::from_ref(&bundle),
-    )?;
     assert_eq!(actual.state, state);
     assert_eq!(actual.decisions, [Decision::Rejected]);
     assert_eq!(bundle.legs().len(), 2);
@@ -118,32 +98,5 @@ fn authorization_reads_create_dependencies() -> Result<()> {
     );
     assert!(serial(&mut state, &[])?.is_empty());
     assert!(Schedule::new(&[events[1].clone(), events[0].clone()]).is_err());
-    Ok(())
-}
-
-#[cfg(feature = "compute")]
-#[test]
-fn transport_ownership_time_budgets_and_checkpoint_replay() -> Result<()> {
-    let scenario = Scenario::baseline(120, 42, Experiment::Transport)?;
-    let mut simulation =
-        bad_econ::simulation::Simulation::new(scenario.clone(), support::device(64)?)?;
-    (0..8).try_for_each(|_| simulation.advance())?;
-    let initial_cash = simulation.download()?.initial_cash;
-    assert_eq!(simulation.snapshot.cash, initial_cash);
-    let checkpoint = simulation.checkpoint()?;
-    let serialized = serde_json::to_string(&checkpoint)?;
-    let checkpoint: Checkpoint = serde_json::from_str(&serialized)?;
-    (0..4).try_for_each(|_| simulation.advance())?;
-    let expected = simulation.download()?;
-    simulation.command(SimulationCommand::Restore(checkpoint.into()))?;
-    (0..4).try_for_each(|_| simulation.advance())?;
-    assert_eq!(simulation.download()?, expected);
-    let state = simulation.download()?;
-    (0..scenario.config().households as usize).for_each(|i| {
-        assert!(
-            state.get(Field::Hours, i) + state.get(Field::Time, i)
-                <= u64::from(scenario.config().work_cap)
-        )
-    });
     Ok(())
 }

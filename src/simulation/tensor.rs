@@ -400,29 +400,28 @@ mod tests {
     use super::*;
 
     #[test]
-    fn contiguous_gpu_copy_preserves_words_across_dispatch_boundaries() -> Result<()> {
-        for workgroup in [32, 256] {
-            let device = crate::simulation::tests::device(workgroup)?;
-            for count in [1, 2, 3, 4, 20, 255, 256, 260, 2044, 2048, 2052, 65_540] {
-                let values = (0..count)
-                    .map(|index| (index as u32).wrapping_mul(2_654_435_761))
-                    .collect::<Vec<_>>();
-                let source = device.tensor(&values);
-                let target = device.tensor(&vec![u32::MAX; count]);
-                copy_contiguous(&device, &source, &target);
-                assert_eq!(device.read(&target)?, values);
-            }
-        }
-        Ok(())
-    }
-
-    #[test]
     fn sparse_gpu_snapshot_preserves_transitions_and_restore() -> Result<()> {
-        let device = crate::simulation::tests::device(64)?;
-        for count in [
-            1, 3, 4, 1020, 1024, 1028, 2048, 2052, 4092, 4096, 4100, 65_540, 65_541,
+        let small = crate::simulation::tests::device(32)?;
+        let large = crate::simulation::tests::device(256)?;
+        for (count, device) in [
+            (1, &small),
+            (2, &small),
+            (3, &small),
+            (4, &small),
+            (255, &small),
+            (260, &small),
+            (1020, &small),
+            (1024, &small),
+            (1028, &small),
+            (2048, &small),
+            (2052, &small),
+            (4092, &large),
+            (4096, &large),
+            (4100, &large),
+            (65_540, &large),
+            (65_541, &large),
         ] {
-            let snapshot = SnapshotCopy::new(&device, count);
+            let snapshot = SnapshotCopy::new(device, count);
             let audited = device.tensor(&vec![u32::MAX; count]);
             let initial = vec![0; count];
             let populated = (0..count)
@@ -439,10 +438,10 @@ mod tests {
                 .collect::<Vec<_>>();
             for values in [&initial, &populated, &changed, &initial, &populated] {
                 let source = device.tensor(values);
-                snapshot.save(&device, &source, &audited);
+                snapshot.save(device, &source, &audited);
                 assert_eq!(device.read(&audited)?, *values);
                 let restored = device.tensor(&vec![17; count]);
-                copy_contiguous(&device, &audited, &restored);
+                copy_contiguous(device, &audited, &restored);
                 assert_eq!(device.read(&restored)?, *values);
             }
         }

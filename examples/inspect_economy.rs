@@ -116,16 +116,9 @@ struct HouseholdSummary {
 
 fn household_summaries(
     state: &State,
+    members: &BTreeMap<u64, u64>,
     classify: impl Fn(usize, u64) -> HouseholdClass,
 ) -> Vec<HouseholdSummary> {
-    let members = state
-        .people
-        .iter()
-        .filter(|person| matches!(person.state, demography::LivingState::Living))
-        .fold(BTreeMap::<u64, u64>::new(), |mut counts, person| {
-            *counts.entry(person.household).or_default() += 1;
-            counts
-        });
     let mut households = std::array::from_fn::<_, 5, _>(|_| Accounts::default());
     let mut balances = std::array::from_fn::<_, 5, _>(|_| Vec::new());
     for (index, actor) in state
@@ -231,6 +224,12 @@ impl InitialCohorts {
 #[derive(Serialize)]
 struct Industry {
     good: Good,
+    #[serde(flatten)]
+    totals: IndustryTotals,
+}
+
+#[derive(Default, Serialize)]
+struct IndustryTotals {
     firms: usize,
     cash: u64,
     capacity: u64,
@@ -245,6 +244,37 @@ struct Industry {
     upgraded: usize,
     price: u64,
     wage: u64,
+}
+
+fn industries(state: &State) -> [Industry; Good::COUNT] {
+    let mut industries = Good::ALL.map(|good| Industry {
+        good,
+        totals: IndustryTotals::default(),
+    });
+    for (index, actor) in state.actors.iter().enumerate().filter(|(index, actor)| {
+        actor.kind > 0
+            && state.get(Field::EnterpriseModel, *index)
+                == enterprise::EnterpriseModel::Producer as u64
+    }) {
+        let industry = &mut industries[actor.kind as usize - 1];
+        let totals = &mut industry.totals;
+        let value = |field| state.get(field, index);
+        totals.firms += 1;
+        totals.cash += value(Field::Cash);
+        totals.capacity += u64::from(actor.capacity);
+        totals.plan += value(Field::Plan);
+        totals.vacancies += value(Field::Slots);
+        totals.demand += value(Field::Demand);
+        totals.sales += value(Field::Sales);
+        totals.unfilled += value(Field::Unfilled);
+        totals.stock += value(Field::inventory(industry.good));
+        totals.produced += value(Field::Produced);
+        totals.states[value(Field::EnterpriseStatus) as usize] += 1;
+        totals.upgraded += usize::from(value(Field::ActiveMethod) > 0);
+        totals.price += value(Field::Price);
+        totals.wage += value(Field::Wage);
+    }
+    industries
 }
 
 fn main() -> Result<()> {
@@ -271,10 +301,18 @@ fn main() -> Result<()> {
         {
             let state = simulation.download()?;
             let owners = shareholders(&state);
-            let households = household_summaries(&state, |index, _| {
+            let members = state
+                .people
+                .iter()
+                .filter(|person| matches!(person.state, demography::LivingState::Living))
+                .fold(BTreeMap::<u64, u64>::new(), |mut counts, person| {
+                    *counts.entry(person.household).or_default() += 1;
+                    counts
+                });
+            let households = household_summaries(&state, &members, |index, _| {
                 HouseholdClass::new(&state, index, &owners)
             });
-            let initial_households = household_summaries(&state, |_, identity| {
+            let initial_households = household_summaries(&state, &members, |_, identity| {
                 cohorts
                     .households
                     .get(&identity)
@@ -282,56 +320,10 @@ fn main() -> Result<()> {
                     .unwrap_or(HouseholdClass::Formed)
             });
             let initial_people = cohorts.population(&state);
-            let industries = Good::ALL
-                .into_iter()
-                .map(|good| {
-                    let firms = state
-                        .actors
-                        .iter()
-                        .enumerate()
-                        .filter(|(index, actor)| {
-                            actor.kind == good as u32
-                                && state.get(Field::EnterpriseModel, *index) == 0
-                        })
-                        .map(|(index, _)| index)
-                        .collect::<Vec<_>>();
-                    let sum = |field| firms.iter().map(|&index| state.get(field, index)).sum();
-                    Industry {
-                        good,
-                        firms: firms.len(),
-                        cash: sum(Field::Cash),
-                        capacity: firms
-                            .iter()
-                            .map(|&index| u64::from(state.actors.at(index).capacity))
-                            .sum(),
-                        plan: sum(Field::Plan),
-                        vacancies: sum(Field::Slots),
-                        demand: sum(Field::Demand),
-                        sales: sum(Field::Sales),
-                        unfilled: sum(Field::Unfilled),
-                        stock: sum(Field::inventory(good)),
-                        produced: sum(Field::Produced),
-                        states: std::array::from_fn(|status| {
-                            firms
-                                .iter()
-                                .filter(|&&index| {
-                                    state.get(Field::EnterpriseStatus, index) == status as u64
-                                })
-                                .count()
-                        }),
-                        upgraded: firms
-                            .iter()
-                            .filter(|&&index| state.get(Field::ActiveMethod, index) > 0)
-                            .count(),
-                        price: sum(Field::Price),
-                        wage: sum(Field::Wage),
-                    }
-                })
-                .collect::<Vec<_>>();
             println!(
                 "{}",
                 serde_json::to_string(
-                    &serde_json::json!({"day":day,"snapshot":simulation.snapshot,"households":households,"initial_households":initial_households,"initial_people":initial_people,"industries":industries})
+                    &serde_json::json!({"day":day,"snapshot":simulation.snapshot,"households":households,"initial_households":initial_households,"initial_people":initial_people,"industries":industries(&state)})
                 )?
             );
         }

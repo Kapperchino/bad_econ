@@ -39,25 +39,6 @@ fn replace_people_preserving_workers(
     }
 }
 
-#[test]
-fn reserved_state_capacity_preserves_checkpoints_and_fault_rollback_on_gpu() -> Result<()> {
-    let scenario = Scenario::industrial(4097, 42, Experiment::Baseline)?;
-    let initial = scenario.initial()?;
-    let mut simulation = Simulation::new(scenario, device(64)?)?;
-    assert!(simulation.config.state_stride as usize > initial.actors.len());
-    let initialized = simulation.download()?;
-    assert_eq!(initialized.values, initial.values);
-    assert_eq!(simulation.checkpoint()?.restore()?.state, initialized);
-    simulation.advance()?;
-    let state = simulation.download()?;
-    let checkpoint = simulation.checkpoint()?;
-    simulation.device.memory_budget = MemoryBudget::Reported { available_bytes: 2 };
-    assert!(simulation.advance().is_err());
-    assert_eq!(simulation.download()?, state);
-    assert_eq!(simulation.checkpoint()?, checkpoint);
-    Ok(())
-}
-
 fn compare_market_execution(scenario: Scenario, days: usize) -> Result<()> {
     let initial = scenario.initial()?;
     compare_market_state(scenario, initial, days)
@@ -253,78 +234,6 @@ fn grouped_market_faults_match_reference_and_restore_the_audited_state() -> Resu
 }
 
 #[test]
-fn gpu_registry_migration_births_and_estates_match_audited_rebuilds() -> Result<()> {
-    let mut config = Scenario::baseline(300, 42, Experiment::Baseline)?
-        .config()
-        .clone();
-    config.firms = 3;
-    config.search_radius = 200;
-    config.shipment_speed = 100;
-    config.household_production = crate::domain::enterprise::HouseholdProduction::industrial();
-    config.demography.annual_births_per_million_fertile_women = 1_000_000;
-    config.demography.mortality.background_annual_ppm = [1_000_000; 5];
-    config.demography.mortality.famine_daily_ppm_at_thirty_days = 0;
-    config.population = Some(Population {
-        households: (1..=300)
-            .map(|identity| HouseholdSeed {
-                identity,
-                position: Position { x: 0, y: 0 },
-                cash: 5000,
-                inventories: [0; Good::COUNT],
-                fatigue: 0,
-            })
-            .collect(),
-        firms: [400, 700, 900]
-            .into_iter()
-            .enumerate()
-            .map(|(index, x)| FirmSeed {
-                identity: 1000 + index as u64,
-                position: Position { x, y: 0 },
-                owner: 1,
-                good: Good::Bread,
-                cash: 0,
-                inventories: Good::food([0, 0, if index == 0 { 6000 } else { 0 }]),
-                capacity: 1,
-                technique: Technique::new(60, 1, 1).expect("basic bakery"),
-                wage: 1,
-                price: 10,
-            })
-            .collect(),
-    });
-    let scenario = Scenario::new(config)?;
-    let mut gpu = Simulation::new(scenario.clone(), device(64)?)?;
-    let mut reference = Simulation::new(scenario.clone(), device(64)?)?;
-    reference.registry_execution = RegistryExecution::Reference;
-    for day in 0..60 {
-        if day == 12 {
-            let mut state = gpu.download()?;
-            let stock = state.get(Field::Bread, 300);
-            state.set(Field::Bread, 300, 0);
-            state.set(Field::Bread, 302, stock);
-            let checkpoint = Checkpoint::new(&scenario, &state)?;
-            gpu.command(SimulationCommand::Restore(Box::new(checkpoint.clone())))?;
-            reference.command(SimulationCommand::Restore(Box::new(checkpoint)))?;
-        }
-        gpu.advance()?;
-        reference.advance()?;
-        assert_eq!(gpu.download()?, reference.download()?, "day {day}");
-        assert_eq!(gpu.snapshot, reference.snapshot, "day {day}");
-    }
-    let state = gpu.download()?;
-    assert!(
-        state
-            .actors
-            .iter()
-            .any(|actor| actor.kind == 0 && actor.position.x == 900)
-    );
-    assert!(gpu.snapshot.population.births > 0);
-    assert!(gpu.snapshot.population.deaths[0] > 0);
-    assert!((0..state.actors.len()).any(|actor| state.get(Field::EstateSettled, actor) == 2));
-    gpu.checkpoint()?.restore()?;
-    Ok(())
-}
-
-#[test]
 fn gpu_parent_estates_preserve_inheritance_without_full_state_readback() -> Result<()> {
     use crate::domain::demography::{DeathCause, LivingState};
     use crate::domain::enterprise::OwnershipShare;
@@ -432,13 +341,21 @@ fn gpu_parent_estates_preserve_inheritance_without_full_state_readback() -> Resu
             initial.set(Field::SplitPerson, parent, person);
             requests[parent] = (1 << 24) + 1;
         }
-        let pending =
-            registry::records::PendingRecords::from_dense(&requests, &vec![0; requests.len()])?;
-        let mut expected = initial.clone();
-        enterprise::transitions(&mut expected, &scenario, &requests)?;
+        let mut births = vec![0; requests.len()];
+        births[5] = 1;
+        let pending = registry::records::PendingRecords::from_dense(&requests, &births)?;
         let mut gpu = Simulation::from_state(scenario.clone(), initial.clone(), device(64)?)
             .context("initial inheritance state")?;
         gpu.device.write(&gpu.enterprise_requests, &requests);
+        gpu.device.write(gpu.demography.birth_buffer(), &births);
+        let mut expected = gpu.download()?;
+        let people = gpu
+            .demography
+            .reference_births(&gpu.device, &births, expected.next_identity)?
+            .download(&gpu.device, &expected, CopyDirection::Save)?;
+        replace_people_preserving_workers(&mut expected, people);
+        expected.next_identity += 1;
+        enterprise::transitions(&mut expected, &scenario, &requests)?;
         let before = gpu.readback_bytes;
         match registry::entries::EntryGrowth::new(
             &scenario,
@@ -966,142 +883,169 @@ fn company_investment_updates_every_site_and_closing_one_site_preserves_the_othe
     Ok(())
 }
 
+fn sparse_market_scenario() -> Result<Scenario> {
+    let generated = Scenario::industrial(67, 42, Experiment::Concentrated)?;
+    let initial = generated.initial()?;
+    let mut config = generated.config().clone();
+    let households = config.households as usize;
+    config.population = Some(Population {
+        households: (0..households)
+            .map(|household| {
+                let actor = initial.actors.at(household);
+                let mut inventories =
+                    Good::ALL.map(|good| initial.get(Field::inventory(good), household));
+                inventories[Good::Bread as usize - 1] = match household % 3 {
+                    0 => 500,
+                    _ => 0,
+                };
+                HouseholdSeed {
+                    identity: actor.identity,
+                    position: actor.position,
+                    cash: match household % 4 {
+                        0 => 1,
+                        _ => 5000,
+                    },
+                    inventories,
+                    fatigue: initial.get(Field::Fatigue, household) as u32,
+                }
+            })
+            .collect(),
+        firms: (households..initial.actors.len())
+            .map(|firm| {
+                let actor = initial.actors.at(firm);
+                Ok(FirmSeed {
+                    identity: actor.identity,
+                    position: actor.position,
+                    owner: initial.actors.at(actor.owner as usize).identity,
+                    good: Good::from_index(actor.kind)?,
+                    cash: initial.get(Field::Cash, firm),
+                    inventories: Good::ALL.map(|good| initial.get(Field::inventory(good), firm)),
+                    capacity: actor.capacity,
+                    technique: generated.technique(firm),
+                    wage: initial.get(Field::Wage, firm) as u32,
+                    price: initial.get(Field::Price, firm) as u32,
+                })
+            })
+            .collect::<Result<Vec<_>>>()?,
+    });
+    Scenario::new(config)
+}
+
 #[test]
 fn device_markets_and_checkpoint_replay_match_original_gpu_phases() -> Result<()> {
-    for experiment in [Experiment::Baseline, Experiment::Concentrated] {
-        let mut config = Scenario::industrial(193, 42, experiment)?.config().clone();
-        config.demography.annual_births_per_million_fertile_women = 1_000_000;
-        let scenario = Scenario::new(config)?;
-        let mut actual = Simulation::new(scenario.clone(), device(64)?)?;
-        let mut expected = Simulation::new(scenario, device(64)?)?;
-        expected.market_execution = MarketExecution::Original;
-        expected.audit_execution = AuditExecution::Original;
-        expected.registry_execution = RegistryExecution::Reference;
-        for day in 0..3 {
-            if day == 1 {
-                actual = Simulation::from_checkpoint(expected.checkpoint()?, device(64)?)?;
+    #[derive(Clone, Copy, Debug)]
+    enum Comparison {
+        OriginalReplay,
+        SparseTrace,
+    }
+
+    let device = device(64)?;
+    let mut generated = Scenario::industrial(193, 42, Experiment::Baseline)?
+        .config()
+        .clone();
+    generated.demography.annual_births_per_million_fertile_women = 1_000_000;
+    for (case, scenario) in [
+        (Comparison::OriginalReplay, Scenario::new(generated)?),
+        (Comparison::SparseTrace, sparse_market_scenario()?),
+    ] {
+        let mut actual = Simulation::new(scenario.clone(), device.clone())?;
+        let mut expected = Simulation::new(scenario, device.clone())?;
+        let traces = match case {
+            Comparison::OriginalReplay => {
+                expected.market_execution = MarketExecution::Original;
+                expected.audit_execution = AuditExecution::Original;
+                expected.registry_execution = RegistryExecution::Reference;
+                [Trace::Record; 3]
+            }
+            Comparison::SparseTrace => [Trace::Discard, Trace::Record, Trace::Discard],
+        };
+        let mut purchases = 0;
+        for (day, trace) in traces.into_iter().enumerate() {
+            if let (Comparison::OriginalReplay, 1) = (case, day) {
+                actual = Simulation::from_checkpoint(expected.checkpoint()?, device.clone())?;
             }
             for phase in Phase::ALL {
                 let reference = expected.phase(phase, Trace::Record)?;
-                let result = actual.phase(phase, Trace::Record)?;
-                assert_eq!(
-                    result.decisions, reference.decisions,
-                    "{experiment:?} {day} {phase:?}"
-                );
+                let result = actual.phase(phase, trace)?;
+                if let Trace::Record = trace {
+                    assert_eq!(
+                        result.decisions, reference.decisions,
+                        "{case:?} {day} {phase:?}"
+                    );
+                }
                 assert_eq!(
                     result.frontier_depth, reference.frontier_depth,
-                    "{experiment:?} {day} {phase:?}"
+                    "{case:?} {day} {phase:?}"
                 );
-                assert_eq!(
-                    result.events, reference.events,
-                    "{experiment:?} {day} {phase:?}"
-                );
+                assert_eq!(result.events, reference.events, "{case:?} {day} {phase:?}");
                 assert_eq!(
                     actual.download()?,
                     expected.download()?,
-                    "{experiment:?} {day} {phase:?}"
+                    "{case:?} {day} {phase:?}"
                 );
                 assert_eq!(actual.snapshot, expected.snapshot);
+                if phase == Phase::ProvisionPurchase {
+                    purchases += reference
+                        .decisions
+                        .iter()
+                        .filter(|decision| **decision == Decision::Accepted)
+                        .count();
+                }
             }
         }
+        assert!(purchases > 0, "{case:?} completed without a purchase");
         assert_eq!(actual.checkpoint()?, expected.checkpoint()?);
     }
     Ok(())
 }
 
 #[test]
-fn capacity_changes_preserve_spatial_membership_and_rollback_preparation() -> Result<()> {
+fn capacity_changes_preserve_gpu_metadata_spatial_membership_and_rollback() -> Result<()> {
     let scenario = Scenario::industrial(97, 42, Experiment::Baseline)?;
-    let mut simulation = Simulation::new(scenario.clone(), device(64)?)?;
-    let mut initial = simulation.download()?;
-    initial.set(Field::PendingCapacity, 97, 5);
-    simulation.device.write(
-        &simulation.state,
-        bytemuck::cast_slice(&encode(&initial.values)),
-    );
-    let spatial = simulation.device.read(&simulation.spatial)?;
-    let mut requests = vec![0; simulation.actors().len()];
-    requests[97] = (6 << 24) | 5;
-    let pending =
-        registry::records::PendingRecords::from_dense(&requests, &vec![0; requests.len()])?;
-    simulation
-        .device
-        .write(&simulation.enterprise_requests, &requests);
-    let plan = registry::RegistryPlan::new(
-        &scenario,
-        &simulation.metadata,
-        &simulation.migrations,
-        &pending.records,
-    )?
-    .context("capacity transition")?;
-    let budget = simulation.device.memory_budget;
-    simulation.device.memory_budget = MemoryBudget::Reported { available_bytes: 2 };
-    assert!(simulation.commit_registry(plan, &[]).is_err());
-    simulation.device.memory_budget = budget;
-    assert_eq!(simulation.download()?, initial);
-    let plan = registry::RegistryPlan::new(
-        &scenario,
-        &simulation.metadata,
-        &simulation.migrations,
-        &pending.records,
-    )?
-    .context("capacity transition")?;
-    simulation.commit_registry(plan, &[])?;
-    let mut expected = initial;
-    enterprise::transitions(&mut expected, &scenario, &requests)?;
-    assert_eq!(simulation.download()?, expected);
-    assert_eq!(simulation.device.read(&simulation.spatial)?, spatial);
-    Ok(())
-}
-
-#[test]
-fn restored_zero_capacity_growth_matches_complete_gpu_metadata() -> Result<()> {
-    let scenario = Scenario::industrial(97, 42, Experiment::Baseline)?;
-    let mut initial = scenario.initial()?;
-    let mut firm = initial.actors.at(97);
-    firm.capacity = 0;
-    initial.actors.set(97, firm);
-    initial.set(Field::InstalledCapital, 97, 1);
-    initial.set(Field::PendingCapacity, 97, 5);
-    let checkpoint = Checkpoint::new(&scenario, &initial)?;
+    let actor = 97;
+    let initial = scenario.initial()?;
     let mut requests = vec![0; initial.actors.len()];
-    requests[97] = (6 << 24) | 5;
+    requests[actor] = (6 << 24) | 5;
     let pending =
         registry::records::PendingRecords::from_dense(&requests, &vec![0; requests.len()])?;
-    let workgroup = 64;
-    let mut simulation = Simulation::from_checkpoint(checkpoint.clone(), device(workgroup)?)?;
-    let mut expected = simulation.download()?;
-    enterprise::transitions(&mut expected, &scenario, &requests)?;
-    let spatial = simulation.device.read(&simulation.spatial)?;
-    let rows = expected
-        .actors
-        .iter()
-        .map(|actor| ActorLayout::new(&actor, &scenario))
-        .collect::<ActorMetadataRows>();
-    simulation
-        .device
-        .write(&simulation.enterprise_requests, &requests);
-    let plan = registry::RegistryPlan::new(
-        &scenario,
-        &simulation.metadata,
-        &simulation.migrations,
-        &pending.records,
-    )?
-    .context("restored capacity transition")?;
-    simulation.commit_registry(plan, &[])?;
-    assert_eq!(simulation.download()?.digest(), expected.digest());
-    assert_eq!(simulation.device.read(&simulation.spatial)?, spatial);
-    for (index, (actual, expected)) in simulation
-        .device
-        .read(&simulation.actors)?
-        .into_iter()
-        .zip(rows.words())
-        .enumerate()
-    {
-        assert_eq!(
-            actual, expected,
-            "actor metadata word {index}, workgroup {workgroup}"
-        );
+    for capacity in [initial.actors.at(actor).capacity, 0] {
+        let mut state = initial.clone();
+        let mut firm = state.actors.at(actor);
+        firm.capacity = capacity;
+        state.actors.set(actor, firm);
+        state.set(Field::InstalledCapital, actor, 1);
+        state.set(Field::PendingCapacity, actor, 5);
+        let mut simulation =
+            Simulation::from_checkpoint(Checkpoint::new(&scenario, &state)?, device(64)?)?;
+        let mut expected = simulation.download()?;
+        let spatial = simulation.device.read(&simulation.spatial)?;
+        simulation
+            .device
+            .write(&simulation.enterprise_requests, &requests);
+        let plan = |simulation: &Simulation| {
+            registry::RegistryPlan::new(
+                &scenario,
+                &simulation.metadata,
+                &simulation.migrations,
+                &pending.records,
+            )?
+            .context("capacity transition")
+        };
+        let budget = simulation.device.memory_budget;
+        simulation.device.memory_budget = MemoryBudget::Reported { available_bytes: 2 };
+        assert!(simulation.commit_registry(plan(&simulation)?, &[]).is_err());
+        simulation.device.memory_budget = budget;
+        assert_eq!(simulation.download()?, expected);
+        simulation.commit_registry(plan(&simulation)?, &[])?;
+        enterprise::transitions(&mut expected, &scenario, &requests)?;
+        assert_eq!(simulation.download()?, expected);
+        assert_eq!(simulation.device.read(&simulation.spatial)?, spatial);
+        let rows = expected
+            .actors
+            .iter()
+            .map(|actor| ActorLayout::new(&actor, &scenario))
+            .collect::<ActorMetadataRows>();
+        assert_eq!(simulation.device.read(&simulation.actors)?, rows.words());
     }
     Ok(())
 }

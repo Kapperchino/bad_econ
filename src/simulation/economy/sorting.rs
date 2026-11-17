@@ -29,8 +29,6 @@ pub(in crate::simulation) enum SortKeys {
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum Radix {
     Nibble,
-    #[cfg(test)]
-    Five,
     Byte,
 }
 
@@ -45,8 +43,6 @@ impl Radix {
     fn bits(self) -> u32 {
         match self {
             Self::Nibble => 4,
-            #[cfg(test)]
-            Self::Five => 5,
             Self::Byte => 8,
         }
     }

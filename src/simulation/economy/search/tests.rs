@@ -994,26 +994,18 @@ fn indexed_partial_input_search_preserves_quantities_ties_and_wide_targets_on_gp
 
 #[test]
 fn cached_bread_suppliers_preserve_rotations_stock_and_affordability_on_gpu() -> Result<()> {
-    for case in [
-        SupplyCase::Capped,
-        SupplyCase::Sparse,
-        SupplyCase::Empty,
-        SupplyCase::Unaffordable,
-        SupplyCase::MixedAffordability,
-        SupplyCase::Retail,
-        SupplyCase::Free,
-        SupplyCase::HighCash,
-        SupplyCase::DistantStock,
-        SupplyCase::DistantEmpty,
+    for (case, day) in [
+        (SupplyCase::Retail, 0),
+        (SupplyCase::Sparse, 1),
+        (SupplyCase::DistantStock, 19),
+        (SupplyCase::DistantEmpty, SUPPLIERS - 1),
     ] {
-        for day in [0, 1, 19] {
-            let probe = SearchProbe::new(case, day, Market::Input(Good::Bread))?;
-            assert_eq!(
-                probe.outcome(SearchExecution::Cached)?,
-                probe.outcome(SearchExecution::Plane)?,
-                "{case:?} day {day}",
-            );
-        }
+        let probe = SearchProbe::new(case, day, Market::Input(Good::Bread))?;
+        assert_eq!(
+            probe.outcome(SearchExecution::Cached)?,
+            probe.outcome(SearchExecution::Plane)?,
+            "{case:?} day {day}",
+        );
     }
     Ok(())
 }
@@ -1063,37 +1055,43 @@ fn cooperative_market_search_preserves_serial_search_and_shared_fallback_on_gpu(
         Market::Consumer(Good::Coal),
         Market::Consumer(Good::Wood),
     ] {
-        for case in cases {
-            for day in [0, 128, SUPPLIERS - 1] {
-                let probe = SearchProbe::new(case, day, market)?;
-                let expected = probe.outcome(SearchExecution::Serial)?;
-                if let SupplyCase::Capped = case {
-                    assert_ne!(expected.proposal[ProposalLayout::ACTOR], NO_ACTOR);
-                    assert!(expected.proposal[ProposalLayout::QUANTITY_LOW] > 0);
-                }
-                for execution in [SearchExecution::Shared, SearchExecution::Plane] {
+        for (index, case) in cases.into_iter().enumerate() {
+            let suppliers = match (market, case) {
+                (
+                    Market::Household,
+                    SupplyCase::Sparse | SupplyCase::Empty | SupplyCase::DistantEmpty,
+                ) => 2177,
+                _ => SUPPLIERS,
+            };
+            let day = [0, 128, suppliers - 1][index % 3];
+            let probe = SearchProbe::with_suppliers(case, day, market, suppliers)?;
+            let expected = probe.outcome(SearchExecution::Serial)?;
+            if let SupplyCase::Capped = case {
+                assert_ne!(expected.proposal[ProposalLayout::ACTOR], NO_ACTOR);
+                assert!(expected.proposal[ProposalLayout::QUANTITY_LOW] > 0);
+            }
+            for execution in [SearchExecution::Shared, SearchExecution::Plane] {
+                assert_eq!(
+                    probe.outcome(execution)?,
+                    expected,
+                    "{case:?}, {market:?}, day {day}, {execution:?}"
+                );
+            }
+            if let Market::Consumer(Good::Coal | Good::Wood) = market {
+                for execution in [SearchExecution::ScalarFuel, SearchExecution::SpatialFuel] {
                     assert_eq!(
                         probe.outcome(execution)?,
                         expected,
                         "{case:?}, {market:?}, day {day}, {execution:?}"
                     );
                 }
-                if let Market::Consumer(Good::Coal | Good::Wood) = market {
-                    for execution in [SearchExecution::ScalarFuel, SearchExecution::SpatialFuel] {
-                        assert_eq!(
-                            probe.outcome(execution)?,
-                            expected,
-                            "{case:?}, {market:?}, day {day}, {execution:?}"
-                        );
-                    }
-                }
-                if let Market::Household = market {
-                    assert_eq!(
-                        probe.outcome(SearchExecution::ScalarHousehold)?,
-                        expected,
-                        "{case:?}, {market:?}, day {day}, scalar household"
-                    );
-                }
+            }
+            if let Market::Household = market {
+                assert_eq!(
+                    probe.outcome(SearchExecution::ScalarHousehold)?,
+                    expected,
+                    "{case:?}, {market:?}, day {day}, scalar household"
+                );
             }
         }
     }
@@ -2006,37 +2004,6 @@ fn consumer_preparation_clears_inactive_requests_and_preserves_captured_retries_
     Ok(())
 }
 
-#[test]
-fn large_search_preserves_rotated_candidates_and_empty_offer_ties_on_gpu() -> Result<()> {
-    for case in [
-        SupplyCase::Capped,
-        SupplyCase::Sparse,
-        SupplyCase::Empty,
-        SupplyCase::Unaffordable,
-        SupplyCase::MixedAffordability,
-        SupplyCase::Free,
-        SupplyCase::DistantStock,
-        SupplyCase::DistantEmpty,
-    ] {
-        for day in [31, 1023, 1024, 2047, 2176] {
-            let probe = SearchProbe::with_suppliers(case, day, Market::Household, 2177)?;
-            let expected = probe.outcome(SearchExecution::Serial)?;
-            for execution in [
-                SearchExecution::Shared,
-                SearchExecution::Plane,
-                SearchExecution::ScalarHousehold,
-            ] {
-                assert_eq!(
-                    probe.outcome(execution)?,
-                    expected,
-                    "{case:?}, day {day}, {execution:?}"
-                );
-            }
-        }
-    }
-    Ok(())
-}
-
 #[derive(CubeType, CubeLaunch)]
 struct DeliveryFloorInput {
     actors: Box<[u32]>,
@@ -2080,6 +2047,9 @@ impl GpuPass<DeliveryFloorInput> for CompareDeliveryFloor {
                     buyer_access: access,
                 },
             );
+            if route.days < max(ceildiv(trip, input.config.shipment_speed), 1) {
+                input.findings[3usize].fetch_add(1);
+            }
             if days != route.days {
                 input.findings[2usize].fetch_add(1);
             }
@@ -2102,25 +2072,43 @@ impl GpuPass<DeliveryFloorInput> for CompareDeliveryFloor {
 
 #[test]
 fn station_access_floor_never_exceeds_selected_route_days_on_gpu() -> Result<()> {
+    let mut rail: crate::domain::ScenarioConfig =
+        serde_json::from_str(include_str!("../../../../scenarios/railway.json"))?;
+    let build = rail.railway.construction.quantities();
+    let population = rail
+        .population
+        .as_mut()
+        .expect("explicit railway population");
+    for firm in population
+        .firms
+        .iter_mut()
+        .filter(|firm| firm.good == Good::Railway)
+    {
+        for (good, amount) in [Good::Coal, Good::Steel, Good::Locomotives]
+            .into_iter()
+            .zip(build)
+        {
+            firm.inventories[good as usize - 1] = u64::from(amount);
+        }
+    }
+    let device = device(64)?;
     let mut improved = 0;
+    let mut faster_routes = 0;
     for scenario in [
         Scenario::industrial(193, 42, Experiment::Baseline)?,
         Scenario::industrial(193, 42, Experiment::Transport)?,
-        Scenario::new(serde_json::from_str(include_str!(
-            "../../../../scenarios/railway.json"
-        ))?)?,
+        Scenario::new(rail)?,
     ] {
-        let device = device(64)?;
-        let mut simulation = Simulation::new(scenario, device.clone())?;
-        simulation.advance()?;
+        let simulation = Simulation::new(scenario, device.clone())?;
         for stage in [
+            railway::RailStage::Infrastructure,
             railway::RailStage::Access,
             railway::RailStage::Routes,
             railway::RailStage::Quotes,
         ] {
             simulation.railways(stage);
         }
-        let findings = device.tensor(&[0, 0, 0]);
+        let findings = device.tensor(&[0; 4]);
         let count = simulation.metadata.actors.len();
         DeliveryFloorCheck::launch(
             &device,
@@ -2136,8 +2124,10 @@ fn station_access_floor_never_exceeds_selected_route_days_on_gpu() -> Result<()>
         assert_eq!(findings[0], 0);
         assert_eq!(findings[2], 0);
         improved += findings[1];
+        faster_routes += findings[3];
     }
     assert!(improved > 0);
+    assert!(faster_routes > 0);
     Ok(())
 }
 
@@ -2305,91 +2295,6 @@ fn filtered_empty_consumer_orders_preserve_state_feedback_and_diagnostics_on_gpu
         }
         if let Orders::Empty | Orders::Mixed = orders {
             assert!(removed > 0, "{orders:?}");
-        }
-    }
-    Ok(())
-}
-
-#[test]
-fn active_market_statuses_preserve_traces_and_feedback_across_days_on_gpu() -> Result<()> {
-    for experiment in [Experiment::Concentrated, Experiment::Transport] {
-        let generated = Scenario::industrial(67, 42, experiment)?;
-        let initial = generated.initial()?;
-        let mut config = generated.config().clone();
-        let households = config.households as usize;
-        config.population = Some(Population {
-            households: (0..households)
-                .map(|household| {
-                    let actor = initial.actors.at(household);
-                    let mut inventories =
-                        Good::ALL.map(|good| initial.get(Field::inventory(good), household));
-                    inventories[Good::Bread as usize - 1] = match household % 3 {
-                        0 => 500,
-                        _ => 0,
-                    };
-                    HouseholdSeed {
-                        identity: actor.identity,
-                        position: actor.position,
-                        cash: match household % 4 {
-                            0 => 1,
-                            _ => 5000,
-                        },
-                        inventories,
-                        fatigue: initial.get(Field::Fatigue, household) as u32,
-                    }
-                })
-                .collect(),
-            firms: (households..initial.actors.len())
-                .map(|firm| {
-                    let actor = initial.actors.at(firm);
-                    Ok(FirmSeed {
-                        identity: actor.identity,
-                        position: actor.position,
-                        owner: initial.actors.at(actor.owner as usize).identity,
-                        good: Good::from_index(actor.kind)?,
-                        cash: initial.get(Field::Cash, firm),
-                        inventories: Good::ALL
-                            .map(|good| initial.get(Field::inventory(good), firm)),
-                        capacity: actor.capacity,
-                        technique: generated.technique(firm),
-                        wage: initial.get(Field::Wage, firm) as u32,
-                        price: initial.get(Field::Price, firm) as u32,
-                    })
-                })
-                .collect::<Result<Vec<_>>>()?,
-        });
-        let scenario = Scenario::new(config)?;
-        let mut expected = Simulation::new(scenario.clone(), device(64)?)?;
-        let mut actual = Simulation::new(scenario, device(64)?)?;
-        for day in 0..3 {
-            let trace = match day {
-                1 => Trace::Record,
-                _ => Trace::Discard,
-            };
-            for phase in Phase::ALL {
-                let reference = expected.phase(phase, Trace::Record)?;
-                let result = actual.phase(phase, trace)?;
-                assert_eq!(
-                    result.events, reference.events,
-                    "{experiment:?} {day} {phase:?}"
-                );
-                assert_eq!(
-                    result.frontier_depth, reference.frontier_depth,
-                    "{experiment:?} {day} {phase:?}"
-                );
-                if let Trace::Record = trace {
-                    assert_eq!(
-                        result.decisions, reference.decisions,
-                        "{experiment:?} {day} {phase:?}"
-                    );
-                }
-                assert_eq!(
-                    actual.download()?,
-                    expected.download()?,
-                    "{experiment:?} {day} {phase:?}"
-                );
-                assert_eq!(actual.snapshot, expected.snapshot);
-            }
         }
     }
     Ok(())

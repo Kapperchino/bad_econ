@@ -224,7 +224,7 @@ pub enum GoodKind {
 }
 
 #[repr(u32)]
-#[derive(Clone, Copy, Debug, Serialize, Deserialize, PartialEq, Eq, Hash)]
+#[derive(Clone, Copy, Debug, Serialize, Deserialize, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub enum Good {
     Grain = 1,
     Flour = 2,
@@ -367,7 +367,7 @@ impl std::fmt::Display for Good {
     }
 }
 
-#[derive(Clone, Copy, Debug, Serialize, Deserialize, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, Serialize, Deserialize, PartialEq, Eq, clap::ValueEnum)]
 pub enum Experiment {
     Baseline,
     Shortage,
@@ -459,6 +459,88 @@ pub struct ScenarioConfig {
     pub working_conditions: Vec<enterprise::FirmConditions>,
 }
 
+impl ScenarioConfig {
+    const HOUSEHOLDS: std::ops::RangeInclusive<u32> = 1..=1_000_000;
+
+    fn baseline(households: u32, seed: u64, experiment: Experiment) -> Result<Self> {
+        match Self::HOUSEHOLDS.contains(&households) {
+            true => (),
+            false => Err(anyhow!("scenario parameter outside DeterministicV1 bounds"))?,
+        }
+        let firms = (households / 100).max(3);
+        let map_size = match households {
+            0..=10_000 => 1000,
+            10_001..=100_000 => 3000,
+            _ => 10_000,
+        };
+        let mut config = Self {
+            economy: Economy::Agrarian,
+            version: SCENARIO_VERSION,
+            seed,
+            households,
+            firms,
+            map_size,
+            resources: ResourceMap::Generated,
+            search_radius: 1000,
+            commute_speed: 50,
+            shipment_speed: 1000,
+            railway: railway::RailwayConfig::default(),
+            household_cash: 5000,
+            household_liquidity: HouseholdLiquidity::Uniform,
+            entrepreneurship: enterprise::EntrepreneurshipPolicy::default(),
+            expansion: enterprise::ExpansionPolicy::default(),
+            firm_cash: 200_000,
+            buffer_days: 4,
+            producer_buffer_days: None,
+            household_need: 1,
+            food: None,
+            capacity: 100,
+            packet_output: 3,
+            packet_minutes: 360,
+            work_cap: 480,
+            reserved_minutes: 960,
+            wage: 1,
+            prices: [150, 300, 450],
+            reserve: 100_000,
+            distribution_rate: 100,
+            forecast_weight: 250,
+            coverage: 2,
+            minimum_price: 1,
+            maximum_price: 10_000,
+            delivery_penalty: 5,
+            batch_size: 65_536,
+            experiment,
+            population: None,
+            behavior: BehaviorPolicy::default(),
+            payroll: None,
+            rent: None,
+            household_policy: None,
+            finance: None,
+            research: None,
+            bargaining: None,
+            demography: demography::DemographicPolicy::default(),
+            household_production: enterprise::HouseholdProduction::Unavailable,
+            distributors: Vec::new(),
+            ownership: Vec::new(),
+            companies: Vec::new(),
+            land_access: None,
+            property: None,
+            working_conditions: Vec::new(),
+        };
+        config.capacity = (supply::StartingDemand::new(&config)
+            .production(Good::Bread)
+            .div_ceil(u64::from(config.firms / 3) * u64::from(config.packet_output))
+            as u32)
+            .max(config.capacity);
+        match experiment {
+            Experiment::Shortage => config.buffer_days = 0,
+            Experiment::Transport => config.shipment_speed = 100,
+            Experiment::Baseline | Experiment::Concentrated => (),
+        }
+        Ok(config)
+    }
+}
+
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Scenario {
     config: ScenarioConfig,
@@ -475,7 +557,7 @@ pub struct Scenario {
 }
 impl Scenario {
     pub fn industrial(households: u32, seed: u64, experiment: Experiment) -> Result<Self> {
-        let mut config = Self::baseline(households, seed, experiment)?.config;
+        let mut config = ScenarioConfig::baseline(households, seed, experiment)?;
         config.economy = Economy::Industrial;
         config.rent = Some(RentPolicy::default());
         let transport_scale = config.map_size / 1000;
@@ -586,64 +668,55 @@ impl Scenario {
         Ok(scenario)
     }
 
-    pub fn goods_markets(&self) -> Vec<Market> {
-        let mut inputs = std::collections::BTreeSet::new();
-        for firm in self.config.households as usize..self.actors() {
+    fn agrarian_inputs(&self) -> std::collections::BTreeSet<Good> {
+        let mut inputs = std::collections::BTreeSet::from([Good::Bread, Good::Tools, Good::Wood]);
+        for firm in self.initial_actors.firm_indices() {
             let good = Good::from_index(self.actor(firm).kind).expect("validated firm");
-            inputs.extend(good.inputs().into_iter().flatten().map(|good| good as u32));
+            inputs.extend(good.inputs().into_iter().flatten());
         }
         if let Some(research) = &self.config.research {
             for lab in &research.labs {
                 let firm = self.index_of(lab.owner).expect("validated lab");
                 let good = Good::from_index(self.actor(firm).kind).expect("validated firm");
-                for method in &lab.methods {
-                    inputs.extend(
-                        method
-                            .recipe(good, self.technique(firm))
-                            .inputs
-                            .into_iter()
-                            .flatten()
-                            .map(|good| good as u32),
-                    );
-                }
+                let technique = self.technique(firm);
+                inputs.extend(lab.methods.iter().flat_map(|method| {
+                    method.recipe(good, technique).inputs.into_iter().flatten()
+                }));
             }
         }
-        inputs.extend(
-            self.config
-                .distributors
-                .iter()
-                .map(|store| store.good as u32),
-        );
-        inputs.insert(Good::Bread as u32);
-        inputs.extend(
-            [Good::Coal, Good::Steel, Good::Locomotives]
-                .into_iter()
-                .filter(|_| !self.config.railway.companies.is_empty())
-                .map(|good| good as u32),
-        );
-        inputs.insert(Good::Tools as u32);
-        inputs.insert(Good::Wood as u32);
-        if self.config.property.is_some() || self.config.rent.is_some() {
-            inputs.insert(Good::Construction as u32);
+        inputs.extend(self.config.distributors.iter().map(|store| store.good));
+        if !self.config.railway.companies.is_empty() {
+            inputs.extend([Good::Coal, Good::Steel, Good::Locomotives]);
         }
-        if self.config.economy == Economy::Industrial {
-            inputs.extend(Good::ALL.map(|good| good as u32));
+        if self.config.property.is_some() || self.config.rent.is_some() {
+            inputs.insert(Good::Construction);
         }
         inputs
-            .into_iter()
-            .map(|index| Market::Input(Good::from_index(index).expect("catalogue good")))
-            .chain(std::iter::once(Market::Household))
-            .chain([Market::Consumer(Good::Coal), Market::Consumer(Good::Wood)])
-            .chain(
+    }
+
+    pub fn goods_markets(&self) -> Vec<Market> {
+        let mut markets: Vec<_> = match self.config.economy {
+            Economy::Industrial => Good::ALL.into_iter().map(Market::Input).collect(),
+            Economy::Agrarian => self
+                .agrarian_inputs()
+                .into_iter()
+                .map(Market::Input)
+                .collect(),
+        };
+        markets.extend([
+            Market::Household,
+            Market::Consumer(Good::Coal),
+            Market::Consumer(Good::Wood),
+        ]);
+        if self.config.economy == Economy::Industrial {
+            markets.extend(
                 Good::ALL
                     .into_iter()
-                    .filter(|good| {
-                        self.config.economy == Economy::Industrial
-                            && good.consumption_interval() > 1
-                    })
+                    .filter(|good| good.consumption_interval() > 1)
                     .map(Market::Consumer),
-            )
-            .collect()
+            );
+        }
+        markets
     }
     pub fn new(mut config: ScenarioConfig) -> Result<Self> {
         config.minimum_price = 1;
@@ -700,7 +773,7 @@ impl Scenario {
             .transpose()?;
         let bounds = [
             config.version == SCENARIO_VERSION,
-            (1..=1_000_000).contains(&config.households),
+            ScenarioConfig::HOUSEHOLDS.contains(&config.households),
             (3..=20_000).contains(&config.firms),
             (1..=100_000).contains(&config.map_size),
             (1..=config.map_size).contains(&config.search_radius),
@@ -751,15 +824,15 @@ impl Scenario {
                 }
                 let demand = supply::StartingDemand::new(&config);
                 let food_reserve = supply::StartingReserves::new(&config);
-                let daily = std::array::from_fn::<_, { Good::COUNT }, _>(|good| {
-                    demand.daily[good]
-                        .div_ceil(u64::from(firm_counts[good].max(1)))
+                let daily = Good::ALL.map(|good| {
+                    demand.daily[good as usize - 1]
+                        .div_ceil(u64::from(firm_counts[good as usize - 1].max(1)))
                         .max(1)
                 });
-                let production = std::array::from_fn::<_, { Good::COUNT }, _>(|good| {
+                let production = Good::ALL.map(|good| {
                     demand
-                        .production(Good::ALL[good])
-                        .div_ceil(u64::from(firm_counts[good].max(1)))
+                        .production(good)
+                        .div_ceil(u64::from(firm_counts[good as usize - 1].max(1)))
                         .max(1)
                 });
                 let capacities =
@@ -800,7 +873,7 @@ impl Scenario {
                         }
                     });
                 let initial_employment =
-                    employment::InitialEmployment::new(&config, &capacities, &daily);
+                    employment::InitialEmployment::new(&config, &capacities, &daily, &retailers);
                 let totals = match &config.population {
                     Some(population) => population.totals()?,
                     None => {
@@ -889,44 +962,28 @@ impl Scenario {
                 };
                 scenario.initial_actors = std::sync::Arc::new(
                     (0..scenario.actors())
-                        .map(|index| scenario.actor(index))
+                        .map(|index| scenario.generate_actor(index))
                         .collect(),
                 );
-                if scenario.config.finance.is_some() || scenario.config.research.is_some() {
-                    let actors = &scenario.initial_actors;
-                    scenario.config.research = scenario
-                        .config
-                        .research
-                        .take()
-                        .map(|config| research::ResearchConfig::new(config, actors))
-                        .transpose()?;
-                    let identities = actors
-                        .iter()
-                        .map(|actor| actor.identity)
-                        .collect::<Vec<_>>();
-                    scenario.config.finance = scenario
-                        .config
-                        .finance
-                        .take()
-                        .map(|config| {
-                            finance::FinanceConfig::new(
-                                config,
-                                &identities,
-                                &identities[..scenario.config.households as usize],
-                            )
-                        })
-                        .transpose()?;
-                    let financial_cash = scenario
-                        .config
-                        .finance
-                        .as_ref()
-                        .map(finance::FinanceConfig::initial_cash)
-                        .transpose()?
-                        .unwrap_or(0);
-                    scenario.totals.cash = add(scenario.totals.cash, financial_cash)?;
+                let actors = &scenario.initial_actors;
+                scenario.config.research = scenario
+                    .config
+                    .research
+                    .take()
+                    .map(|config| research::ResearchConfig::new(config, actors))
+                    .transpose()?;
+                if let Some(config) = scenario.config.finance.take() {
+                    let identities = actors.identities();
+                    let finance = finance::FinanceConfig::new(
+                        config,
+                        identities,
+                        &identities[..scenario.config.households as usize],
+                    )?;
+                    scenario.totals.cash = add(scenario.totals.cash, finance.initial_cash()?)?;
+                    scenario.config.finance = Some(finance);
                 }
                 scenario.config.railway = railway::RailwayConfig::new(
-                    scenario.config.railway.clone(),
+                    std::mem::take(&mut scenario.config.railway),
                     &scenario.initial_actors,
                     scenario.config.map_size,
                 )?;
@@ -947,77 +1004,7 @@ impl Scenario {
         }
     }
     pub fn baseline(households: u32, seed: u64, experiment: Experiment) -> Result<Self> {
-        let firms = (households / 100).max(3);
-        let map_size = match households {
-            0..=10_000 => 1000,
-            10_001..=100_000 => 3000,
-            _ => 10_000,
-        };
-        let mut config = ScenarioConfig {
-            economy: Economy::Agrarian,
-            version: SCENARIO_VERSION,
-            seed,
-            households,
-            firms,
-            map_size,
-            resources: ResourceMap::Generated,
-            search_radius: 1000,
-            commute_speed: 50,
-            shipment_speed: 1000,
-            railway: railway::RailwayConfig::default(),
-            household_cash: 5000,
-            household_liquidity: HouseholdLiquidity::Uniform,
-            entrepreneurship: enterprise::EntrepreneurshipPolicy::default(),
-            expansion: enterprise::ExpansionPolicy::default(),
-            firm_cash: 200_000,
-            buffer_days: 4,
-            producer_buffer_days: None,
-            household_need: 1,
-            food: None,
-            capacity: 100,
-            packet_output: 3,
-            packet_minutes: 360,
-            work_cap: 480,
-            reserved_minutes: 960,
-            wage: 1,
-            prices: [150, 300, 450],
-            reserve: 100_000,
-            distribution_rate: 100,
-            forecast_weight: 250,
-            coverage: 2,
-            minimum_price: 1,
-            maximum_price: 10_000,
-            delivery_penalty: 5,
-            batch_size: 65_536,
-            experiment,
-            population: None,
-            behavior: BehaviorPolicy::default(),
-            payroll: None,
-            rent: None,
-            household_policy: None,
-            finance: None,
-            research: None,
-            bargaining: None,
-            demography: demography::DemographicPolicy::default(),
-            household_production: enterprise::HouseholdProduction::Unavailable,
-            distributors: Vec::new(),
-            ownership: Vec::new(),
-            companies: Vec::new(),
-            land_access: None,
-            property: None,
-            working_conditions: Vec::new(),
-        };
-        config.capacity = (supply::StartingDemand::new(&config)
-            .production(Good::Bread)
-            .div_ceil(u64::from(config.firms / 3) * u64::from(config.packet_output))
-            as u32)
-            .max(config.capacity);
-        match experiment {
-            Experiment::Shortage => config.buffer_days = 0,
-            Experiment::Transport => config.shipment_speed = 100,
-            Experiment::Baseline | Experiment::Concentrated => (),
-        }
-        Self::new(config)
+        Self::new(ScenarioConfig::baseline(households, seed, experiment)?)
     }
     pub fn config(&self) -> &ScenarioConfig {
         &self.config
@@ -1239,8 +1226,7 @@ impl Scenario {
         }
         state.ownership = state
             .actors
-            .iter()
-            .filter(|actor| actor.kind > 0)
+            .firm_actors()
             .map(|actor| enterprise::Ownership {
                 firm: actor.identity,
                 shares: vec![enterprise::OwnershipShare {
@@ -1630,7 +1616,7 @@ impl Scenario {
     }
 }
 
-#[derive(Clone, Copy, Debug, Serialize, Deserialize, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, Serialize, Deserialize, PartialEq, Eq, PartialOrd, Ord)]
 pub struct Position {
     pub x: u32,
     pub y: u32,
@@ -1809,6 +1795,9 @@ impl ActorRows {
             .iter()
             .enumerate()
             .filter_map(move |(offset, &kind)| (kind > 0).then_some(start + offset))
+    }
+    pub(crate) fn firm_actors(&self) -> impl Iterator<Item = Actor> + '_ {
+        self.firm_indices().map(|index| self.at(index))
     }
 }
 impl FromIterator<Actor> for ActorRows {

@@ -1,5 +1,3 @@
-#![cfg(feature = "compute")]
-
 use super::support;
 use anyhow::Result;
 use bad_econ::{
@@ -7,7 +5,7 @@ use bad_econ::{
     simulation::Simulation,
 };
 
-fn diet_scenario() -> Result<Scenario> {
+fn diet_config() -> Result<ScenarioConfig> {
     let mut config = Scenario::baseline(3, 42, Experiment::Concentrated)?
         .config()
         .clone();
@@ -56,11 +54,11 @@ fn diet_scenario() -> Result<Scenario> {
             })
             .collect(),
     });
-    Scenario::new(config)
+    Ok(config)
 }
 
 fn salary_scenario() -> Result<Scenario> {
-    let mut config = diet_scenario()?.config().clone();
+    let mut config = diet_config()?;
     for (firm, wage) in config
         .population
         .as_mut()
@@ -123,7 +121,7 @@ fn salary_tiers_consume_one_two_or_ten_daily_bread_units_on_gpu() -> Result<()> 
 
 #[test]
 fn household_metric_processing_keeps_fractional_output_on_gpu() -> Result<()> {
-    let mut config = diet_scenario()?.config().clone();
+    let mut config = diet_config()?;
     config.household_production = HouseholdProduction::industrial();
     config.coverage = 6;
     let households = &mut config.population.as_mut().unwrap().households;

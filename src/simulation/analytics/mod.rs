@@ -42,14 +42,14 @@ pub struct Coefficient {
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(try_from = "MatrixDefinition", into = "MatrixDefinition")]
+#[serde(try_from = "MatrixDefinition", rename(serialize = "MatrixDefinition"))]
 pub struct SparseMatrix {
     rows: usize,
     columns: usize,
     entries: Vec<Coefficient>,
 }
 
-#[derive(Serialize, Deserialize)]
+#[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
 struct MatrixDefinition {
     rows: usize,
@@ -60,15 +60,6 @@ impl TryFrom<MatrixDefinition> for SparseMatrix {
     type Error = anyhow::Error;
     fn try_from(value: MatrixDefinition) -> Result<Self> {
         Self::new(value.rows, value.columns, value.entries)
-    }
-}
-impl From<SparseMatrix> for MatrixDefinition {
-    fn from(value: SparseMatrix) -> Self {
-        Self {
-            rows: value.rows,
-            columns: value.columns,
-            entries: value.entries,
-        }
     }
 }
 
@@ -229,14 +220,17 @@ pub struct ApproximateValues {
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
-#[serde(try_from = "ContractionDefinition", into = "ContractionDefinition")]
+#[serde(
+    try_from = "ContractionDefinition",
+    rename(serialize = "ContractionDefinition")
+)]
 pub struct Contraction {
     numerator: u32,
     denominator: u32,
     weights: Vec<u32>,
 }
 
-#[derive(Serialize, Deserialize)]
+#[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
 struct ContractionDefinition {
     numerator: u32,
@@ -247,15 +241,6 @@ impl TryFrom<ContractionDefinition> for Contraction {
     type Error = anyhow::Error;
     fn try_from(value: ContractionDefinition) -> Result<Self> {
         Self::new(value.numerator, value.denominator, value.weights)
-    }
-}
-impl From<Contraction> for ContractionDefinition {
-    fn from(value: Contraction) -> Self {
-        Self {
-            numerator: value.numerator,
-            denominator: value.denominator,
-            weights: value.weights,
-        }
     }
 }
 
@@ -291,16 +276,24 @@ impl DeviceVector {
     pub fn from_ticks(device: &Device, values: &[u64]) -> Result<Self> {
         match values.len() <= MAX_DIMENSION {
             true => {
-                let values_f32 = values
-                    .iter()
-                    .map(|&value| TickEstimate::new(value as f32).map(|value| value.0))
-                    .collect::<Result<Vec<_>>>()?;
+                let mut bounds = Vec::with_capacity(values.len() * 2);
+                for &value in values {
+                    bounds.push(TickEstimate::new(value as f32)?.0);
+                }
+                bounds.extend_from_within(..);
                 Ok(Self {
-                    data: tensor::floats(device, [2, values.len()], &values_f32.repeat(2)),
+                    data: tensor::floats(device, [2, values.len()], &bounds),
                     length: values.len(),
                 })
             }
             false => Err(anyhow!("analytical vector exceeds dimension limit")),
+        }
+    }
+
+    fn zeros(device: &Device, length: usize) -> Self {
+        Self {
+            data: tensor::floats(device, [2, length], &vec![0.0; length * 2]),
+            length,
         }
     }
 
@@ -543,7 +536,7 @@ impl DeviceOperator {
         certificate: &Contraction,
         budget: SolveBudget,
     ) -> Result<DeviceSolution> {
-        let initial = DeviceVector::from_ticks(device, &vec![0; self.rows])?;
+        let initial = DeviceVector::zeros(device, self.rows);
         self.solve_from(device, rhs, &initial, certificate, budget)
     }
 

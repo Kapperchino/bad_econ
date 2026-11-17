@@ -87,12 +87,9 @@ fn prepare(
         let k = kind(actors, id);
         let mut chosen = u32::new(comptime!(i64::from(NO_ACTOR)));
         let mut quantity = ticks(0u32, 0u32);
-        let trip = 0u32;
         let mut search = false;
         let mut good = 0u32;
         let mut wanted = ticks(0u32, 0u32);
-        let seen_supply = false;
-        let missing_supply = false;
         let household_demand = match comptime!(parameters.market) {
             MarketFlag::Input(_) => {
                 let grain = parameters.traded_good() == Good::Grain as u32
@@ -148,150 +145,9 @@ fn prepare(
                     }
                     MarketFlag::Input(_) => {
                         good = parameters.traded_good();
-                        search = !k.is(comptime!(ActorKind::Household))
-                            && (number(state, config, comptime!(Field::FirstInput as u32), id)
-                                == good
-                                || number(state, config, comptime!(Field::SecondInput as u32), id)
-                                    == good);
-                        wanted = ticks(
-                            actors[ActorLayout::CAPACITY * (actors.len() / ActorLayout::WORDS)
-                                + id as usize]
-                                * number(state, config, comptime!(Field::InputTicks as u32), id)
-                                * consumption::input_coverage(config, k.bits()),
-                            0u32,
-                        );
-                        if number(state, config, comptime!(Field::EnterpriseModel as u32), id) == 1
-                        {
-                            search = good == k.output();
-                            let forecast = maximum(
-                                value(state, config, comptime!(Field::Demand as u32), id),
-                                ticks(1, 0),
-                            );
-                            wanted = multiply(
-                                control,
-                                forecast,
-                                number(state, config, comptime!(Field::StockCoverage as u32), id)
-                                    + config.ring,
-                            );
-                        }
-                        if !k.is(comptime!(ActorKind::Household))
-                            && number(state, config, comptime!(Field::EnterpriseModel as u32), id)
-                                == 0
-                            && comptime!(config.home_mode == Feature::Enabled)
-                        {
-                            let horizon = config.coverage + config.ring;
-                            let packets = divide(
-                                add_checked(
-                                    control,
-                                    multiply(
-                                        control,
-                                        value(state, config, comptime!(Field::Demand as u32), id),
-                                        horizon,
-                                    ),
-                                    ticks(
-                                        number(
-                                            state,
-                                            config,
-                                            comptime!(Field::OutputTicks as u32),
-                                            id,
-                                        ) - 1,
-                                        0,
-                                    ),
-                                ),
-                                max(
-                                    number(state, config, comptime!(Field::OutputTicks as u32), id),
-                                    1,
-                                ),
-                            );
-                            let capacity = actors[ActorLayout::CAPACITY
-                                * (actors.len() / ActorLayout::WORDS)
-                                + id as usize];
-                            wanted = multiply(
-                                control,
-                                minimum(packets, times32(capacity, horizon)),
-                                number(state, config, comptime!(Field::InputTicks as u32), id),
-                            );
-                        }
-                        if k.is(comptime!(ActorKind::Household))
-                            && comptime!(config.home_mode == Feature::Enabled)
-                            && good == comptime!(Good::Grain as u32)
-                            && (comptime!(config.economy == crate::domain::Economy::Agrarian)
-                                || number(state, config, comptime!(Field::LandPlots as u32), id)
-                                    > 0)
-                            && number(state, config, comptime!(Field::LivingMembers as u32), id) > 0
-                        {
-                            search = true;
-                            wanted = ticks(
-                                number(state, config, comptime!(Field::FoodNeed as u32), id)
-                                    * (config.coverage + config.ring),
-                                0,
-                            );
-                        }
-                        let investment =
-                            number(state, config, comptime!(Field::InvestmentGood as u32), id) > 0;
-                        if k.is(comptime!(ActorKind::Household))
-                            && investment
-                            && comptime!(config.property_mode == Feature::Disabled)
-                            && number(state, config, comptime!(Field::LivingMembers as u32), id) > 0
-                            && comptime!(config.home_mode == Feature::Enabled)
-                            && (good == comptime!(Good::Tools as u32)
-                                || good == comptime!(Good::Wood as u32))
-                        {
-                            search = true;
-                            wanted =
-                                ticks(select(good == comptime!(Good::Tools as u32), 2u32, 5u32), 0);
-                        }
-                        if !k.is(comptime!(ActorKind::Household))
-                            && comptime!(
-                                config.home_mode == Feature::Enabled
-                                    && config.property_mode == Feature::Disabled
-                            )
-                            && good == comptime!(Good::Wood as u32)
-                            && number(state, config, comptime!(Field::Slots as u32), id) == 0
-                            && number(state, config, comptime!(Field::Plan as u32), id) > 0
-                            && !lt(
-                                value(state, config, comptime!(Field::Cash as u32), id),
-                                ticks(10_000, 0),
-                            )
-                        {
-                            wanted = select(search, maximum(wanted, ticks(5, 0)), ticks(5, 0));
-                            search = true;
-                        }
-                        if !k.is(comptime!(ActorKind::Household))
-                            && k.bits() != comptime!(Good::Railway as u32)
-                            && good == comptime!(Good::Tools as u32)
-                            && comptime!(config.home_mode == Feature::Enabled)
-                        {
-                            wanted = select(search, maximum(wanted, ticks(2, 0)), ticks(2, 0));
-                            search = true;
-                        }
-                        if good == comptime!(Good::Construction as u32) {
-                            let building =
-                                number(state, config, comptime!(Field::ProjectStatus as u32), id)
-                                    == comptime!(
-                                        crate::domain::property::ProjectStatus::Building as u32
-                                    );
-                            let work = value(
-                                state,
-                                config,
-                                comptime!(Field::ConstructionRemaining as u32),
-                                id,
-                            );
-                            wanted = select(
-                                building,
-                                select(search, maximum(wanted, work), work),
-                                wanted,
-                            );
-                            search = search || building;
-                            if k.bits() == comptime!(Good::Housing as u32) {
-                                wanted = add_checked(
-                                    control,
-                                    wanted,
-                                    landlords::maintenance(state, config, id),
-                                );
-                                search = true;
-                            }
-                        }
+                        let demand = InputDemand::new(state, actors, config, control, id, &k, good);
+                        search = demand.search;
+                        wanted = demand.wanted;
                     }
                     MarketFlag::Consumer(_) => {
                         good = parameters.traded_good();
@@ -447,11 +303,6 @@ fn prepare(
                         }
                     }
                 }
-                if comptime!(matches!(market, MarketFlag::Input(_))) {
-                    let rail = railway::demand(state, actors, config, id, good);
-                    wanted = maximum(wanted, rail);
-                    search = search || !equal(rail, zero());
-                }
                 if good > 0u32 {
                     wanted = positive(
                         wanted,
@@ -511,11 +362,11 @@ fn prepare(
                         purchasing_power.extract(HIGH_WORD);
                 }
                 if comptime!(market == MarketFlag::Household) {
-                    let cash = value(state, config, comptime!(Field::Cash as u32), id);
-                    let mut failure = u32::cast_from(missing_supply);
-                    if !equal(wanted, zero()) && chosen == NO_ACTOR {
-                        failure = select(seen_supply || equal(cash, zero()), 2u32, 1u32);
-                    }
+                    let failure = select(
+                        equal(wanted, zero()),
+                        0u32,
+                        select(equal(purchasing_power, zero()), 2u32, 1u32),
+                    );
                     set32(
                         state,
                         config,
@@ -548,7 +399,7 @@ fn prepare(
                 quantity.extract(LOW_WORD);
             proposals[id as usize * ProposalLayout::WORDS + ProposalLayout::QUANTITY_HIGH] =
                 quantity.extract(HIGH_WORD);
-            proposals[id as usize * ProposalLayout::WORDS + ProposalLayout::DISTANCE] = trip;
+            proposals[id as usize * ProposalLayout::WORDS + ProposalLayout::DISTANCE] = 0;
         }
     }
     let mut packed = u32::cast_from(searching);

@@ -89,7 +89,7 @@ cargo gpu-full
 cargo run --release -- benchmark --sizes 100000,1000000 --seed 42 --warmup 0 --days 1000 --output /tmp/benchmark.json
 ```
 
-All test aliases use the GPU. `gpu-fast` runs 11 smoke tests; `gpu-full` runs the core regression suite, including the viewer unit tests. Tests run serially to avoid GPU contention. Unit and integration tests share one library test binary and a cached GPU device; memory-budget tests use a separate binary. Add integration modules to `tests/integration.rs`; automatic test discovery is disabled. Run a single module with, for example, `cargo test --lib tests::railway`.
+`gpu-fast` runs 10 smoke tests. `gpu-full` runs the core regression suite, including the viewer unit tests. Both run serially on the GPU to avoid contention. Unit and integration tests share one library test binary and a cached GPU device. Memory-budget tests use a separate binary. Add integration modules to `tests/integration.rs` because automatic test discovery is disabled. Run a single module with, for example, `cargo test --lib tests::railway`.
 
 Check shader access across the 2 GiB boundary with `cargo test --locked --test gpu gpu_buffer_larger_than_two_gib_preserves_distant_writes -- --ignored --nocapture`. This allocates a 3.46 GB GPU buffer and requires sufficient GPU memory.
 

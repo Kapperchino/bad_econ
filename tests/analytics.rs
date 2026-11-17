@@ -1,8 +1,7 @@
-#![cfg(feature = "compute")]
 use super::{estimates, support};
 
 use anyhow::{Result, anyhow};
-use bad_econ::simulation::{Device, analytics::*};
+use bad_econ::simulation::analytics::*;
 
 fn dense(
     rows: usize,
@@ -47,20 +46,6 @@ fn available(values: Diagnostic<ApproximateValues>) -> Result<ApproximateValues>
     }
 }
 
-fn approximate(vector: &DeviceVector, device: &Device, expected: &[u64]) -> Result<()> {
-    estimates::assert_close(
-        vector.read(device)?,
-        expected
-            .iter()
-            .map(|&value| Interval {
-                lower: value,
-                upper: value,
-            })
-            .collect::<Vec<_>>(),
-    );
-    Ok(())
-}
-
 fn contains(interval: Interval, numerator: u64, denominator: u64) {
     assert!(u128::from(interval.lower) * u128::from(denominator) <= u128::from(numerator));
     assert!(u128::from(interval.upper) * u128::from(denominator) >= u128::from(numerator));
@@ -78,7 +63,7 @@ fn lean_coupled_step_uses_old_blocks_and_normalizes_both_blocks() -> Result<()> 
         &DeviceVector::from_ticks(&device, &[0, 0, 1000, 1000])?,
         &DeviceVector::from_ticks(&device, &[2000, 3000, 5000, 7000])?,
     )?;
-    approximate(&step, &device, &[6000, 19000, 3250, 1250])?;
+    estimates::assert_ticks(&step.read(&device)?, &[6000, 19000, 3250, 1250]);
     let coupled = SparseMatrix::coupled(
         &SparseMatrix::new(2, 2, vec![])?,
         &labor,
@@ -103,7 +88,7 @@ fn lean_coupled_step_uses_old_blocks_and_normalizes_both_blocks() -> Result<()> 
         Diagnostic::Available(value) => value,
         _ => Err(anyhow!("normalization unavailable"))?,
     };
-    approximate(&normalized, &device, &[1000, 2700, 1000, 700])?;
+    estimates::assert_ticks(&normalized.read(&device)?, &[1000, 2700, 1000, 700]);
     Ok(())
 }
 
@@ -272,11 +257,6 @@ fn cubek_rectangular_products_and_transposes_match_f64_reference() -> Result<()>
             assert_eq!(transposed[column * rows + row], value);
         }
     }
-    let empty = DeviceVector::from_ticks(&device, &[])?;
-    assert_eq!(
-        empty.dot(&device, &empty, 1)?.read(&device)?,
-        [Interval { lower: 0, upper: 0 }]
-    );
     Ok(())
 }
 

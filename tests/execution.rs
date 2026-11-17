@@ -1,4 +1,3 @@
-#![cfg(feature = "compute")]
 use super::support;
 use anyhow::Result;
 use bad_econ::{
@@ -109,7 +108,14 @@ fn checkpoint_rejects_tampering_and_keeps_last_audited_boundary() -> Result<()> 
     simulation.command(SimulationCommand::AdvanceDay)?;
     assert_eq!(simulation.status, RuntimeState::Paused);
     let checkpoint = simulation.checkpoint()?;
+    assert!(
+        simulation
+            .phase(Phase::PhysicalClose, Trace::Record)
+            .is_err()
+    );
     simulation.phase(Phase::Opening, Trace::Discard)?;
+    assert!(simulation.phase(Phase::Opening, Trace::Discard).is_err());
+    assert!(simulation.advance().is_err());
     simulation.phase(Phase::Observation, Trace::Discard)?;
     assert_eq!(simulation.checkpoint()?, checkpoint);
     let mut json = serde_json::to_value(&checkpoint)?;
@@ -127,6 +133,14 @@ fn checkpoint_rejects_tampering_and_keeps_last_audited_boundary() -> Result<()> 
     invalid = scenario.initial()?;
     invalid.values.clear();
     assert!(Checkpoint::new(&scenario, &invalid).is_err());
+    for phase in Phase::ALL.into_iter().skip(2) {
+        simulation.phase(phase, Trace::Record)?;
+    }
+    assert_eq!(simulation.snapshot.day, 2);
+    assert_eq!(
+        simulation.checkpoint()?.restore()?.state,
+        simulation.download()?
+    );
     simulation.command(SimulationCommand::Restore(checkpoint.into()))?;
     let state = simulation.download()?;
     for identity in [1, 31] {
@@ -173,29 +187,5 @@ fn arithmetic_fault_rolls_back_and_reset_recovers() -> Result<()> {
     simulation.command(SimulationCommand::AdvanceDay)?;
     assert_eq!(simulation.snapshot.day, 1);
     assert_eq!(simulation.status, RuntimeState::Paused);
-    Ok(())
-}
-
-#[test]
-fn phase_machine_rejects_out_of_order_and_checkpoints_completed_days() -> Result<()> {
-    let scenario = Scenario::baseline(12, 42, Experiment::Baseline)?;
-    let mut simulation = Simulation::new(scenario, support::device(64)?)?;
-    assert!(
-        simulation
-            .phase(Phase::PhysicalClose, Trace::Record)
-            .is_err()
-    );
-    simulation.phase(Phase::Opening, Trace::Discard)?;
-    assert!(simulation.phase(Phase::Opening, Trace::Discard).is_err());
-    assert!(simulation.advance().is_err());
-    for phase in Phase::ALL.into_iter().skip(1) {
-        simulation.phase(phase, Trace::Record)?;
-    }
-    assert_eq!(
-        simulation.checkpoint()?.restore()?.state,
-        simulation.download()?
-    );
-    simulation.advance()?;
-    assert_eq!(simulation.snapshot.day, 2);
     Ok(())
 }

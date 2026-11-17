@@ -82,13 +82,16 @@ pub fn hex(bytes: &[u8]) -> String {
 }
 
 #[derive(Clone, Copy, Debug, Serialize, Deserialize, PartialEq, Eq)]
-#[serde(try_from = "ProbabilityDefinition", into = "ProbabilityDefinition")]
+#[serde(
+    try_from = "ProbabilityDefinition",
+    rename(serialize = "ProbabilityDefinition")
+)]
 pub struct Probability {
     numerator: u64,
     denominator: u64,
 }
 
-#[derive(Serialize, Deserialize)]
+#[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
 struct ProbabilityDefinition {
     numerator: u64,
@@ -100,15 +103,6 @@ impl TryFrom<ProbabilityDefinition> for Probability {
 
     fn try_from(value: ProbabilityDefinition) -> Result<Self> {
         Self::new(value.numerator, value.denominator)
-    }
-}
-
-impl From<Probability> for ProbabilityDefinition {
-    fn from(value: Probability) -> Self {
-        Self {
-            numerator: value.numerator,
-            denominator: value.denominator,
-        }
     }
 }
 

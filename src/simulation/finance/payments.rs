@@ -149,20 +149,10 @@ pub fn bank_payments(
     balances: &[u64],
     payments: &[BankPayment],
 ) -> Result<crate::simulation::LedgerResult> {
-    let values = balances
-        .iter()
-        .copied()
-        .map(TickLayout::from)
-        .collect::<Vec<_>>();
-    let state = device.tensor(bytemuck::cast_slice(&values));
+    let state = device.tensor(bytemuck::cast_slice(&crate::simulation::encode(balances)));
     let decisions = post_bank_payments(device, &state, payments)?;
-    let updated = device
-        .read(&state)?
-        .chunks_exact(TICK_WORDS)
-        .map(|words| u64::from(words[0]) | (u64::from(words[1]) << 32))
-        .collect();
     Ok(crate::simulation::LedgerResult {
-        state: updated,
+        state: crate::simulation::decode(&device.read(&state)?),
         decisions: decisions.decisions,
         frontier_depth: decisions.frontier_depth,
     })
@@ -219,7 +209,7 @@ pub fn post_bank_payments(
             amount: payment.amount.into(),
         })
         .collect::<Vec<_>>();
-    let input = padded(device, bytemuck::cast_slice(&records));
+    let input = device.record_tensor(&records);
     let events = device.empty((payments.len() * EVENT_WORDS).max(MIN_BUFFER_WORDS));
     let scratch =
         device.empty((payments.len() * ScratchLayout::WORDS_PER_EVENT).max(MIN_BUFFER_WORDS));

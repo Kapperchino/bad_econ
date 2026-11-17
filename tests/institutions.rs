@@ -1,4 +1,3 @@
-#![cfg(feature = "compute")]
 use super::support;
 
 use anyhow::{Context, Result};
@@ -200,7 +199,16 @@ fn research_configuration() -> Result<Scenario> {
             renewal_rate: 0,
             extraction_per_packet: 1,
         }],
-        strikes: vec![],
+        strikes: vec![StrikePolicy {
+            household: 3,
+            grievance: 1000,
+            solidarity: 1000,
+            trust: 1000,
+            efficacy: 1000,
+            peers: 1000,
+            cost: 0,
+            risk: 0,
+        }],
     });
     Scenario::new(config)
 }
@@ -214,12 +222,17 @@ fn research_adoption_equipment_and_natural_stocks_constrain_real_production() ->
     assert_eq!(simulation.snapshot.research.discoveries, 1);
     assert_eq!(simulation.snapshot.research.consumed, Good::food([1, 0, 0]));
     let checkpoint = simulation.checkpoint()?;
-    simulation.phase(Phase::Opening, Trace::Discard)?;
-    simulation.phase(Phase::Observation, Trace::Discard)?;
+    for phase in Phase::ALL
+        .into_iter()
+        .take_while(|phase| *phase != Phase::AccountsDecisions)
+    {
+        simulation.phase(phase, Trace::Discard)?;
+    }
     assert_eq!(simulation.checkpoint()?, checkpoint);
     simulation.command(SimulationCommand::Restore(checkpoint.clone().into()))?;
     (0..4).try_for_each(|_| simulation.advance())?;
     assert_eq!(simulation.snapshot.produced[1], 2);
+    assert!(simulation.snapshot.research.striking <= 1);
     assert_eq!(simulation.snapshot.research.remaining_service, 0);
     assert_eq!(simulation.snapshot.research.natural_stock, 2);
     let expected = simulation.download()?;

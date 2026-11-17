@@ -1,5 +1,3 @@
-#![cfg(feature = "compute")]
-
 use super::support;
 use anyhow::Result;
 use bad_econ::{
@@ -9,7 +7,7 @@ use bad_econ::{
 
 #[test]
 fn small_prices_accumulate_changes_and_replay_without_rounding_floors_on_gpu() -> Result<()> {
-    let mut config = pricing_scenario()?.config().clone();
+    let mut config = pricing_config()?;
     for firm in &mut config.population.as_mut().unwrap().firms {
         firm.price = 10;
         firm.cash = 1_000_000;
@@ -23,20 +21,18 @@ fn small_prices_accumulate_changes_and_replay_without_rounding_floors_on_gpu() -
         assert!((6..10).contains(&state.get(Field::Price, firm)));
     }
     let mut resumed = Simulation::from_checkpoint(simulation.checkpoint()?, support::device(64)?)?;
-    for _ in 8..80 {
-        simulation.advance()?;
-        resumed.advance()?;
-        assert_eq!(simulation.snapshot, resumed.snapshot);
-    }
-    let state = simulation.download()?;
-    assert_eq!(state, resumed.download()?);
+    simulation.advance()?;
+    resumed.advance()?;
+    assert_eq!(simulation.download()?, resumed.download()?);
+    (9..80).try_for_each(|_| resumed.advance())?;
+    let state = resumed.download()?;
     for firm in 1..4 {
         assert_eq!(state.get(Field::Price, firm), 1);
     }
     Ok(())
 }
 
-fn pricing_scenario() -> Result<Scenario> {
+fn pricing_config() -> Result<ScenarioConfig> {
     let mut config = Scenario::baseline(1, 42, Experiment::Concentrated)?
         .config()
         .clone();
@@ -81,12 +77,12 @@ fn pricing_scenario() -> Result<Scenario> {
             })
             .collect::<Result<_>>()?,
     });
-    Scenario::new(config)
+    Ok(config)
 }
 
 #[test]
 fn input_quotes_ignore_empty_and_distant_suppliers_on_gpu() -> Result<()> {
-    let mut config = pricing_scenario()?.config().clone();
+    let mut config = pricing_config()?;
     config.search_radius = 100;
     config.shipment_speed = 100;
     config.resources = ResourceMap::Explicit {

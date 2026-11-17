@@ -1,4 +1,3 @@
-#![cfg(feature = "compute")]
 use super::support;
 use anyhow::Result;
 use bad_econ::{
@@ -162,11 +161,19 @@ fn connected_railways_charge_freight_and_foreign_track_fees_on_gpu() -> Result<(
     assert_eq!(simulation.snapshot.used[Good::Coal as usize - 1], 8);
     assert_eq!(simulation.snapshot.used[Good::Steel as usize - 1], 12);
     assert_eq!(simulation.snapshot.used[Good::Locomotives as usize - 1], 4);
-    let mut replay = Simulation::from_checkpoint(simulation.checkpoint()?, support::device(64)?)?;
+    let encoded = serde_json::to_vec(&simulation.checkpoint()?)?;
+    let mut replay =
+        Simulation::from_checkpoint(serde_json::from_slice(&encoded)?, support::device(64)?)?;
     for _ in 0..4 {
         simulation.advance()?;
         replay.advance()?;
-        assert_eq!(simulation.download()?, replay.download()?);
+        let state = simulation.download()?;
+        assert_eq!(state, replay.download()?);
+        assert_eq!(simulation.snapshot.cash, state.initial_cash);
+        assert!((0..scenario.config().households as usize).all(|actor| {
+            state.get(Field::Hours, actor) + state.get(Field::Time, actor)
+                <= u64::from(scenario.config().work_cap)
+        }));
     }
     simulation.checkpoint()?.restore()?;
     Ok(())

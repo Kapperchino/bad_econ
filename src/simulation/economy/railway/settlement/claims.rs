@@ -10,8 +10,6 @@ const SORT_TILE: usize = 2048;
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(super) enum SortMethod {
     Merge,
-    #[cfg(test)]
-    Block256,
     Block2048,
 }
 
@@ -19,8 +17,6 @@ impl SortMethod {
     fn tile(self) -> usize {
         match self {
             Self::Merge => 1,
-            #[cfg(test)]
-            Self::Block256 => 256,
             Self::Block2048 => SORT_TILE,
         }
     }
@@ -75,20 +71,7 @@ impl Claim {
 
 #[cube]
 pub(super) fn add_demand(words: &[Atomic<u32>], index: usize, overflow: usize, amount: Ticks) {
-    let low = amount.extract(LOW_WORD);
-    let mut carry = 0u32;
-    if low > 0 {
-        let previous = words[index].fetch_add(low);
-        carry = u32::cast_from(previous + low < previous);
-    }
-    let high = amount.extract(HIGH_WORD);
-    let increment = high + carry;
-    let mut overflowed = increment < high;
-    if increment > 0 {
-        let previous = words[index + 1].fetch_add(increment);
-        overflowed = overflowed || previous + increment < previous;
-    }
-    if overflowed {
+    if atomic_add_overflows(words, index, amount) {
         words[overflow].fetch_or(1);
     }
 }
@@ -230,19 +213,9 @@ impl System for ClaimSort {
     type Passes = gpu_passes![SortClaims];
 }
 
-pub(super) fn sorted_source(capacity: usize) -> u32 {
-    let passes = capacity.max(1).next_power_of_two().ilog2();
-    (capacity * (FREIGHT_CLAIM_WORDS + passes as usize % 2)) as u32
-}
-
 pub(super) fn settlement_source(buffers: &Buffers) -> u32 {
-    match buffers.sorting {
-        SortMethod::Merge => sorted_source(buffers.claim_capacity),
-        method => block_sorted_source(buffers.claim_capacity, method.tile()),
-    }
-}
-
-fn block_sorted_source(capacity: usize, tile: usize) -> u32 {
+    let capacity = buffers.claim_capacity;
+    let tile = buffers.sorting.tile();
     let passes = capacity
         .max(1)
         .next_power_of_two()
@@ -262,32 +235,43 @@ pub(super) fn sort_buffered(
     execution: Execution,
 ) {
     if buffers.claim_capacity > 0 {
+        let dispatch = |workgroup| {
+            ClaimDispatch::launch(
+                device,
+                CubeCount::Static(1, 1, 1),
+                CubeDim::new_1d(1),
+                DispatchInputLaunch {
+                    progress: buffers.progress.clone().into_buffer_arg(),
+                    control: control.clone().into_buffer_arg(),
+                    dispatches: buffers.dispatches.clone().into_buffer_arg(),
+                    workgroup,
+                    execution,
+                },
+            );
+        };
+        let tile = buffers.sorting.tile();
         match buffers.sorting {
-            SortMethod::Merge => sort_merges_buffered(device, buffers, control, execution),
-            method => sort_blocks_buffered(device, buffers, control, execution, method.tile()),
+            SortMethod::Merge => dispatch(device.workgroup),
+            _ => {
+                dispatch(tile as u32);
+                ClaimBlocks::launch(
+                    device,
+                    markets::dispatch(&buffers.dispatches, SORT_DISPATCH),
+                    CubeDim::new_1d(256),
+                    BlockInputLaunch {
+                        claims: buffers.claims.clone().into_buffer_arg(),
+                        progress: buffers.progress.clone().into_buffer_arg(),
+                        capacity: buffers.claim_capacity as u32,
+                        tile,
+                    },
+                );
+                if buffers.claim_capacity > tile {
+                    dispatch(device.workgroup);
+                }
+            }
         }
+        merge_passes(device, buffers, tile);
     }
-}
-
-fn sort_merges_buffered(
-    device: &Device,
-    buffers: &Buffers,
-    control: &CubeTensor,
-    execution: Execution,
-) {
-    ClaimDispatch::launch(
-        device,
-        CubeCount::Static(1, 1, 1),
-        CubeDim::new_1d(1),
-        DispatchInputLaunch {
-            progress: buffers.progress.clone().into_buffer_arg(),
-            control: control.clone().into_buffer_arg(),
-            dispatches: buffers.dispatches.clone().into_buffer_arg(),
-            workgroup: device.workgroup,
-            execution,
-        },
-    );
-    merge_passes(device, buffers, 1);
 }
 
 fn merge_passes(device: &Device, buffers: &Buffers, mut width: usize) {
@@ -392,53 +376,6 @@ impl GpuPass<BlockInput> for SortClaimBlocks {
             }
         }
     }
-}
-
-fn sort_blocks_buffered(
-    device: &Device,
-    buffers: &Buffers,
-    control: &CubeTensor,
-    execution: Execution,
-    tile: usize,
-) {
-    ClaimDispatch::launch(
-        device,
-        CubeCount::Static(1, 1, 1),
-        CubeDim::new_1d(1),
-        DispatchInputLaunch {
-            progress: buffers.progress.clone().into_buffer_arg(),
-            control: control.clone().into_buffer_arg(),
-            dispatches: buffers.dispatches.clone().into_buffer_arg(),
-            workgroup: tile as u32,
-            execution,
-        },
-    );
-    ClaimBlocks::launch(
-        device,
-        markets::dispatch(&buffers.dispatches, SORT_DISPATCH),
-        CubeDim::new_1d(256),
-        BlockInputLaunch {
-            claims: buffers.claims.clone().into_buffer_arg(),
-            progress: buffers.progress.clone().into_buffer_arg(),
-            capacity: buffers.claim_capacity as u32,
-            tile,
-        },
-    );
-    if buffers.claim_capacity > tile {
-        ClaimDispatch::launch(
-            device,
-            CubeCount::Static(1, 1, 1),
-            CubeDim::new_1d(1),
-            DispatchInputLaunch {
-                progress: buffers.progress.clone().into_buffer_arg(),
-                control: control.clone().into_buffer_arg(),
-                dispatches: buffers.dispatches.clone().into_buffer_arg(),
-                workgroup: device.workgroup,
-                execution,
-            },
-        );
-    }
-    merge_passes(device, buffers, tile);
 }
 
 #[cube]

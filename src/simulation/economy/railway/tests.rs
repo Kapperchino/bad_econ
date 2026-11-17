@@ -76,76 +76,6 @@ fn incident_routes_preserve_original_parallel_segment_ties_on_gpu() -> Result<()
 }
 
 #[test]
-fn updated_railway_reuses_routes_and_refreshes_company_access_on_gpu() -> Result<()> {
-    use crate::domain::{Actor, company::Company, railway::RailSharing};
-
-    let mut config: crate::domain::ScenarioConfig =
-        serde_json::from_str(include_str!("../../../../scenarios/railway.json"))?;
-    for company in &mut config.railway.companies {
-        company.sharing = RailSharing::Private;
-    }
-    let scenario = Scenario::new(config)?;
-    let device = crate::simulation::tests::device(64)?;
-    let mut state = scenario.initial()?;
-    let original = Network::new(&device, &scenario, &state);
-    let routes = vec![0x1234_5678; original.routes.meta.num_elements()];
-    let quotes = vec![0x8765_4321; original.quotes.meta.num_elements()];
-    device.write(&original.routes, &routes);
-    device.write(&original.quotes, &quotes);
-    let company = Company::new(Company {
-        identity: scenario.config().railway.companies[0].firm,
-        sites: scenario
-            .config()
-            .railway
-            .companies
-            .iter()
-            .map(|company| company.firm)
-            .collect(),
-    })?;
-    company.initialize(&mut state)?;
-    state.companies.push(company);
-    state.actors.extend([Actor {
-        identity: state.next_identity,
-        position: state.actors.at(0).position,
-        kind: Good::Bread as u32,
-        owner: 0,
-        capacity: 1,
-    }]);
-    state.next_identity += 1;
-    let updated = original.updated(&device, &scenario, &state);
-    let rebuilt = Network::new(&device, &scenario, &state);
-    for (before, after) in [
-        (&original.stations, &updated.stations),
-        (&original.access, &updated.access),
-        (&original.station_companies, &updated.station_companies),
-        (&original.segments, &updated.segments),
-        (&original.materials, &updated.materials),
-        (&original.routes, &updated.routes),
-        (&original.quotes, &updated.quotes),
-        (&original.regions, &updated.regions),
-        (&original.segment_regions, &updated.segment_regions),
-    ] {
-        assert!(crate::simulation::market_graphs::same_buffer(before, after));
-    }
-    assert_eq!(device.read(&updated.routes)?, routes);
-    assert_eq!(device.read(&updated.quotes)?, quotes);
-    assert_eq!(
-        device.read(&updated.companies)?,
-        device.read(&rebuilt.companies)?
-    );
-    assert_eq!(
-        device.read(&updated.access_rights)?,
-        device.read(&rebuilt.access_rights)?
-    );
-    assert_ne!(
-        device.read(&updated.access_rights)?,
-        device.read(&original.access_rights)?
-    );
-    assert_eq!(updated.firms, original.firms + 1);
-    Ok(())
-}
-
-#[test]
 fn unchanged_railway_companies_reuse_buffers_and_refresh_remapped_sites_on_gpu() -> Result<()> {
     use crate::domain::Actor;
 
@@ -404,9 +334,28 @@ fn exact_route_cache_initializes_empty_service_and_invalidates_company_access_on
     })?;
     company.initialize(&mut state)?;
     state.companies.push(company);
-    simulation.config = simulation
+    let updated = simulation
         .config
         .updated(&simulation.device, &scenario, &previous, &state);
+    let before = &simulation.config.railway;
+    let after = &updated.railway;
+    for (original, retained) in [
+        (&before.stations, &after.stations),
+        (&before.access, &after.access),
+        (&before.station_companies, &after.station_companies),
+        (&before.segments, &after.segments),
+        (&before.materials, &after.materials),
+        (&before.routes, &after.routes),
+        (&before.quotes, &after.quotes),
+        (&before.regions, &after.regions),
+        (&before.segment_regions, &after.segment_regions),
+    ] {
+        assert!(crate::simulation::market_graphs::same_buffer(
+            original, retained
+        ));
+    }
+    assert_eq!(RailTables::read(&simulation.device, after)?, private);
+    simulation.config = updated;
     assert_eq!(
         route_cache_states(&simulation)?,
         [RouteCacheState::Unknown as u32; 2]

@@ -1,46 +1,6 @@
-#![cfg(feature = "compute")]
 use super::support;
 use anyhow::Result;
 use bad_econ::{domain::*, runtime::SimulationCommand, simulation::Simulation};
-
-#[test]
-fn births_grow_the_person_registry_and_checkpoint_without_creating_money() -> Result<()> {
-    let mut config = Scenario::baseline(2000, 19, Experiment::Concentrated)?
-        .config()
-        .clone();
-    config.demography.annual_births_per_million_fertile_women = 1_000_000;
-    config.demography.mortality.background_annual_ppm = [0; 5];
-    config.demography.mortality.cold_daily_ppm_at_seven_days = 0;
-    config.demography.mortality.occupational_annual_ppm = [0; Good::COUNT];
-    let scenario = Scenario::new(config)?;
-    let initial = scenario.initial()?;
-    let mut original = Simulation::new(scenario.clone(), support::device(64)?)?;
-    for _ in 0..7 {
-        original.advance()?;
-    }
-    assert!(original.snapshot.population.births > 0);
-    assert!(original.snapshot.population.dependents > 0);
-    assert_eq!(original.snapshot.cash, initial.initial_cash);
-    let state = original.download()?;
-    assert_eq!(
-        state.people.len() as u64,
-        initial.initial_population + original.snapshot.population.births
-    );
-    assert!(
-        state
-            .people
-            .iter()
-            .filter(|person| person.age_days < 7)
-            .all(|person| person.work_minutes == 0 && person.employer.is_none())
-    );
-    let checkpoint = original.checkpoint()?;
-    let mut resumed = Simulation::new(scenario, support::device(64)?)?;
-    resumed.command(SimulationCommand::Restore(Box::new(checkpoint)))?;
-    original.advance()?;
-    resumed.advance()?;
-    assert_eq!(original.download()?, resumed.download()?);
-    Ok(())
-}
 
 #[test]
 fn household_formation_and_inheritance_preserve_assets_and_pending_deliveries() -> Result<()> {
@@ -175,6 +135,31 @@ fn exhausted_person_growth_budget_restores_the_complete_audited_day() -> Result<
     );
     simulation.device.memory_budget = prior_budget;
     assert_eq!(simulation.download()?, initial);
-    simulation.checkpoint()?.restore()?;
+    let checkpoint = simulation.checkpoint()?;
+    assert_eq!(checkpoint.restore()?.state, initial);
+    simulation.command(SimulationCommand::Restore(checkpoint.into()))?;
+    simulation.advance()?;
+    let state = simulation.download()?;
+    let births = simulation.snapshot.population.births;
+    assert!(births > 0);
+    assert!(simulation.snapshot.population.dependents > 0);
+    assert_eq!(simulation.snapshot.cash, initial.initial_cash);
+    assert_eq!(
+        state.people.len() as u64,
+        initial.initial_population + births
+    );
+    assert!(
+        state
+            .people
+            .iter()
+            .filter(|person| person.age_days < 1)
+            .all(|person| person.work_minutes == 0 && person.employer.is_none())
+    );
+    let checkpoint = simulation.checkpoint()?;
+    simulation.advance()?;
+    let expected = simulation.download()?;
+    simulation.command(SimulationCommand::Restore(checkpoint.into()))?;
+    simulation.advance()?;
+    assert_eq!(simulation.download()?, expected);
     Ok(())
 }

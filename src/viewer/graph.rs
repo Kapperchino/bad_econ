@@ -140,10 +140,10 @@ struct Geometry {
 }
 impl Geometry {
     fn quad(&mut self, points: [Vec2; 4], color: Color) {
-        [0, 2, 1, 0, 3, 2].into_iter().for_each(|index| {
-            self.positions.push(points[index].extend(0.0).to_array());
-            self.colors.push(color.to_linear().to_f32_array());
-        });
+        let color = color.to_linear().to_f32_array();
+        self.positions
+            .extend([0, 2, 1, 0, 3, 2].map(|index| points[index].extend(0.0).to_array()));
+        self.colors.extend([color; 6]);
     }
 
     fn line(&mut self, from: Vec2, to: Vec2, color: Color) {
@@ -169,18 +169,13 @@ impl Geometry {
                 3.0 + (1.0 - range.fraction(value) as f32) * (size.y - 6.0).max(0.0),
             )
         };
-        let last = history
-            .iter()
-            .enumerate()
-            .filter(|(_, snapshot)| (range.first_day..=range.last_day).contains(&snapshot.day))
-            .map(|(index, snapshot)| {
-                chart
-                    .values(
-                        snapshot,
-                        index.checked_sub(1).and_then(|index| history.get(index)),
-                    )
+        let last = chart
+            .samples(history, range.first_day, range.last_day)
+            .map(|sample| {
+                sample
+                    .values
                     .into_iter()
-                    .map(|value| point(snapshot.day, value))
+                    .map(|value| point(sample.day, value))
                     .collect::<Vec<_>>()
             })
             .reduce(|previous, current| {

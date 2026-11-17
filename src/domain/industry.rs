@@ -1,7 +1,9 @@
 use super::{Good, Technique};
 use serde::{Deserialize, Serialize};
 
-#[derive(Clone, Copy, Debug, Default, Hash, Serialize, Deserialize, PartialEq, Eq)]
+#[derive(
+    Clone, Copy, Debug, Default, Hash, Serialize, Deserialize, PartialEq, Eq, clap::ValueEnum,
+)]
 pub enum Economy {
     #[default]
     Agrarian,

@@ -138,9 +138,6 @@ fn sorted_gpu_prefixes_match_wide_reference_with_repeated_visits_and_overflow() 
         (32, SortMethod::Merge),
         (64, SortMethod::Merge),
         (256, SortMethod::Merge),
-        (32, SortMethod::Block256),
-        (64, SortMethod::Block256),
-        (256, SortMethod::Block256),
         (32, SortMethod::Block2048),
         (64, SortMethod::Block2048),
         (256, SortMethod::Block2048),
@@ -469,21 +466,15 @@ fn block_claim_sort_preserves_stable_indices_partial_tiles_and_output_parity_on_
             merge.reset(&device);
             merge.sort(&device, Execution::Immediate);
             let expected = merge.outcome(&device)?;
-            for method in [SortMethod::Block256, SortMethod::Block2048] {
-                let blocked = ClaimSortProbe::new(&device, capacity, count, method);
-                blocked.reset(&device);
-                blocked.sort(&device, Execution::Immediate);
-                let actual = blocked.outcome(&device)?;
-                assert_eq!(
-                    actual
-                        .iter()
-                        .zip(&expected)
-                        .position(|(actual, expected)| actual != expected),
-                    None,
-                    "capacity {capacity}, count {count}, sorting {:?}",
-                    blocked.buffers.sorting,
-                );
-            }
+            let blocked = ClaimSortProbe::new(&device, capacity, count, SortMethod::Block2048);
+            blocked.reset(&device);
+            blocked.sort(&device, Execution::Immediate);
+            let actual = blocked.outcome(&device)?;
+            assert_eq!(
+                actual, expected,
+                "capacity {capacity}, count {count}, sorting {:?}",
+                blocked.buffers.sorting,
+            );
         }
     }
     Ok(())
@@ -531,30 +522,28 @@ fn empty_claim_sort_skips_dispatches_and_small_blocks_keep_their_dispatch_on_gpu
 #[test]
 fn block_claim_sort_preserves_disabled_retries_and_prior_gpu_faults() -> Result<()> {
     let device = crate::simulation::tests::device(64)?;
-    for sorting in [SortMethod::Block256, SortMethod::Block2048] {
-        for execution in [Execution::Initial, Execution::Retry] {
-            for faults in [
-                FaultFlags::empty(),
-                FaultFlags::ARITHMETIC_OVERFLOW,
-                FaultFlags::CLAIM_CAPACITY,
-            ] {
-                let probe = ClaimSortProbe::new(&device, 5000, 128, sorting);
-                probe.reset(&device);
-                let mut control = vec![0; CONTROL_WORDS + 7];
-                control[crate::simulation::flags::FAULT_WORD] = faults.bits();
-                device.write(&probe.control, &control);
-                probe.sort(&device, execution);
-                match (execution, faults.is_empty()) {
-                    (Execution::Initial, true) => {
-                        let merge = ClaimSortProbe::new(&device, 5000, 128, SortMethod::Merge);
-                        merge.reset(&device);
-                        merge.sort(&device, execution);
-                        assert_eq!(probe.outcome(&device)?, merge.outcome(&device)?);
-                    }
-                    _ => assert_eq!(device.read(&probe.buffers.claims)?, probe.initial),
+    for execution in [Execution::Initial, Execution::Retry] {
+        for faults in [
+            FaultFlags::empty(),
+            FaultFlags::ARITHMETIC_OVERFLOW,
+            FaultFlags::CLAIM_CAPACITY,
+        ] {
+            let probe = ClaimSortProbe::new(&device, 5000, 128, SortMethod::Block2048);
+            probe.reset(&device);
+            let mut control = vec![0; CONTROL_WORDS + 7];
+            control[crate::simulation::flags::FAULT_WORD] = faults.bits();
+            device.write(&probe.control, &control);
+            probe.sort(&device, execution);
+            match (execution, faults.is_empty()) {
+                (Execution::Initial, true) => {
+                    let merge = ClaimSortProbe::new(&device, 5000, 128, SortMethod::Merge);
+                    merge.reset(&device);
+                    merge.sort(&device, execution);
+                    assert_eq!(probe.outcome(&device)?, merge.outcome(&device)?);
                 }
-                assert_eq!(device.read(&probe.control)?, control);
+                _ => assert_eq!(device.read(&probe.buffers.claims)?, probe.initial),
             }
+            assert_eq!(device.read(&probe.control)?, control);
         }
     }
     Ok(())

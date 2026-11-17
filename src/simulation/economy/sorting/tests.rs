@@ -84,7 +84,6 @@ fn byte_radix_matches_nibble_stability_parity_faults_and_restored_dispatches_on_
     let capacity = 1_010_003;
     let nibble = SortBuffers::new(&device, capacity);
     let byte = SortBuffers::new(&device, capacity);
-    let five = SortBuffers::new(&device, capacity);
     for keys in [
         SortKeys::Actors,
         SortKeys::Firms {
@@ -105,7 +104,6 @@ fn byte_radix_matches_nibble_stability_parity_faults_and_restored_dispatches_on_
     ] {
         let mut nibble_cache = MarketSort::Unrecorded;
         let mut byte_cache = MarketSort::Unrecorded;
-        let mut five_cache = MarketSort::Unrecorded;
         for scan in [parallel::ScanMode::new(&device), parallel::ScanMode::Shared] {
             for fault in [Fault::Clear, Fault::Latched, Fault::Pending] {
                 for active in [0, 1, 257, capacity - 1] {
@@ -117,7 +115,6 @@ fn byte_radix_matches_nibble_stability_parity_faults_and_restored_dispatches_on_
                     };
                     let input = nibble.reset_keys(&device, &case, keys);
                     byte.reset_keys(&device, &case, keys);
-                    five.reset_keys(&device, &case, keys);
                     let dispatches = device.read(&byte.dispatches)?;
                     let parameters = case.parameters();
                     let nibble_source = nibble_cache.run_radix(
@@ -138,22 +135,10 @@ fn byte_radix_matches_nibble_stability_parity_faults_and_restored_dispatches_on_
                         keys,
                         Radix::Byte,
                     )? as usize;
-                    let five_source = five_cache.run_radix(
-                        &device,
-                        &five.scratch,
-                        &five.control,
-                        &five.dispatches,
-                        &parameters,
-                        keys,
-                        Radix::Five,
-                    )? as usize;
-                    assert_eq!(device.read(&five.dispatches)?, dispatches);
-                    assert_eq!(device.read(&five.control)?, device.read(&nibble.control)?);
                     assert_eq!(device.read(&byte.dispatches)?, dispatches);
                     assert_eq!(device.read(&byte.control)?, device.read(&nibble.control)?);
                     let nibble_words = device.read(&nibble.scratch)?;
                     let byte_words = device.read(&byte.scratch)?;
-                    let five_words = device.read(&five.scratch)?;
                     match fault {
                         Fault::Clear => {
                             let mut order = (0..active).collect::<Vec<_>>();
@@ -162,11 +147,9 @@ fn byte_radix_matches_nibble_stability_parity_faults_and_restored_dispatches_on_
                                 order.iter().map(|&index| input[index]).collect::<Vec<_>>();
                             let expected_items =
                                 order.iter().map(|&index| index as u32).collect::<Vec<_>>();
-                            for (words, source) in [
-                                (&nibble_words, nibble_source),
-                                (&byte_words, byte_source),
-                                (&five_words, five_source),
-                            ] {
+                            for (words, source) in
+                                [(&nibble_words, nibble_source), (&byte_words, byte_source)]
+                            {
                                 assert_eq!(words[source..source + active], expected_keys);
                                 assert_eq!(
                                     words[source + capacity..source + capacity + active],
@@ -176,13 +159,11 @@ fn byte_radix_matches_nibble_stability_parity_faults_and_restored_dispatches_on_
                             }
                             if keys.span(capacity as u32) == 257 {
                                 assert_ne!(nibble_source, byte_source);
-                                assert_ne!(nibble_source, five_source);
                             }
                         }
                         Fault::Latched | Fault::Pending => {
                             assert_eq!(nibble_words, input);
                             assert_eq!(byte_words, input);
-                            assert_eq!(five_words, input);
                         }
                     }
                 }

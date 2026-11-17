@@ -1,7 +1,7 @@
 use super::{Device, profiling_day};
 use crate::domain::Market;
 use cubecl::{client::ProfileWindow, profile::ProfileDuration};
-use std::{cell::RefCell, fmt::Debug};
+use std::{cell::RefCell, fmt::Debug, time::Instant};
 
 pub(super) enum MarketProfile {
     Disabled,
@@ -71,6 +71,23 @@ impl MarketProfile {
                     ),
                 }
             }
+        }
+    }
+}
+
+pub(super) fn audit_checkpoints(device: &Device, day: u64) -> impl FnMut(&str) + use<> {
+    let mut profile = (day == profiling_day()
+        && std::env::var_os("BAD_ECON_PROFILE_STAGES").is_some())
+    .then(|| (device.clone(), Instant::now()));
+    move |label| {
+        if let Some((device, previous)) = &mut profile {
+            device.sync().expect("audit profile synchronization");
+            let now = Instant::now();
+            eprintln!(
+                "AUDIT {day} {label} {:.3}",
+                now.duration_since(*previous).as_secs_f64() * 1000.0
+            );
+            *previous = now;
         }
     }
 }

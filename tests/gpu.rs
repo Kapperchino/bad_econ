@@ -86,38 +86,24 @@ fn gpu_memory_budget_rejects_scenarios_before_allocation() -> Result<()> {
 }
 
 #[test]
-fn gpu_memory_budget_survives_restore_and_faults_on_excess_usage() -> Result<()> {
+fn gpu_memory_budget_reclaims_released_buffers_and_survives_restore() -> Result<()> {
     use bad_econ::runtime::{RuntimeState, SimulationCommand};
-
-    let scenario = Scenario::baseline(48, 42, Experiment::Baseline)?;
-    let device = support::device(64)?;
-    let budget = device.memory_budget.bytes();
-    let mut simulation = Simulation::new(scenario, device)?;
-    let checkpoint = simulation.checkpoint()?;
-    simulation.advance()?;
-    simulation.command(SimulationCommand::Restore(checkpoint.into()))?;
-    assert_eq!(simulation.device.memory_budget.bytes(), budget);
-    simulation.device.memory_budget = MemoryBudget::Reported { available_bytes: 2 };
-    assert!(simulation.advance().is_err());
-    assert!(matches!(simulation.status, RuntimeState::Fault { .. }));
-    Ok(())
-}
-
-#[test]
-fn released_large_gpu_buffers_do_not_cause_a_false_capacity_fault() -> Result<()> {
     let scenario = Scenario::baseline(48, 42, Experiment::Baseline)?;
     let mut constrained = Simulation::new(scenario, support::device(64)?)?;
     constrained.advance()?;
     let mut reference =
         Simulation::from_checkpoint(constrained.checkpoint()?, support::device(64)?)?;
     let before = constrained.memory_usage().bytes_reserved;
+    let budget = constrained
+        .scenario
+        .memory_estimate()
+        .max(before + 32 * 1024 * 1024);
     let spare = constrained
         .device
-        .empty((before as usize + 64 * 1024 * 1024) / size_of::<u32>());
+        .empty((budget as usize + 32 * 1024 * 1024) / size_of::<u32>());
     constrained.device.sync()?;
     let inflated = constrained.memory_usage().bytes_reserved;
     drop(spare);
-    let budget = before + 32 * 1024 * 1024;
     assert!(inflated > budget);
     constrained.device.memory_budget = MemoryBudget::Reported {
         available_bytes: budget * 2,
@@ -128,6 +114,13 @@ fn released_large_gpu_buffers_do_not_cause_a_false_capacity_fault() -> Result<()
         assert!(constrained.memory_usage().bytes_reserved <= budget);
         assert_eq!(constrained.download()?, reference.download()?);
     }
+    drop(reference);
+    let checkpoint = constrained.checkpoint()?;
+    constrained.command(SimulationCommand::Restore(checkpoint.into()))?;
+    assert_eq!(constrained.device.memory_budget.bytes(), budget);
+    constrained.device.memory_budget = MemoryBudget::Reported { available_bytes: 2 };
+    assert!(constrained.advance().is_err());
+    assert!(matches!(constrained.status, RuntimeState::Fault { .. }));
     Ok(())
 }
 

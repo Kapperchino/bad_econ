@@ -28,6 +28,121 @@ struct Metric {
 }
 
 impl Metric {
+    fn definition(metric: u32) -> Self {
+        use SummaryLayout as S;
+        let goods = Good::COUNT as u32;
+        let firms = goods + 1;
+        let sum = |source: Source, field, kind| Self {
+            source: source as u32,
+            field,
+            kind,
+            operation: 0,
+        };
+        let field = |coordinate: Field, kind| sum(Source::Field, coordinate as u32, kind);
+        match metric {
+            S::CASH => sum(Source::Cash, 0, NO_ACTOR),
+            S::PAYROLL_RESERVES => field(Field::PayrollReserve, NO_ACTOR),
+            S::INCOME_TAX => field(Field::TaxTreasury, NO_ACTOR),
+            S::EMPLOYEE_CHARGES => field(Field::ChargeTreasury, NO_ACTOR),
+            S::RENT_COLLECTED => field(Field::RentTreasury, NO_ACTOR),
+            S::RENT_ARREARS => field(Field::RentArrears, NO_ACTOR),
+            S::HOMELESS_HOUSEHOLDS => sum(Source::Homeless, 0, 0),
+            S::EMPLOYED => field(Field::Employed, 0),
+            S::SHORTAGES => field(Field::Shortage, 0),
+            S::INVENTORIES..S::TRANSIT => {
+                sum(Source::Inventory, 1 + metric - S::INVENTORIES, NO_ACTOR)
+            }
+            S::TRANSIT..S::PRODUCED => sum(
+                Source::Field,
+                TRANSIT_FIELDS as u32 + metric - S::TRANSIT,
+                NO_ACTOR,
+            ),
+            S::PRODUCED..S::USED => sum(
+                Source::Produced,
+                PRODUCTION_FIELDS as u32 + metric - S::PRODUCED,
+                NO_ACTOR,
+            ),
+            S::USED..S::CONSUMED => sum(
+                Source::Field,
+                USED_FIELDS as u32 + metric - S::USED,
+                NO_ACTOR,
+            ),
+            S::CONSUMED => field(Field::Consumed, 0),
+            S::HOUSEHOLD_PRODUCTION..S::DISTRIBUTORS => sum(
+                Source::Field,
+                PRODUCTION_FIELDS as u32 + metric - S::HOUSEHOLD_PRODUCTION,
+                NO_ACTOR,
+            ),
+            S::DISTRIBUTORS => sum(Source::Distributor, 0, firms),
+            S::CLOSURES => sum(Source::Closure, 0, firms),
+            S::CONSUMPTION..S::MINIMUM_WAGE => sum(
+                Source::Field,
+                CONSUMPTION_FIELDS as u32 + metric - S::CONSUMPTION,
+                NO_ACTOR,
+            ),
+            S::MINIMUM_WAGE | S::MAXIMUM_WAGE | S::MINIMUM_PRICE | S::MAXIMUM_PRICE => {
+                let quote = match metric {
+                    S::MINIMUM_WAGE | S::MAXIMUM_WAGE => {
+                        sum(Source::QuoteField, Field::Wage as u32, firms)
+                    }
+                    _ => sum(Source::PriceField, Field::Price as u32, firms),
+                };
+                Self {
+                    operation: match metric {
+                        S::MINIMUM_WAGE | S::MINIMUM_PRICE => 1,
+                        _ => 2,
+                    },
+                    ..quote
+                }
+            }
+            S::FIRMS_BY_GOOD..S::WORKFORCE => {
+                let index = (metric - S::FIRMS_BY_GOOD) % goods;
+                let (coordinate, source, operation) = match metric - index {
+                    S::FIRMS_BY_GOOD => (Field::Price, Source::QuotedFirm, 0),
+                    S::WAGE_MINIMA => (Field::Wage, Source::QuoteField, 1),
+                    S::WAGE_MAXIMA => (Field::Wage, Source::QuoteField, 2),
+                    S::WAGE_TOTALS => (Field::Wage, Source::QuoteField, 0),
+                    S::WAGE_SQUARES => (Field::Wage, Source::QuoteSquare, 0),
+                    S::PRICE_MINIMA => (Field::Price, Source::PriceField, 1),
+                    S::PRICE_MAXIMA => (Field::Price, Source::PriceField, 2),
+                    S::PRICE_TOTALS => (Field::Price, Source::PriceField, 0),
+                    S::PRICE_SQUARES => (Field::Price, Source::PriceSquare, 0),
+                    _ => unreachable!("summary quote metric"),
+                };
+                Self {
+                    operation,
+                    ..sum(source, coordinate as u32, index + 1)
+                }
+            }
+            S::WORKFORCE | S::SUBSISTENCE | S::INACTIVE => {
+                sum(Source::Labor, metric - S::WORKFORCE, 0)
+            }
+            S::RURAL_EMPLOYED => sum(Source::RuralEmployed, Field::Employed as u32, 0),
+            S::HOUSEHOLD_CASH => field(Field::Cash, 0),
+            S::ACTIVE_BY_GOOD..S::BUSINESS_TYPES => {
+                sum(Source::ActiveFirm, 0, metric - S::ACTIVE_BY_GOOD + 1)
+            }
+            S::BUSINESS_TYPES..S::BUSINESS_STATES => {
+                sum(Source::BusinessType, metric - S::BUSINESS_TYPES, firms)
+            }
+            S::BUSINESS_STATES..S::FIRM_CASH => {
+                sum(Source::BusinessState, metric - S::BUSINESS_STATES, firms)
+            }
+            S::FIRM_CASH..S::PRICE_COUNTS => {
+                let index = (metric - S::FIRM_CASH) % goods;
+                let coordinate = match metric - index {
+                    S::FIRM_CASH => Field::Cash,
+                    S::BUSINESS_OPENING => Field::BusinessOpeningCash,
+                    S::BUSINESS_CLOSING => Field::BusinessClosingCash,
+                    S::BUSINESS_REVENUE => Field::BusinessRevenue,
+                    _ => unreachable!("summary firm metric"),
+                };
+                field(coordinate, index + 1)
+            }
+            S::PRICE_COUNTS.. => sum(Source::PricedFirm, 0, metric - S::PRICE_COUNTS + 1),
+        }
+    }
+
     fn population(&self) -> MetricPopulation {
         match self.kind {
             0 | NO_ACTOR => MetricPopulation::Actors,
@@ -154,170 +269,8 @@ pub(in crate::simulation) struct AuditBuffers {
 
 impl AuditBuffers {
     pub fn new(device: &Device, actors: &ActorRows) -> Self {
-        use SummaryLayout as S;
-        let metrics = (0..S::METRICS as u32)
-            .map(|metric| {
-                let mut definition = Metric {
-                    field: 0,
-                    kind: NO_ACTOR,
-                    operation: 0,
-                    source: Source::Field as u32,
-                };
-                match metric {
-                    S::WORKFORCE | S::SUBSISTENCE | S::INACTIVE => {
-                        definition.source = Source::Labor as u32;
-                        definition.field = metric - S::WORKFORCE;
-                        definition.kind = 0;
-                    }
-                    S::RURAL_EMPLOYED => {
-                        definition.source = Source::RuralEmployed as u32;
-                        definition.field = Field::Employed as u32;
-                        definition.kind = 0;
-                    }
-                    S::HOUSEHOLD_CASH => {
-                        definition.field = Field::Cash as u32;
-                        definition.kind = 0;
-                    }
-                    metric if (S::BUSINESS_TYPES..S::BUSINESS_STATES).contains(&metric) => {
-                        definition.source = Source::BusinessType as u32;
-                        definition.field = metric - S::BUSINESS_TYPES;
-                        definition.kind = Good::COUNT as u32 + 1;
-                    }
-                    metric if (S::BUSINESS_STATES..S::FIRM_CASH).contains(&metric) => {
-                        definition.source = Source::BusinessState as u32;
-                        definition.field = metric - S::BUSINESS_STATES;
-                        definition.kind = Good::COUNT as u32 + 1;
-                    }
-                    metric if metric >= S::PRICE_COUNTS => {
-                        definition.kind = metric - S::PRICE_COUNTS + 1;
-                        definition.source = Source::PricedFirm as u32;
-                    }
-                    metric if metric >= S::FIRM_CASH => {
-                        let group = (metric - S::FIRM_CASH) / Good::COUNT as u32;
-                        definition.kind = (metric - S::FIRM_CASH) % Good::COUNT as u32 + 1;
-                        definition.field = match group {
-                            0 => Field::Cash,
-                            1 => Field::BusinessOpeningCash,
-                            2 => Field::BusinessClosingCash,
-                            _ => Field::BusinessRevenue,
-                        } as u32;
-                    }
-                    metric if (S::ACTIVE_BY_GOOD..S::BUSINESS_TYPES).contains(&metric) => {
-                        definition.kind = metric - S::ACTIVE_BY_GOOD + 1;
-                        definition.source = Source::ActiveFirm as u32;
-                    }
-                    S::CASH => definition.source = Source::Cash as u32,
-                    S::PAYROLL_RESERVES => definition.field = Field::PayrollReserve as u32,
-                    S::INCOME_TAX => definition.field = Field::TaxTreasury as u32,
-                    S::EMPLOYEE_CHARGES => definition.field = Field::ChargeTreasury as u32,
-                    S::RENT_COLLECTED => definition.field = Field::RentTreasury as u32,
-                    S::RENT_ARREARS => definition.field = Field::RentArrears as u32,
-                    S::HOMELESS_HOUSEHOLDS => {
-                        definition.source = Source::Homeless as u32;
-                        definition.kind = 0;
-                    }
-                    S::EMPLOYED => {
-                        definition.field = Field::Employed as u32;
-                        definition.kind = 0;
-                    }
-                    S::SHORTAGES => {
-                        definition.field = Field::Shortage as u32;
-                        definition.kind = 0;
-                    }
-                    S::CONSUMED => {
-                        definition.field = Field::Consumed as u32;
-                        definition.kind = 0;
-                    }
-                    S::DISTRIBUTORS => {
-                        definition.source = Source::Distributor as u32;
-                        definition.kind = Good::COUNT as u32 + 1;
-                    }
-                    S::CLOSURES => {
-                        definition.source = Source::Closure as u32;
-                        definition.kind = Good::COUNT as u32 + 1;
-                    }
-                    S::MINIMUM_WAGE | S::MAXIMUM_WAGE | S::MINIMUM_PRICE | S::MAXIMUM_PRICE => {
-                        definition.kind = Good::COUNT as u32 + 1;
-                        definition.source = match metric {
-                            S::MINIMUM_WAGE | S::MAXIMUM_WAGE => Source::QuoteField,
-                            _ => Source::PriceField,
-                        } as u32;
-                        definition.field = match metric {
-                            S::MINIMUM_WAGE | S::MAXIMUM_WAGE => Field::Wage as u32,
-                            _ => Field::Price as u32,
-                        };
-                        definition.operation = match metric {
-                            S::MINIMUM_WAGE | S::MINIMUM_PRICE => 1,
-                            _ => 2,
-                        };
-                    }
-                    _ => {
-                        let groups = [
-                            (S::INVENTORIES, 1, Source::Inventory),
-                            (S::TRANSIT, TRANSIT_FIELDS as u32, Source::Field),
-                            (S::PRODUCED, PRODUCTION_FIELDS as u32, Source::Produced),
-                            (S::USED, USED_FIELDS as u32, Source::Field),
-                            (
-                                S::HOUSEHOLD_PRODUCTION,
-                                PRODUCTION_FIELDS as u32,
-                                Source::Field,
-                            ),
-                            (S::CONSUMPTION, CONSUMPTION_FIELDS as u32, Source::Field),
-                        ];
-                        let group = groups.into_iter().find(|(start, _, _)| {
-                            (*start..*start + Good::COUNT as u32).contains(&metric)
-                        });
-                        match group {
-                            Some((start, field, source)) => {
-                                definition.field = field + metric - start;
-                                definition.source = source as u32;
-                            }
-                            None => {
-                                let groups = [
-                                    S::FIRMS_BY_GOOD,
-                                    S::WAGE_MINIMA,
-                                    S::WAGE_MAXIMA,
-                                    S::WAGE_TOTALS,
-                                    S::WAGE_SQUARES,
-                                    S::PRICE_MINIMA,
-                                    S::PRICE_MAXIMA,
-                                    S::PRICE_TOTALS,
-                                    S::PRICE_SQUARES,
-                                ];
-                                let start = groups
-                                    .into_iter()
-                                    .find(|start| {
-                                        (*start..*start + Good::COUNT as u32).contains(&metric)
-                                    })
-                                    .expect("summary metric");
-                                definition.kind = metric - start + 1;
-                                definition.field = match start {
-                                    S::WAGE_MINIMA
-                                    | S::WAGE_MAXIMA
-                                    | S::WAGE_TOTALS
-                                    | S::WAGE_SQUARES => Field::Wage as u32,
-                                    _ => Field::Price as u32,
-                                };
-                                definition.source = match start {
-                                    S::FIRMS_BY_GOOD => Source::QuotedFirm,
-                                    S::WAGE_SQUARES => Source::QuoteSquare,
-                                    S::PRICE_SQUARES => Source::PriceSquare,
-                                    S::WAGE_MINIMA | S::WAGE_MAXIMA | S::WAGE_TOTALS => {
-                                        Source::QuoteField
-                                    }
-                                    _ => Source::PriceField,
-                                } as u32;
-                                definition.operation = match start {
-                                    S::WAGE_MINIMA | S::PRICE_MINIMA => 1,
-                                    S::WAGE_MAXIMA | S::PRICE_MAXIMA => 2,
-                                    _ => 0,
-                                };
-                            }
-                        }
-                    }
-                }
-                definition
-            })
+        let metrics = (0..SummaryLayout::METRICS as u32)
+            .map(Metric::definition)
             .collect::<Vec<_>>();
         let sets = [MetricPopulation::Actors, MetricPopulation::Firms]
             .map(|population| MetricSet::new(device, &metrics, actors, population));

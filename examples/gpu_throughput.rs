@@ -39,17 +39,16 @@ struct Arguments {
 fn starting_simulation(scenario: Scenario, device: Device, day: u64) -> Result<Simulation> {
     let mut simulation = Simulation::new(scenario, device)?;
     match day {
-        0 => (),
+        0 => Ok(simulation),
         _ => {
             let mut state = simulation.download()?;
             state.day = day;
-            simulation = Simulation::from_checkpoint(
+            Simulation::from_checkpoint(
                 Checkpoint::new(&simulation.scenario, &state)?,
                 simulation.device.clone(),
-            )?;
+            )
         }
     }
-    Ok(simulation)
 }
 
 fn main() -> Result<()> {
@@ -80,13 +79,11 @@ fn main() -> Result<()> {
         let readback_before = simulation.readback_bytes;
         let mut daily = Vec::new();
         let mut durations = Vec::new();
-        let mut slowest = Duration::ZERO;
         let start = Instant::now();
         for _ in 0..days {
             let day_start = Instant::now();
             simulation.advance()?;
             let elapsed = day_start.elapsed();
-            slowest = slowest.max(elapsed);
             durations.push(elapsed);
             let memory = simulation.memory_usage();
             eprintln!(
@@ -104,6 +101,7 @@ fn main() -> Result<()> {
         }
         let seconds = start.elapsed().as_secs_f64();
         durations.sort_unstable();
+        let slowest = durations[durations.len() - 1];
         let median = (durations[(durations.len() - 1) / 2] + durations[durations.len() / 2]) / 2;
         let readback_bytes = simulation.readback_bytes - readback_before;
         let final_state_hash = simulation.download()?.digest();
@@ -137,27 +135,20 @@ fn main() -> Result<()> {
             "daily": daily,
         }));
         std::fs::write(&args.output, serde_json::to_vec_pretty(&reports)?)?;
-        match args.max_day_ms {
-            Some(limit) if slowest >= Duration::from_millis(u64::from(limit.get())) => {
+        for (metric, duration, limit) in [
+            ("slowest", slowest, args.max_day_ms),
+            ("median", median, args.max_median_ms),
+        ] {
+            if let Some(limit) =
+                limit.filter(|limit| duration >= Duration::from_millis(u64::from(limit.get())))
+            {
                 Err(anyhow!(
-                    "{households} households: slowest day was {:.3} ms, exceeding the strict {} ms budget; report saved to {}",
-                    slowest.as_secs_f64() * 1000.0,
+                    "{households} households: {metric} day was {:.3} ms, exceeding the strict {} ms budget; report saved to {}",
+                    duration.as_secs_f64() * 1000.0,
                     limit,
                     args.output.display(),
                 ))?
             }
-            _ => (),
-        }
-        match args.max_median_ms {
-            Some(limit) if median >= Duration::from_millis(u64::from(limit.get())) => {
-                Err(anyhow!(
-                    "{households} households: median day was {:.3} ms, exceeding the strict {} ms budget; report saved to {}",
-                    median.as_secs_f64() * 1000.0,
-                    limit,
-                    args.output.display(),
-                ))?
-            }
-            _ => (),
         }
     }
     Ok(())

@@ -1,4 +1,3 @@
-#[cfg(feature = "compute")]
 use super::support;
 use anyhow::Result;
 use bad_econ::domain::*;
@@ -78,7 +77,6 @@ fn scenario() -> Result<Scenario> {
     Scenario::new(config)
 }
 
-#[cfg(feature = "compute")]
 #[test]
 fn actor_rows_round_trip_on_gpu_and_reject_mismatched_lengths() -> Result<()> {
     use bad_econ::simulation::Simulation;

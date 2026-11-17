@@ -1,3 +1,4 @@
+#![cfg(feature = "compute")]
 mod analytics;
 mod bargaining;
 mod calendar;
@@ -6,7 +7,6 @@ mod demography;
 mod diagnostics;
 mod distributors;
 mod enterprise;
-#[cfg(feature = "compute")]
 #[path = "support/estimates.rs"]
 mod estimates;
 mod execution;
@@ -28,6 +28,5 @@ mod research;
 mod retained;
 mod seasonal_farming;
 mod sensitivity;
-#[cfg(feature = "compute")]
 pub(crate) mod support;
 mod valuation;

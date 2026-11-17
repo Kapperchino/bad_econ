@@ -1,5 +1,5 @@
 import argparse
-from dataclasses import asdict, dataclass, field
+from dataclasses import asdict, dataclass
 import json
 from pathlib import Path
 
@@ -8,11 +8,11 @@ from pathlib import Path
 class AnnualAccounts:
     first_day: int
     living_at_start: int
+    deaths: list[int]
     last_day: int = 0
     living_at_end: int = 0
     living_person_days: int = 0
     births: int = 0
-    deaths: list[int] = field(default_factory=lambda: [0, 0, 0])
     paid_household_days: int = 0
     food_required: int = 0
     bread_consumed: int = 0
@@ -55,20 +55,19 @@ class AnnualAccounts:
 
 
 def analyze(root, case):
+    zero_deaths = [0] * len(case["final"]["population"]["deaths"])
     previous = {
-        "population": {"living": case["population_initial"], "births": 0, "deaths": [0, 0, 0]},
-        "consumed": 0, "produced": [0] * 16, "household_production": [0] * 16,
+        "population": {"living": case["population_initial"], "births": 0, "deaths": zero_deaths},
+        "consumed": 0, "produced": [0] * 3, "household_production": [0] * 3,
         "firm_entries": 0, "firm_closures": 0,
     }
     years = []
     count = 0
     with (root / (case["name"] + ".jsonl")).open() as stream:
-        for line in stream:
-            current = json.loads(line)
-            count += 1
+        for count, current in enumerate(map(json.loads, stream), 1):
             assert current["day"] == count
             if (count - 1) % 365 == 0:
-                years.append(AnnualAccounts(count, previous["population"]["living"]))
+                years.append(AnnualAccounts(count, previous["population"]["living"], zero_deaths.copy()))
             years[-1].observe(previous, current)
             previous = current
     assert count == case["days"]
@@ -90,7 +89,7 @@ def main():
         reports.append({"binary_sha256": source["binary_sha256"], "workgroup": source["workgroup"],
                         "cases": [analyze(root, case) for case in source["cases"]]})
     result = {
-        "units": "Food is in bread ticks; deaths are background, occupational, famine. Person-days use the living population after each audited day. Food required equals consumed bread plus recorded unmet requirements.",
+        "units": "Food is in bread ticks; death counts follow the trajectory order (background, occupational, famine, and cold when available). Person-days use the living population after each audited day. Food required equals consumed bread plus recorded unmet requirements.",
         "interpretation": "Annual accounts describe replenishment, employment, and population change without assigning a recovery verdict. Falling food requirements can accompany deaths. Partial final years retain their actual day count.",
         "runs": reports,
     }

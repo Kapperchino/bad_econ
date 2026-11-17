@@ -288,9 +288,8 @@ impl DemographyRuntime {
             ranges[base + 1] += 1;
         }
         let count = encoded.len();
-        encoded.resize(count.max(1), PersonLayout::zeroed());
-        let people = device.tensor(bytemuck::cast_slice(&encoded));
-        let audited = device.tensor(bytemuck::cast_slice(&encoded));
+        let people = device.record_tensor(&encoded);
+        let audited = device.record_tensor(&encoded);
         let config = &scenario.config().demography;
         let mortality = &config.mortality;
         let policy = Policy {
@@ -569,13 +568,7 @@ impl DemographyRuntime {
         let actors = self.range_counts.len();
         let growth =
             count as u64 * ((PersonLayout::WORDS * 2 + 5) * WORD_BYTES) as u64 + actors as u64 * 8;
-        device.reclaim_memory(growth)?;
-        let required = growth
-            + device
-                .client
-                .memory_report(cubecl::MemoryScope::Device)
-                .usage()
-                .bytes_reserved;
+        let required = growth.saturating_add(device.reclaim_memory(growth)?.bytes_reserved);
         match count <= u32::MAX as usize && required <= device.memory_budget.bytes() {
             true => (),
             false => Err(anyhow!(
@@ -653,14 +646,7 @@ impl DemographyRuntime {
                 next_high: (next_identity >> 32) as u32,
             },
         );
-        device.reclaim_memory(0)?;
-        match device
-            .client
-            .memory_report(cubecl::MemoryScope::Device)
-            .usage()
-            .bytes_reserved
-            <= device.memory_budget.bytes()
-        {
+        match device.reclaim_memory(0)?.bytes_reserved <= device.memory_budget.bytes() {
             true => Ok(grown),
             false => Err(anyhow!("person registry allocation exceeded device budget")),
         }
@@ -675,13 +661,7 @@ impl DemographyRuntime {
         let count = self.count + births.iter().filter(|&&birth| birth > 0).count();
         let growth = count as u64 * ((PersonLayout::WORDS * 2 + 5) * WORD_BYTES) as u64
             + births.len() as u64 * 8;
-        device.reclaim_memory(growth)?;
-        let required = growth
-            + device
-                .client
-                .memory_report(cubecl::MemoryScope::Device)
-                .usage()
-                .bytes_reserved;
+        let required = growth.saturating_add(device.reclaim_memory(growth)?.bytes_reserved);
         match count <= u32::MAX as usize && required <= device.memory_budget.bytes() {
             true => (),
             false => Err(anyhow!(
@@ -726,14 +706,7 @@ impl DemographyRuntime {
             next_identity as u32,
             (next_identity >> 32) as u32,
         );
-        device.reclaim_memory(0)?;
-        match device
-            .client
-            .memory_report(cubecl::MemoryScope::Device)
-            .usage()
-            .bytes_reserved
-            <= device.memory_budget.bytes()
-        {
+        match device.reclaim_memory(0)?.bytes_reserved <= device.memory_budget.bytes() {
             true => Ok(grown),
             false => Err(anyhow!("person registry allocation exceeded device budget")),
         }

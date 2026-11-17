@@ -233,12 +233,11 @@ pub struct BargainingResult {
 }
 
 pub fn evaluate(device: &Device, requests: &[BargainingRequest]) -> Result<Vec<BargainingResult>> {
-    let mut encoded = requests
+    let encoded = requests
         .iter()
         .map(RequestLayout::new)
         .collect::<Result<Vec<_>>>()?;
-    encoded.resize(encoded.len().max(1), RequestLayout::zeroed());
-    let input = device.tensor(bytemuck::cast_slice(&encoded));
+    let input = device.record_tensor(&encoded);
     let output = device.empty(requests.len().max(1) * ResultLayout::WORDS);
     let control = device.tensor(&[0; 4]);
     let argument = |tensor: &CubeTensor| tensor.clone().into_buffer_arg();
@@ -266,10 +265,7 @@ pub fn evaluate(device: &Device, requests: &[BargainingRequest]) -> Result<Vec<B
             anchor: result.anchor.into(),
             required_net_rate: result.required_net.into(),
             weight: result.weight,
-            second_offer: match result.quote_available {
-                0 => None,
-                _ => Some(result.second.into()),
-            },
+            second_offer: (result.quote_available != 0).then(|| result.second.into()),
         })
         .collect())
 }

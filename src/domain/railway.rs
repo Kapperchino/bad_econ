@@ -110,10 +110,7 @@ impl RailwayConfig {
             length_unit: (map_size / 10).max(1),
             ..Self::default()
         };
-        let sites = actors
-            .iter()
-            .filter(|actor| actor.kind > 0)
-            .collect::<Vec<_>>();
+        let sites = actors.firm_actors().collect::<Vec<_>>();
         let firms = sites
             .iter()
             .filter(|actor| actor.kind == Good::Railway as u32)
@@ -135,11 +132,7 @@ impl RailwayConfig {
             let origin = station(firm.position);
             let mut neighbors = sites
                 .iter()
-                .filter(|actor| {
-                    actor.kind > 0
-                        && actor.identity != firm.identity
-                        && actor.position != firm.position
-                })
+                .filter(|actor| actor.identity != firm.identity && actor.position != firm.position)
                 .collect::<Vec<_>>();
             neighbors.sort_by_key(|actor| (firm.position.distance(actor.position), actor.identity));
             let destinations = neighbors
@@ -149,14 +142,13 @@ impl RailwayConfig {
                 .chain(firms.get(index + 1).map(|actor| actor.position))
                 .map(station)
                 .filter(|position| *position != origin)
-                .map(|position| (position.x, position.y))
                 .collect::<BTreeSet<_>>();
             config
                 .segments
-                .extend(destinations.into_iter().map(|(x, y)| RailSegment {
+                .extend(destinations.into_iter().map(|to| RailSegment {
                     company: firm.identity,
                     from: origin,
-                    to: Position { x, y },
+                    to,
                 }));
         }
         let stations = config.stations();
@@ -195,8 +187,8 @@ impl RailwayConfig {
         let mut connections = BTreeSet::new();
         for connection in &config.connections {
             let firm = actors
-                .iter()
-                .find(|actor| actor.identity == connection.firm && actor.kind > 0)
+                .firm_actors()
+                .find(|actor| actor.identity == connection.firm)
                 .ok_or_else(|| anyhow!("rail connection requires an existing firm"))?;
             match identities.contains(&connection.company)
                 && stations.contains(&connection.station)
@@ -230,14 +222,14 @@ impl RailwayConfig {
         let rates = config.companies.iter().all(|company| {
             (1..=1000).contains(&company.freight_rate)
                 && (1..=1000).contains(&company.access_fee)
-                && actors.iter().any(|actor| {
+                && actors.firm_actors().any(|actor| {
                     actor.identity == company.firm && actor.kind == Good::Railway as u32
                 })
         });
         let mut edges = BTreeSet::new();
         let segments = config.segments.iter().all(|segment| {
-            let from = (segment.from.x, segment.from.y);
-            let to = (segment.to.x, segment.to.y);
+            let from = segment.from;
+            let to = segment.to;
             identities.contains(&segment.company)
                 && from != to
                 && segment.from.x < map_size
@@ -283,10 +275,8 @@ impl RailwayConfig {
         self.segments
             .iter()
             .flat_map(|segment| [segment.from, segment.to])
-            .map(|position| (position.x, position.y))
             .collect::<BTreeSet<_>>()
             .into_iter()
-            .map(|(x, y)| Position { x, y })
             .collect()
     }
 

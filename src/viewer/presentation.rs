@@ -596,25 +596,17 @@ fn draw_readout(
         });
         let index = display
             .history
-            .iter()
-            .position(|point| point.day >= day)
-            .unwrap_or(display.history.len().saturating_sub(1));
+            .partition_point(|point| point.day < day)
+            .min(display.history.len().saturating_sub(1));
         let snapshot = display.history.get(index).unwrap_or(&display.snapshot);
         let previous = index
             .checked_sub(1)
             .and_then(|index| display.history.get(index));
         let reference = display.comparison.as_ref().and_then(|run| {
-            run.history
-                .iter()
-                .position(|point| point.day == snapshot.day)
-                .map(|index| {
-                    chart.values(
-                        &run.history[index],
-                        index
-                            .checked_sub(1)
-                            .and_then(|index| run.history.get(index)),
-                    )
-                })
+            chart
+                .samples(&run.history, snapshot.day, snapshot.day)
+                .next()
+                .map(|sample| sample.values)
         });
         let detail = {
             let values = chart.values(snapshot, previous);

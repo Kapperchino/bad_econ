@@ -10,7 +10,6 @@ use crate::{
 use anyhow::Result;
 use crossbeam_channel::{Receiver, RecvTimeoutError};
 use std::{
-    collections::BTreeSet,
     sync::{Arc, Mutex},
     time::Instant,
 };
@@ -282,16 +281,15 @@ struct ObservationUpdate {
 impl ObservationUpdate {
     fn new(simulation: &mut Simulation) -> Result<Self> {
         let firms = simulation.open_firms()?;
-        let firm_identities = firms
-            .iter()
-            .map(|firm| firm.identity)
-            .collect::<BTreeSet<_>>();
+        let mut open = firms.iter().peekable();
         let identities = simulation
             .actors()
             .iter()
-            .filter(|actor| match actor.kind {
-                0 => true,
-                _ => firm_identities.contains(&actor.identity),
+            .filter(|actor| {
+                actor.kind == 0
+                    || open
+                        .next_if(|firm| firm.identity == actor.identity)
+                        .is_some()
             })
             .map(|actor| actor.identity)
             .collect();

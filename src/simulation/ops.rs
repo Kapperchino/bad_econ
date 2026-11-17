@@ -135,6 +135,12 @@ impl Device {
         };
         self.upload(words, allocation)
     }
+    pub(super) fn record_tensor<T: bytemuck::Pod>(&self, records: &[T]) -> CubeTensor {
+        match records {
+            [] => self.tensor(bytemuck::cast_slice(&[T::zeroed()])),
+            records => self.tensor(bytemuck::cast_slice(records)),
+        }
+    }
     pub(super) fn dedicated_tensor(&self, words: &[u32]) -> CubeTensor {
         self.upload(words, TensorAllocation::Dedicated)
     }
@@ -243,17 +249,22 @@ impl Device {
     pub fn sync(&self) -> Result<()> {
         pollster::block_on(self.client.sync()).map_err(Into::into)
     }
-    pub(super) fn reclaim_memory(&self, additional_bytes: u64) -> Result<()> {
-        let reserved = self
-            .client
+    pub(super) fn memory_usage(&self) -> cubecl::MemoryUsage {
+        self.client
             .memory_report(cubecl::MemoryScope::Device)
             .usage()
-            .bytes_reserved;
-        if reserved.saturating_add(additional_bytes) > self.memory_budget.bytes() {
-            self.sync()?;
-            self.client.memory_cleanup()?;
+    }
+
+    pub(super) fn reclaim_memory(&self, additional_bytes: u64) -> Result<cubecl::MemoryUsage> {
+        let usage = self.memory_usage();
+        match usage.bytes_reserved.saturating_add(additional_bytes) <= self.memory_budget.bytes() {
+            true => Ok(usage),
+            false => {
+                self.sync()?;
+                self.client.memory_cleanup()?;
+                Ok(self.memory_usage())
+            }
         }
-        Ok(())
     }
     pub(super) fn count(&self, count: usize) -> CubeCount {
         cubecl::calculate_cube_count_elemwise(

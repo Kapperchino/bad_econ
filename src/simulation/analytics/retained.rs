@@ -109,12 +109,12 @@ impl InventoryHorizon {
                 "inventory horizon requires one context, matching dimensions, and at most 4096 stages"
             )),
             true => {
-                let zero = || DeviceVector::from_ticks(device, &vec![0; m]);
+                let zero = DeviceVector::zeros(device, m);
                 let mut current = opening;
-                let mut actual_hours = zero()?;
-                let mut final_and_project_hours = zero()?;
-                let mut positive_adjustment = zero()?;
-                let mut negative_adjustment = zero()?;
+                let mut actual_hours = zero.clone();
+                let mut final_and_project_hours = zero.clone();
+                let mut positive_adjustment = zero.clone();
+                let mut negative_adjustment = zero;
                 let mut physical_residuals = Vec::with_capacity(stages.len());
                 for stage in stages {
                     let account = InventoryAccount::new(
@@ -146,20 +146,19 @@ impl InventoryHorizon {
                         device,
                         &regime.labor_requirements.apply(device, stage.closing)?,
                     )?;
-                    negative_adjustment = negative_adjustment
-                        .add(device, &regime.labor_requirements.apply(device, current)?)?;
+                    negative_adjustment =
+                        negative_adjustment.add(device, &account.reconciled_hours.negative)?;
                     physical_residuals.push(account.physical_residual);
                     current = stage.closing;
                 }
                 let terminal = regime.labor_requirements.apply(device, current)?;
                 let initial = regime.labor_requirements.apply(device, opening)?;
-                let reconciled_hours = DeviceSignedVector::difference(
-                    final_and_project_hours.add(device, &terminal)?,
-                    initial.clone(),
-                )?;
+                let output_hours = final_and_project_hours.add(device, &terminal)?;
+                let reconciled_hours =
+                    DeviceSignedVector::difference(output_hours.clone(), initial.clone())?;
                 let reconciliation_residual = DeviceSignedVector::difference(
                     actual_hours.add(device, &initial)?,
-                    final_and_project_hours.add(device, &terminal)?,
+                    output_hours,
                 )?;
                 Ok(Self {
                     context: regime.context,

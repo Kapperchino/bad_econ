@@ -1,7 +1,7 @@
 use super::{
     Economy, Good, ScenarioConfig,
     calendar::{CalendarDate, HarvestSeason},
-    enterprise::HouseholdProduction,
+    enterprise::{Distributor, HouseholdProduction},
     prices::StartingPrices,
 };
 
@@ -72,6 +72,7 @@ impl InitialEmployment {
         config: &ScenarioConfig,
         capacities: &[u32; Good::COUNT],
         daily: &[u64; Good::COUNT],
+        retailers: &std::collections::BTreeMap<u64, Distributor>,
     ) -> Self {
         match (
             config.economy,
@@ -98,35 +99,21 @@ impl InitialEmployment {
                 let mut slots = 0;
                 let employers = (0..config.firms as usize)
                     .map(|firm| {
-                        let good = super::generated_good(config, firm) as usize - 1;
-                        let capacity = config
-                            .distributors
-                            .iter()
-                            .find(|store| {
-                                store.firm == u64::from(config.households) + firm as u64 + 1
-                            })
-                            .map(|store| {
-                                daily[good]
-                                    .div_ceil(u64::from(store.units_per_shift))
-                                    .max(1)
-                                    .min(u64::from(config.capacity))
-                                    as usize
-                            })
-                            .unwrap_or_else(|| {
-                                daily[good]
-                                    .div_ceil(u64::from(
-                                        super::food::technique(config, super::Good::ALL[good])
-                                            .output_ticks,
-                                    ))
-                                    .max(1)
-                                    .min(u64::from(capacities[good]))
-                                    as usize
-                            });
-                        slots += capacity;
-                        EmployerSlots {
-                            actor: config.households as usize + firm,
-                            end: slots,
-                        }
+                        let good = super::generated_good(config, firm);
+                        let index = good as usize - 1;
+                        let actor = config.households as usize + firm;
+                        let (output, capacity) = match retailers.get(&(actor as u64 + 1)) {
+                            Some(store) => (store.units_per_shift, config.capacity),
+                            None => (
+                                super::food::technique(config, good).output_ticks,
+                                capacities[index],
+                            ),
+                        };
+                        slots += daily[index]
+                            .div_ceil(u64::from(output))
+                            .max(1)
+                            .min(u64::from(capacity)) as usize;
+                        EmployerSlots { actor, end: slots }
                     })
                     .collect();
                 let settlement = InitialSettlement::new(config);

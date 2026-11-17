@@ -28,7 +28,7 @@ mod words;
 use crate::{
     arithmetic::add,
     domain::*,
-    ledger::{Bundle, Decision, MAX_LEGS, Schedule, TickLayout},
+    ledger::{Bundle, Decision, MAX_LEGS, OrderedEvents, TickLayout},
     runtime::{PhaseTiming, RuntimeState, SimulationCommand},
 };
 use anyhow::{Context, Result, anyhow};
@@ -120,6 +120,14 @@ impl MarketReplay {
             _ => parameters::MarketClock::Scalars,
         }
     }
+}
+
+enum RegistryChange {
+    Unchanged,
+    Births,
+    Transitions(registry::RegistryPlan),
+    Entries(registry::entries::EntryGrowth),
+    Rebuild,
 }
 
 #[derive(Clone, Copy)]
@@ -296,10 +304,7 @@ impl Simulation {
             .collect())
     }
     pub fn memory_usage(&self) -> cubecl::MemoryUsage {
-        self.device
-            .client
-            .memory_report(cubecl::MemoryScope::Device)
-            .usage()
+        self.device.memory_usage()
     }
     pub fn new(scenario: Scenario, device: Device) -> Result<Self> {
         match scenario.memory_estimate() <= device.memory_budget.bytes() {
@@ -489,8 +494,9 @@ impl Simulation {
         simulation.snapshot = simulation.observe()?;
         simulation.copy_audited(CopyDirection::Save)?;
         simulation.device.client.memory_cleanup()?;
-        simulation.device.reclaim_memory(0)?;
-        match simulation.memory_usage().bytes_reserved <= simulation.device.memory_budget.bytes() {
+        match simulation.device.reclaim_memory(0)?.bytes_reserved
+            <= simulation.device.memory_budget.bytes()
+        {
             true => Ok(simulation),
             false => Err(anyhow!(
                 "simulation memory exceeded the device memory budget of {} bytes",
@@ -642,8 +648,7 @@ impl Simulation {
             .reclaim_memory(0)
             .and_then(|_| self.execute_phase(phase, trace))
             .and_then(|evidence| {
-                self.device.reclaim_memory(0)?;
-                let memory = self.memory_usage();
+                let memory = self.device.reclaim_memory(0)?;
                 match memory.bytes_reserved <= self.device.memory_budget.bytes() {
                     true => Ok(evidence),
                     false => Err(anyhow!(
@@ -896,23 +901,7 @@ impl Simulation {
         grown
     }
     fn commit_enterprises(&mut self, audit: RegistryAudit) -> Result<()> {
-        let profile_device = self.device.clone();
-        let profile_day = self.day;
-        let profile =
-            profile_day == profiling_day() && std::env::var_os("BAD_ECON_PROFILE_STAGES").is_some();
-        let profile_time = std::cell::Cell::new(Instant::now());
-        let checkpoint = |label: &str| {
-            if profile {
-                profile_device
-                    .sync()
-                    .expect("audit profile synchronization");
-                let now = Instant::now();
-                eprintln!(
-                    "AUDIT {profile_day} {label} {:.3}",
-                    now.duration_since(profile_time.replace(now)).as_secs_f64() * 1000.0
-                );
-            }
-        };
+        let mut checkpoint = profiling::audit_checkpoints(&self.device, self.day);
         let records = registry::records::RecordBuffers {
             requests: &self.enterprise_requests,
             births: self.demography.birth_buffer(),
@@ -955,103 +944,125 @@ impl Simulation {
         }
         let count = records.iter().filter(|record| record.request > 0).count();
         let newborns = records.iter().filter(|record| record.birth > 0).count();
-        if count == 0 && newborns > 0 {
-            let next_identity = self
-                .metadata
-                .next_identity
-                .checked_add(newborns as u64)
+        let change = match (count, newborns) {
+            (0, 0) => RegistryChange::Unchanged,
+            (0, _) => RegistryChange::Births,
+            _ => {
+                let plan = registry::RegistryPlan::new(
+                    &self.scenario,
+                    &self.metadata,
+                    &self.migrations,
+                    records,
+                )?;
+                checkpoint("RegistryPlan");
+                match plan {
+                    Some(plan) => RegistryChange::Transitions(plan),
+                    None => {
+                        let growth = registry::entries::EntryGrowth::new(
+                            &self.scenario,
+                            &self.metadata,
+                            &self.migrations,
+                            records,
+                        )?;
+                        checkpoint("EntryGrowth");
+                        growth.map_or(RegistryChange::Rebuild, RegistryChange::Entries)
+                    }
+                }
+            }
+        };
+        #[cfg(test)]
+        let change = match (self.registry_execution, change) {
+            (
+                RegistryExecution::Reference,
+                RegistryChange::Transitions(_) | RegistryChange::Entries(_),
+            ) => RegistryChange::Rebuild,
+            (_, change) => change,
+        };
+        match change {
+            RegistryChange::Unchanged => Ok(()),
+            RegistryChange::Births => self.commit_births(records, newborns),
+            RegistryChange::Transitions(plan) => self.commit_registry_audited(plan, records, audit),
+            RegistryChange::Entries(growth) => {
+                self.commit_entries(&growth.requests, growth.plan, records, audit)
+            }
+            RegistryChange::Rebuild => self.rebuild_enterprises(records, count, newborns),
+        }
+    }
+
+    fn commit_births(&mut self, records: &[PendingRecord], newborns: usize) -> Result<()> {
+        let next_identity = self
+            .metadata
+            .next_identity
+            .checked_add(newborns as u64)
+            .context("identity capacity exhausted")?;
+        let grown = self.grow_births(records)?;
+        grown.remap_workers_from(
+            &self.device,
+            &self.state,
+            self.config.state_stride,
+            &self.demography,
+        );
+        let population = grown.observation(&self.device, &self.state, &self.config)?;
+        match self.device.reclaim_memory(0)?.bytes_reserved <= self.device.memory_budget.bytes() {
+            true => (),
+            false => Err(anyhow!(
+                "person registry capacity exhausted while observing growth"
+            ))?,
+        }
+        self.demography = grown;
+        self.metadata.next_identity = next_identity;
+        self.snapshot.population = population;
+        Ok(())
+    }
+
+    fn rebuild_enterprises(
+        &mut self,
+        records: &[PendingRecord],
+        count: usize,
+        newborns: usize,
+    ) -> Result<()> {
+        let mut state = self.download()?;
+        let estimated = (state.actors.len() + count) as u64 * self.scenario.fields() as u64 * 24
+            + (state.people.len() + newborns) as u64 * 144;
+        match estimated <= self.device.memory_budget.bytes() {
+            true => (),
+            false => Err(anyhow!(
+                "registry capacity exhausted: {estimated} bytes exceed device budget"
+            ))?,
+        }
+        for record in records.iter().filter(|record| record.birth > 0) {
+            let identity = state.next_identity;
+            state.next_identity = identity
+                .checked_add(1)
                 .context("identity capacity exhausted")?;
-            let grown = self.grow_births(records)?;
-            grown.remap_workers_from(
-                &self.device,
-                &self.state,
-                self.config.state_stride,
-                &self.demography,
-            );
-            let population = grown.observation(&self.device, &self.state, &self.config)?;
-            self.device.reclaim_memory(0)?;
-            match self.memory_usage().bytes_reserved <= self.device.memory_budget.bytes() {
-                true => (),
-                false => Err(anyhow!(
-                    "person registry capacity exhausted while observing growth"
-                ))?,
-            }
-            self.demography = grown;
-            self.metadata.next_identity = next_identity;
-            self.snapshot.population = population;
+            state.people.push(crate::domain::demography::Person {
+                identity,
+                household: state.actors.at(record.actor as usize).identity,
+                age_days: 0,
+                sex: match record.birth {
+                    1 => crate::domain::demography::Sex::Female,
+                    _ => crate::domain::demography::Sex::Male,
+                },
+                state: crate::domain::demography::LivingState::Living,
+                employer: None,
+                work_minutes: 0,
+                fatigue: 0,
+                famine_exposure: 0,
+                cold_exposure: 0,
+                birth_cooldown: 0,
+            });
         }
-        let plan =
-            registry::RegistryPlan::new(&self.scenario, &self.metadata, &self.migrations, records)?;
-        checkpoint("RegistryPlan");
-        #[cfg(test)]
-        let plan = match self.registry_execution {
-            RegistryExecution::Gpu => plan,
-            RegistryExecution::Reference => None,
-        };
-        let entries = registry::entries::EntryGrowth::new(
-            &self.scenario,
-            &self.metadata,
-            &self.migrations,
-            records,
-        )?;
-        checkpoint("EntryGrowth");
-        #[cfg(test)]
-        let entries = match self.registry_execution {
-            RegistryExecution::Gpu => entries,
-            RegistryExecution::Reference => None,
-        };
-        match (count, plan, entries) {
-            (0, _, _) => (),
-            (_, Some(plan), _) => self.commit_registry_audited(plan, records, audit)?,
-            (_, None, Some(growth)) => {
-                self.commit_entries(&growth.requests, growth.plan, records, audit)?
-            }
-            (_, None, None) => {
-                let mut state = self.download()?;
-                let estimated =
-                    (state.actors.len() + count) as u64 * self.scenario.fields() as u64 * 24
-                        + (state.people.len() + newborns) as u64 * 144;
-                match estimated <= self.device.memory_budget.bytes() {
-                    true => (),
-                    false => Err(anyhow!(
-                        "registry capacity exhausted: {estimated} bytes exceed device budget"
-                    ))?,
-                }
-                for record in records.iter().filter(|record| record.birth > 0) {
-                    let identity = state.next_identity;
-                    state.next_identity = identity
-                        .checked_add(1)
-                        .context("identity capacity exhausted")?;
-                    state.people.push(crate::domain::demography::Person {
-                        identity,
-                        household: state.actors.at(record.actor as usize).identity,
-                        age_days: 0,
-                        sex: match record.birth {
-                            1 => crate::domain::demography::Sex::Female,
-                            _ => crate::domain::demography::Sex::Male,
-                        },
-                        state: crate::domain::demography::LivingState::Living,
-                        employer: None,
-                        work_minutes: 0,
-                        fatigue: 0,
-                        famine_exposure: 0,
-                        cold_exposure: 0,
-                        birth_cooldown: 0,
-                    });
-                }
-                let mut requests = vec![0; state.actors.len()];
-                for record in records {
-                    requests[record.actor as usize] = record.request;
-                }
-                enterprise::enter(&mut state, &self.scenario, &requests)?;
-                enterprise::transitions(&mut state, &self.scenario, &requests)?;
-                let timings = self.timings.clone();
-                let readback = self.readback_bytes;
-                self.replace(self.scenario.clone(), state)?;
-                self.timings = timings;
-                self.readback_bytes += readback;
-            }
+        let mut requests = vec![0; state.actors.len()];
+        for record in records {
+            requests[record.actor as usize] = record.request;
         }
+        enterprise::enter(&mut state, &self.scenario, &requests)?;
+        enterprise::transitions(&mut state, &self.scenario, &requests)?;
+        let timings = self.timings.clone();
+        let readback = self.readback_bytes;
+        self.replace(self.scenario.clone(), state)?;
+        self.timings = timings;
+        self.readback_bytes += readback;
         Ok(())
     }
     fn commit_entries(
@@ -1061,23 +1072,7 @@ impl Simulation {
         births: &[PendingRecord],
         registry_audit: RegistryAudit,
     ) -> Result<()> {
-        let profile_device = self.device.clone();
-        let profile_day = self.day;
-        let profile =
-            profile_day == profiling_day() && std::env::var_os("BAD_ECON_PROFILE_STAGES").is_some();
-        let profile_time = std::cell::Cell::new(Instant::now());
-        let checkpoint = |label: &str| {
-            if profile {
-                profile_device
-                    .sync()
-                    .expect("audit profile synchronization");
-                let now = Instant::now();
-                eprintln!(
-                    "AUDIT {profile_day} {label} {:.3}",
-                    now.duration_since(profile_time.replace(now)).as_secs_f64() * 1000.0
-                );
-            }
-        };
+        let mut checkpoint = profiling::audit_checkpoints(&self.device, self.day);
         self.market_graphs = market_graphs::MarketGraphs::default();
         checkpoint("ReleaseGraphs");
         let newborns = births.iter().filter(|record| record.birth > 0).count();
@@ -1104,9 +1099,9 @@ impl Simulation {
             false => stride as u64 * self.scenario.fields() as u64 * 16,
         };
         let additional = state_bytes + count as u64 * 192;
-        self.device.reclaim_memory(additional)?;
         match self
-            .memory_usage()
+            .device
+            .reclaim_memory(additional)?
             .bytes_reserved
             .saturating_add(additional)
             <= self.device.memory_budget.bytes()
@@ -1353,8 +1348,7 @@ impl Simulation {
         );
         next.snapshot = next.observe_rings(rings)?;
         checkpoint("Observe");
-        next.device.reclaim_memory(0)?;
-        match next.memory_usage().bytes_reserved <= next.device.memory_budget.bytes() {
+        match next.device.reclaim_memory(0)?.bytes_reserved <= next.device.memory_budget.bytes() {
             true => *self = next,
             false => Err(anyhow!(
                 "registry allocation exceeds the device memory budget"
@@ -1377,23 +1371,7 @@ impl Simulation {
         births: &[PendingRecord],
         audit: RegistryAudit,
     ) -> Result<()> {
-        let profile_device = self.device.clone();
-        let profile_day = self.day;
-        let profile =
-            profile_day == profiling_day() && std::env::var_os("BAD_ECON_PROFILE_STAGES").is_some();
-        let profile_time = std::cell::Cell::new(Instant::now());
-        let checkpoint = |label: &str| {
-            if profile {
-                profile_device
-                    .sync()
-                    .expect("audit profile synchronization");
-                let now = Instant::now();
-                eprintln!(
-                    "AUDIT {profile_day} {label} {:.3}",
-                    now.duration_since(profile_time.replace(now)).as_secs_f64() * 1000.0
-                );
-            }
-        };
+        let mut checkpoint = profiling::audit_checkpoints(&self.device, self.day);
         let settlement = registry::settlement::SettlementBatch::new(
             &self.device,
             &self.scenario,
@@ -1499,8 +1477,7 @@ impl Simulation {
             None => next_buffers,
         };
         checkpoint("RegistryBuffers");
-        self.device.reclaim_memory(0)?;
-        match self.memory_usage().bytes_reserved <= self.device.memory_budget.bytes() {
+        match self.device.reclaim_memory(0)?.bytes_reserved <= self.device.memory_budget.bytes() {
             true => (),
             false => Err(anyhow!(
                 "registry capacity exhausted while preparing GPU transitions"
@@ -1566,8 +1543,9 @@ impl Simulation {
                 .map(|snapshot| (snapshot, population))
             })
             .and_then(|observation| {
-                self.device.reclaim_memory(0)?;
-                match self.memory_usage().bytes_reserved <= self.device.memory_budget.bytes() {
+                match self.device.reclaim_memory(0)?.bytes_reserved
+                    <= self.device.memory_budget.bytes()
+                {
                     true => Ok(observation),
                     false => Err(anyhow!(
                         "registry capacity exhausted while auditing GPU transitions"
@@ -3497,7 +3475,7 @@ pub struct LedgerResult {
     pub frontier_depth: usize,
 }
 pub fn ledger(device: &Device, balances: &[u64], bundles: &[Bundle]) -> Result<LedgerResult> {
-    let _ = Schedule::new(bundles)?;
+    OrderedEvents::new(bundles)?;
     match bundles
         .iter()
         .flat_map(Bundle::legs)
@@ -3507,7 +3485,9 @@ pub fn ledger(device: &Device, balances: &[u64], bundles: &[Bundle]) -> Result<L
         false => Err(anyhow!("invalid ledger coordinate")),
     }?;
     let state = device.tensor(bytemuck::cast_slice(&encode(balances)));
-    let events = device.tensor(&bundles.iter().flat_map(Bundle::encode).collect::<Vec<_>>());
+    let events = device.tensor(bytemuck::cast_slice(
+        &bundles.iter().map(Bundle::encoded_legs).collect::<Vec<_>>(),
+    ));
     let scratch =
         device.empty((bundles.len() * ScratchLayout::WORDS_PER_EVENT).max(MIN_BUFFER_WORDS));
     let links = device.empty((bundles.len() * LinkLayout::WORDS_PER_EVENT).max(MIN_BUFFER_WORDS));

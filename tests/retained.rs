@@ -1,4 +1,3 @@
-#![cfg(feature = "compute")]
 use super::{estimates, support};
 
 use anyhow::Result;
@@ -30,34 +29,6 @@ fn matrix(
     scale: u32,
 ) -> Result<DeviceMatrix> {
     DeviceMatrix::new(device, &sparse(rows, columns, values, denominator)?, scale)
-}
-
-fn approximate(vector: &DeviceVector, device: &Device, values: &[u64]) -> Result<()> {
-    estimates::assert_close(
-        vector.read(device)?,
-        values
-            .iter()
-            .map(|&value| Interval {
-                lower: value,
-                upper: value,
-            })
-            .collect::<Vec<_>>(),
-    );
-    Ok(())
-}
-
-fn signed_approximate(vector: &DeviceSignedVector, device: &Device, values: &[i64]) -> Result<()> {
-    let decode = |value: SignedTicks| match value.sign {
-        Sign::NonNegative => i128::from(value.magnitude),
-        Sign::Negative => -i128::from(value.magnitude),
-    };
-    let actual = vector.read(device)?;
-    assert_eq!(actual.len(), values.len());
-    for (actual, &value) in actual.iter().zip(values) {
-        estimates::assert_close(decode(actual.lower), i128::from(value));
-        estimates::assert_close(decode(actual.upper), i128::from(value));
-    }
-    Ok(())
 }
 
 #[test]
@@ -117,14 +88,17 @@ fn lean_inventory_horizon_telescopes_research_and_signed_stock_changes() -> Resu
         ],
     )?;
     assert_eq!(horizon.stages, 3);
-    approximate(&horizon.actual_hours, &device, &[16_000])?;
-    approximate(&horizon.final_and_project_hours, &device, &[20_000])?;
-    signed_approximate(&horizon.accumulated_stock_adjustment, &device, &[-4000])?;
-    signed_approximate(&horizon.terminal_stock_adjustment, &device, &[-4000])?;
-    signed_approximate(&horizon.reconciled_hours, &device, &[16_000])?;
-    signed_approximate(&horizon.reconciliation_residual, &device, &[0])?;
+    estimates::assert_ticks(&horizon.actual_hours.read(&device)?, &[16_000]);
+    estimates::assert_ticks(&horizon.final_and_project_hours.read(&device)?, &[20_000]);
+    estimates::assert_signed_ticks(
+        &horizon.accumulated_stock_adjustment.read(&device)?,
+        &[-4000],
+    );
+    estimates::assert_signed_ticks(&horizon.terminal_stock_adjustment.read(&device)?, &[-4000]);
+    estimates::assert_signed_ticks(&horizon.reconciled_hours.read(&device)?, &[16_000]);
+    estimates::assert_signed_ticks(&horizon.reconciliation_residual.read(&device)?, &[0]);
     for residual in &horizon.physical_residuals {
-        signed_approximate(residual, &device, &[0, 0])?;
+        estimates::assert_signed_ticks(&residual.read(&device)?, &[0, 0]);
     }
     Ok(())
 }
@@ -151,34 +125,28 @@ fn lean_augmented_inverse_and_terminal_activities_use_both_blocks() -> Result<()
         (&augmented.labor_from_goods, 4000),
         (&augmented.labor_from_labor, 2000),
     ] {
-        estimates::assert_close(
-            block.read(&device)?,
-            vec![Interval {
-                lower: expected,
-                upper: expected,
-            }],
-        );
+        estimates::assert_ticks(&block.read(&device)?, &[expected]);
     }
     let rhs = DeviceVector::from_ticks(&device, &[1000])?;
     let result = augmented.apply(&device, &rhs, &rhs)?;
-    approximate(&result.goods, &device, &[3500])?;
-    approximate(&result.labor, &device, &[6000])?;
+    estimates::assert_ticks(&result.goods.read(&device)?, &[3500]);
+    estimates::assert_ticks(&result.labor.read(&device)?, &[6000]);
     let a = matrix(&device, 1, 1, &[1], 2, scale)?;
     let t = matrix(&device, 1, 1, &[1], 4, scale)?;
-    estimates::assert_close(
-        result.goods.read(&device)?,
-        a.apply(&device, &result.goods)?
+    estimates::assert_ticks(
+        &a.apply(&device, &result.goods)?
             .add(&device, &reproduction.apply(&device, &result.labor)?)?
             .add(&device, &rhs)?
             .read(&device)?,
+        &[3500],
     );
-    estimates::assert_close(
-        result.labor.read(&device)?,
-        direct
+    estimates::assert_ticks(
+        &direct
             .apply(&device, &result.goods)?
             .add(&device, &t.apply(&device, &result.labor)?)?
             .add(&device, &rhs)?
             .read(&device)?,
+        &[6000],
     );
     let terminal = matrix(&device, 1, 2, &[3, 4], 1, scale)?.add(
         &device,
@@ -186,18 +154,6 @@ fn lean_augmented_inverse_and_terminal_activities_use_both_blocks() -> Result<()
             .product(&device, &inverse)?
             .product(&device, &matrix(&device, 1, 2, &[1, 2], 1, scale)?)?,
     )?;
-    estimates::assert_close(
-        terminal.read(&device)?,
-        vec![
-            Interval {
-                lower: 5000,
-                upper: 5000,
-            },
-            Interval {
-                lower: 8000,
-                upper: 8000,
-            },
-        ],
-    );
+    estimates::assert_ticks(&terminal.read(&device)?, &[5000, 8000]);
     Ok(())
 }

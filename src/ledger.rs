@@ -147,13 +147,13 @@ pub struct EventKey {
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(try_from = "BundleDefinition", into = "BundleDefinition")]
+#[serde(try_from = "BundleDefinition", rename(serialize = "BundleDefinition"))]
 pub struct Bundle {
     key: EventKey,
     legs: Vec<Leg>,
 }
 
-#[derive(Serialize, Deserialize)]
+#[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
 struct BundleDefinition {
     key: EventKey,
@@ -165,15 +165,6 @@ impl TryFrom<BundleDefinition> for Bundle {
 
     fn try_from(value: BundleDefinition) -> Result<Self> {
         Self::new(value.key, value.legs)
-    }
-}
-
-impl From<Bundle> for BundleDefinition {
-    fn from(value: Bundle) -> Self {
-        Self {
-            key: value.key,
-            legs: value.legs,
-        }
     }
 }
 
@@ -245,12 +236,14 @@ impl Bundle {
         Ok(decision)
     }
     pub fn encode(&self) -> Vec<u32> {
-        let legs: [LegLayout; MAX_LEGS] = std::array::from_fn(|index| {
+        bytemuck::cast_slice(&self.encoded_legs()).to_vec()
+    }
+    pub(crate) fn encoded_legs(&self) -> [LegLayout; MAX_LEGS] {
+        std::array::from_fn(|index| {
             self.legs
                 .get(index)
                 .map_or_else(LegLayout::empty, LegLayout::new)
-        });
-        bytemuck::cast_slice(&legs).to_vec()
+        })
     }
 }
 struct Posting {
@@ -270,12 +263,12 @@ pub struct Schedule {
     pub frontiers: Vec<Vec<usize>>,
 }
 
-struct OrderedEvents<'a> {
+pub(crate) struct OrderedEvents<'a> {
     bundles: &'a [Bundle],
 }
 
 impl<'a> OrderedEvents<'a> {
-    fn new(events: &'a [Bundle]) -> Result<Self> {
+    pub(crate) fn new(events: &'a [Bundle]) -> Result<Self> {
         match events.windows(2).all(|pair| pair[0].key < pair[1].key) {
             false => Err(anyhow!(
                 "event identities must be unique and canonically ordered"
@@ -288,30 +281,21 @@ impl<'a> OrderedEvents<'a> {
 impl Schedule {
     pub fn new(events: &[Bundle]) -> Result<Self> {
         let events = OrderedEvents::new(events)?.bundles;
-        let mut incidences = events
-            .iter()
-            .enumerate()
-            .flat_map(|(index, bundle)| bundle.legs.iter().map(move |leg| (leg.coordinate, index)))
-            .collect::<Vec<_>>();
-        incidences.sort_unstable();
-        let mut predecessors = vec![Vec::<usize>::new(); events.len()];
-        incidences
-            .windows(2)
-            .filter(|pair| pair[0].0 == pair[1].0)
-            .for_each(|pair| predecessors[pair[1].1].push(pair[0].1));
-        let mut levels = vec![0; events.len()];
-        (0..events.len()).for_each(|event| {
-            levels[event] = predecessors[event]
+        let mut next_level = BTreeMap::new();
+        let mut frontiers = Vec::new();
+        for (index, event) in events.iter().enumerate() {
+            let level = event
+                .legs
                 .iter()
-                .map(|&p| levels[p] + 1)
+                .filter_map(|leg| next_level.get(&leg.coordinate).copied())
                 .max()
-                .unwrap_or(0)
-        });
-        let mut frontiers = vec![Vec::new(); levels.iter().max().map_or(0, |n| n + 1)];
-        levels
-            .iter()
-            .enumerate()
-            .for_each(|(event, &level)| frontiers[level].push(event));
+                .unwrap_or(0);
+            if level == frontiers.len() {
+                frontiers.push(Vec::new());
+            }
+            frontiers[level].push(index);
+            next_level.extend(event.legs.iter().map(|leg| (leg.coordinate, level + 1)));
+        }
         Ok(Self { frontiers })
     }
 }

@@ -5,6 +5,48 @@ import re
 import subprocess
 import time
 
+
+def executables(manifest):
+    with manifest.open(encoding='utf-8-sig') as stream:
+        return {
+            record['executable']: record['target']['name']
+            for record in map(json.loads, stream)
+            if record.get('reason') == 'compiler-artifact'
+            and record.get('profile', {}).get('test')
+            and record.get('executable')
+        }
+
+
+def test_count(executable):
+    listing = subprocess.run([executable, '--list'], capture_output=True, text=True, check=True)
+    return sum(line.endswith(': test') for line in listing.stdout.splitlines())
+
+
+def measure(executable, target, count, output):
+    started = previous = time.perf_counter()
+    cases = []
+    print(f'Starting {target}: {count} tests', flush=True)
+    with (output / f'{target}.log').open('w', encoding='utf-8') as log, subprocess.Popen(
+        [executable, '--test-threads=1', '--color', 'never'],
+        stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True, encoding='utf-8', errors='replace'
+    ) as process:
+        for line in process.stdout:
+            log.write(line)
+            log.flush()
+            now = time.perf_counter()
+            result = re.match(r'test (.+?) \.\.\. (ok|FAILED|ignored)', line)
+            if result:
+                case = dict(name=result[1], status=result[2], approximate_seconds=now-previous)
+                cases.append(case)
+                previous = now
+                print(f'{target}::{case["name"]}: {case["status"]} {case["approximate_seconds"]:.3f}s', flush=True)
+            elif re.match(r'running \d+ tests?', line):
+                previous = now
+    return dict(target=target, executable=executable, tests=count,
+                exit_code=process.returncode or int(len(cases) != count),
+                seconds=time.perf_counter()-started, cases=cases)
+
+
 parser = argparse.ArgumentParser()
 parser.add_argument('manifest', type=Path)
 parser.add_argument('output', type=Path)
@@ -14,43 +56,16 @@ args = parser.parse_args()
 if args.max_seconds <= 0:
     parser.error('--max-seconds must be positive')
 args.output.mkdir(parents=True, exist_ok=True)
-artifacts = {}
-for line in args.manifest.read_text(encoding='utf-8-sig').splitlines():
-    record = json.loads(line)
-    if record.get('reason') == 'compiler-artifact' and record.get('profile', {}).get('test') and record.get('executable'):
-        artifacts[record['executable']] = record['target']['name']
-unknown = set(args.target) - set(artifacts.values())
+artifacts = executables(args.manifest)
+selected = set(args.target) or set(artifacts.values())
+unknown = selected.difference(artifacts.values())
 if unknown:
     parser.error(f'unknown test targets: {sorted(unknown)}')
 results = []
 for executable, target in artifacts.items():
-    selected = not args.target or target in args.target
-    if selected:
-        listing = subprocess.run([executable, '--list'], capture_output=True, text=True, check=True)
-        count = len(re.findall(r': test$', listing.stdout, re.MULTILINE))
-        if count:
-            started = time.perf_counter()
-            previous = started
-            cases = []
-            print(f'Starting {target}: {count} tests', flush=True)
-            with (args.output / f'{target}.log').open('w', encoding='utf-8') as log:
-                process = subprocess.Popen([executable, '--test-threads=1', '--color', 'never'], stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True, encoding='utf-8', errors='replace')
-                for line in process.stdout:
-                    log.write(line)
-                    log.flush()
-                    now = time.perf_counter()
-                    if re.match(r'running \d+ tests?', line):
-                        previous = now
-                    result = re.match(r'test (.+?) \.\.\. (ok|FAILED|ignored)', line)
-                    if result:
-                        case = dict(name=result[1], status=result[2], approximate_seconds=now-previous)
-                        cases.append(case)
-                        previous = now
-                        print(f'{target}::{case["name"]}: {case["status"]} {case["approximate_seconds"]:.3f}s', flush=True)
-                code = process.wait()
-            outcome = code or int(len(cases) != count)
-            results.append(dict(target=target, executable=executable, tests=count, exit_code=outcome, seconds=time.perf_counter()-started, cases=cases))
-            (args.output / 'summary.json').write_text(json.dumps(results, indent=2), encoding='utf-8')
+    if target in selected and (count := test_count(executable)):
+        results.append(measure(executable, target, count, args.output))
+        (args.output / 'summary.json').write_text(json.dumps(results, indent=2), encoding='utf-8')
 if not results:
     parser.error('the manifest contains no selected executable tests')
 seconds = sum(r['seconds'] for r in results)

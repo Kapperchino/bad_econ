@@ -18,10 +18,10 @@ struct Cli {
     households: u32,
     #[arg(long, default_value_t = 42)]
     seed: u64,
-    #[arg(long, value_enum, default_value_t = ExperimentArg::Baseline)]
-    experiment: ExperimentArg,
-    #[arg(long, value_enum, default_value_t = EconomyArg::Industrial)]
-    economy: EconomyArg,
+    #[arg(long, value_enum, default_value_t = Experiment::Baseline)]
+    experiment: Experiment,
+    #[arg(long, value_enum, default_value_t = Economy::Industrial)]
+    economy: Economy,
     #[arg(long)]
     scenario: Option<PathBuf>,
     #[arg(long)]
@@ -91,33 +91,11 @@ impl Cli {
         }
     }
 }
-#[derive(Clone, Copy, ValueEnum)]
-enum EconomyArg {
-    Industrial,
-    Agrarian,
-}
-impl EconomyArg {
-    fn scenario(self, households: u32, seed: u64, experiment: Experiment) -> Result<Scenario> {
-        match self {
-            Self::Industrial => Scenario::industrial(households, seed, experiment),
-            Self::Agrarian => Scenario::baseline(households, seed, experiment),
-        }
-    }
-}
-#[derive(Clone, Copy, ValueEnum)]
-enum ExperimentArg {
-    Baseline,
-    Shortage,
-    Transport,
-    Concentrated,
-}
-impl From<ExperimentArg> for Experiment {
-    fn from(value: ExperimentArg) -> Self {
-        match value {
-            ExperimentArg::Baseline => Self::Baseline,
-            ExperimentArg::Shortage => Self::Shortage,
-            ExperimentArg::Transport => Self::Transport,
-            ExperimentArg::Concentrated => Self::Concentrated,
+impl Cli {
+    fn generated_scenario(&self, households: u32) -> Result<Scenario> {
+        match self.economy {
+            Economy::Industrial => Scenario::industrial(households, self.seed, self.experiment),
+            Economy::Agrarian => Scenario::baseline(households, self.seed, self.experiment),
         }
     }
 }
@@ -147,9 +125,7 @@ fn main() -> Result<()> {
 fn scenario(args: &Cli) -> Result<Scenario> {
     match &args.scenario {
         Some(path) => Scenario::new(serde_json::from_slice(&std::fs::read(path)?)?),
-        None => args
-            .economy
-            .scenario(args.households, args.seed, args.experiment.into()),
+        None => args.generated_scenario(args.households),
     }
 }
 #[cfg(feature = "compute")]
@@ -258,10 +234,7 @@ fn benchmark(scenario: Scenario, args: &Cli) -> Result<()> {
         (None, None) => args
             .sizes
             .iter()
-            .map(|&households| {
-                args.economy
-                    .scenario(households, args.seed, args.experiment.into())
-            })
+            .map(|&households| args.generated_scenario(households))
             .collect::<Result<Vec<_>>>()?,
     };
     let mut reports = Vec::new();
@@ -293,7 +266,7 @@ fn benchmark(scenario: Scenario, args: &Cli) -> Result<()> {
         let readback_bytes = simulation.readback_bytes - readback_before;
         let state_hash = simulation.download()?.digest();
         reports.push(serde_json::json!({"households":households,"firms":simulation.scenario.config().firms,"scenario":simulation.scenario.config(),"scenario_hash":fingerprint,"device":simulation.device.name,"workgroup":args.workgroup,"days":args.days,"starting_day":starting_day,"warmup_days":args.warmup,"startup_seconds":startup_seconds,"seconds":seconds,"days_per_second":f64::from(args.days)/seconds,"readback_bytes":readback_bytes,"final_state_hash":state_hash,"state_hash_version":STATE_HASH_VERSION,"profile":bad_econ::arithmetic::PROFILE,"policy_table_hash":bad_econ::arithmetic::table_hash(),"estimated_bytes":estimate,"memory_budget_bytes":simulation.device.memory_budget.bytes(),"memory_budget":simulation.device.memory_budget,"daily":daily,"snapshot":simulation.snapshot}));
-        output(&args.output, &serde_json::to_value(&reports)?)?;
+        output(&args.output, &reports)?;
     }
     Ok(())
 }
@@ -317,7 +290,7 @@ fn view(scenario: Scenario, workgroup: u32, mode: Mode) -> Result<()> {
 fn view(_: Scenario, _: u32, _: Mode) -> Result<()> {
     Err(anyhow!("build with --features viewer"))
 }
-fn output(path: &Option<PathBuf>, value: &serde_json::Value) -> Result<()> {
+fn output(path: &Option<PathBuf>, value: &impl serde::Serialize) -> Result<()> {
     let json = serde_json::to_string_pretty(value)?;
     match path {
         Some(path) => {

@@ -690,14 +690,25 @@ fn atomic_store(words: &[Atomic<u32>], index: usize, amount: Ticks) {
 }
 
 #[cube]
-fn atomic_add(words: &[Atomic<u32>], index: usize, amount: Ticks, control: &[Atomic<u32>]) {
+fn atomic_add_overflows(words: &[Atomic<u32>], index: usize, amount: Ticks) -> bool {
     let low = amount.extract(LOW_WORD);
-    let previous = words[index].fetch_add(low);
-    let carry = u32::cast_from(previous + low < previous);
+    let carry = if low == 0 {
+        0u32
+    } else {
+        u32::cast_from(words[index].fetch_add(low) > u32::MAX - low)
+    };
     let high = amount.extract(HIGH_WORD);
-    let previous_high = words[index + 1].fetch_add(high);
-    let before_carry = words[index + 1].fetch_add(carry);
-    if previous_high + high < previous_high || before_carry + carry < before_carry {
+    let increment = high + carry;
+    if increment == 0 {
+        high != 0
+    } else {
+        words[index + 1].fetch_add(increment) > u32::MAX - increment
+    }
+}
+
+#[cube]
+fn atomic_add(words: &[Atomic<u32>], index: usize, amount: Ticks, control: &[Atomic<u32>]) {
+    if atomic_add_overflows(words, index, amount) {
         KernelFaults::new(comptime!(FaultFlags::ARITHMETIC_OVERFLOW)).record(control);
     }
 }

@@ -42,9 +42,10 @@ fn worker_identity(state: &State, household: usize) -> u64 {
 }
 
 #[test]
-fn births_preserve_selected_person_identity_and_non_dependent_occupations_on_gpu() -> Result<()> {
+fn births_preserve_worker_identities_occupations_and_audited_rollback_on_gpu() -> Result<()> {
     let mut simulation = fixture()?;
     let previous = simulation.download()?;
+    let checkpoint = simulation.checkpoint()?;
     let before = simulation.demography.observation(
         &simulation.device,
         &simulation.state,
@@ -66,19 +67,16 @@ fn births_preserve_selected_person_identity_and_non_dependent_occupations_on_gpu
         previous.next_identity,
         &simulation.scratch,
     )?;
-    let target = simulation
-        .device
-        .tensor(&simulation.device.read(&simulation.state)?);
     grown.remap_workers_from(
         &simulation.device,
-        &target,
+        &simulation.state,
         simulation.config.state_stride,
         &simulation.demography,
     );
     let mut actual = previous.clone();
     actual.people = grown.download(&simulation.device, &actual, CopyDirection::Save)?;
     let workers = decode(&simulation.device.read_range(
-        &target,
+        &simulation.state,
         Field::Worker as usize * simulation.config.state_stride as usize * 2,
         previous.actors.len() * 2,
     )?);
@@ -89,7 +87,7 @@ fn births_preserve_selected_person_identity_and_non_dependent_occupations_on_gpu
             worker_identity(&previous, household)
         );
     }
-    let after = grown.observation(&simulation.device, &target, &simulation.config)?;
+    let after = grown.observation(&simulation.device, &simulation.state, &simulation.config)?;
     for occupation in Occupation::ALL {
         let additional = match occupation {
             Occupation::Dependent => 2,
@@ -100,6 +98,15 @@ fn births_preserve_selected_person_identity_and_non_dependent_occupations_on_gpu
             before.occupations[occupation as usize] + additional
         );
     }
+    assert_ne!(workers[1], previous.get(Field::Worker, 1));
+    simulation.copy_audited(CopyDirection::Restore)?;
+    assert_eq!(simulation.download()?, previous);
+    assert_eq!(simulation.checkpoint()?, checkpoint);
+    simulation.device.memory_budget =
+        crate::simulation::MemoryBudget::Reported { available_bytes: 2 };
+    assert!(simulation.advance().is_err());
+    assert_eq!(simulation.download()?, previous);
+    assert_eq!(simulation.checkpoint()?, checkpoint);
     Ok(())
 }
 
@@ -237,48 +244,5 @@ fn reordered_checkpoint_people_preserve_selected_worker_identities_on_gpu() -> R
         );
     }
     assert_eq!(actual, previous);
-    Ok(())
-}
-
-#[test]
-fn uncommitted_worker_remapping_restores_the_audited_checkpoint_on_gpu() -> Result<()> {
-    let mut simulation = fixture()?;
-    let previous = simulation.download()?;
-    let checkpoint = simulation.checkpoint()?;
-    let mut births = vec![0; previous.actors.len()];
-    births[0] = 1;
-    simulation
-        .device
-        .write(simulation.demography.birth_buffer(), &births);
-    let records = crate::simulation::registry::records::PendingRecords::from_dense(
-        &vec![0; births.len()],
-        &births,
-    )?;
-    let grown = simulation.demography.grow_births(
-        &simulation.device,
-        &records.records,
-        previous.next_identity,
-        &simulation.scratch,
-    )?;
-    grown.remap_workers_from(
-        &simulation.device,
-        &simulation.state,
-        simulation.config.state_stride,
-        &simulation.demography,
-    );
-    let workers = simulation.device.read_range(
-        &simulation.state,
-        Field::Worker as usize * simulation.config.state_stride as usize * 2,
-        previous.actors.len() * 2,
-    )?;
-    assert_ne!(decode(&workers)[1], previous.get(Field::Worker, 1));
-    simulation.copy_audited(CopyDirection::Restore)?;
-    assert_eq!(simulation.download()?, previous);
-    assert_eq!(simulation.checkpoint()?, checkpoint);
-    simulation.device.memory_budget =
-        crate::simulation::MemoryBudget::Reported { available_bytes: 2 };
-    assert!(simulation.advance().is_err());
-    assert_eq!(simulation.download()?, previous);
-    assert_eq!(simulation.checkpoint()?, checkpoint);
     Ok(())
 }

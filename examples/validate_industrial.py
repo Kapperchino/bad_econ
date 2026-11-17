@@ -48,15 +48,16 @@ def run_case(arguments, case):
              "--seed", str(case.seed), "--experiment", experiment, "--output", str(scenario)],
             base.with_suffix(".scenario.log"))
     config = json.loads(scenario.read_text())
-    changes = {
-        Change.BASELINE: lambda: None,
-        Change.EMPTY: lambda: config.update(buffer_days=0),
-        Change.TRANSPORT: lambda: config.update(shipment_speed=max(1, config["shipment_speed"] // 4)),
-        Change.BASIC: lambda: config.update(research=None),
-        Change.HIGH: lambda: mortality(config["demography"]["mortality"], 2, 1),
-        Change.LOW: lambda: mortality(config["demography"]["mortality"], 1, 2),
-    }
-    changes[case.change]()
+    if case.change == Change.EMPTY:
+        config["buffer_days"] = 0
+    elif case.change == Change.TRANSPORT:
+        config["shipment_speed"] = max(1, config["shipment_speed"] // 4)
+    elif case.change == Change.BASIC:
+        config["research"] = None
+    elif case.change == Change.HIGH:
+        mortality(config["demography"]["mortality"], 2, 1)
+    elif case.change == Change.LOW:
+        mortality(config["demography"]["mortality"], 1, 2)
     scenario.write_text(json.dumps(config, sort_keys=True))
     command = [str(arguments.binary), "run", "--scenario", str(scenario), "--backend", "gpu",
                "--workgroup", str(arguments.workgroup), "--days", str(arguments.days),
@@ -72,16 +73,17 @@ def run_case(arguments, case):
     peak_deficit = 0
     milestones = []
     with trajectory.open() as stream:
-        for line in stream:
-            snapshot = json.loads(line)
-            days += 1
+        for days, snapshot in enumerate(map(json.loads, stream), 1):
             assert snapshot["day"] == days
             assert snapshot["cash"] == opening["cash"], (case.name, days, "cash")
             people = snapshot["population"]
             assert people["living"] + sum(people["deaths"]) == initial_population + people["births"], (case.name, days, "population")
-            for good in range(16):
-                resources = opening["goods"][good] + snapshot["produced"][good]
+            research_consumption = (snapshot.get("research") or {}).get("consumed") or ()
+            for good, stock in enumerate(opening["goods"]):
+                resources = stock + snapshot["produced"][good]
                 accounts = sum(snapshot[field][good] for field in ["inventories", "transit", "used", "consumption"])
+                if good < len(research_consumption):
+                    accounts += research_consumption[good]
                 assert resources == accounts, (case.name, days, good, resources, accounts)
             peak_deficit = max(peak_deficit, snapshot["shortages"])
             if days in [1, 30, 60, 90, 180, 270, 365, 730, 1095, arguments.days]:

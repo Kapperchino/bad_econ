@@ -1,4 +1,3 @@
-#![cfg(feature = "compute")]
 use super::{estimates, support};
 
 use anyhow::{Result, anyhow};
@@ -60,21 +59,6 @@ fn direction(
     )
 }
 
-fn signed(ticks: SignedTicks) -> i128 {
-    match ticks.sign {
-        Sign::NonNegative => i128::from(ticks.magnitude),
-        Sign::Negative => -i128::from(ticks.magnitude),
-    }
-}
-
-fn signed_approximate(values: &[SignedInterval], expected: &[i64]) {
-    assert_eq!(values.len(), expected.len());
-    for (actual, &expected) in values.iter().zip(expected) {
-        estimates::assert_close(signed(actual.lower), i128::from(expected));
-        estimates::assert_close(signed(actual.upper), i128::from(expected));
-    }
-}
-
 fn available<T>(value: Diagnostic<T>) -> Result<T> {
     match value {
         Diagnostic::Available(value) => Ok(value),
@@ -90,7 +74,7 @@ fn lean_inverse_labor_coefficient_and_reproduction_derivatives() -> Result<()> {
     let labor = matrix(&device, 1, 2, &[2, 3], 1, scale)?;
     let goods_change = direction(&device, 2, 2, &[0, 1, 0, 0], 4, scale)?;
     let direct_change = direction(&device, 1, 2, &[0, -1], 1, scale)?;
-    signed_approximate(
+    estimates::assert_signed_ticks(
         &Sensitivity::inverse(&device, &inverse, &goods_change)?.read(&device)?,
         &[0, 12_000, 0, 0],
     );
@@ -103,7 +87,7 @@ fn lean_inverse_labor_coefficient_and_reproduction_derivatives() -> Result<()> {
             direct_labor: &direct_change,
         },
     )?;
-    signed_approximate(&labor_change.read(&device)?, &[0, -12_000]);
+    estimates::assert_signed_ticks(&labor_change.read(&device)?, &[0, -12_000]);
     let coefficient = Sensitivity::coefficient(
         &device,
         &labor,
@@ -113,16 +97,7 @@ fn lean_inverse_labor_coefficient_and_reproduction_derivatives() -> Result<()> {
             output: 1,
         },
     )?;
-    estimates::assert_close(
-        coefficient.read(&device)?,
-        [
-            Interval { lower: 0, upper: 0 },
-            Interval {
-                lower: 48_000,
-                upper: 48_000,
-            },
-        ],
-    );
+    estimates::assert_ticks(&coefficient.read(&device)?, &[0, 48_000]);
     let reproduction = matrix(&device, 2, 1, &[3, 2], 24, scale)?;
     let reproduction_change = direction(&device, 2, 1, &[0, 1], 2, scale)?;
     let training_change = direction(&device, 1, 1, &[-1], 4, scale)?;
@@ -136,10 +111,10 @@ fn lean_inverse_labor_coefficient_and_reproduction_derivatives() -> Result<()> {
             training_change: &training_change,
         },
     )?;
-    signed_approximate(&change.read(&device)?, &[29_000]);
+    estimates::assert_signed_ticks(&change.read(&device)?, &[29_000]);
     let conversion_inverse = matrix(&device, 1, 1, &[4], 1, scale)?;
     let beta = DeviceVector::from_ticks(&device, &[96_000])?;
-    signed_approximate(
+    estimates::assert_signed_ticks(
         &Sensitivity::conversion(&device, &conversion_inverse, &beta, &change)?.read(&device)?,
         &[464_000],
     );
@@ -161,11 +136,11 @@ fn lean_normalized_and_scalar_derivatives_keep_negative_directions() -> Result<(
         0,
         1000,
     )?)?;
-    signed_approximate(&alpha_change.read(&device)?, &[0, -1250, 250]);
+    estimates::assert_signed_ticks(&alpha_change.read(&device)?, &[0, -1250, 250]);
     let labor = matrix(&device, 3, 2, &[2, 3, 1, 4, 5, 0], 1, 1000)?;
     let labor_change = direction(&device, 3, 2, &[2, 0, 0, -2, 1, 0], 2, 1000)?;
     let alpha = available(beta.normalize(&device, 0, 1000)?)?;
-    signed_approximate(
+    estimates::assert_signed_ticks(
         &Sensitivity::scalar_values(&device, &labor, &alpha, &labor_change, &alpha_change)?
             .read(&device)?,
         &[1250, -6500],

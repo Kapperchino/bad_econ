@@ -1,4 +1,3 @@
-#![cfg(feature = "compute")]
 use super::support;
 
 use anyhow::Result;
@@ -49,7 +48,22 @@ fn teaching_request() -> BargainingRequest {
 #[test]
 fn lean_tax_inversion_directional_wages_and_household_bargaining() -> Result<()> {
     let device = support::device(64)?;
-    let result = evaluate(&device, &[teaching_request()])?;
+    let mut funded = teaching_request();
+    funded.household.cover_millidays = 30_000;
+    funded.household.funded_other = 0;
+    let mut impossible = teaching_request();
+    impossible.wage.funded = 100;
+    let mut extreme = teaching_request();
+    extreme.income.prior_gross = 100_000;
+    extreme.wage.payable_hours = 1;
+    extreme.wage.funded = u64::MAX;
+    extreme.wage.employer_charge = 0;
+    extreme.first_offer = u64::MAX;
+    extreme.desired_offer = 0;
+    let result = evaluate(&device, &[teaching_request(), funded, impossible, extreme])?;
+    assert_eq!(result.len(), 4);
+    assert_eq!(result[1].required_net_rate, 700);
+    assert_eq!(result[2].second_offer, None);
     assert_eq!(
         result[0],
         BargainingResult {
@@ -64,20 +78,6 @@ fn lean_tax_inversion_directional_wages_and_household_bargaining() -> Result<()>
             second_offer: Some(682),
         }
     );
-    let mut funded = teaching_request();
-    funded.household.cover_millidays = 30_000;
-    funded.household.funded_other = 0;
-    let covered = evaluate(&device, &[funded])?;
-    assert_eq!(covered[0].required_net_rate, 700);
-    Ok(())
-}
-
-#[test]
-fn empty_wage_intervals_invalid_brackets_and_overflow_are_explicit() -> Result<()> {
-    let device = support::device(64)?;
-    let mut impossible = teaching_request();
-    impossible.wage.funded = 100;
-    assert_eq!(evaluate(&device, &[impossible])?[0].second_offer, None);
     let mut invalid = teaching_request();
     invalid.income.net_slope = 0;
     assert!(evaluate(&device, &[invalid]).is_err());
@@ -90,13 +90,5 @@ fn empty_wage_intervals_invalid_brackets_and_overflow_are_explicit() -> Result<(
     let mut overflow = teaching_request();
     overflow.income.gross_threshold = u64::MAX;
     assert!(evaluate(&device, &[overflow]).is_err());
-    let mut extreme = teaching_request();
-    extreme.income.prior_gross = 100_000;
-    extreme.wage.payable_hours = 1;
-    extreme.wage.funded = u64::MAX;
-    extreme.wage.employer_charge = 0;
-    extreme.first_offer = u64::MAX;
-    extreme.desired_offer = 0;
-    assert!(evaluate(&device, &[extreme]).is_ok());
     Ok(())
 }

@@ -240,7 +240,7 @@ impl FinancePolicies {
                 })
             })
             .collect::<Result<Vec<_>>>()?;
-        let input = padded(device, bytemuck::cast_slice(&records));
+        let input = device.record_tensor(&records);
         let output = device.empty(inputs.len().max(1) * TICK_WORDS);
         let control = device.tensor(&[0; CONTROL_WORDS]);
         LendingEvaluation::launch(
@@ -279,8 +279,8 @@ impl FinancePolicies {
                 [flow.outflow, flow.receipt, flow.cushion].map(crate::ledger::TickLayout::from)
             }));
         }
-        let records = padded(device, bytemuck::cast_slice(&records));
-        let flows = padded(device, bytemuck::cast_slice(&flows));
+        let records = device.record_tensor(&records);
+        let flows = device.record_tensor(&flows);
         let output = device.empty(inputs.len().max(1) * 2 * TICK_WORDS);
         let control = device.tensor(&[0; CONTROL_WORDS]);
         FundingEvaluation::launch(
@@ -322,8 +322,8 @@ impl FinancePolicies {
                     .map(crate::ledger::TickLayout::from),
             );
         }
-        let metadata = padded(device, bytemuck::cast_slice(&records));
-        let input = padded(device, bytemuck::cast_slice(&demands));
+        let metadata = device.record_tensor(&records);
+        let input = device.record_tensor(&demands);
         let output = device.empty(demands.len().max(1) * TICK_WORDS);
         let remaining = device.empty(inputs.len().max(1) * TICK_WORDS);
         PoolAllocation::launch(
@@ -583,7 +583,7 @@ impl FinancePolicies {
                 budget: policy.rent_budget.into(),
             })
             .collect::<Vec<_>>();
-        let input = padded(device, bytemuck::cast_slice(&records));
+        let input = device.record_tensor(&records);
         let output = device.empty(inputs.len().max(1) * 2 * TICK_WORDS);
         let control = device.tensor(&[0; CONTROL_WORDS]);
         BudgetEvaluation::launch(
@@ -627,8 +627,8 @@ impl FinancePolicies {
                 [flow.receipt, flow.outflow].map(crate::ledger::TickLayout::from)
             }));
         }
-        let records = padded(device, bytemuck::cast_slice(&records));
-        let flows = padded(device, bytemuck::cast_slice(&flows));
+        let records = device.record_tensor(&records);
+        let flows = device.record_tensor(&flows);
         let output = device.empty(inputs.len().max(1) * 4 * TICK_WORDS);
         let control = device.tensor(&[0; CONTROL_WORDS]);
         DiscountEvaluation::launch(

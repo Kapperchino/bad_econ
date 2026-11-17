@@ -44,17 +44,13 @@ pub(super) struct StartingPrices {
 impl StartingPrices {
     pub fn production(config: &ScenarioConfig) -> Self {
         Self {
-            goods: std::array::from_fn(|index| {
-                price(config, Good::ALL[index], FoodPricing::Production)
-            }),
+            goods: Good::ALL.map(|good| price(config, good, FoodPricing::Production)),
         }
     }
 
     pub fn configured(config: &ScenarioConfig) -> Self {
         Self {
-            goods: std::array::from_fn(|index| {
-                price(config, Good::ALL[index], FoodPricing::Configured)
-            }),
+            goods: Good::ALL.map(|good| price(config, good, FoodPricing::Configured)),
         }
     }
 

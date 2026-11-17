@@ -183,11 +183,8 @@ impl SettlementBatch {
             );
         }
         let required = selected.len() as u64 * scenario.fields() as u64 * 16;
-        device.reclaim_memory(required)?;
         match device
-            .client
-            .memory_report(cubecl::MemoryScope::Device)
-            .usage()
+            .reclaim_memory(required)?
             .bytes_reserved
             .saturating_add(required)
             <= device.memory_budget.bytes()
