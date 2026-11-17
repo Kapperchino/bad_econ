@@ -4,12 +4,27 @@ use super::{
 use anyhow::{Result, anyhow};
 use serde::{Deserialize, Serialize};
 
+#[derive(Clone, Copy, Debug, Default, Hash, Serialize, Deserialize, PartialEq, Eq)]
+pub enum FoodIncome {
+    #[default]
+    Nominal,
+    PurchasingPower,
+}
+
+impl FoodIncome {
+    fn is_nominal(&self) -> bool {
+        *self == Self::Nominal
+    }
+}
+
 #[derive(Clone, Copy, Debug, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(deny_unknown_fields)]
 pub struct FoodPolicy {
     pub medium_daily_salary: u32,
     pub rich_daily_salary: u32,
     pub wheat_kg_per_hectare: u32,
+    #[serde(default, skip_serializing_if = "FoodIncome::is_nominal")]
+    pub income: FoodIncome,
 }
 
 impl Default for FoodPolicy {
@@ -18,6 +33,7 @@ impl Default for FoodPolicy {
             medium_daily_salary: 2000,
             rich_daily_salary: 10_000,
             wheat_kg_per_hectare: 1601,
+            income: FoodIncome::Nominal,
         }
     }
 }
@@ -26,6 +42,25 @@ impl FoodPolicy {
     pub const HISTORICAL_PENNY_UNITS: u32 = 100;
     pub const BREAD_GRAMS_PER_UNIT: u32 = 500;
     pub const PRICES: [u32; 3] = [697, 1087, 468];
+
+    pub fn industrial() -> Self {
+        Self {
+            income: FoodIncome::PurchasingPower,
+            ..Self::default()
+        }
+    }
+
+    pub(super) fn reserve_portions(self, config: &ScenarioConfig) -> u64 {
+        match self.income {
+            FoodIncome::Nominal => 1,
+            FoodIncome::PurchasingPower => (u64::from(config.wage)
+                * u64::from(config.packet_minutes)
+                / (2 * u64::from(config.demography.initial_household_members)
+                    * u64::from(config.household_need)
+                    * u64::from(config.prices[2])))
+            .clamp(1, 10),
+        }
+    }
 
     pub fn new(policy: Self) -> Result<Self> {
         match policy.medium_daily_salary > 0

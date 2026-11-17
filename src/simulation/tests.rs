@@ -1,6 +1,44 @@
 use super::*;
 pub(super) use crate::tests::support::device;
 
+struct WorkerReference {
+    actor: usize,
+    identity: u64,
+}
+
+fn replace_people_preserving_workers(
+    state: &mut State,
+    people: Vec<crate::domain::demography::Person>,
+) {
+    let workers = state
+        .actors
+        .iter()
+        .enumerate()
+        .filter(|(_, actor)| actor.kind == 0)
+        .filter_map(|(index, actor)| {
+            state
+                .people
+                .get(state.get(Field::Worker, index) as usize)
+                .filter(|person| person.household == actor.identity)
+                .map(|person| WorkerReference {
+                    actor: index,
+                    identity: person.identity,
+                })
+        })
+        .collect::<Vec<_>>();
+    let indices = people
+        .iter()
+        .enumerate()
+        .map(|(index, person)| (person.identity, index as u64))
+        .collect::<std::collections::HashMap<_, _>>();
+    state.people = people;
+    for worker in workers {
+        if let Some(&index) = indices.get(&worker.identity) {
+            state.set(Field::Worker, worker.actor, index);
+        }
+    }
+}
+
 #[test]
 fn reserved_state_capacity_preserves_checkpoints_and_fault_rollback_on_gpu() -> Result<()> {
     let scenario = Scenario::industrial(4097, 42, Experiment::Baseline)?;
@@ -469,6 +507,15 @@ fn gpu_household_growth_matches_rebuilds_and_keeps_unrelated_estates_sparse() ->
         person.identity += 1 << 32;
     }
     initial.next_identity += 1 << 32;
+    for household in 0..scenario.config().households as usize {
+        let identity = initial.actors.at(household).identity;
+        let selected = initial
+            .people
+            .iter()
+            .position(|person| person.household == identity)
+            .context("initial household adult")?;
+        initial.set(Field::Worker, household, selected as u64);
+    }
     let parents = [0, 31, 299];
     for parent in parents {
         let identity = initial.actors.at(parent).identity;
@@ -534,10 +581,11 @@ fn gpu_household_growth_matches_rebuilds_and_keeps_unrelated_estates_sparse() ->
         RegistryAudit::Full,
     )?;
     let mut expected = reference.download()?;
-    expected.people = reference
+    let people = reference
         .demography
         .reference_births(&reference.device, &births, expected.next_identity)?
         .download(&reference.device, &expected, CopyDirection::Save)?;
+    replace_people_preserving_workers(&mut expected, people);
     expected.next_identity += 3;
     enterprise::enter(&mut expected, &scenario, &requests)?;
     enterprise::transitions(&mut expected, &scenario, &requests)?;
@@ -598,12 +646,20 @@ fn gpu_firm_growth_matches_full_rebuild_with_births_and_migration() -> Result<()
     let mut config = Scenario::industrial(300, 42, Experiment::Baseline)?
         .config()
         .clone();
+    config.rent = None;
     config.demography.annual_births_per_million_fertile_women = 1_000_000;
     config.buffer_days = 30;
     config.household_cash = 1_000_000;
     let scenario = Scenario::new(config)?;
     let mut initial = Simulation::new(scenario.clone(), device(64)?)?.download()?;
     initial.day = 120;
+    let arrival = initial
+        .actors
+        .at(scenario.config().households as usize + 2)
+        .position;
+    initial.set(Field::MoveDue, 4, initial.day);
+    initial.set(Field::MoveX, 4, arrival.x.into());
+    initial.set(Field::MoveY, 4, arrival.y.into());
     for actor in 0..3 {
         for (good, amount) in [(Good::Tools, 20), (Good::Wood, 50)] {
             let field = Field::inventory(good);
@@ -634,8 +690,13 @@ fn gpu_firm_growth_matches_full_rebuild_with_births_and_migration() -> Result<()
         requests[2] = (9 << 24) + source as u32 + 1;
         let closing = scenario.config().households as usize + day;
         requests[3] = (2 << 24) + closing as u32 + 1;
-        requests[10] = (7 << 24) + closing as u32 + 1;
-        requests[closing] = 4 << 24;
+        match day {
+            0 => requests[4] = 3 << 24,
+            _ => {
+                requests[10] = (7 << 24) + closing as u32 + 1;
+                requests[closing] = 4 << 24;
+            }
+        }
         let mut births = vec![0; requests.len()];
         births[0] = 1;
         births[299] = 2;
@@ -649,6 +710,20 @@ fn gpu_firm_growth_matches_full_rebuild_with_births_and_migration() -> Result<()
             registry::entries::EntryRequests::new(&scenario, requests.len(), &pending.records)
                 .expect("entry requests");
         if day == 0 {
+            let growth = registry::entries::EntryGrowth::new(
+                &scenario,
+                &gpu.metadata,
+                &gpu.migrations,
+                &pending.records,
+            )?
+            .context("growth with an arriving household")?;
+            let actors = growth
+                .plan
+                .actors
+                .as_ref()
+                .context("prepared arrival rows")?;
+            assert_eq!(actors.len(), requests.len());
+            assert!(actors.growth_capacity() >= requests.len() + 3);
             let before = gpu.download()?;
             let budget = gpu.device.memory_budget;
             gpu.device.memory_budget = MemoryBudget::Reported { available_bytes: 2 };
@@ -684,10 +759,11 @@ fn gpu_firm_growth_matches_full_rebuild_with_births_and_migration() -> Result<()
         }
         assert!(gpu.config.state_stride as usize > gpu.actors().len());
         let mut expected = reference.download()?;
-        expected.people = reference
+        let people = reference
             .demography
             .reference_births(&reference.device, &births, expected.next_identity)?
             .download(&reference.device, &expected, CopyDirection::Save)?;
+        replace_people_preserving_workers(&mut expected, people);
         expected.next_identity += 2;
         enterprise::enter(&mut expected, &scenario, &requests)?;
         enterprise::transitions(&mut expected, &scenario, &requests)?;
@@ -769,6 +845,7 @@ fn sparse_settlements_match_rebuilds_with_shared_assets_migration_and_investment
         initial.values[TRANSIT_FIELDS * initial.actors.len() + firm] = 7;
         initial.set(Field::Transit, firm, 7);
         let mut gpu = Simulation::from_state(scenario.clone(), initial.clone(), device(64)?)?;
+        initial = gpu.download()?;
         let mut requests = vec![0; initial.actors.len()];
         requests[4] = (2 << 24) + 6;
         requests[5] = 3 << 24;

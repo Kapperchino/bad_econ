@@ -195,6 +195,198 @@ fn direct_goods_buyers_match_event_fields_rejections_and_faults_on_gpu() -> Resu
     Ok(())
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+enum EmptySellerExecution {
+    Direct,
+    Peer,
+}
+
+#[derive(CubeType, CubeLaunch)]
+struct EmptySellerProbeInput {
+    state: Box<[u32]>,
+    actors: Box<[u32]>,
+    config: EconomyConfig,
+    proposals: Box<[u32]>,
+    control: Box<[Atomic<u32>]>,
+    statuses: Box<[u32]>,
+    parameters: EconomyParameters,
+    #[cube(comptime)]
+    execution: EmptySellerExecution,
+}
+
+struct EmptySellerProbe;
+struct CompareEmptySeller;
+
+impl System for EmptySellerProbe {
+    type Input = EmptySellerProbeInput;
+    type Passes = gpu_passes![CompareEmptySeller];
+}
+
+#[cube]
+impl GpuPass<EmptySellerProbeInput> for CompareEmptySeller {
+    type Output = ();
+
+    fn execute(mut input: EmptySellerProbeInput) {
+        let actor = ABSOLUTE_POS as u32;
+        if actor < input.parameters.count {
+            let peer =
+                input.proposals[actor as usize * ProposalLayout::WORDS + ProposalLayout::ACTOR];
+            let prior = KernelEventStatus::load(&mut input.statuses, actor);
+            let status = match comptime!(input.execution) {
+                EmptySellerExecution::Direct => empty_seller_settlement(
+                    &mut input.state,
+                    &input.actors,
+                    &input.config,
+                    &input.proposals,
+                    &input.control,
+                    &input.parameters,
+                    actor,
+                    peer,
+                    &prior,
+                ),
+                EmptySellerExecution::Peer => {
+                    let mut balances = PeerBalances::new(
+                        &mut input.state,
+                        &input.actors,
+                        &input.config,
+                        &input.parameters,
+                        peer,
+                    );
+                    let status = balances.offer(
+                        &mut input.state,
+                        &input.config,
+                        &mut input.proposals,
+                        &input.control,
+                        &input.parameters,
+                        PeerOffer {
+                            actor,
+                            peer,
+                            status: prior,
+                        },
+                    );
+                    balances.store(
+                        &mut input.state,
+                        &input.actors,
+                        &input.config,
+                        &input.parameters,
+                        peer,
+                    );
+                    status
+                }
+            };
+            status.store(&mut input.statuses, actor);
+        }
+    }
+}
+
+#[test]
+fn empty_consumer_seller_checks_preserve_unit_bulk_and_wide_faults_on_gpu() -> Result<()> {
+    let device = crate::simulation::tests::device(64)?;
+    let scenario = Scenario::industrial(513, 42, Experiment::Concentrated)?;
+    let simulation = Simulation::new(scenario.clone(), device.clone())?;
+    for good in [
+        Good::Coal,
+        Good::Wood,
+        Good::LuxuryClothes,
+        Good::LuxuryFurniture,
+        Good::Linen,
+        Good::Furniture,
+    ] {
+        let mut state = scenario.initial()?;
+        let mut proposals = vec![0; scenario.actors() * ProposalLayout::WORDS];
+        let mut priors = vec![0; 64];
+        for (actor, prior) in priors.iter_mut().enumerate() {
+            let peer = scenario.config().households as usize + actor;
+            let case = actor % 10;
+            let cash = match case {
+                1 | 8 | 9 => u64::MAX,
+                4 => u64::MAX - 2,
+                6 => u64::MAX - 7,
+                7 => 1,
+                _ => 0,
+            };
+            let sales = match case {
+                2 | 8 => u64::MAX,
+                4 => u64::MAX - 1,
+                6 => u64::MAX - 7,
+                7 => 1,
+                _ => 0,
+            };
+            let quote = match case {
+                2 | 7 | 8 | 9 => 0,
+                3 => u32::MAX,
+                4 | 6 => 1,
+                _ => 3,
+            };
+            let quantity = match case {
+                3 | 7 => u64::MAX,
+                0 | 1 | 6 => 7,
+                4 => 3,
+                5 => 5,
+                _ => 1,
+            };
+            *prior = enumflags2::BitFlags::from_flag(match case {
+                4 | 7 | 9 => EventStatus::Rejected,
+                5 | 8 => EventStatus::Faulted,
+                _ => EventStatus::Accepted,
+            })
+            .bits();
+            state.set(Field::Cash, peer, cash);
+            state.set(Field::Sales, peer, sales);
+            state.set(Field::Price, peer, (1u64 << 40) + u64::from(quote));
+            state.set(Field::EnterpriseModel, peer, 0);
+            state.set(Field::inventory(good), peer, 0);
+            proposals[actor * ProposalLayout::WORDS + ProposalLayout::ACTOR] = peer as u32;
+            proposals[actor * ProposalLayout::WORDS + ProposalLayout::QUANTITY_LOW] =
+                quantity as u32;
+            proposals[actor * ProposalLayout::WORDS + ProposalLayout::QUANTITY_HIGH] =
+                (quantity >> 32) as u32;
+        }
+        let parameters =
+            simulation.parameters(Phase::ProvisionPurchase, Market::Consumer(good), 0, 64)?;
+        let mut outcomes = Vec::new();
+        for execution in [EmptySellerExecution::Direct, EmptySellerExecution::Peer] {
+            let mut requests = proposals.clone();
+            if matches!(execution, EmptySellerExecution::Peer)
+                && !matches!(
+                    good,
+                    Good::Coal | Good::Wood | Good::LuxuryClothes | Good::LuxuryFurniture
+                )
+            {
+                for actor in 0..64 {
+                    requests[actor * ProposalLayout::WORDS + ProposalLayout::QUANTITY_LOW] = 1;
+                    requests[actor * ProposalLayout::WORDS + ProposalLayout::QUANTITY_HIGH] = 0;
+                }
+            }
+            let state = device.tensor(bytemuck::cast_slice(&encode(&state.values)));
+            let control = device.tensor(&vec![0; CONTROL_WORDS]);
+            let statuses = device.tensor(&priors);
+            EmptySellerProbe::launch(
+                &device,
+                device.count(64),
+                CubeDim::new_1d(device.workgroup),
+                EmptySellerProbeInputLaunch {
+                    state: state.clone().into_buffer_arg(),
+                    actors: simulation.actors.clone().into_buffer_arg(),
+                    config: simulation.config.launch(),
+                    proposals: device.tensor(&requests).into_buffer_arg(),
+                    control: control.clone().into_buffer_arg(),
+                    statuses: statuses.clone().into_buffer_arg(),
+                    parameters: parameters.launch(),
+                    execution,
+                },
+            );
+            outcomes.push(BuyerOutcome {
+                state: device.read(&state)?,
+                control: device.read(&control)?,
+                statuses: device.read(&statuses)?,
+            });
+        }
+        assert_eq!(outcomes[0], outcomes[1], "{good:?}");
+    }
+    Ok(())
+}
+
 struct CompactedBuyerCase {
     cash: u64,
     purchased: u64,

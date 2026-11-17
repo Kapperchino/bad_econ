@@ -10,6 +10,347 @@ use bad_econ::{
 };
 
 #[test]
+#[ignore = "extended scenario coverage; run cargo gpu-extended"]
+fn industrial_transition_grows_work_and_output_with_supported_births_on_gpu() -> Result<()> {
+    let scenario = Scenario::industrial(1000, 42, Experiment::Baseline)?;
+    let mut simulation = Simulation::new(scenario, support::device(64)?)?;
+    let initial = simulation.download()?;
+    let cash = simulation.snapshot.cash;
+    let mut employed = 0;
+    let mut produced = 0;
+    let mut first_annual = 0;
+    let mut last_annual = 0;
+    let mut rural = initial
+        .actors
+        .iter()
+        .enumerate()
+        .filter(|(household, actor)| {
+            actor.kind == 0 && initial.get(Field::LandPlots, *household) > 0
+        })
+        .count();
+    assert_eq!(rural, 900);
+    for year in 0..3 {
+        for _ in 0..365 {
+            simulation.advance()?;
+        }
+        let state = simulation.download()?;
+        let households = state
+            .actors
+            .iter()
+            .enumerate()
+            .filter(|(household, actor)| {
+                actor.kind == 0 && state.get(Field::LandPlots, *household) > 0
+            })
+            .count();
+        let bread = simulation.snapshot.produced[Good::Bread as usize - 1]
+            - simulation.snapshot.household_production[Good::Bread as usize - 1];
+        let population = &simulation.snapshot.population;
+        assert_eq!(
+            population.living + population.deaths.iter().sum::<u64>(),
+            initial.initial_population + population.births
+        );
+        assert!(simulation.snapshot.employed > employed);
+        last_annual = bread - produced;
+        first_annual = match year {
+            0 => last_annual,
+            _ => first_annual,
+        };
+        assert!(households < rural);
+        assert!(
+            simulation
+                .snapshot
+                .economy
+                .wage_employed(simulation.snapshot.employed)
+                <= simulation.snapshot.economy.workforce
+        );
+        assert_eq!(simulation.snapshot.cash, cash);
+        employed = simulation.snapshot.employed;
+        produced = bread;
+        rural = households;
+    }
+    assert!(last_annual > first_annual);
+    simulation.checkpoint()?.restore()?;
+    Ok(())
+}
+
+fn urbanization_scenario(wage: u32) -> Result<Scenario> {
+    use bad_econ::domain::demography::{PersonSeed, Sex};
+    let mut config = Scenario::baseline(2, 42, Experiment::Concentrated)?
+        .config()
+        .clone();
+    config.economy = Economy::Industrial;
+    config.firms = 4;
+    config.household_production = HouseholdProduction::industrial();
+    config.food = Some(food::FoodPolicy::default());
+    config.prices = [9, 30, 20];
+    config.search_radius = 1000;
+    config.shipment_speed = 100;
+    config.forecast_weight = 0;
+    config.distribution_rate = 0;
+    config.behavior.price_response = 0;
+    config.behavior.wage_increment = 0;
+    config.entrepreneurship.interested_per_mille = 0;
+    config.expansion = enterprise::ExpansionPolicy {
+        small_business_per_mille: 0,
+        industrial_per_mille: 0,
+    };
+    config.demography.annual_births_per_million_fertile_women = 0;
+    config.demography.people = (1..=2)
+        .map(|household| PersonSeed {
+            identity: 1000 + household,
+            household,
+            age_days: 30 * 365,
+            sex: Sex::Male,
+        })
+        .collect();
+    config.resources = ResourceMap::Explicit {
+        regions: [Good::Wood, Good::Grain]
+            .into_iter()
+            .map(|good| {
+                ResourceRegion::new(
+                    good,
+                    Position { x: 0, y: 0 },
+                    Position { x: 1000, y: 1000 },
+                    1000,
+                )
+            })
+            .collect::<Result<_>>()?,
+    };
+    config.population = Some(Population {
+        households: (1..=2)
+            .map(|identity| {
+                let mut inventories = Good::food([5, 0, 8]);
+                inventories[Good::Tools as usize - 1] = 1;
+                HouseholdSeed {
+                    identity,
+                    position: Position {
+                        x: if identity == 1 { 0 } else { 700 },
+                        y: 0,
+                    },
+                    cash: 10_000,
+                    inventories,
+                    fatigue: 0,
+                }
+            })
+            .collect(),
+        firms: [Good::Clothes, Good::Bread, Good::Wood, Good::Grain]
+            .into_iter()
+            .enumerate()
+            .map(|(index, good)| {
+                let mut inventories = [0; Good::COUNT];
+                inventories[good as usize - 1] = 1000;
+                inventories[Good::Cloth as usize - 1] = 1000;
+                inventories[Good::Linen as usize - 1] = 1000;
+                Ok(FirmSeed {
+                    identity: 3 + index as u64,
+                    position: Position { x: 700, y: 0 },
+                    owner: 2,
+                    good,
+                    cash: match good {
+                        Good::Clothes => 1_000_000,
+                        _ => 0,
+                    },
+                    inventories,
+                    capacity: 2,
+                    technique: Technique::new(20, u32::from(good.inputs()[0].is_some()), 1)?,
+                    wage,
+                    price: match good {
+                        Good::Bread => 20,
+                        Good::Wood => 1,
+                        _ => 100,
+                    },
+                })
+            })
+            .collect::<Result<_>>()?,
+    });
+    Scenario::new(config)
+}
+
+#[test]
+fn sustained_urban_jobs_attract_farmers_before_food_shortages_on_gpu() -> Result<()> {
+    let scenario = urbanization_scenario(12)?;
+    let mut initial = scenario.initial()?;
+    initial.day = 120;
+    initial.set(Field::LandPlots, 0, 1);
+    initial.set(Field::Demand, 2, 1000);
+    let mut simulation =
+        Simulation::from_checkpoint(Checkpoint::new(&scenario, &initial)?, support::device(64)?)?;
+    simulation.advance()?;
+    let first = simulation.download()?;
+    assert_eq!(first.get(Field::Employed, 0), 1);
+    assert!(
+        simulation.snapshot.economy.workforce
+            >= simulation
+                .snapshot
+                .economy
+                .wage_employed(simulation.snapshot.employed)
+    );
+    assert_eq!(first.get(Field::MoveDue, 0), 0);
+    let mut resumed = Simulation::from_checkpoint(simulation.checkpoint()?, support::device(64)?)?;
+    let mut urban_work = 0;
+    for _ in 1..40 {
+        simulation.advance()?;
+        resumed.advance()?;
+        let state = simulation.download()?;
+        assert_eq!(state, resumed.download()?);
+        assert_eq!(simulation.snapshot.cash, initial.initial_cash);
+        assert_eq!(state.get(Field::Shortage, 0), 0);
+        urban_work += match state.actors.at(0).position.x {
+            700 => state.get(Field::Employed, 0),
+            _ => 0,
+        };
+    }
+    let state = simulation.download()?;
+    assert_eq!(state.actors.at(0).position.x, 700);
+    assert_eq!(state.get(Field::LandPlots, 0), 0);
+    assert_eq!(state.get(Field::CropWork, 0), 0);
+    assert!(state.get(Field::IncomeForecast, 0) <= 240_000);
+    assert!(urban_work > 0);
+    Ok(())
+}
+
+#[test]
+fn jobs_that_cannot_cover_city_living_do_not_displace_farmers_on_gpu() -> Result<()> {
+    let scenario = urbanization_scenario(1)?;
+    let mut initial = scenario.initial()?;
+    initial.day = 120;
+    initial.set(Field::LandPlots, 0, 1);
+    initial.set(Field::Demand, 2, 1000);
+    let mut simulation =
+        Simulation::from_checkpoint(Checkpoint::new(&scenario, &initial)?, support::device(64)?)?;
+    for _ in 0..40 {
+        simulation.advance()?;
+    }
+    let state = simulation.download()?;
+    assert_eq!(state.actors.at(0).position.x, 0);
+    assert_eq!(state.get(Field::LandPlots, 0), 1);
+    assert_eq!(state.get(Field::MoveDue, 0), 0);
+    assert_eq!(simulation.snapshot.cash, initial.initial_cash);
+    Ok(())
+}
+
+fn close_employers(state: &mut State) {
+    for firm in 0..state.actors.len() {
+        if state.actors.at(firm).kind > 0 {
+            state.set(
+                Field::EnterpriseStatus,
+                firm,
+                enterprise::EnterpriseState::Closed as u64,
+            );
+        }
+    }
+}
+
+#[test]
+fn temporary_rural_paid_work_does_not_reduce_farmer_population_on_gpu() -> Result<()> {
+    use bad_econ::domain::demography::Occupation;
+
+    let scenario = urbanization_scenario(1)?;
+    let mut initial = scenario.initial()?;
+    initial.day = 120;
+    initial.set(Field::LandPlots, 0, 1);
+    initial.set(Field::Demand, 2, 1000);
+    let mut simulation =
+        Simulation::from_checkpoint(Checkpoint::new(&scenario, &initial)?, support::device(64)?)?;
+    simulation.advance()?;
+    let mut state = simulation.download()?;
+    let farmers = simulation.snapshot.population.occupations[Occupation::Farmer as usize];
+    assert_eq!(state.get(Field::Employed, 0), 1);
+    assert_eq!(farmers, 1);
+    assert_eq!(simulation.snapshot.economy.rural_employed, 1);
+    assert_eq!(simulation.snapshot.economy.subsistence, 1);
+    assert_eq!(
+        simulation.snapshot,
+        ObservationSnapshot::from_state(&scenario, &state)?
+    );
+    close_employers(&mut state);
+    let mut simulation =
+        Simulation::from_checkpoint(Checkpoint::new(&scenario, &state)?, support::device(64)?)?;
+    for _ in 0..4 {
+        simulation.advance()?;
+        let state = simulation.download()?;
+        assert_eq!(state.get(Field::Employed, 0), 0);
+        assert_eq!(state.get(Field::LandPlots, 0), 1);
+        assert_eq!(simulation.snapshot.economy.rural_employed, 0);
+        assert_eq!(simulation.snapshot.economy.subsistence, 1);
+        assert_eq!(
+            simulation.snapshot.population.occupations[Occupation::Farmer as usize],
+            farmers
+        );
+        assert_eq!(
+            simulation.snapshot,
+            ObservationSnapshot::from_state(&scenario, &state)?
+        );
+    }
+    Ok(())
+}
+
+#[test]
+fn nearby_sustained_jobs_commit_farmers_to_wage_work_after_job_loss_on_gpu() -> Result<()> {
+    use bad_econ::domain::demography::Occupation;
+
+    let mut config = urbanization_scenario(12)?.config().clone();
+    config.population.as_mut().unwrap().households[0].position = Position { x: 700, y: 0 };
+    let scenario = Scenario::new(config)?;
+    let mut initial = scenario.initial()?;
+    initial.day = 120;
+    initial.set(Field::LandPlots, 0, 1);
+    initial.set(Field::Demand, 2, 1000);
+    let mut simulation =
+        Simulation::from_checkpoint(Checkpoint::new(&scenario, &initial)?, support::device(64)?)?;
+    simulation.advance()?;
+    assert_eq!(simulation.download()?.get(Field::LandPlots, 0), 1);
+    let mut replay = Simulation::from_checkpoint(simulation.checkpoint()?, support::device(64)?)?;
+    for _ in 1..32 {
+        simulation.advance()?;
+        replay.advance()?;
+        let state = simulation.download()?;
+        assert_eq!(state, replay.download()?);
+        assert_eq!(simulation.snapshot.cash, initial.initial_cash);
+        assert_eq!(state.get(Field::MoveDue, 0), 0);
+        assert_eq!(state.actors.at(0).position, initial.actors.at(0).position);
+        assert!(
+            simulation
+                .snapshot
+                .economy
+                .wage_employed(simulation.snapshot.employed)
+                <= simulation.snapshot.economy.workforce
+        );
+        assert_eq!(
+            simulation.snapshot,
+            ObservationSnapshot::from_state(&scenario, &state)?
+        );
+    }
+    let mut state = simulation.download()?;
+    assert_eq!(state.get(Field::LandPlots, 0), 0);
+    assert_eq!(state.get(Field::CropWork, 0), 0);
+    assert_eq!(
+        simulation.snapshot.population.occupations[Occupation::Farmer as usize],
+        0
+    );
+    close_employers(&mut state);
+    let mut simulation =
+        Simulation::from_checkpoint(Checkpoint::new(&scenario, &state)?, support::device(64)?)?;
+    for _ in 0..4 {
+        simulation.advance()?;
+        let state = simulation.download()?;
+        assert_eq!(state.get(Field::Employed, 0), 0);
+        assert_eq!(state.get(Field::LandPlots, 0), 0);
+        assert_eq!(state.get(Field::CropWork, 0), 0);
+        assert_eq!(
+            simulation.snapshot.population.occupations[Occupation::Farmer as usize],
+            0
+        );
+        assert!(simulation.snapshot.population.occupations[Occupation::Unemployed as usize] > 0);
+        assert_eq!(
+            simulation.snapshot,
+            ObservationSnapshot::from_state(&scenario, &state)?
+        );
+    }
+    Ok(())
+}
+
+#[test]
 fn entrepreneurial_interest_limits_entry_even_with_abundant_savings_on_gpu() -> Result<()> {
     let mut config = Scenario::baseline(1000, 42, Experiment::Concentrated)?
         .config()

@@ -67,6 +67,7 @@ impl DemographyRuntime {
         let next = Self {
             people: device.empty(self.count.max(1) * PersonLayout::WORDS),
             audited: device.empty(self.count.max(1) * PersonLayout::WORDS),
+            snapshot: Arc::new(Mutex::new(PersonSnapshot::Dirty)),
             ranges: device.tensor(&ranges),
             births: device.tensor(&vec![0; actors]),
             range_counts,

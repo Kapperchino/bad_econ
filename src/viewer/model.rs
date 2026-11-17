@@ -363,7 +363,7 @@ impl Chart {
     pub fn description(self) -> &'static str {
         match self {
             Self::Employment => {
-                "One labor representative per household. Subsistence households are separate from the wage workforce; inactive households have no eligible worker."
+                "One labor representative per household. Farming households stay in subsistence while taking supplementary paid work. Wage employment and unemployment cover households that have left farming; inactive households have no eligible worker."
             }
             Self::Unemployment => {
                 "Unemployed labor representatives divided by wage workers plus unemployed representatives. Excludes owners, subsistence farmers, dependents and other adults. Available after the first simulated day."
@@ -488,9 +488,15 @@ impl Chart {
     }
     pub fn series(self) -> Vec<String> {
         match self {
-            Self::Employment => ["Paid workers", "No paid work", "Subsistence", "Inactive"]
-                .map(String::from)
-                .into(),
+            Self::Employment => [
+                "Wage workers",
+                "Unemployed",
+                "Farmers with paid work",
+                "Farmers without paid work",
+                "Inactive",
+            ]
+            .map(String::from)
+            .into(),
             Self::Unemployment => ["No paid work"].map(String::from).into(),
             Self::Cash => [
                 "0",
@@ -558,9 +564,14 @@ impl Chart {
     ) -> Vec<f64> {
         match self {
             Self::Employment => vec![
-                s.employed as f64,
-                s.economy.workforce.saturating_sub(s.employed) as f64,
-                s.economy.subsistence as f64,
+                s.economy.wage_employed(s.employed) as f64,
+                s.economy
+                    .workforce
+                    .saturating_sub(s.economy.wage_employed(s.employed)) as f64,
+                s.economy.rural_employed as f64,
+                s.economy
+                    .subsistence
+                    .saturating_sub(s.economy.rural_employed) as f64,
                 s.economy.inactive as f64,
             ]
             .into_iter()
@@ -987,6 +998,15 @@ mod tests {
         assert!((Chart::Unemployment.values(&snapshot, None)[0] - 100.0 / 6.0).abs() < 0.000_001);
         snapshot.population.occupations = [0; 6];
         assert!(Chart::Unemployment.values(&snapshot, None)[0].is_nan());
+        snapshot.economy.workforce = 10;
+        snapshot.employed = 7;
+        snapshot.economy.rural_employed = 3;
+        snapshot.economy.subsistence = 8;
+        snapshot.economy.inactive = 2;
+        assert_eq!(
+            Chart::Employment.values(&snapshot, None),
+            vec![4.0, 6.0, 3.0, 5.0, 2.0]
+        );
         for chart in Chart::ALL {
             assert_eq!(chart.series().len(), chart.values(&snapshot, None).len());
             assert!(chart.menu().charts().contains(&chart));

@@ -38,6 +38,25 @@ pub(crate) enum RentalRefresh {
     Changed,
 }
 
+pub(crate) enum RentalChanges<'a> {
+    #[cfg(test)]
+    Compared,
+    Selected(&'a [usize]),
+}
+
+struct RentalMove {
+    actor: usize,
+    previous: Option<usize>,
+    current: Option<usize>,
+}
+
+#[derive(Clone, Copy, Debug)]
+enum RentalRefreshMode {
+    Current,
+    Sparse,
+    Dense,
+}
+
 #[derive(Clone, PartialEq, Eq)]
 struct RentalLocation {
     landlord: usize,
@@ -213,42 +232,122 @@ impl RentalRegistry {
         Self::build(scenario, state, None)
     }
 
-    pub(crate) fn updated(&self, scenario: &Scenario, previous: &ActorRows, state: &State) -> Self {
+    pub(crate) fn updated(
+        &self,
+        scenario: &Scenario,
+        previous: &ActorRows,
+        state: &State,
+        changes: RentalChanges<'_>,
+    ) -> Self {
+        let profile = std::env::var_os("BAD_ECON_PROFILE_STAGES").is_some();
         let housing = state
             .actors
             .iter_from(previous.len())
             .any(|actor| actor.kind == Good::Housing as u32);
         match (state.actors.len() >= previous.len(), housing) {
             (true, false) => {
-                let mut current = self.clone();
-                for (offset, actor) in state.actors.iter_from(previous.len()).enumerate() {
-                    let index = previous.len() + offset;
-                    let assignment = match current.regions.get(&region(scenario, &actor)) {
-                        Some(sites) => {
-                            let household = match actor.kind {
-                                0 => index,
-                                _ => actor.owner as usize,
-                            };
-                            Some(sites.account(actor.position, household))
+                let started = std::time::Instant::now();
+                let additions = state
+                    .actors
+                    .iter_from(previous.len())
+                    .enumerate()
+                    .map(|(offset, actor)| {
+                        let index = previous.len() + offset;
+                        match self.regions.get(&region(scenario, &actor)) {
+                            Some(sites) => Some(sites.account(
+                                actor.position,
+                                match actor.kind {
+                                    0 => index,
+                                    _ => actor.owner as usize,
+                                },
+                            )),
+                            None => None,
                         }
-                        None => None,
-                    };
-                    if let Some(account) = assignment {
-                        current.accounts[account].tenants.push(index);
-                    }
-                    current.assignments.push(assignment);
+                    })
+                    .collect::<Vec<_>>();
+                let mut counts = vec![0; self.accounts.len()];
+                for &account in additions.iter().flatten() {
+                    counts[account] += 1;
                 }
-                current.refresh(scenario, state, previous.rental_changes(&state.actors));
+                let planned = started.elapsed();
+                let started = std::time::Instant::now();
+                let mut assignments = Vec::with_capacity(state.actors.len());
+                assignments.extend_from_slice(&self.assignments);
+                let accounts = self
+                    .accounts
+                    .iter()
+                    .enumerate()
+                    .map(|(index, account)| {
+                        let mut tenants = Vec::with_capacity(account.tenants.len() + counts[index]);
+                        tenants.extend_from_slice(&account.tenants);
+                        RentalAccount {
+                            landlord: account.landlord,
+                            tenants,
+                        }
+                    })
+                    .collect();
+                let mut current = Self {
+                    accounts,
+                    assignments,
+                    locations: self.locations.clone(),
+                    regions: self.regions.clone(),
+                };
+                if profile {
+                    eprintln!(
+                        "RENTALS_PART Clone {:.3}",
+                        started.elapsed().as_secs_f64() * 1000.0
+                    );
+                }
+                let started = std::time::Instant::now();
+                for (offset, &assignment) in additions.iter().enumerate() {
+                    if let Some(account) = assignment {
+                        current.accounts[account]
+                            .tenants
+                            .push(previous.len() + offset);
+                    }
+                }
+                current.assignments.extend_from_slice(&additions);
+                if profile {
+                    eprintln!(
+                        "RENTALS_PART Appends {:.3} actors={}",
+                        (planned + started.elapsed()).as_secs_f64() * 1000.0,
+                        additions.len()
+                    );
+                }
+                let started = std::time::Instant::now();
+                let changes = match changes {
+                    #[cfg(test)]
+                    RentalChanges::Compared => previous.rental_changes(&state.actors),
+                    RentalChanges::Selected(changes) => changes.to_vec(),
+                };
+                let changed = changes.len();
+                current.refresh(scenario, state, changes);
+                if profile {
+                    eprintln!(
+                        "RENTALS_PART Refresh {:.3} actors={changed}",
+                        started.elapsed().as_secs_f64() * 1000.0
+                    );
+                }
                 current
             }
-            _ => Self::build(
-                scenario,
-                state,
-                Some(RentalHistory {
-                    registry: self,
-                    actors: previous,
-                }),
-            ),
+            _ => {
+                let started = std::time::Instant::now();
+                let current = Self::build(
+                    scenario,
+                    state,
+                    Some(RentalHistory {
+                        registry: self,
+                        actors: previous,
+                    }),
+                );
+                if profile {
+                    eprintln!(
+                        "RENTALS_PART Build {:.3} housing={housing}",
+                        started.elapsed().as_secs_f64() * 1000.0
+                    );
+                }
+                current
+            }
         }
     }
 
@@ -258,7 +357,9 @@ impl RentalRegistry {
         state: &State,
         changes: impl IntoIterator<Item = usize>,
     ) -> RentalRefresh {
-        let changes = changes.into_iter().collect::<Vec<_>>();
+        let mut changes = changes.into_iter().collect::<Vec<_>>();
+        changes.sort_unstable();
+        changes.dedup();
         let current = self.assignments.len() == state.actors.len()
             && changes.iter().all(|&index| {
                 let actor = state.actors.at(index);
@@ -278,39 +379,88 @@ impl RentalRegistry {
                 RentalRefresh::Changed
             }
             true => {
-                let mut refresh = RentalRefresh::Current;
-                for index in changes {
-                    let actor = state.actors.at(index);
-                    let assignment = match (actor.kind, self.regions.get(&region(scenario, &actor)))
-                    {
-                        (kind, Some(sites)) if kind != Good::Housing as u32 => {
-                            let household = match actor.kind {
-                                0 => index,
-                                _ => actor.owner as usize,
+                let profile = std::env::var_os("BAD_ECON_PROFILE_STAGES").is_some();
+                let started = std::time::Instant::now();
+                let moves = changes
+                    .iter()
+                    .filter_map(|&index| {
+                        let actor = state.actors.at(index);
+                        let assignment =
+                            match (actor.kind, self.regions.get(&region(scenario, &actor))) {
+                                (kind, Some(sites)) if kind != Good::Housing as u32 => {
+                                    let household = match actor.kind {
+                                        0 => index,
+                                        _ => actor.owner as usize,
+                                    };
+                                    Some(sites.account(actor.position, household))
+                                }
+                                _ => None,
                             };
-                            Some(sites.account(actor.position, household))
-                        }
-                        _ => None,
-                    };
-                    match self.assignments[index] == assignment {
-                        true => (),
-                        false => {
-                            if let Some(account) = self.assignments[index] {
+                        (self.assignments[index] != assignment).then_some(RentalMove {
+                            actor: index,
+                            previous: self.assignments[index],
+                            current: assignment,
+                        })
+                    })
+                    .collect::<Vec<_>>();
+                let mode = match moves.len() {
+                    0 => RentalRefreshMode::Current,
+                    1..=255 => RentalRefreshMode::Sparse,
+                    _ => RentalRefreshMode::Dense,
+                };
+                if profile {
+                    eprintln!(
+                        "RENTALS_PART MovePlan {:.3} actors={} moves={} accounts={} tenants={}",
+                        started.elapsed().as_secs_f64() * 1000.0,
+                        changes.len(),
+                        moves.len(),
+                        self.accounts.len(),
+                        self.assignments.len()
+                    );
+                }
+                let started = std::time::Instant::now();
+                let refresh = match mode {
+                    RentalRefreshMode::Current => RentalRefresh::Current,
+                    RentalRefreshMode::Sparse => {
+                        for movement in moves {
+                            if let Some(account) = movement.previous {
                                 let tenants = &mut self.accounts[account].tenants;
-                                let position =
-                                    tenants.binary_search(&index).expect("assigned tenant");
+                                let position = tenants
+                                    .binary_search(&movement.actor)
+                                    .expect("assigned tenant");
                                 tenants.remove(position);
                             }
-                            if let Some(account) = assignment {
+                            if let Some(account) = movement.current {
                                 let tenants = &mut self.accounts[account].tenants;
-                                let position =
-                                    tenants.binary_search(&index).expect_err("new tenant");
-                                tenants.insert(position, index);
+                                let position = tenants
+                                    .binary_search(&movement.actor)
+                                    .expect_err("new tenant");
+                                tenants.insert(position, movement.actor);
                             }
-                            self.assignments[index] = assignment;
-                            refresh = RentalRefresh::Changed;
+                            self.assignments[movement.actor] = movement.current;
                         }
+                        RentalRefresh::Changed
                     }
+                    RentalRefreshMode::Dense => {
+                        for movement in moves {
+                            self.assignments[movement.actor] = movement.current;
+                        }
+                        for account in &mut self.accounts {
+                            account.tenants.clear();
+                        }
+                        for (actor, &assignment) in self.assignments.iter().enumerate() {
+                            if let Some(account) = assignment {
+                                self.accounts[account].tenants.push(actor);
+                            }
+                        }
+                        RentalRefresh::Changed
+                    }
+                };
+                if profile {
+                    eprintln!(
+                        "RENTALS_PART MoveApply {:.3} mode={mode:?}",
+                        started.elapsed().as_secs_f64() * 1000.0
+                    );
                 }
                 refresh
             }
@@ -543,4 +693,169 @@ pub fn initialize(scenario: &Scenario, state: &mut State) -> Result<()> {
         );
     }
     Ok(())
+}
+
+#[cfg(all(test, feature = "compute"))]
+mod tests {
+    use super::*;
+    use crate::domain::Experiment;
+    use crate::simulation::Simulation;
+
+    #[test]
+    fn rental_growth_preserves_assignments_and_sorted_tenants_after_gpu_days() -> Result<()> {
+        let device = crate::tests::support::device(64)?;
+        for scenario in [
+            Scenario::industrial(128, 42, Experiment::Baseline)?,
+            Scenario::baseline(31, 42, Experiment::Concentrated)?,
+        ] {
+            let mut simulation = Simulation::new(scenario.clone(), device.clone())?;
+            simulation.advance()?;
+            let mut state = simulation.download()?;
+            let mut cached = RentalRegistry::new(&scenario, &state);
+            for step in 0..4u32 {
+                let previous = state.actors.clone();
+                let mut changes = (1..8).collect::<Vec<_>>();
+                for tenant in 1..8 {
+                    let mut actor = state.actors.at(tenant);
+                    actor.position = Position {
+                        x: 71 * tenant as u32 + 11 * step,
+                        y: 97 * tenant as u32 + 17 * step,
+                    };
+                    state.actors.set(tenant, actor);
+                }
+                let bread = state
+                    .actors
+                    .firm_indices()
+                    .find(|&index| state.actors.at(index).kind == Good::Bread as u32);
+                if let Some(firm) = bread {
+                    let mut actor = state.actors.at(firm);
+                    actor.owner = 2 + step;
+                    state.actors.set(firm, actor);
+                    changes.push(firm);
+                }
+                if step == 3 {
+                    let building = state
+                        .actors
+                        .firm_indices()
+                        .find(|&index| state.actors.at(index).kind == Good::Housing as u32);
+                    if let Some(housing) = building {
+                        let mut actor = state.actors.at(housing);
+                        actor.position = Position { x: 999, y: 999 };
+                        state.actors.set(housing, actor);
+                        changes.push(housing);
+                    }
+                }
+                for offset in 0..12u32 {
+                    let kind = match (step, offset) {
+                        (2, 0) => Good::Housing as u32,
+                        (_, 1) => 0,
+                        _ => Good::Bread as u32,
+                    };
+                    state.actors.extend([Actor {
+                        identity: state.next_identity,
+                        position: Position {
+                            x: 50 + offset * 71,
+                            y: 100 + step * 97,
+                        },
+                        kind,
+                        owner: 2 + offset,
+                        capacity: 1,
+                    }]);
+                    state.next_identity += 1;
+                }
+                let selected = cached.updated(
+                    &scenario,
+                    &previous,
+                    &state,
+                    RentalChanges::Selected(&changes),
+                );
+                cached = cached.updated(&scenario, &previous, &state, RentalChanges::Compared);
+                assert_eq!(selected.assignments, cached.assignments, "step {step}");
+                assert_eq!(selected.words(), cached.words(), "step {step}");
+                let rebuilt = RentalRegistry::new(&scenario, &state);
+                assert_eq!(cached.assignments, rebuilt.assignments, "step {step}");
+                assert_eq!(cached.words(), rebuilt.words(), "step {step}");
+                assert!(
+                    cached
+                        .accounts
+                        .iter()
+                        .all(|account| account.tenants.is_sorted())
+                );
+            }
+        }
+        Ok(())
+    }
+
+    #[test]
+    fn sparse_and_dense_rental_moves_match_rebuilt_assignments_after_gpu_days() -> Result<()> {
+        let scenario = Scenario::industrial(1024, 42, Experiment::Baseline)?;
+        let device = crate::tests::support::device(64)?;
+        let mut simulation = Simulation::new(scenario.clone(), device)?;
+        simulation.advance()?;
+        let mut initial = simulation.download()?;
+        let housing = initial
+            .actors
+            .firm_indices()
+            .filter(|&index| initial.actors.at(index).kind == Good::Housing as u32)
+            .collect::<Vec<_>>();
+        assert!(housing.len() >= 2);
+        for (ordinal, &index) in housing.iter().enumerate() {
+            let mut actor = initial.actors.at(index);
+            actor.position = match ordinal {
+                0 => Position { x: 0, y: 0 },
+                _ => Position { x: 999, y: 999 },
+            };
+            initial.actors.set(index, actor);
+        }
+        for index in 0..scenario.config().households as usize {
+            let mut actor = initial.actors.at(index);
+            actor.position = Position { x: 0, y: 0 };
+            initial.actors.set(index, actor);
+        }
+        let original = RentalRegistry::new(&scenario, &initial);
+        for count in [0usize, 3, 255, 256, 513] {
+            let mut state = initial.clone();
+            for index in 0..count {
+                let mut actor = state.actors.at(index);
+                actor.position = Position { x: 999, y: 999 };
+                state.actors.set(index, actor);
+            }
+            let rebuilt = RentalRegistry::new(&scenario, &state);
+            let changes = (0..count).rev().chain(0..count).collect::<Vec<_>>();
+            let selected = original.updated(
+                &scenario,
+                &initial.actors,
+                &state,
+                RentalChanges::Selected(&changes),
+            );
+            let compared =
+                original.updated(&scenario, &initial.actors, &state, RentalChanges::Compared);
+            assert_eq!(selected.assignments, compared.assignments, "moves {count}");
+            assert_eq!(selected.words(), compared.words(), "moves {count}");
+            assert_eq!(
+                original
+                    .assignments
+                    .iter()
+                    .zip(&rebuilt.assignments)
+                    .filter(|(before, after)| before != after)
+                    .count(),
+                count
+            );
+            let mut cached = original.clone();
+            let refresh = cached.refresh(&scenario, &state, (0..count).rev().chain(0..count));
+            match (count, refresh) {
+                (0, RentalRefresh::Current) | (1.., RentalRefresh::Changed) => (),
+                _ => panic!("rental refresh classification changed"),
+            }
+            assert_eq!(cached.assignments, rebuilt.assignments, "moves {count}");
+            assert_eq!(cached.words(), rebuilt.words(), "moves {count}");
+            assert!(
+                cached
+                    .accounts
+                    .iter()
+                    .all(|account| account.tenants.is_sorted())
+            );
+        }
+        Ok(())
+    }
 }

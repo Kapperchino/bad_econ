@@ -44,6 +44,8 @@ impl GpuPass<EconomyInput> for AdvanceEconomy {
                 input.parameters.good;
             input.config.consumption_intervals[crate::domain::Good::COUNT + 3usize] =
                 input.config.heating_per_person;
+            input.config.consumption_intervals[crate::domain::Good::COUNT + 4usize] =
+                input.parameters.matching_round;
         }
         economy(
             &mut input.state,

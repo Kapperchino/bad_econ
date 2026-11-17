@@ -60,8 +60,14 @@ impl EntryGrowth {
     ) -> Result<Option<Self>> {
         EntryRequests::new(scenario, metadata.actors.len(), requests)
             .map(|requests| {
-                RegistryPlan::new(scenario, metadata, migrations, &requests.transitions)
-                    .map(|plan| plan.map(|plan| Self { requests, plan }))
+                RegistryPlan::with_growth(
+                    scenario,
+                    metadata,
+                    migrations,
+                    &requests.transitions,
+                    requests.entries.len(),
+                )
+                .map(|plan| plan.map(|plan| Self { requests, plan }))
             })
             .transpose()
             .map(Option::flatten)
@@ -83,6 +89,7 @@ impl EntryBatch {
         metadata: &State,
         state: &CubeTensor,
         entries: &EntryRequests,
+        plan: &mut RegistryPlan,
         next_identity: u64,
     ) -> Result<Self> {
         let selected = entries
@@ -161,9 +168,42 @@ impl EntryBatch {
             };
         }
         enterprise::enter(&mut compact, scenario, &compact_requests)?;
-        let formations = enterprise::form_households(&mut compact, scenario, &compact_requests)?;
-        let mut grown = metadata.clone();
         let before = metadata.actors.len();
+        let formations = enterprise::form_households(&mut compact, scenario, &compact_requests)?
+            .into_iter()
+            .map(|formation| enterprise::HouseholdFormation {
+                parent: selected[formation.parent],
+                household: before + formation.household - selected.len(),
+                person: formation.person,
+            })
+            .collect::<Vec<_>>();
+        plan.migrations
+            .extend_households(&metadata.actors, &formations);
+        let prepared_actors = match super::settlement::SettlementBatch::required(
+            metadata,
+            &entries.transitions,
+            &plan.migrations,
+        ) {
+            true => None,
+            false => plan.actors.take(),
+        };
+        let mut grown = State {
+            actors: prepared_actors.unwrap_or_else(|| {
+                metadata
+                    .actors
+                    .clone_for_growth(compact.actors.len() - selected.len())
+            }),
+            day: metadata.day,
+            next_identity: metadata.next_identity,
+            values: metadata.values.clone(),
+            initial_cash: metadata.initial_cash,
+            initial_goods: metadata.initial_goods,
+            research: metadata.research.clone(),
+            people: metadata.people.clone(),
+            initial_population: metadata.initial_population,
+            ownership: metadata.ownership.clone(),
+            companies: metadata.companies.clone(),
+        };
         grown
             .actors
             .extend(compact.actors.iter_from(selected.len()).map(|mut actor| {
@@ -216,14 +256,7 @@ impl EntryBatch {
         Ok(Self {
             metadata: grown,
             readback_bytes,
-            formations: formations
-                .into_iter()
-                .map(|formation| enterprise::HouseholdFormation {
-                    parent: selected[formation.parent],
-                    household: before + formation.household - selected.len(),
-                    person: formation.person,
-                })
-                .collect(),
+            formations,
             indices: device.tensor(&indices),
             values: device.tensor(bytemuck::cast_slice(&encode(&values))),
         })

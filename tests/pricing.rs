@@ -7,6 +7,127 @@ use bad_econ::{
     simulation::Simulation,
 };
 
+#[test]
+fn generated_prices_cover_recipes_and_retail_handling_on_gpu() -> Result<()> {
+    let scenario = Scenario::industrial(96, 42, Experiment::Baseline)?;
+    let config = scenario.config();
+    let mut simulation = Simulation::new(scenario.clone(), support::device(64)?)?;
+    let state = simulation.download()?;
+    for (index, actor) in state.actors.iter().enumerate().filter(|(_, actor)| {
+        actor.kind > 0 && actor.kind != Good::Housing as u32 && actor.kind != Good::Railway as u32
+    }) {
+        let recipe = scenario.technique(index);
+        let costs = u64::from(config.wage) * u64::from(recipe.labor_minutes)
+            + [Field::FirstInputCost, Field::SecondInputCost]
+                .into_iter()
+                .map(|field| state.get(field, index) * u64::from(recipe.input_ticks))
+                .sum::<u64>();
+        let revenue = state.get(Field::Price, index) * u64::from(recipe.output_ticks);
+        match config
+            .distributors
+            .iter()
+            .find(|store| store.firm == actor.identity)
+        {
+            Some(store) => {
+                let wholesale = state.get(Field::ReplacementCost, index);
+                let replacement = wholesale * u64::from(store.units_per_shift) + costs;
+                assert!(revenue * 1000 >= replacement * u64::from(1000 + store.margin_per_mille));
+                assert_eq!(wholesale, u64::from(config.prices[2]));
+            }
+            None => {
+                let work_days = match Good::from_index(actor.kind)? {
+                    Good::Grain | Good::Flax | Good::Cotton | Good::Dye => 211,
+                    _ => 365,
+                };
+                assert!(revenue * 365 * 4 >= costs * work_days * 5);
+            }
+        }
+    }
+    assert_eq!(config.household_cash, 9835);
+    assert_eq!(simulation.snapshot.cash, state.initial_cash);
+    simulation.checkpoint()?.restore()?;
+    Ok(())
+}
+
+#[test]
+fn configured_food_prices_and_explicit_firm_quotes_are_preserved_on_gpu() -> Result<()> {
+    let mut config = pricing_scenario()?.config().clone();
+    config.economy = Economy::Industrial;
+    config.prices = [71, 113, 47];
+    let scenario = Scenario::new(config)?;
+    let mut simulation = Simulation::new(scenario.clone(), support::device(64)?)?;
+    let state = simulation.download()?;
+    assert_eq!(scenario.config().prices, [71, 113, 47]);
+    for firm in 1..4 {
+        assert_eq!(state.get(Field::Price, firm), firm as u64 * 100);
+    }
+    assert_eq!(state.get(Field::Cash, 0), 100_000);
+    assert_eq!(state.get(Field::FirstInputCost, 2), 71);
+    assert_eq!(state.get(Field::FirstInputCost, 3), 113);
+    simulation.checkpoint()?.restore()?;
+    Ok(())
+}
+
+#[test]
+fn household_food_budgets_learn_purchase_quotes_without_changing_selling_quotes_on_gpu()
+-> Result<()> {
+    let mut config = pricing_scenario()?.config().clone();
+    config.population.as_mut().unwrap().households[0].inventories[Good::Bread as usize - 1] = 0;
+    let mut simulation = Simulation::new(Scenario::new(config)?, support::device(64)?)?;
+    simulation.advance()?;
+    let state = simulation.download()?;
+    assert!(state.get(Field::Purchased, 0) > 0);
+    assert_eq!(state.get(Field::FoodPrice, 0), 300);
+    assert_eq!(state.get(Field::Price, 0), 468);
+    simulation.checkpoint()?.restore()?;
+    Ok(())
+}
+
+#[test]
+fn small_prices_accumulate_changes_and_replay_without_rounding_floors_on_gpu() -> Result<()> {
+    let mut config = pricing_scenario()?.config().clone();
+    for firm in &mut config.population.as_mut().unwrap().firms {
+        firm.price = 10;
+        firm.cash = 1_000_000;
+    }
+    let mut simulation = Simulation::new(Scenario::new(config)?, support::device(64)?)?;
+    for _ in 0..8 {
+        simulation.advance()?;
+    }
+    let state = simulation.download()?;
+    for firm in 1..4 {
+        assert!((6..10).contains(&state.get(Field::Price, firm)));
+    }
+    let mut resumed = Simulation::from_checkpoint(simulation.checkpoint()?, support::device(64)?)?;
+    for _ in 8..80 {
+        simulation.advance()?;
+        resumed.advance()?;
+        assert_eq!(simulation.snapshot, resumed.snapshot);
+    }
+    let state = simulation.download()?;
+    assert_eq!(state, resumed.download()?);
+    for firm in 1..4 {
+        assert_eq!(state.get(Field::Price, firm), 1);
+    }
+    Ok(())
+}
+
+#[test]
+fn calibrated_industrial_start_preserves_food_access_and_paid_work_on_gpu() -> Result<()> {
+    let scenario = Scenario::industrial(1000, 42, Experiment::Baseline)?;
+    let mut simulation = Simulation::new(scenario, support::device(64)?)?;
+    let initial_cash = simulation.snapshot.cash;
+    for _ in 0..32 {
+        simulation.advance()?;
+        assert_eq!(simulation.snapshot.cash, initial_cash);
+        assert_eq!(simulation.snapshot.population.famine_exposure, 0);
+    }
+    assert!(simulation.snapshot.employed > 100);
+    assert_eq!(simulation.snapshot.population.deaths[2], 0);
+    simulation.checkpoint()?.restore()?;
+    Ok(())
+}
+
 fn pricing_scenario() -> Result<Scenario> {
     let mut config = Scenario::baseline(1, 42, Experiment::Concentrated)?
         .config()
@@ -92,6 +213,26 @@ fn planned_inventory_buffers_do_not_trigger_clearance_prices_on_gpu() -> Result<
 }
 
 #[test]
+fn industrial_quotes_recover_below_replacement_cost_after_surplus_clears_on_gpu() -> Result<()> {
+    let mut config = pricing_scenario()?.config().clone();
+    config.economy = Economy::Industrial;
+    config.population.as_mut().unwrap().firms[0].inventories[Good::Grain as usize - 1] = 0;
+    let scenario = Scenario::new(config)?;
+    let initial = scenario.initial()?;
+    let mut simulation = Simulation::new(scenario, support::device(64)?)?;
+    simulation.advance()?;
+    let first = simulation.download()?;
+    assert_eq!(first.get(Field::Unfilled, 1), 0);
+    assert!(first.get(Field::Price, 1) > initial.get(Field::Price, 1));
+    assert!(first.get(Field::Price, 2) < initial.get(Field::Price, 2));
+    assert!(first.get(Field::Price, 3) < initial.get(Field::Price, 3));
+    assert!(first.get(Field::Price, 1) < 1000 * 20 / 20);
+    assert_eq!(simulation.snapshot.cash, initial.initial_cash);
+    simulation.checkpoint()?.restore()?;
+    Ok(())
+}
+
+#[test]
 fn distributor_delivery_reserves_do_not_trigger_clearance_prices_on_gpu() -> Result<()> {
     let mut config = pricing_scenario()?.config().clone();
     config.distributors = vec![Distributor {
@@ -170,7 +311,8 @@ fn unfilled_orders_raise_prices_without_a_cost_floor_on_gpu() -> Result<()> {
     simulation.advance()?;
     let state = simulation.download()?;
     assert!(state.get(Field::Unfilled, 3) > 0);
-    assert!(state.get(Field::Price, 3) > 300);
+    assert!(state.get(Field::Price, 3) >= 300);
+    assert!(state.get(Field::PriceQuote, 3) > 300_000_000);
     Ok(())
 }
 

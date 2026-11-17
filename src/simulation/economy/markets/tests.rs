@@ -203,6 +203,7 @@ fn indexed_feedback_ignores_stale_statuses_and_matches_dense_feedback_on_gpu() -
                 &simulation.device,
                 &simulation.control,
                 &simulation.feedback,
+                FeedbackSource::Constructed,
             );
             simulation.feedback_operation(
                 super::super::EconomyStage::RecordFeedback,
@@ -372,7 +373,9 @@ impl SortCase {
         let mut parameters = EconomyParameters {
             clock: crate::simulation::parameters::MarketClock::Scalars,
             scan: self.scan,
+            empty_orders: crate::simulation::parameters::EmptyOrderMode::Settle,
             day: 0,
+            matching_round: 0,
             settlement_rotation: 0,
             phase: Phase::Opening,
             market: MarketFlag::Labor,
@@ -683,7 +686,9 @@ impl ProposalCase {
         let parameters = EconomyParameters {
             clock: crate::simulation::parameters::MarketClock::Scalars,
             scan: self.scan,
+            empty_orders: crate::simulation::parameters::EmptyOrderMode::Settle,
             day: 0,
+            matching_round: 0,
             settlement_rotation: self.rotation as u32,
             phase: Phase::Opening,
             market: MarketFlag::Labor,

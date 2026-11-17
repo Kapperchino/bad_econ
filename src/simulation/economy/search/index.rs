@@ -1,6 +1,6 @@
 use super::*;
 
-const FIELDS: usize = 8;
+const FIELDS: usize = 10;
 pub(super) const BLOCK: u32 = 32;
 pub(super) const HOUSEHOLD_STRIDE_FIELD: u32 = 6;
 pub(super) const HOUSEHOLD_X_FIELD: u32 = 8;
@@ -22,6 +22,8 @@ enum BlockField {
     MaxY,
     Stocked,
     MinAccess,
+    MaximumAvailable,
+    MaximumQuote,
 }
 
 #[derive(Clone, Copy)]
@@ -56,7 +58,7 @@ impl Supply {
             source == SupplySource::Index
                 || matches!(
                     parameters.market,
-                    MarketFlag::Consumer | MarketFlag::Household
+                    MarketFlag::Consumer(_) | MarketFlag::Household
                 )
         ) {
             Self::load(scratch, config, member)
@@ -136,6 +138,8 @@ pub(super) fn build(
     spatial: &mut [u32],
     scratch: &mut [u32],
     searches: &mut [u32],
+    successes: &[Atomic<u32>],
+    control: &[Atomic<u32>],
     parameters: &EconomyParameters,
 ) {
     let cooperative = comptime!(parameters.scan == crate::simulation::parallel::ScanMode::Plane)
@@ -148,6 +152,8 @@ pub(super) fn build(
             spatial,
             scratch,
             searches,
+            successes,
+            control,
             parameters,
             comptime!(IndexReduction::Plane),
         );
@@ -159,6 +165,8 @@ pub(super) fn build(
             spatial,
             scratch,
             searches,
+            successes,
+            control,
             parameters,
             comptime!(IndexReduction::Workgroup),
         );
@@ -173,6 +181,8 @@ fn build_blocks(
     spatial: &mut [u32],
     scratch: &mut [u32],
     searches: &mut [u32],
+    successes: &[Atomic<u32>],
+    control: &[Atomic<u32>],
     parameters: &EconomyParameters,
     #[comptime] reduction: IndexReduction,
 ) {
@@ -189,6 +199,7 @@ fn build_blocks(
     let mut block = start + UNIT_POS / width;
     let good = parameters.traded_good();
     let mut minimum_quote = u32::new(comptime!(i64::from(u32::MAX)));
+    let mut minimum_eligible = u32::new(comptime!(i64::from(u32::MAX)));
     while block < end {
         let mut stocked_price = u32::new(comptime!(i64::from(u32::MAX)));
         let mut empty_price = u32::new(comptime!(i64::from(u32::MAX)));
@@ -197,10 +208,19 @@ fn build_blocks(
         let mut min_y = u32::new(comptime!(i64::from(u32::MAX)));
         let mut max_y = 0u32;
         let mut stocked = 0u32;
+        let mut maximum_available = 0u32;
+        let mut maximum_quote = 0u32;
         let mut min_access = u32::new(comptime!(i64::from(u32::MAX)));
         let mut member = block * BLOCK + lane;
         while member < min((block + 1) * BLOCK, count) {
             let actor = spatial[(cells + 1 + member) as usize];
+            if comptime!(
+                parameters.empty_orders
+                    == crate::simulation::parameters::EmptyOrderMode::FeedbackOnly
+                    && matches!(parameters.market, MarketFlag::Consumer(_))
+            ) {
+                successes[markets::filtered_count(config.actors, actor) as usize].store(0);
+            }
             let supply = Supply::new(state, actors, config, actor, good);
             supply.store(scratch, config, member);
             let quote = supply.quote;
@@ -208,6 +228,22 @@ fn build_blocks(
                 minimum_quote = min(minimum_quote, quote);
             }
             let offered = supply.offered;
+            if comptime!(matches!(parameters.market, MarketFlag::Input(_)))
+                && good == comptime!(Good::Bread as u32)
+                && quote > 0
+                && (offered || supply.producer)
+            {
+                minimum_eligible = min(minimum_eligible, quote);
+            }
+            maximum_quote = max(maximum_quote, select(offered, quote, 0));
+            maximum_available = max(
+                maximum_available,
+                select(
+                    supply.available.extract(HIGH_WORD) > 0,
+                    u32::MAX,
+                    supply.available.extract(LOW_WORD),
+                ),
+            );
             let producer = supply.producer;
             let price = select(quote > 0, quote, u32::MAX);
             stocked_price = min(stocked_price, select(offered, price, u32::MAX));
@@ -229,7 +265,7 @@ fn build_blocks(
                         coprime_stride(length, offset);
                 }
             }
-            if comptime!(parameters.market == MarketFlag::Consumer) {
+            if comptime!(matches!(parameters.market, MarketFlag::Consumer(_))) {
                 scratch[(5 * config.actors + member) as usize] = empty::key(config, x, y);
             }
             min_x = min(min_x, x);
@@ -250,6 +286,8 @@ fn build_blocks(
         min_y = reduce_minimum(min_y, comptime!(reduction));
         max_y = !reduce_minimum(!max_y, comptime!(reduction));
         stocked = !reduce_minimum(!stocked, comptime!(reduction));
+        maximum_available = !reduce_minimum(!maximum_available, comptime!(reduction));
+        maximum_quote = !reduce_minimum(!maximum_quote, comptime!(reduction));
         if comptime!(config.railway.routes_enabled == Feature::Enabled) && config.railway.nodes > 0
         {
             min_access = reduce_minimum(min_access, comptime!(reduction));
@@ -264,8 +302,18 @@ fn build_blocks(
             scratch[base + comptime!(BlockField::MaxY as usize)] = max_y;
             scratch[base + comptime!(BlockField::Stocked as usize)] = stocked;
             scratch[base + comptime!(BlockField::MinAccess as usize)] = min_access;
+            scratch[base + comptime!(BlockField::MaximumAvailable as usize)] = maximum_available;
+            scratch[base + comptime!(BlockField::MaximumQuote as usize)] = maximum_quote;
         }
         block += step;
+    }
+    if comptime!(matches!(parameters.market, MarketFlag::Input(_)))
+        && good == comptime!(Good::Bread as u32)
+    {
+        let minimum = parallel::reduce(minimum_eligible, comptime!(Reduction::Minimum));
+        if UNIT_POS == 0 && minimum < control[INPUT_MINIMUM_QUOTE_WORD].load() {
+            control[INPUT_MINIMUM_QUOTE_WORD].fetch_min(minimum);
+        }
     }
     if good == comptime!(Good::Bread as u32) {
         let minimum = parallel::reduce(minimum_quote, comptime!(Reduction::Minimum));
@@ -274,6 +322,47 @@ fn build_blocks(
             spatial[(base + CUBE_POS as u32) as usize] = minimum;
         }
     }
+}
+
+#[cube]
+pub(super) fn maximum_available(scratch: &[u32], config: &EconomyConfig, block: u32) -> u32 {
+    let base = 6 * config.actors as usize + block as usize * FIELDS;
+    scratch[base + comptime!(BlockField::MaximumAvailable as usize)]
+}
+
+#[cube]
+pub(super) fn partial_input_price_floor(
+    scratch: &[u32],
+    config: &EconomyConfig,
+    block: u32,
+    x: u32,
+    y: u32,
+    buyer_access: u32,
+    maximum_delivery_cost: Ticks,
+) -> u32 {
+    let base = 6 * config.actors as usize + block as usize * FIELDS;
+    let minimum_quote = scratch[base + comptime!(BlockField::StockedPrice as usize)];
+    let maximum_quote = scratch[base + comptime!(BlockField::MaximumQuote as usize)];
+    let min_x = scratch[base + comptime!(BlockField::MinX as usize)];
+    let max_x = scratch[base + comptime!(BlockField::MaxX as usize)];
+    let min_y = scratch[base + comptime!(BlockField::MinY as usize)];
+    let max_y = scratch[base + comptime!(BlockField::MaxY as usize)];
+    let distance = max(x, min_x) - min(x, max_x) + max(y, min_y) - min(y, max_y);
+    let mut days = max(ceildiv(distance, config.shipment_speed), 1);
+    if comptime!(config.railway.routes_enabled == Feature::Enabled) && config.railway.nodes > 0 {
+        let seller_access = scratch[base + comptime!(BlockField::MinAccess as usize)];
+        days = min(
+            days,
+            ceildiv(buyer_access + seller_access, config.shipment_speed) + 1,
+        );
+    }
+    let lower = plus(
+        ticks(minimum_quote, 0),
+        times32(days, config.delivery_penalty),
+    )
+    .value;
+    let upper = plus(ticks(maximum_quote, 0), maximum_delivery_cost).value;
+    select(upper.extract(HIGH_WORD) == 0, lower.extract(LOW_WORD), 0)
 }
 
 #[cube]

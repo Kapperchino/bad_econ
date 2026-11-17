@@ -21,7 +21,8 @@ impl StartingReserves {
         Self {
             household_stock: u64::from(config.household_need)
                 * u64::from(config.demography.initial_household_members)
-                * u64::from(days),
+                * u64::from(days)
+                * config.food.map_or(1, |food| food.reserve_portions(config)),
             coal: u64::from(heat / 2) * u64::from(days),
             wood: u64::from(heat % 2) * u64::from(days),
             days,
@@ -73,7 +74,10 @@ impl StartingDemand {
                         .map(|grant| u64::from(grant.plots))
                         .sum(),
                     None => {
-                        u64::from(config.households.div_ceil(2)) * u64::from(members.div_ceil(2))
+                        u64::from(
+                            super::employment::InitialSettlement::new(config)
+                                .farmers(config.households),
+                        ) * u64::from(members.div_ceil(2))
                     }
                 };
                 let farming_households = match &config.land_access {
@@ -82,7 +86,10 @@ impl StartingDemand {
                         .iter()
                         .filter(|grant| grant.plots > 0)
                         .count() as u64,
-                    None => u64::from(config.households.div_ceil(2)),
+                    None => u64::from(
+                        super::employment::InitialSettlement::new(config)
+                            .farmers(config.households),
+                    ),
                 };
                 let grain = plots * u64::from(annual_yield_per_plot);
                 let bread = config.food.map_or(grain, |food| food.bread(grain));

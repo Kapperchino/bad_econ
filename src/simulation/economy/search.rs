@@ -1,8 +1,14 @@
 use super::*;
-use crate::simulation::markets::{LATCH_WORD, SEARCHES_WORD};
+use crate::simulation::{
+    flags::InputMarket,
+    markets::{LATCH_WORD, SEARCHES_WORD},
+};
 mod empty;
+mod filter;
 mod fuel;
 mod index;
+
+pub(in crate::simulation) const INPUT_MINIMUM_QUOTE_WORD: usize = CONTROL_WORDS + 7;
 
 #[cfg(test)]
 mod tests;
@@ -63,7 +69,9 @@ fn prepare(
                 .store(scratch, 4 * config.actors + invocation);
         }
         let market = comptime!(parameters.market);
-        if comptime!(market == MarketFlag::Consumer && round == PreparationRound::Capture) {
+        if comptime!(
+            matches!(market, MarketFlag::Consumer(_)) && round == PreparationRound::Capture
+        ) {
             searches[(14 * config.actors + id) as usize] = 0;
         }
         if comptime!(market == MarketFlag::Household && parameters.discovery.indexed()) {
@@ -72,10 +80,7 @@ fn prepare(
                 3 * (cells + 1 + config.actors) + ceildiv(config.actors, DISCOVERY_BLOCK) + 1;
             id = spatial[(base + invocation) as usize];
         }
-        if comptime!(market == MarketFlag::Consumer)
-            && (parameters.traded_good() == comptime!(Good::Coal as u32)
-                || parameters.traded_good() == comptime!(Good::Wood as u32))
-        {
+        if comptime!(matches!(market, MarketFlag::Consumer(_))) {
             searches[(config.actors + id) as usize] = 0;
             searches[(2 * config.actors + id) as usize] = 0;
         }
@@ -138,7 +143,8 @@ fn prepare(
                             && number(state, config, comptime!(Field::Employed as u32), id) == 0u32
                             && (comptime!(config.economy == crate::domain::Economy::Agrarian)
                                 || number(state, config, comptime!(Field::LandPlots as u32), id)
-                                    == 0);
+                                    == 0
+                                || parameters.matching_round + 1 == MATCHING_ROUNDS as u32);
                     }
                     MarketFlag::Input(_) => {
                         good = parameters.traded_good();
@@ -287,12 +293,20 @@ fn prepare(
                             }
                         }
                     }
-                    MarketFlag::Consumer => {
+                    MarketFlag::Consumer(_) => {
                         good = parameters.traded_good();
-                        if good == comptime!(Good::Coal as u32)
-                            || good == comptime!(Good::Wood as u32)
-                        {
-                            wanted = consumption::fuel_target(state, config, control, id, good);
+                        if comptime!(matches!(
+                            market,
+                            MarketFlag::Consumer(Good::Coal | Good::Wood)
+                        )) {
+                            wanted = consumption::fuel_purchase_target(
+                                state, config, control, parameters, id, good,
+                            );
+                            let held = add_checked(
+                                control,
+                                value(state, config, good, id),
+                                value(state, config, TRANSIT_FIELDS as u32 + good - 1, id),
+                            );
                             search = k.is(comptime!(ActorKind::Household))
                                 && number(
                                     state,
@@ -302,16 +316,15 @@ fn prepare(
                                 ) > 0
                                 && !lt(
                                     value(state, config, comptime!(Field::Bread as u32), id),
-                                    ticks(
-                                        number(
-                                            state,
-                                            config,
-                                            comptime!(Field::FoodNeed as u32),
-                                            id,
-                                        ),
-                                        0,
-                                    ),
-                                );
+                                    ticks(food::minimum_daily(state, config, id), 0),
+                                )
+                                && lt(held, wanted)
+                                && !equal(purchasing_power, zero());
+                            if search {
+                                search = consumption::preferred_fuel(
+                                    state, actors, config, &*spatial, parameters, id, good,
+                                ) == good;
+                            }
                         } else {
                             let interval = config.consumption_intervals[good as usize - 1];
                             let until_due = (interval - (parameters.day + id) % max(interval, 1))
@@ -323,7 +336,16 @@ fn prepare(
                                     comptime!(Field::LivingMembers as u32),
                                     id,
                                 ) > 0
-                                && until_due <= config.coverage + config.ring;
+                                && (until_due <= config.coverage + config.ring
+                                    || comptime!(
+                                        matches!(
+                                            market,
+                                            MarketFlag::Consumer(
+                                                Good::LuxuryClothes | Good::LuxuryFurniture
+                                            )
+                                        ) && config.food_income
+                                            == crate::domain::food::FoodIncome::PurchasingPower
+                                    ));
                             let reserve = ticks(
                                 number(state, config, comptime!(Field::FoodNeed as u32), id)
                                     * (config.coverage + config.ring - 1),
@@ -342,7 +364,7 @@ fn prepare(
                             let cash_reserve = multiply(
                                 control,
                                 reserve,
-                                number(state, config, comptime!(Field::Price as u32), id),
+                                number(state, config, comptime!(Field::FoodPrice as u32), id),
                             );
                             search = search
                                 && !lt(food, reserve)
@@ -350,17 +372,39 @@ fn prepare(
                                     cash_reserve,
                                     value(state, config, comptime!(Field::Cash as u32), id),
                                 );
-                            purchasing_power =
-                                consumption::budget(state, config, control, id, good);
+                            if comptime!(matches!(
+                                market,
+                                MarketFlag::Consumer(Good::LuxuryClothes | Good::LuxuryFurniture)
+                            )) {
+                                purchasing_power =
+                                    consumption::budget(state, config, control, id, good);
+                            }
                             search = search && !equal(purchasing_power, zero());
                             wanted = ticks(1, 0);
+                            if comptime!(matches!(
+                                market,
+                                MarketFlag::Consumer(Good::LuxuryClothes | Good::LuxuryFurniture)
+                            )) && search
+                            {
+                                wanted = consumption::durable_target(
+                                    state,
+                                    actors,
+                                    config,
+                                    &*spatial,
+                                    control,
+                                    parameters,
+                                    id,
+                                    good,
+                                    purchasing_power,
+                                );
+                            }
                         }
                     }
                     MarketFlag::Household => {
                         good = comptime!(Good::Bread as u32);
                         search = k.is(comptime!(ActorKind::Household));
                         wanted = ticks(
-                            number(state, config, comptime!(Field::FoodNeed as u32), id)
+                            food::purchase_daily(state, config, parameters, id)
                                 * (config.coverage + config.ring - 1u32),
                             0u32,
                         );
@@ -425,8 +469,38 @@ fn prepare(
                     search = search && !equal(wanted, zero()) && !equal(purchasing_power, zero());
                 }
                 searching = search;
-                if comptime!(round == PreparationRound::Capture && market == MarketFlag::Consumer) {
+                if comptime!(
+                    round == PreparationRound::Capture
+                        && market == MarketFlag::Input(InputMarket::Grain)
+                ) {
+                    eligible = select(k.is(comptime!(ActorKind::Household)), searching, eligible);
+                }
+                if comptime!(
+                    round == PreparationRound::Capture && matches!(market, MarketFlag::Consumer(_))
+                ) {
                     eligible = searching;
+                }
+                if comptime!(
+                    round == PreparationRound::Capture
+                        && matches!(market, MarketFlag::Consumer(Good::Coal | Good::Wood))
+                        && config.food_income == crate::domain::food::FoodIncome::PurchasingPower
+                ) && !searching
+                    && k.is(comptime!(ActorKind::Household))
+                {
+                    let comfort = consumption::fuel_target(state, config, control, id, good);
+                    let held = add_checked(
+                        control,
+                        value(state, config, good, id),
+                        value(state, config, TRANSIT_FIELDS as u32 + good - 1, id),
+                    );
+                    eligible = number(state, config, comptime!(Field::LivingMembers as u32), id)
+                        > 0
+                        && !lt(
+                            value(state, config, comptime!(Field::Bread as u32), id),
+                            ticks(food::minimum_daily(state, config, id), 0),
+                        )
+                        && !equal(purchasing_power, zero())
+                        && lt(held, comfort);
                 }
                 if searching {
                     searches[(config.actors + id) as usize] = wanted.extract(LOW_WORD);
@@ -769,14 +843,20 @@ fn candidate_supply(
                     );
                     let food_cost = times32(
                         missing,
-                        number(state, config, comptime!(Field::Price as u32), id),
+                        number(state, config, comptime!(Field::FoodPrice as u32), id),
                     );
                     eligible =
                         eligible && !(self_provision && remaining < minutes && lt(paid, food_cost));
                 }
             } else {
-                let affordable = minimum(wanted, divide(purchasing_power, max(quote, 1u32)));
                 let offered = supply.offered;
+                let stocked = minimum(wanted, supply.available);
+                let payment = times(stocked, max(quote, 1u32));
+                let funded = payment.faults.is_empty() && !lt(purchasing_power, payment.value);
+                let mut affordable = stocked;
+                if !offered || !funded {
+                    affordable = minimum(wanted, divide(purchasing_power, max(quote, 1u32)));
+                }
                 seen_supply = seen_supply || (eligible && offered);
                 let known_producer = supply.producer;
                 if eligible
@@ -865,10 +945,27 @@ pub(in crate::simulation) enum SearchStage {
     PrepareSelected,
     Search,
     SearchIndexed,
+    #[cfg_attr(not(test), allow(dead_code))]
     SearchFuel,
     SearchHousehold,
     SearchSpatialFuel,
+    FilterEmpty,
+    FinishFiltered,
     Compact,
+}
+
+pub(in crate::simulation) fn empty_bounds_invocations(
+    members: usize,
+    mode: parallel::ScanMode,
+) -> usize {
+    let lanes = match mode {
+        parallel::ScanMode::Plane => 32,
+        parallel::ScanMode::Shared => 1,
+    };
+    members
+        .min(empty::LIMIT as usize)
+        .div_ceil(empty::BLOCK as usize)
+        * lanes
 }
 
 #[derive(CubeType, CubeLaunch)]
@@ -912,6 +1009,8 @@ impl GpuPass<SearchInput> for Search {
                     &mut input.spatial,
                     &mut input.scratch,
                     &mut input.searches,
+                    &input.successes,
+                    &input.control,
                     &input.parameters,
                 ),
                 SearchStage::EmptySort => empty::sort(
@@ -919,12 +1018,14 @@ impl GpuPass<SearchInput> for Search {
                     &input.spatial,
                     &mut input.scratch,
                     &mut input.searches,
+                    comptime!(input.parameters.scan),
                 ),
                 SearchStage::EmptyBounds => empty::bounds(
                     &input.actors,
                     &input.config,
                     &input.spatial,
                     &mut input.scratch,
+                    comptime!(input.parameters.scan),
                 ),
                 SearchStage::Prepare
                 | SearchStage::PrepareCandidates
@@ -981,6 +1082,22 @@ impl GpuPass<SearchInput> for Search {
                         _ => fuel::SearchOrder::Compact,
                     }),
                 ),
+                SearchStage::FilterEmpty => filter::orders(
+                    &mut input.state,
+                    &input.actors,
+                    &input.config,
+                    &input.proposals,
+                    &input.successes,
+                    &input.control,
+                    &input.parameters,
+                ),
+                SearchStage::FinishFiltered => filter::finish(
+                    &input.config,
+                    &input.spatial,
+                    &input.successes,
+                    &input.control,
+                    &input.parameters,
+                ),
                 SearchStage::Compact => {
                     if input.control[crate::simulation::flags::FAULT_WORD].load() == 0 {
                         compact(
@@ -994,7 +1111,7 @@ impl GpuPass<SearchInput> for Search {
                         );
                         if comptime!(matches!(
                             input.parameters.market,
-                            MarketFlag::Consumer | MarketFlag::Household
+                            MarketFlag::Consumer(_) | MarketFlag::Household
                         )) {
                             let job = ABSOLUTE_POS as u32;
                             if job < input.control[SEARCHES_WORD].load() {
@@ -1002,7 +1119,7 @@ impl GpuPass<SearchInput> for Search {
                                 let peer = input.proposals[actor as usize * ProposalLayout::WORDS
                                     + ProposalLayout::ACTOR];
                                 if peer != NO_ACTOR {
-                                    super::clearing::buyer_settlement(
+                                    let mut status = super::clearing::buyer_settlement(
                                         &mut input.state,
                                         &input.actors,
                                         &input.config,
@@ -1012,8 +1129,34 @@ impl GpuPass<SearchInput> for Search {
                                         actor,
                                         peer,
                                         comptime!(super::scheduler::Posting::CheckActor),
-                                    )
-                                    .store(&mut input.scratch, 4 * input.parameters.count + actor);
+                                    );
+                                    if comptime!(
+                                        input.parameters.empty_orders
+                                            == crate::simulation::parameters::EmptyOrderMode::FeedbackOnly
+                                    ) {
+                                        let position = (actor + input.parameters.count
+                                            - input.parameters.settlement_rotation)
+                                            % input.parameters.count;
+                                        let kept = input.successes[(position / 32) as usize].load()
+                                            & (1u32 << (position % 32));
+                                        if kept == 0 {
+                                            status.replace(super::clearing::empty_seller_settlement(
+                                                &mut input.state,
+                                                &input.actors,
+                                                &input.config,
+                                                &input.proposals,
+                                                &input.control,
+                                                &input.parameters,
+                                                actor,
+                                                peer,
+                                                &status,
+                                            ));
+                                        }
+                                    }
+                                    status.store(
+                                        &mut input.scratch,
+                                        4 * input.parameters.count + actor,
+                                    );
                                 }
                             }
                         }
@@ -1049,6 +1192,18 @@ fn search(
             searches[(3 * config.actors + id) as usize],
             searches[(4 * config.actors + id) as usize],
         );
+        let mut input_target = zero();
+        if comptime!(matches!(parameters.market, MarketFlag::Input(_))) {
+            let capacity =
+                actors[ActorLayout::CAPACITY * (actors.len() / ActorLayout::WORDS) + id as usize];
+            input_target = minimum(
+                wanted,
+                times32(
+                    capacity,
+                    number(state, config, comptime!(Field::InputTicks as u32), id),
+                ),
+            );
+        }
         let mut buyer_access = 0u32;
         if comptime!(config.railway.routes_enabled == Feature::Enabled) && config.railway.nodes > 0
         {
@@ -1057,8 +1212,22 @@ fn search(
         let px = actors[ActorLayout::X * (actors.len() / ActorLayout::WORDS) + id as usize];
         let py = actors[ActorLayout::Y * (actors.len() / ActorLayout::WORDS) + id as usize];
         let radius = config.search_radius;
-        let cx = px / radius;
-        let cy = py / radius;
+        let whole_map =
+            comptime!(config.spatial_side == 1 && config.map_size <= config.search_radius);
+        let maximum_delivery_cost = times32(
+            max(ceildiv(radius, config.shipment_speed), 1),
+            config.delivery_penalty,
+        );
+        let cx = if comptime!(whole_map) {
+            u32::cast_from(0u32)
+        } else {
+            px / radius
+        };
+        let cy = if comptime!(whole_map) {
+            u32::cast_from(0u32)
+        } else {
+            py / radius
+        };
         let side = config.spatial_side;
         let mut chosen = u32::new(comptime!(i64::from(NO_ACTOR)));
         let mut quantity = zero();
@@ -1077,13 +1246,30 @@ fn search(
             index::SupplySource::Index => 256usize * 9,
             index::SupplySource::State => 32usize * 9,
         }));
-        let candidate_faults = Shared::<[Atomic<u32>]>::new_slice(comptime!(match source {
-            index::SupplySource::Index => 256usize * CONTROL_WORDS,
-            index::SupplySource::State => 32usize * CONTROL_WORDS,
-        }));
+        let candidate_faults =
+            Shared::<[Atomic<u32>]>::new_slice(comptime!(match (parameters.market, source) {
+                (MarketFlag::Labor, index::SupplySource::Index) => 256usize * CONTROL_WORDS,
+                (MarketFlag::Labor, index::SupplySource::State) => 32usize * CONTROL_WORDS,
+                _ => 1usize,
+            }));
+        let fault_words = comptime!(match parameters.market {
+            MarketFlag::Labor => CONTROL_WORDS,
+            _ => 1usize,
+        });
         let mut visited = Shared::<u32>::new();
         let mut supply = Shared::<u32>::new();
         let mut y = max(cy, 1u32) - 1;
+        if comptime!(
+            source == index::SupplySource::Index
+                && matches!(parameters.market, MarketFlag::Input(_))
+        ) && parameters.traded_good() == Good::Bread as u32
+            && lt(
+                purchasing_power,
+                ticks(control[INPUT_MINIMUM_QUOTE_WORD].load(), 0),
+            )
+        {
+            y = side;
+        }
         while y <= min(cy + 1, side - 1) && considered < DISCOVERY_CANDIDATES {
             let mut x = max(cx, 1u32) - 1;
             while x <= min(cx + 1, side - 1) && considered < DISCOVERY_CANDIDATES {
@@ -1095,19 +1281,24 @@ fn search(
                 let stride = supplier_stride(actors, parameters, id, length);
                 let mut cursor = (parameters.settlement_rotation + id) % max(length, 1);
                 let mut j = begin;
-                let nearest = max(px, x * radius) - min(px, (x + 1) * radius - 1)
-                    + max(py, y * radius)
-                    - min(py, (y + 1) * radius - 1);
+                let nearest = if comptime!(whole_map) {
+                    u32::cast_from(0u32)
+                } else {
+                    max(px, x * radius) - min(px, (x + 1) * radius - 1) + max(py, y * radius)
+                        - min(py, (y + 1) * radius - 1)
+                };
                 if nearest > radius {
                     j = end;
                 }
                 while j < limit && considered < DISCOVERY_CANDIDATES {
                     let previous = j;
                     let mut skipped = 0u32;
-                    if comptime!(matches!(
-                        parameters.market,
-                        MarketFlag::Consumer | MarketFlag::Household
-                    )) && stride == 1
+                    if comptime!(
+                        matches!(
+                            parameters.market,
+                            MarketFlag::Consumer(_) | MarketFlag::Household
+                        ) || source == index::SupplySource::Index
+                    ) && stride == 1
                     {
                         let rotated = begin + cursor;
                         let block = rotated / index::BLOCK;
@@ -1130,6 +1321,39 @@ fn search(
                             unavailable,
                             min(min((block + 1) * index::BLOCK, end) - rotated, end - j),
                             0,
+                        );
+                    }
+                    if comptime!(
+                        source == index::SupplySource::Index
+                            && matches!(parameters.market, MarketFlag::Input(_))
+                    ) && stride == 1
+                        && chosen != NO_ACTOR
+                        && input_target.extract(HIGH_WORD) == 0
+                    {
+                        let rotated = begin + cursor;
+                        let block = rotated / index::BLOCK;
+                        let upper = ticks(index::maximum_available(scratch, config, block), 0);
+                        let mut inferior = lt(upper, quantity);
+                        if equal(upper, quantity) {
+                            let price_floor = index::partial_input_price_floor(
+                                scratch,
+                                config,
+                                block,
+                                px,
+                                py,
+                                buyer_access,
+                                maximum_delivery_cost,
+                            );
+                            inferior = price_floor >= best.extract(LOW_WORD);
+                        }
+                        inferior = inferior && lt(upper, input_target);
+                        skipped = max(
+                            skipped,
+                            select(
+                                inferior,
+                                min(min((block + 1) * index::BLOCK, end) - rotated, limit - j),
+                                0,
+                            ),
                         );
                     }
                     if parameters.traded_good() == Good::Bread as u32 && stride == 1 {
@@ -1177,7 +1401,11 @@ fn search(
                         );
                         let width = select(j == begin, initial_width, CUBE_DIM);
                         let lane = UNIT_POS as usize;
-                        let fault_start = lane * CONTROL_WORDS;
+                        let fault_start = lane
+                            * comptime!(match parameters.market {
+                                MarketFlag::Labor => CONTROL_WORDS,
+                                _ => 0usize,
+                            });
                         if comptime!(parameters.market == MarketFlag::Labor) {
                             candidate_faults[fault_start + crate::simulation::flags::FAULT_WORD]
                                 .store(0);
@@ -1191,25 +1419,64 @@ fn search(
                             let supply = index::Supply::for_search(
                                 state, actors, config, scratch, parameters, rotated, firm, source,
                             );
-                            let trip = distance(actors, id, firm);
                             let mut relevant = true;
-                            if comptime!(matches!(
-                                parameters.market,
-                                MarketFlag::Household | MarketFlag::Consumer
-                            )) {
-                                let quote = supply.quote;
-                                let days = minimum_delivery_days(config, buyer_access, firm, trip);
-                                let lower_score =
-                                    plus(ticks(quote, 0), times32(days, config.delivery_penalty))
-                                        .value;
-                                relevant = supply.offered
-                                    || (chosen == NO_ACTOR
-                                        && quote > 0
-                                        && lt(lower_score, empty_score));
+                            if comptime!(
+                                source == index::SupplySource::Index
+                                    && matches!(parameters.market, MarketFlag::Input(_))
+                            ) && chosen != NO_ACTOR
+                                && input_target.extract(HIGH_WORD) == 0
+                            {
+                                relevant = !(lt(supply.available, input_target)
+                                    && lt(supply.available, quantity));
+                            }
+                            let mut trip = 0u32;
+                            if relevant {
+                                trip = distance(actors, id, firm);
+                                if comptime!(matches!(
+                                    parameters.market,
+                                    MarketFlag::Household | MarketFlag::Consumer(_)
+                                )) {
+                                    let quote = supply.quote;
+                                    let days =
+                                        minimum_delivery_days(config, buyer_access, firm, trip);
+                                    let lower_score = plus(
+                                        ticks(quote, 0),
+                                        times32(days, config.delivery_penalty),
+                                    )
+                                    .value;
+                                    relevant = supply.offered
+                                        || (chosen == NO_ACTOR
+                                            && quote > 0
+                                            && lt(lower_score, empty_score));
+                                }
+                                if comptime!(
+                                    source == index::SupplySource::Index
+                                        && matches!(parameters.market, MarketFlag::Input(_))
+                                ) && chosen != NO_ACTOR
+                                    && input_target.extract(HIGH_WORD) == 0
+                                    && lt(supply.available, input_target)
+                                    && equal(supply.available, quantity)
+                                {
+                                    let days =
+                                        minimum_delivery_days(config, buyer_access, firm, trip);
+                                    let lower = plus(
+                                        ticks(supply.quote, 0),
+                                        times32(days, config.delivery_penalty),
+                                    )
+                                    .value;
+                                    let upper =
+                                        plus(ticks(supply.quote, 0), maximum_delivery_cost).value;
+                                    let price_floor = select(
+                                        upper.extract(HIGH_WORD) == 0,
+                                        lower.extract(LOW_WORD),
+                                        0,
+                                    );
+                                    relevant = price_floor < best.extract(LOW_WORD);
+                                }
                             }
                             if relevant {
                                 let offer = match comptime!(parameters.market) {
-                                    MarketFlag::Consumer => consumer_candidate(
+                                    MarketFlag::Consumer(_) => consumer_candidate(
                                         config,
                                         id,
                                         firm,
@@ -1223,7 +1490,7 @@ fn search(
                                         state,
                                         actors,
                                         config,
-                                        &candidate_faults[fault_start..fault_start + CONTROL_WORDS],
+                                        &candidate_faults[fault_start..fault_start + fault_words],
                                         parameters,
                                         id,
                                         firm,
@@ -1256,51 +1523,67 @@ fn search(
                                     comptime!(!matches!(parameters.market, MarketFlag::Input(_)))
                                         || score.extract(HIGH_WORD) == 0,
                                 );
-                            let prefix = parallel::scan_prefix(counted, comptime!(parameters.scan));
+                            let improving =
+                                eligible * u32::cast_from(chosen == NO_ACTOR || lt(score, best));
+                            let prefix = parallel::scan_prefix(
+                                counted | (improving << 16),
+                                comptime!(parameters.scan),
+                            );
                             let remaining = DISCOVERY_CANDIDATES - considered;
                             let included = u32::cast_from(
                                 UNIT_POS < width
                                     && j + UNIT_POS < limit
-                                    && prefix.inclusive - counted < remaining,
+                                    && (prefix.inclusive & 0xffff) - counted < remaining,
                             );
-                            seen_supply = seen_supply
-                                || parallel::reduce(
-                                    candidates[lane * 9 + 1] * included,
-                                    comptime!(Reduction::Sum),
-                                ) > 0;
-                            let winner = group_winner(CandidateRank {
-                                active: eligible * included,
-                                score,
-                            });
-                            let fallback = group_winner(CandidateRank {
-                                active: candidates[lane * 9 + 2] * included,
-                                score,
-                            });
-                            if winner != NO_ACTOR {
-                                let slot = winner as usize;
-                                let score =
-                                    ticks(candidates[slot * 9 + 5], candidates[slot * 9 + 6]);
-                                if lt(score, best) || chosen == NO_ACTOR {
+                            if comptime!(parameters.market == MarketFlag::Household) {
+                                seen_supply = seen_supply
+                                    || parallel::reduce(
+                                        candidates[lane * 9 + 1] * included,
+                                        comptime!(Reduction::Sum),
+                                    ) > 0;
+                            }
+                            if prefix.total >> 16 > 0 {
+                                let winner = group_winner(
+                                    CandidateRank {
+                                        active: improving * included,
+                                        score,
+                                    },
+                                    comptime!(parameters.scan),
+                                );
+                                if winner != NO_ACTOR {
+                                    let slot = winner as usize;
                                     chosen = candidates[slot * 9 + 8];
                                     quantity =
                                         ticks(candidates[slot * 9 + 3], candidates[slot * 9 + 4]);
                                     trip = candidates[slot * 9 + 7];
-                                    best = score;
+                                    best =
+                                        ticks(candidates[slot * 9 + 5], candidates[slot * 9 + 6]);
                                 }
                             }
-                            if fallback != NO_ACTOR {
-                                let slot = fallback as usize;
-                                let score =
-                                    ticks(candidates[slot * 9 + 5], candidates[slot * 9 + 6]);
-                                if lt(score, empty_score) {
-                                    empty_seller = candidates[slot * 9 + 8];
-                                    empty_quantity =
-                                        ticks(candidates[slot * 9 + 3], candidates[slot * 9 + 4]);
-                                    empty_trip = candidates[slot * 9 + 7];
-                                    empty_score = score;
+                            if chosen == NO_ACTOR {
+                                let fallback = group_winner(
+                                    CandidateRank {
+                                        active: candidates[lane * 9 + 2] * included,
+                                        score,
+                                    },
+                                    comptime!(parameters.scan),
+                                );
+                                if fallback != NO_ACTOR {
+                                    let slot = fallback as usize;
+                                    let score =
+                                        ticks(candidates[slot * 9 + 5], candidates[slot * 9 + 6]);
+                                    if lt(score, empty_score) {
+                                        empty_seller = candidates[slot * 9 + 8];
+                                        empty_quantity = ticks(
+                                            candidates[slot * 9 + 3],
+                                            candidates[slot * 9 + 4],
+                                        );
+                                        empty_trip = candidates[slot * 9 + 7];
+                                        empty_score = score;
+                                    }
                                 }
                             }
-                            considered += min(prefix.total, remaining);
+                            considered += min(prefix.total & 0xffff, remaining);
                         }
                         if comptime!(
                             source == index::SupplySource::State
@@ -1456,7 +1739,8 @@ fn search(
                 trip = empty_trip;
                 missing_supply = true;
             }
-            if comptime!(parameters.market == MarketFlag::Consumer) && chosen != NO_ACTOR {
+            if comptime!(matches!(parameters.market, MarketFlag::Consumer(_))) && chosen != NO_ACTOR
+            {
                 let supply =
                     index::Supply::new(state, actors, config, chosen, parameters.traded_good());
                 let affordable = minimum(wanted, divide(purchasing_power, max(supply.quote, 1)));
@@ -1487,6 +1771,7 @@ fn search(
             proposals[id as usize * ProposalLayout::WORDS + ProposalLayout::DISTANCE] = trip;
             if chosen != NO_ACTOR {
                 record_success(successes, parameters, id);
+                record_wide_order(control, parameters, quantity);
             }
         }
     }
@@ -1502,6 +1787,24 @@ pub(super) fn record_success(
     let masks = ceildiv(parameters.count, 32);
     successes[(position / 32) as usize].fetch_or(1u32 << (position % 32));
     successes[(masks + position / markets::COMPACTION_BLOCK) as usize].fetch_add(1);
+}
+
+#[cube]
+pub(super) fn record_wide_order(
+    control: &[Atomic<u32>],
+    parameters: &EconomyParameters,
+    quantity: Ticks,
+) {
+    if comptime!(
+        parameters.empty_orders == crate::simulation::parameters::EmptyOrderMode::FeedbackOnly
+    ) && (quantity.extract(HIGH_WORD) > 0 || equal(quantity, zero()))
+    {
+        control[markets::WIDE_ORDERS_WORD].fetch_or(select(
+            quantity.extract(HIGH_WORD) > 0,
+            1u32,
+            2u32,
+        ));
+    }
 }
 
 #[cube]
@@ -1529,17 +1832,20 @@ pub(super) fn compact(
             let position = (actor + count - parameters.settlement_rotation) % count;
             let block = position / markets::COMPACTION_BLOCK;
             let word = position / 32;
-            let mut slot = 0u32;
-            if block > 0 {
-                slot = successes[(masks + block - 1) as usize].load();
+            let kept = successes[word as usize].load() & (1u32 << (position % 32));
+            if kept != 0 {
+                let mut slot = 0u32;
+                if block > 0 {
+                    slot = successes[(masks + block - 1) as usize].load();
+                }
+                for preceding in block * (markets::COMPACTION_BLOCK / 32)..word {
+                    slot += successes[preceding as usize].load().count_ones();
+                }
+                let mask = (1u32 << (position % 32)) - 1;
+                slot += (successes[word as usize].load() & mask).count_ones();
+                scratch[slot as usize] = peer;
+                scratch[(count + slot) as usize] = actor;
             }
-            for preceding in block * (markets::COMPACTION_BLOCK / 32)..word {
-                slot += successes[preceding as usize].load().count_ones();
-            }
-            let mask = (1u32 << (position % 32)) - 1;
-            slot += (successes[word as usize].load() & mask).count_ones();
-            scratch[slot as usize] = peer;
-            scratch[(count + slot) as usize] = actor;
         }
     }
 }
@@ -1551,31 +1857,67 @@ struct CandidateRank {
 }
 
 #[cube]
-fn group_winner(rank: CandidateRank) -> u32 {
-    let mut scores = Shared::<[u64]>::new_slice(256usize);
-    let mut lanes = Shared::<[u32]>::new_slice(256usize);
-    let lane = UNIT_POS as usize;
-    let score = u64::cast_from(rank.score.extract(LOW_WORD))
-        | (u64::cast_from(rank.score.extract(HIGH_WORD)) << 32);
-    scores[lane] = select(rank.active > 0, score, u64::MAX);
-    lanes[lane] = select(rank.active > 0, UNIT_POS, NO_ACTOR);
-    sync_cube();
-    let mut stride = CUBE_DIM / 2;
-    while stride > 0 {
-        if UNIT_POS < stride {
-            let other = lane + stride as usize;
-            let preferred = scores[other] < scores[lane]
-                || (scores[other] == scores[lane] && lanes[other] < lanes[lane]);
-            if preferred {
-                scores[lane] = scores[other];
-                lanes[lane] = lanes[other];
+fn group_winner(rank: CandidateRank, #[comptime] mode: parallel::ScanMode) -> u32 {
+    let mut winner = u32::new(comptime!(i64::from(NO_ACTOR)));
+    if comptime!(mode == parallel::ScanMode::Plane) && PLANE_DIM == 32 {
+        let high = select(rank.active > 0, rank.score.extract(HIGH_WORD), u32::MAX);
+        let minimum_high = plane_min(high);
+        let low = select(
+            rank.active > 0 && high == minimum_high,
+            rank.score.extract(LOW_WORD),
+            u32::MAX,
+        );
+        let minimum_low = plane_min(low);
+        let lane = plane_min(select(
+            rank.active > 0 && high == minimum_high && low == minimum_low,
+            UNIT_POS,
+            NO_ACTOR,
+        ));
+        let mut scores = Shared::<[u64]>::new_slice(8usize);
+        let mut lanes = Shared::<[u32]>::new_slice(8usize);
+        let plane = UNIT_POS / 32;
+        if UNIT_POS_PLANE == 0 {
+            scores[plane as usize] =
+                u64::cast_from(minimum_low) | (u64::cast_from(minimum_high) << 32);
+            lanes[plane as usize] = lane;
+        }
+        sync_cube();
+        let mut best = u64::new(-1);
+        for plane in 0..ceildiv(CUBE_DIM, 32) {
+            let score = scores[plane as usize];
+            let lane = lanes[plane as usize];
+            if score < best || score == best && lane < winner {
+                best = score;
+                winner = lane;
             }
         }
         sync_cube();
-        stride /= 2;
+    } else {
+        let mut scores = Shared::<[u64]>::new_slice(256usize);
+        let mut lanes = Shared::<[u32]>::new_slice(256usize);
+        let lane = UNIT_POS as usize;
+        let score = u64::cast_from(rank.score.extract(LOW_WORD))
+            | (u64::cast_from(rank.score.extract(HIGH_WORD)) << 32);
+        scores[lane] = select(rank.active > 0, score, u64::MAX);
+        lanes[lane] = select(rank.active > 0, UNIT_POS, NO_ACTOR);
+        sync_cube();
+        let mut stride = CUBE_DIM / 2;
+        while stride > 0 {
+            if UNIT_POS < stride {
+                let other = lane + stride as usize;
+                let preferred = scores[other] < scores[lane]
+                    || (scores[other] == scores[lane] && lanes[other] < lanes[lane]);
+                if preferred {
+                    scores[lane] = scores[other];
+                    lanes[lane] = lanes[other];
+                }
+            }
+            sync_cube();
+            stride /= 2;
+        }
+        winner = lanes[0usize];
+        sync_cube();
     }
-    let winner = lanes[0usize];
-    sync_cube();
     winner
 }
 

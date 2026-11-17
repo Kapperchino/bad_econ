@@ -256,8 +256,11 @@ pub(crate) fn mobility(
     state: &mut [u32],
     actors: &[u32],
     config: &EconomyConfig,
+    spatial: &[u32],
+    quotes: &[u32],
     household: u32,
     day: u32,
+    #[comptime] quote_mode: crate::simulation::enterprise::EntryQuoteMode,
 ) {
     let needs_food = number(state, config, comptime!(Field::Shortage as u32), household) > 0
         && number(
@@ -276,8 +279,13 @@ pub(crate) fn mobility(
         household,
     ) > 0;
     let mut target = 0u32;
+    if comptime!(config.economy == crate::domain::Economy::Industrial) && settled && alive {
+        target = crate::simulation::economy::mobility::work_target(
+            state, actors, config, spatial, quotes, household, day, quote_mode,
+        );
+    }
     let mut nearest = u32::new(comptime!(i64::from(u32::MAX)));
-    if needs_food && idle && landless && settled && alive {
+    if target == 0 && needs_food && idle && landless && settled && alive {
         for sample in 0..16u32 {
             let candidate = (household + day * 17 + sample * 31) % config.actors;
             let accessible = household_production::offers(
@@ -452,7 +460,7 @@ fn method_output(
     let output = max(number(state, config, recipe + 2, firm), 1);
     let desired = proposed_starts(
         KernelStarts {
-            coverage: config.coverage,
+            coverage: u32::cast_from(config.coverage),
             demand: value(state, config, comptime!(Field::Demand as u32), firm),
             finished: value(state, config, kind(actors, firm).output(), firm),
             pipeline: value(state, config, comptime!(Field::Pipeline as u32), firm),
@@ -574,6 +582,7 @@ pub(super) fn available_method(
 #[cube]
 pub(super) fn operating_plan(
     state: &mut [u32],
+    actors: &[u32],
     config: &EconomyConfig,
     control: &[Atomic<u32>],
     firm: u32,
@@ -632,23 +641,38 @@ pub(super) fn operating_plan(
             divide(add_checked(control, demand, ticks(output - 1, 0)), output),
             ticks(1, 0),
         );
-        let replacement = multiply(
-            control,
-            input_cost,
-            select(
-                distributor,
-                number(state, config, comptime!(Field::StockCoverage as u32), firm),
-                config.coverage,
-            ) + config.ring,
+        let coverage = select(
+            distributor,
+            number(state, config, comptime!(Field::StockCoverage as u32), firm),
+            config.coverage,
+        ) + config.ring;
+        let replacement = multiply(control, input_cost, coverage);
+        let payroll_days = select(
+            farming::farm(state, config, firm, kind(actors, firm).output()),
+            max(coverage, farming::growing_days(config)),
+            coverage,
         );
         let reserve = multiply(
             control,
-            add_checked(control, ticks(labor, 0), replacement),
+            add_checked(control, times32(labor, payroll_days), replacement),
             packets.extract(LOW_WORD),
+        );
+        let construction = times32(
+            number(
+                state,
+                config,
+                comptime!(Field::ConstructionRemaining as u32),
+                firm,
+            ),
+            select(
+                comptime!(config.property_mode == Feature::Enabled),
+                comptime!(Good::Construction.initial_price()),
+                number(state, config, comptime!(Field::Wage as u32), firm),
+            ),
         );
         let reserve = add_checked(
             control,
-            reserve,
+            add_checked(control, reserve, construction),
             rent::obligation(state, config, control, firm),
         );
         set(
@@ -751,7 +775,12 @@ pub(super) fn purchasing_power(
 }
 
 #[cube]
-pub(super) fn household_quote(state: &mut [u32], config: &EconomyConfig, household: u32) {
+pub(super) fn household_quote(
+    state: &mut [u32],
+    config: &EconomyConfig,
+    control: &[Atomic<u32>],
+    household: u32,
+) {
     let reserve = ticks(
         number(state, config, comptime!(Field::FoodNeed as u32), household)
             * (config.coverage + config.ring),
@@ -762,22 +791,16 @@ pub(super) fn household_quote(state: &mut [u32], config: &EconomyConfig, househo
         reserve,
     );
     let sales = value(state, config, comptime!(Field::Sales as u32), household);
-    let quote = number(state, config, comptime!(Field::Price as u32), household);
-    let adjustment = max(quote / 20, 1);
-    let mut next = quote;
-    if lt(excess, sales) {
-        next = min(quote + adjustment, config.maximum_price);
-    }
-    if lt(sales, excess) {
-        next = max(max(quote, adjustment) - adjustment, config.minimum_price);
-    }
-    set32(
-        state,
-        config,
-        comptime!(Field::Price as u32),
-        household,
-        next,
+    let multiplier = select(
+        lt(excess, sales),
+        PRICE_SCALE + PRICE_SCALE / 20,
+        select(
+            lt(sales, excess),
+            PRICE_SCALE - PRICE_SCALE / 20,
+            PRICE_SCALE,
+        ),
     );
+    pricing::adjust(state, config, control, household, multiplier);
 }
 
 #[cube]

@@ -47,7 +47,7 @@ pub(super) fn search(
             || searches[(2 * config.actors + id) as usize] != 0;
         if active {
             let cells = config.spatial_side * config.spatial_side;
-            let indexed = comptime!(parameters.market == MarketFlag::Consumer)
+            let indexed = comptime!(matches!(parameters.market, MarketFlag::Consumer(_)))
                 && spatial[cells as usize] <= empty::LIMIT;
             let wanted = ticks(
                 searches[(config.actors + id) as usize],
@@ -66,8 +66,24 @@ pub(super) fn search(
             let px = actors[ActorLayout::X * (actors.len() / ActorLayout::WORDS) + id as usize];
             let py = actors[ActorLayout::Y * (actors.len() / ActorLayout::WORDS) + id as usize];
             let radius = config.search_radius;
-            let cx = px / radius;
-            let cy = py / radius;
+            let whole_map =
+                comptime!(config.spatial_side == 1 && config.map_size <= config.search_radius);
+            let maximum_delivery_cost = times32(
+                max(ceildiv(radius, config.shipment_speed), 1),
+                config.delivery_penalty,
+            );
+            let scaled_speed = times32(config.shipment_speed, config.railway.speed_multiplier);
+            let maximum_rail_days = ceildiv(u32::MAX, max(scaled_speed.extract(LOW_WORD), 1));
+            let cx = if comptime!(whole_map) {
+                u32::cast_from(0u32)
+            } else {
+                px / radius
+            };
+            let cy = if comptime!(whole_map) {
+                u32::cast_from(0u32)
+            } else {
+                py / radius
+            };
             let side = config.spatial_side;
             let mut chosen = u32::new(comptime!(i64::from(NO_ACTOR)));
             let mut trip = 0u32;
@@ -117,9 +133,12 @@ pub(super) fn search(
                             + offset) as usize];
                     }
                     let mut j = begin;
-                    let nearest = max(px, x * radius) - min(px, (x + 1) * radius - 1)
-                        + max(py, y * radius)
-                        - min(py, (y + 1) * radius - 1);
+                    let nearest = if comptime!(whole_map) {
+                        u32::cast_from(0u32)
+                    } else {
+                        max(px, x * radius) - min(px, (x + 1) * radius - 1) + max(py, y * radius)
+                            - min(py, (y + 1) * radius - 1)
+                    };
                     if nearest > radius {
                         j = end;
                     }
@@ -226,6 +245,35 @@ pub(super) fn search(
                                     relevant =
                                         empty_seller == NO_ACTOR || lower_score < empty_score;
                                 }
+                                let counted = u32::cast_from(relevant && supply.offered);
+                                if relevant && supply.offered && chosen != NO_ACTOR {
+                                    let maximum_score =
+                                        plus(ticks(supply.quote, 0), maximum_delivery_cost).value;
+                                    if maximum_score.extract(HIGH_WORD) == 0 {
+                                        let mut days = minimum_delivery_days(
+                                            config,
+                                            buyer_access,
+                                            firm,
+                                            distance,
+                                        );
+                                        if comptime!(
+                                            config.railway.routes_enabled == Feature::Enabled
+                                        ) && config.railway.nodes > 0
+                                        {
+                                            let access_days = ceildiv(
+                                                buyer_access
+                                                    + config.railway.access[firm as usize * 2 + 1],
+                                                config.shipment_speed,
+                                            );
+                                            let bounded = scaled_speed.extract(HIGH_WORD) == 0
+                                                && scaled_speed.extract(LOW_WORD) > 0
+                                                && access_days <= u32::MAX - maximum_rail_days;
+                                            days = select(bounded, days, 0);
+                                        }
+                                        let floor = supply.quote + days * config.delivery_penalty;
+                                        relevant = floor < best;
+                                    }
+                                }
                                 if relevant {
                                     let days = railway::delivery_days(
                                         config,
@@ -249,8 +297,8 @@ pub(super) fn search(
                                         trip = distance;
                                         best = score;
                                     }
-                                    considered += u32::cast_from(supply.offered);
                                 }
+                                considered += counted;
                                 offset += 1;
                             }
                             j += width;
@@ -272,7 +320,11 @@ pub(super) fn search(
                     actor: u32::new(comptime!(i64::from(NO_ACTOR))),
                     trip: 0u32,
                 };
-                if stocked == 0 && cells == 1 && spatial[cells as usize] <= 256 {
+                let cacheable = cells == 1
+                    && (stocked == 0
+                        || parameters.traded_good() != comptime!(Good::Bread as u32)
+                            && empty::compacted(config, spatial[cells as usize]));
+                if cacheable {
                     let cached = empty::cached_query(
                         actors,
                         config,
@@ -345,6 +397,7 @@ pub(super) fn search(
             proposals[id as usize * ProposalLayout::WORDS + ProposalLayout::DISTANCE] = trip;
             if chosen != NO_ACTOR {
                 record_success(successes, parameters, id);
+                record_wide_order(control, parameters, quantity);
             }
         }
     }

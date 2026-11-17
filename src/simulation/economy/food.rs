@@ -25,6 +25,105 @@ pub(super) struct HomeFoodWork {
     pub minutes: u32,
 }
 
+#[derive(CubeType)]
+pub(in crate::simulation) struct BreadDemand {
+    pub gross_income: Ticks,
+    pub expected_income: Ticks,
+    pub savings: Ticks,
+    pub minimum: u32,
+    pub members: u32,
+    pub price: u32,
+}
+
+#[cube]
+pub(super) fn minimum_daily(state: &mut [u32], config: &EconomyConfig, household: u32) -> u32 {
+    let minimum = number(
+        state,
+        config,
+        comptime!(Field::NutritionNeed as u32),
+        household,
+    );
+    select(
+        minimum > 0,
+        minimum,
+        number(state, config, comptime!(Field::FoodNeed as u32), household),
+    )
+}
+
+#[cube]
+pub(super) fn purchase_daily(
+    state: &mut [u32],
+    config: &EconomyConfig,
+    parameters: &EconomyParameters,
+    household: u32,
+) -> u32 {
+    let desired = number(state, config, comptime!(Field::FoodNeed as u32), household);
+    let minimum = minimum_daily(state, config, household);
+    select(
+        comptime!(config.food_income == crate::domain::food::FoodIncome::PurchasingPower)
+            && parameters.matching_round + 1 < MATCHING_ROUNDS as u32,
+        select(minimum > 0, minimum, desired),
+        desired,
+    )
+}
+
+#[cube]
+pub(super) fn consumption_reserve(
+    state: &mut [u32],
+    config: &EconomyConfig,
+    control: &[Atomic<u32>],
+    household: u32,
+    day: u32,
+) -> Ticks {
+    let ration = number(
+        state,
+        config,
+        comptime!(Field::NutritionNeed as u32),
+        household,
+    );
+    let mut reserve = times32(ration, config.coverage + config.ring - 2);
+    if comptime!(config.food_income == crate::domain::food::FoodIncome::PurchasingPower)
+        && number(state, config, comptime!(Field::LandPlots as u32), household) > 0
+    {
+        let days = 364 - (day % 365 + 365 - config.home.harvest_start) % 365;
+        let requirement = times32(ration, days);
+        let grain = minimum(
+            value(state, config, comptime!(Field::Grain as u32), household),
+            requirement,
+        );
+        let milling = Conversion::milling(config).process(
+            control,
+            grain,
+            number(
+                state,
+                config,
+                comptime!(Field::MillingRemainder as u32),
+                household,
+            ),
+        );
+        let flour = add_checked(
+            control,
+            milling.quantity,
+            minimum(
+                value(state, config, comptime!(Field::Flour as u32), household),
+                requirement,
+            ),
+        );
+        let baking = Conversion::baking(config).process(
+            control,
+            flour,
+            number(
+                state,
+                config,
+                comptime!(Field::BakingRemainder as u32),
+                household,
+            ),
+        );
+        reserve = maximum(reserve, positive(requirement, baking.quantity));
+    }
+    reserve
+}
+
 #[cube]
 pub(super) fn household_work(
     state: &mut [u32],
@@ -104,12 +203,16 @@ impl Conversion {
 }
 
 #[cube]
-pub(in crate::simulation) fn bread_target(
-    config: &EconomyConfig,
-    gross: Ticks,
-    minimum: u32,
-    members: u32,
-) -> u32 {
+pub(in crate::simulation) fn bread_target(config: &EconomyConfig, request: BreadDemand) -> u32 {
+    let gross = select(
+        comptime!(config.food_income == crate::domain::food::FoodIncome::PurchasingPower),
+        plus(
+            divide(request.expected_income, POLICY_SCALE),
+            divide(request.savings, 90),
+        )
+        .value,
+        request.gross_income,
+    );
     let salary =
         (u64::cast_from(gross.extract(HIGH_WORD)) << 32) | u64::cast_from(gross.extract(LOW_WORD));
     let tier = select(
@@ -126,9 +229,22 @@ pub(in crate::simulation) fn bread_target(
         1 => 2u32,
         _ => 10u32,
     };
+    let nominal = request.members * config.household_need * portions;
+    let affordable = (salary / 5) * 4 / u64::cast_from(max(request.price, 1));
+    let purchasing = max(
+        request.minimum,
+        min(
+            affordable,
+            u64::cast_from(request.members * config.household_need * 10),
+        ) as u32,
+    );
     select(
         config.food_medium_salary > 0,
-        members * config.household_need * portions,
-        minimum,
+        select(
+            comptime!(config.food_income == crate::domain::food::FoodIncome::PurchasingPower),
+            purchasing,
+            nominal,
+        ),
+        request.minimum,
     )
 }

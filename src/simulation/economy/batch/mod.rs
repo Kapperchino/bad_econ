@@ -65,6 +65,19 @@ struct UnitDecision {
     overflow: bool,
 }
 
+#[repr(u32)]
+enum UnitSettlementState {
+    Funded,
+    Exhausted,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+enum UnitSettlementExecution {
+    #[cfg_attr(not(test), expect(dead_code))]
+    Complete,
+    Prefix,
+}
+
 #[cube]
 impl UnitBalances {
     fn new(
@@ -159,14 +172,18 @@ pub(in crate::simulation) struct SettlementInput {
     pub parameters: EconomyParameters,
 }
 
+#[cfg(test)]
 pub(in crate::simulation) struct ConsumerSettlement;
+#[cfg(test)]
 pub(in crate::simulation) struct SettleUnits;
 
+#[cfg(test)]
 impl System for ConsumerSettlement {
     type Input = SettlementInput;
     type Passes = gpu_passes![SettleUnits];
 }
 
+#[cfg(test)]
 #[cube]
 impl GpuPass<SettlementInput> for SettleUnits {
     type Output = ();
@@ -180,8 +197,90 @@ impl GpuPass<SettlementInput> for SettleUnits {
             &mut input.scratch,
             &input.control,
             &input.parameters,
+            comptime!(UnitSettlementExecution::Complete),
         );
     }
+}
+
+struct ConsumerPrefix;
+struct SettlePrefix;
+struct ConsumerTail;
+struct SettleTail;
+
+impl System for ConsumerPrefix {
+    type Input = SettlementInput;
+    type Passes = gpu_passes![SettlePrefix];
+}
+
+impl System for ConsumerTail {
+    type Input = SettlementInput;
+    type Passes = gpu_passes![SettleTail];
+}
+
+#[cube]
+impl GpuPass<SettlementInput> for SettlePrefix {
+    type Output = ();
+
+    fn execute(mut input: SettlementInput) {
+        input.parameters.refresh(&mut input.config);
+        settle_units(
+            &mut input.state,
+            &input.actors,
+            &input.config,
+            &mut input.scratch,
+            &input.control,
+            &input.parameters,
+            comptime!(UnitSettlementExecution::Prefix),
+        );
+    }
+}
+
+#[cube]
+impl GpuPass<SettlementInput> for SettleTail {
+    type Output = ();
+
+    fn execute(mut input: SettlementInput) {
+        input.parameters.refresh(&mut input.config);
+        settle_tail(
+            &mut input.state,
+            &input.config,
+            &mut input.scratch,
+            &input.control,
+            &input.parameters,
+        );
+    }
+}
+
+pub(in crate::simulation) fn settle_consumers(
+    device: &crate::simulation::Device,
+    state: &burn_wgpu::CubeTensor,
+    actors: &burn_wgpu::CubeTensor,
+    config: &crate::simulation::configuration::Configuration,
+    scratch: &burn_wgpu::CubeTensor,
+    control: &burn_wgpu::CubeTensor,
+    dispatches: &burn_wgpu::CubeTensor,
+    parameters: &crate::simulation::parameters::EconomyParameters,
+) {
+    let input = || SettlementInputLaunch {
+        state: state.clone().into_buffer_arg(),
+        actors: actors.clone().into_buffer_arg(),
+        config: config.launch(),
+        scratch: scratch.clone().into_buffer_arg(),
+        control: control.clone().into_buffer_arg(),
+        parameters: parameters.launch(),
+    };
+    ConsumerPrefix::launch(
+        device,
+        markets::dispatch(dispatches, markets::QUEUE_DISPATCH),
+        CubeDim::new_1d(device.workgroup),
+        input(),
+    );
+    ConsumerTail::launch(
+        device,
+        markets::dispatch(dispatches, markets::SORT_DISPATCH),
+        CubeDim::new_1d(device.workgroup),
+        input(),
+    );
 }
 
 #[cube]
@@ -192,6 +291,7 @@ fn settle_units(
     scratch: &mut [u32],
     control: &[Atomic<u32>],
     parameters: &EconomyParameters,
+    #[comptime] execution: UnitSettlementExecution,
 ) {
     let job = CUBE_POS as u32;
     if job < control[RANGE_SLOTS_WORD].load() && control[LATCH_WORD].load() == 0 {
@@ -203,34 +303,106 @@ fn settle_units(
         let good = parameters.traded_good();
         let mut balances = UnitBalances::new(state, actors, config, peer, good, length);
         let mut cursor = start;
+        let mut tail_cursor = end;
         let mut faulted = 0u32;
         while cursor < end {
-            let index = cursor + UNIT_POS;
-            let mut actor = 0u32;
-            let mut prior = KernelEventStatus::new(comptime!(EventStatus::Inactive));
-            if index < end {
-                actor = scratch[(parameters.sort_source + count + index) as usize];
-                prior.replace(KernelEventStatus::load(scratch, 4 * count + actor));
+            let settlement = select(
+                equal(balances.capacity(), zero()),
+                comptime!(UnitSettlementState::Exhausted as u32),
+                comptime!(UnitSettlementState::Funded as u32),
+            );
+            match settlement {
+                0 => {
+                    let index = cursor + UNIT_POS;
+                    let mut actor = 0u32;
+                    let mut prior = KernelEventStatus::new(comptime!(EventStatus::Inactive));
+                    if index < end {
+                        actor = scratch[(parameters.sort_source + count + index) as usize];
+                        prior.replace(KernelEventStatus::load(scratch, 4 * count + actor));
+                    }
+                    let eligible = u32::cast_from(prior.contains(comptime!(EventStatus::Accepted)));
+                    let prefix = parallel::scan_prefix(eligible, comptime!(parameters.scan));
+                    if index < end {
+                        let decision = balances.decision(prior, prefix.inclusive - eligible);
+                        faulted |= u32::cast_from(decision.overflow);
+                        decision.status.store(scratch, 4 * count + actor);
+                    }
+                    balances.apply(prefix.total);
+                    sync_cube();
+                    cursor += CUBE_DIM;
+                }
+                _ => {
+                    match comptime!(execution) {
+                        UnitSettlementExecution::Complete => {
+                            let mut index = cursor + UNIT_POS;
+                            while index < end {
+                                let actor =
+                                    scratch[(parameters.sort_source + count + index) as usize];
+                                let prior = KernelEventStatus::load(scratch, 4 * count + actor);
+                                let decision = balances.decision(prior, 0);
+                                faulted |= u32::cast_from(decision.overflow);
+                                decision.status.store(scratch, 4 * count + actor);
+                                index += CUBE_DIM;
+                            }
+                        }
+                        UnitSettlementExecution::Prefix => tail_cursor = cursor,
+                    }
+                    cursor = end;
+                }
             }
-            let eligible = u32::cast_from(prior.contains(comptime!(EventStatus::Accepted)));
-            let prefix = parallel::scan_prefix(eligible, comptime!(parameters.scan));
-            if index < end {
-                let decision = balances.decision(prior, prefix.inclusive - eligible);
-                faulted |= u32::cast_from(decision.overflow);
-                decision.status.store(scratch, 4 * count + actor);
-            }
-            balances.apply(prefix.total);
-            sync_cube();
-            cursor += CUBE_DIM;
         }
+        sync_cube();
         let faults = parallel::scan_prefix(faulted, comptime!(parameters.scan));
         if UNIT_POS == 0 && faults.total > 0 {
             KernelFaults::new(comptime!(FaultFlags::ARITHMETIC_OVERFLOW)).record(control);
         }
         if UNIT_POS == 0 {
+            if comptime!(execution == UnitSettlementExecution::Prefix) {
+                scratch[(8 * count + peer) as usize] = tail_cursor;
+            }
             balances.store(state, config, peer, good);
             control[PROGRESS_WORD].fetch_max(length);
             control[COMPLETED_WORD].fetch_add(length);
+        }
+    }
+}
+
+#[cube]
+fn settle_tail(
+    state: &mut [u32],
+    config: &EconomyConfig,
+    scratch: &mut [u32],
+    control: &[Atomic<u32>],
+    parameters: &EconomyParameters,
+) {
+    let index = ABSOLUTE_POS as u32;
+    if index < markets::active(control, parameters) && control[LATCH_WORD].load() == 0 {
+        let count = parameters.count;
+        let peer = scratch[(parameters.sort_source + index) as usize];
+        let cursor = scratch[(8 * count + peer) as usize];
+        if index >= cursor {
+            let actor = scratch[(parameters.sort_source + count + index) as usize];
+            let prior = KernelEventStatus::load(scratch, 4 * count + actor);
+            let cash = plus(
+                value(state, config, comptime!(Field::Cash as u32), peer),
+                ticks(
+                    number(state, config, comptime!(Field::Price as u32), peer),
+                    0,
+                ),
+            );
+            let sales = plus(
+                value(state, config, comptime!(Field::Sales as u32), peer),
+                ticks(1, 0),
+            );
+            let overflow = !cash.faults.is_empty() || !sales.faults.is_empty();
+            let mut status = KernelEventStatus::new(comptime!(EventStatus::Rejected));
+            if overflow || prior.contains(comptime!(EventStatus::Faulted)) {
+                status.set(comptime!(EventStatus::Faulted));
+            }
+            status.store(scratch, 4 * count + actor);
+            if overflow {
+                KernelFaults::new(comptime!(FaultFlags::ARITHMETIC_OVERFLOW)).record(control);
+            }
         }
     }
 }
@@ -271,6 +443,122 @@ mod tests {
         quote: u32,
         length: usize,
         prior: PriorPattern,
+    }
+
+    #[test]
+    fn parallel_large_consumer_tails_preserve_retail_reserves_and_overflow_statuses_on_gpu()
+    -> Result<()> {
+        struct TailCase {
+            cash: u64,
+            stock: u64,
+            sales: u64,
+            quote: u32,
+            retail_open: u64,
+        }
+        let households = 65_537;
+        let scenario = Scenario::industrial(households, 42, Experiment::Concentrated)?;
+        let initial = scenario.initial()?;
+        let count = initial.actors.len();
+        let peer = households as usize;
+        let length = households as usize;
+        let device = crate::simulation::tests::device(64)?;
+        let actual = Simulation::new(scenario.clone(), device.clone())?;
+        let expected = Simulation::new(scenario.clone(), device.clone())?;
+        let mut scratch = vec![0; actual.scratch.meta.num_elements()];
+        for actor in 0..length {
+            scratch[actor] = peer as u32;
+            scratch[count + actor] = actor as u32;
+            let status = match actor % 7 {
+                0 => EventStatus::Rejected,
+                1 => EventStatus::Faulted,
+                _ => EventStatus::Accepted,
+            };
+            scratch[4 * count + actor] = enumflags2::BitFlags::from_flag(status).bits();
+        }
+        scratch[5 * count] = 0;
+        scratch[6 * count] = length as u32;
+        let mut control = vec![0; actual.control.meta.num_elements()];
+        control[CONSTRUCTED_EVENTS_WORD] = length as u32;
+        control[RANGE_SLOTS_WORD] = 1;
+        for case in [
+            TailCase {
+                cash: 0,
+                stock: 400,
+                sales: 1,
+                quote: 3,
+                retail_open: 3,
+            },
+            TailCase {
+                cash: u64::MAX - 3,
+                stock: 2,
+                sales: 0,
+                quote: 3,
+                retail_open: length as u64,
+            },
+        ] {
+            let mut state = initial.clone();
+            for (field, amount) in [
+                (Field::Cash, case.cash),
+                (Field::Tools, case.stock),
+                (Field::Sales, case.sales),
+                (Field::Price, u64::from(case.quote)),
+                (Field::EnterpriseModel, 1),
+                (Field::RetailOpen, case.retail_open),
+            ] {
+                state.set(field, peer, amount);
+            }
+            let padded = crate::simulation::tensor::state_values(
+                &state.values,
+                count,
+                actual.config.state_stride as usize,
+            );
+            let words = encode(&padded);
+            for simulation in [&actual, &expected] {
+                device.write(&simulation.state, bytemuck::cast_slice(&words));
+                device.write(&simulation.scratch, &scratch);
+                device.write(&simulation.control, &control);
+            }
+            let parameters = actual.parameters(
+                Phase::ProvisionPurchase,
+                Market::Consumer(Good::Tools),
+                0,
+                count,
+            )?;
+            ConsumerSettlement::launch(
+                &device,
+                CubeCount::Static(1, 1, 1),
+                CubeDim::new_1d(64),
+                SettlementInputLaunch {
+                    state: expected.state.clone().into_buffer_arg(),
+                    actors: expected.actors.clone().into_buffer_arg(),
+                    config: expected.config.launch(),
+                    scratch: expected.scratch.clone().into_buffer_arg(),
+                    control: expected.control.clone().into_buffer_arg(),
+                    parameters: parameters.launch(),
+                },
+            );
+            markets::prepare_dispatch(&device, &actual.control, &actual.searches.dispatches, count);
+            settle_consumers(
+                &device,
+                &actual.state,
+                &actual.actors,
+                &actual.config,
+                &actual.scratch,
+                &actual.control,
+                &actual.searches.dispatches,
+                &parameters,
+            );
+            assert_eq!(device.read(&actual.state)?, device.read(&expected.state)?);
+            assert_eq!(
+                device.read(&actual.control)?,
+                device.read(&expected.control)?
+            );
+            assert_eq!(
+                device.read_range(&actual.scratch, 4 * count, count)?,
+                device.read_range(&expected.scratch, 4 * count, count)?
+            );
+        }
+        Ok(())
     }
 
     #[test]
@@ -384,10 +672,35 @@ mod tests {
                 length: 65,
                 prior: PriorPattern::Accepted,
             },
+            SettlementCase {
+                cash: 0,
+                stock: 1,
+                sales: 0,
+                quote: 3,
+                length: 513,
+                prior: PriorPattern::Mixed,
+            },
+            SettlementCase {
+                cash: u64::MAX,
+                stock: 513,
+                sales: 0,
+                quote: 3,
+                length: 513,
+                prior: PriorPattern::Mixed,
+            },
+            SettlementCase {
+                cash: 0,
+                stock: 513,
+                sales: u64::MAX,
+                quote: 0,
+                length: 513,
+                prior: PriorPattern::Mixed,
+            },
         ];
         let workgroup = 64;
         let device = crate::simulation::tests::device(workgroup)?;
         let actual = Simulation::new(scenario.clone(), device.clone())?;
+        let parallel = Simulation::new(scenario.clone(), device.clone())?;
         let mut expected = Simulation::new(scenario.clone(), device.clone())?;
         expected.market_execution = MarketExecution::Original;
         for mode in [parallel::ScanMode::Shared, parallel::ScanMode::new(&device)] {
@@ -414,7 +727,7 @@ mod tests {
                 let mut control = vec![0; actual.control.meta.num_elements()];
                 control[CONSTRUCTED_EVENTS_WORD] = case.length as u32;
                 control[RANGE_SLOTS_WORD] = 1;
-                for simulation in [&actual, &expected] {
+                for simulation in [&actual, &expected, &parallel] {
                     device.write(&simulation.state, bytemuck::cast_slice(&words));
                     device.write(&simulation.proposals, bytemuck::cast_slice(&proposals));
                     device.write(&simulation.scratch, bytemuck::cast_slice(&scratch));
@@ -455,6 +768,38 @@ mod tests {
                         control: actual.control.clone().into_buffer_arg(),
                         parameters: parameters.launch(),
                     },
+                );
+                markets::prepare_dispatch(
+                    &device,
+                    &parallel.control,
+                    &parallel.searches.dispatches,
+                    count,
+                );
+                settle_consumers(
+                    &device,
+                    &parallel.state,
+                    &parallel.actors,
+                    &parallel.config,
+                    &parallel.scratch,
+                    &parallel.control,
+                    &parallel.searches.dispatches,
+                    &parameters,
+                );
+                assert_eq!(
+                    device.read(&parallel.state)?,
+                    device.read(&expected.state)?,
+                    "parallel state case {case_index}"
+                );
+                assert_eq!(
+                    device.read(&parallel.control)?,
+                    device.read(&expected.control)?,
+                    "parallel counters case {case_index}"
+                );
+                let parallel_statuses = device.read_range(&parallel.scratch, 4 * count, count)?;
+                let expected_statuses = device.read_range(&expected.scratch, 4 * count, count)?;
+                assert_eq!(
+                    parallel_statuses, expected_statuses,
+                    "parallel statuses case {case_index}"
                 );
                 for (name, actual, expected) in [
                     ("state", &actual.state, &expected.state),

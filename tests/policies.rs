@@ -196,14 +196,22 @@ fn proposal_and_decision_kernels_match_independent_policy_formulas() -> Result<(
             let excess = u64::try_from(
                 u128::from(before.get(Field::inventory(good), firm)).saturating_sub(target),
             )?;
-            let price = arithmetic::price(
-                before.get(Field::Price, firm),
-                before.get(Field::Unfilled, firm),
-                excess,
-                demand,
-                u64::from(scenario.config().minimum_price),
-                u64::from(scenario.config().maximum_price),
-            )?;
+            let scale = 1_000_000u128;
+            let previous = u128::from(before.get(Field::PriceQuote, firm));
+            let quote = u128::from(before.get(Field::Price, firm));
+            let precise = match (previous + scale / 2) / scale == quote {
+                true => previous,
+                false => quote * scale,
+            };
+            let imbalance = (i128::from(before.get(Field::Unfilled, firm)) - i128::from(excess))
+                * 32
+                / i128::from(demand.max(1));
+            let multiplier = arithmetic::PRICE_TABLE[(32 + imbalance.clamp(-32, 32)) as usize];
+            let precise = (precise * u128::from(multiplier) / scale).clamp(
+                u128::from(scenario.config().minimum_price) * scale,
+                u128::from(scenario.config().maximum_price) * scale,
+            );
+            let price = u64::try_from((precise + scale / 2) / scale)?;
             let increment = u64::from(scenario.config().behavior.wage_increment);
             let offered = match before.get(Field::Slots, firm) {
                 0 => before
@@ -217,6 +225,7 @@ fn proposal_and_decision_kernels_match_independent_policy_formulas() -> Result<(
                 / before.get(Field::Plan, firm).max(1);
             assert_eq!(after.get(Field::Demand, firm), demand);
             assert_eq!(after.get(Field::Price, firm), price);
+            assert_eq!(u128::from(after.get(Field::PriceQuote, firm)), precise);
             assert_eq!(
                 after.get(Field::Wage, firm),
                 offered.min(funded).clamp(1, 10_000)

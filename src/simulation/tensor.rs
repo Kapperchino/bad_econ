@@ -12,7 +12,55 @@ use cubek::{
     std::InputBinding,
 };
 
-const SNAPSHOT_PARTS: usize = 4;
+pub(super) const SNAPSHOT_PARTS: usize = 4;
+pub(super) const SNAPSHOT_BLOCK_WORDS: usize = SNAPSHOT_PARTS * 32 * 4;
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+pub(super) enum RingMaskState {
+    Empty,
+    Unknown,
+}
+
+pub(super) fn reset_ring_mask(device: &Device, mask: &CubeTensor, state: RingMaskState) {
+    RingMaskReset::launch(
+        device,
+        device.count(mask.meta.num_elements()),
+        CubeDim::new_1d(device.workgroup),
+        RingMaskInputLaunch {
+            mask: mask.clone().into_buffer_arg(),
+            state,
+        },
+    );
+}
+
+#[derive(CubeType, CubeLaunch)]
+struct RingMaskInput {
+    mask: Box<[Atomic<u32>]>,
+    #[cube(comptime)]
+    state: RingMaskState,
+}
+
+struct RingMaskReset;
+struct ResetRingMask;
+
+impl System for RingMaskReset {
+    type Input = RingMaskInput;
+    type Passes = gpu_passes![ResetRingMask];
+}
+
+#[cube]
+impl GpuPass<RingMaskInput> for ResetRingMask {
+    type Output = ();
+
+    fn execute(input: RingMaskInput) {
+        if ABSOLUTE_POS < input.mask.len() {
+            input.mask[ABSOLUTE_POS].store(comptime!(match input.state {
+                RingMaskState::Empty => 0,
+                RingMaskState::Unknown => 1,
+            }));
+        }
+    }
+}
 
 pub(super) fn state_values(
     values: &[u64],
@@ -156,7 +204,10 @@ pub(super) fn copy_contiguous(device: &Device, source: &CubeTensor, target: &Cub
 #[derive(Clone)]
 pub(super) enum SnapshotCopy {
     Full,
-    Sparse { nonzero: CubeTensor },
+    Sparse {
+        nonzero: CubeTensor,
+        current: CubeTensor,
+    },
 }
 
 impl SnapshotCopy {
@@ -171,29 +222,77 @@ impl SnapshotCopy {
             && properties.hardware.plane_size_min >= 32
         {
             true => Self::Sparse {
-                nonzero: device.dedicated_tensor(&vec![1; words.div_ceil(SNAPSHOT_PARTS * 32 * 4)]),
+                nonzero: device.dedicated_tensor(&vec![1; words.div_ceil(SNAPSHOT_BLOCK_WORDS)]),
+                current: device.dedicated_tensor(&vec![1; words.div_ceil(SNAPSHOT_BLOCK_WORDS)]),
             },
             false => Self::Full,
         }
     }
 
+    #[cfg(test)]
     pub(super) fn save(&self, device: &Device, source: &CubeTensor, target: &CubeTensor) {
+        self.save_range(device, source, target, 0, 0);
+    }
+
+    pub(super) fn save_state(
+        &self,
+        device: &Device,
+        source: &CubeTensor,
+        target: &CubeTensor,
+        stride: usize,
+        ring: usize,
+    ) {
+        self.save_range(
+            device,
+            source,
+            target,
+            crate::domain::BASE_FIELDS * stride * 2,
+            (crate::domain::BASE_FIELDS + ring * crate::domain::Good::COUNT) * stride * 2,
+        );
+    }
+
+    pub(super) fn ring_mask(&self) -> Option<&CubeTensor> {
+        match self {
+            Self::Full => None,
+            Self::Sparse { current, .. } => Some(current),
+        }
+    }
+
+    fn save_range(
+        &self,
+        device: &Device,
+        source: &CubeTensor,
+        target: &CubeTensor,
+        ring_start: usize,
+        ring_end: usize,
+    ) {
+        let hardware = &device.client.properties().hardware;
+        let workgroup = match (
+            hardware.max_units_per_cube >= 1024,
+            hardware.max_cube_dim.0 >= 1024,
+        ) {
+            (true, true) => 1024,
+            _ => 256,
+        };
         match self {
             Self::Full => copy_contiguous(device, source, target),
-            Self::Sparse { nonzero } => SparseCopy::launch(
+            Self::Sparse { nonzero, current } => SparseCopy::launch(
                 device,
                 cubecl::calculate_cube_count_elemwise(
                     &device.client,
                     source.meta.num_elements().div_ceil(SNAPSHOT_PARTS * 4),
-                    CubeDim::new_1d(256),
+                    CubeDim::new_1d(workgroup),
                 ),
-                CubeDim::new_1d(256),
+                CubeDim::new_1d(workgroup),
                 SnapshotInputLaunch {
                     source: source.clone().into_buffer_arg(),
                     target: target.clone().into_buffer_arg(),
                     nonzero: nonzero.clone().into_buffer_arg(),
+                    current: current.clone().into_buffer_arg(),
                     groups: source.meta.num_elements().div_ceil(SNAPSHOT_PARTS * 32 * 4) as u32,
                     parts: SNAPSHOT_PARTS as u32,
+                    ring_start: ring_start as u32,
+                    ring_end: ring_end as u32,
                 },
             ),
         }
@@ -205,7 +304,10 @@ struct SnapshotInput {
     source: Box<[Vector<u32, Const<4>>]>,
     target: Box<[Vector<u32, Const<4>>]>,
     nonzero: Box<[u32]>,
+    current: Box<[Atomic<u32>]>,
     groups: u32,
+    ring_start: u32,
+    ring_end: u32,
     #[cube(comptime)]
     parts: u32,
 }
@@ -226,27 +328,36 @@ impl GpuPass<SnapshotInput> for SparseWords {
         let group = CUBE_POS * (CUBE_DIM as usize / 32) + UNIT_POS as usize / 32;
         if group < input.groups as usize {
             let previous = input.nonzero[group];
-            let mut local = 0u32;
-            #[unroll]
-            for part in 0..comptime!(input.parts) {
-                let index = group * (comptime!(input.parts) as usize * 32)
-                    + part as usize * 32
-                    + UNIT_POS as usize % 32;
-                if index < input.source.len() {
-                    let value = input.source[index];
-                    let nonzero = value.extract(0usize)
-                        | value.extract(1usize)
-                        | value.extract(2usize)
-                        | value.extract(3usize);
-                    local |= nonzero;
-                    if (nonzero | previous) != 0 {
-                        input.target[index] = value;
+            let start = group * (comptime!(input.parts) as usize * 32 * 4);
+            let ring = start >= input.ring_start as usize
+                && start + comptime!(input.parts) as usize * 32 * 4 <= input.ring_end as usize;
+            let observed_zero = ring && input.current[group].load() == 0;
+            if PLANE_DIM != 32 || !observed_zero || previous > 0 {
+                let mut local = 0u32;
+                #[unroll]
+                for part in 0..comptime!(input.parts) {
+                    let index = group * (comptime!(input.parts) as usize * 32)
+                        + part as usize * 32
+                        + UNIT_POS as usize % 32;
+                    if index < input.source.len() && (!observed_zero || previous > 0) {
+                        let mut value = Vector::<u32, Const<4>>::new(0);
+                        if !observed_zero {
+                            value = input.source[index];
+                        }
+                        let nonzero = value.extract(0usize)
+                            | value.extract(1usize)
+                            | value.extract(2usize)
+                            | value.extract(3usize);
+                        local |= nonzero;
+                        if (nonzero | previous) != 0 {
+                            input.target[index] = value;
+                        }
                     }
                 }
-            }
-            let current = plane_max(local);
-            if UNIT_POS % 32 == 0 {
-                input.nonzero[group] = u32::cast_from(current != 0);
+                let current = plane_any(local != 0);
+                if UNIT_POS % 32 == 0 {
+                    input.nonzero[group] = u32::cast_from(current);
+                }
             }
         }
     }
@@ -287,6 +398,61 @@ impl GpuPass<CopyInput> for CopyWords {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    #[ignore]
+    fn snapshot_ring_density_before_day_twenty_copy_on_million_household_gpu() -> Result<()> {
+        use crate::domain::{BASE_FIELDS, Experiment, Good, Phase, Scenario};
+        use crate::simulation::{Simulation, Trace};
+
+        let device = crate::simulation::tests::device(64)?;
+        let mut simulation = Simulation::new(
+            Scenario::industrial(1_000_000, 42, Experiment::Baseline)?,
+            device,
+        )?;
+        (0..19).try_for_each(|_| simulation.advance())?;
+        for phase in Phase::ALL
+            .into_iter()
+            .filter(|phase| *phase != Phase::Audit)
+        {
+            simulation.phase(phase, Trace::Discard)?;
+        }
+        simulation.observe()?;
+        match &simulation.snapshot_copy {
+            SnapshotCopy::Sparse {
+                nonzero, current, ..
+            } => {
+                let previous = simulation.device.read(nonzero)?;
+                let current = simulation.device.read(current)?;
+                let stride = simulation.config.state_stride as usize;
+                let ring_start = BASE_FIELDS * stride * 2;
+                let ring_end =
+                    (BASE_FIELDS + simulation.scenario.ring() * Good::COUNT) * stride * 2;
+                let mut ring_blocks = 0usize;
+                let mut ring_active = 0usize;
+                let mut clearing = 0usize;
+                for (block, &prior) in previous.iter().enumerate() {
+                    let start = block * SNAPSHOT_BLOCK_WORDS;
+                    if start >= ring_start && start + SNAPSHOT_BLOCK_WORDS <= ring_end {
+                        ring_blocks += 1;
+                        ring_active += usize::from(prior > 0 || current[block] > 0);
+                        clearing += usize::from(prior > 0 && current[block] == 0);
+                    }
+                }
+                let non_ring = previous.len() - ring_blocks;
+                let skipped = ring_blocks - ring_active;
+                let active = non_ring + ring_active;
+                assert!(ring_blocks > 0);
+                eprintln!(
+                    "SNAPSHOT_DENSITY day=20 total={} non_ring={non_ring} ring={ring_blocks} ring_active={ring_active} clearing={clearing} skipped={skipped} active_fraction={:.6}",
+                    previous.len(),
+                    active as f64 / previous.len() as f64,
+                );
+            }
+            SnapshotCopy::Full => panic!("snapshot density requires sparse GPU snapshots"),
+        }
+        Ok(())
+    }
 
     #[test]
     fn contiguous_gpu_copy_preserves_words_across_dispatch_boundaries() -> Result<()> {
@@ -339,6 +505,41 @@ mod tests {
     }
 
     #[test]
+    fn audited_zero_ring_blocks_preserve_snapshot_transitions_and_boundaries_on_gpu() -> Result<()>
+    {
+        let device = crate::simulation::tests::device(64)?;
+        for count in [1024, 2052, 65_540] {
+            let snapshot = SnapshotCopy::new(&device, count);
+            let audited = device.tensor(&vec![u32::MAX; count]);
+            let mask = snapshot.ring_mask().expect("sparse snapshot mask");
+            let start = SNAPSHOT_BLOCK_WORDS / 2;
+            let end = count - SNAPSHOT_BLOCK_WORDS / 2;
+            for populated in [0usize, 1, 2, 0, 1] {
+                let values = (0..count)
+                    .map(
+                        |index| match index / SNAPSHOT_BLOCK_WORDS % 3 == populated {
+                            true => index as u32 + 1,
+                            false => 0,
+                        },
+                    )
+                    .collect::<Vec<_>>();
+                let source = device.tensor(&values);
+                let observed = values
+                    .chunks(SNAPSHOT_BLOCK_WORDS)
+                    .map(|block| u32::from(block.iter().any(|&value| value > 0)))
+                    .collect::<Vec<_>>();
+                device.write(mask, &observed);
+                snapshot.save_range(&device, &source, &audited, start, end);
+                assert_eq!(device.read(&audited)?, values);
+                reset_ring_mask(&device, mask, RingMaskState::Unknown);
+                snapshot.save_range(&device, &source, &audited, start, end);
+                assert_eq!(device.read(&audited)?, values);
+            }
+        }
+        Ok(())
+    }
+
+    #[test]
     fn sparse_gpu_snapshot_ignores_dispatch_groups_past_the_logical_extent() -> Result<()> {
         let device = crate::simulation::tests::device(64)?;
         let group_words = SNAPSHOT_PARTS * 32 * 4;
@@ -346,6 +547,7 @@ mod tests {
         let sentinel = 0xdead_beef;
         let target = device.tensor(&vec![sentinel; group_words * 2]);
         let metadata = device.tensor(&[1, sentinel]);
+        let current = device.tensor(&[1]);
         SparseCopy::launch(
             &device,
             CubeCount::Static(2, 1, 1),
@@ -354,8 +556,11 @@ mod tests {
                 source: source.into_buffer_arg(),
                 target: target.clone().into_buffer_arg(),
                 nonzero: metadata.clone().into_buffer_arg(),
+                current: current.into_buffer_arg(),
                 groups: 1,
                 parts: SNAPSHOT_PARTS as u32,
+                ring_start: 0,
+                ring_end: 0,
             },
         );
         assert_eq!(
@@ -375,14 +580,26 @@ mod tests {
 mod copy_profile {
     use super::*;
 
+    fn words() -> Result<usize> {
+        Ok(std::env::var("BAD_ECON_COPY_WORDS")
+            .ok()
+            .map(|value| value.parse())
+            .transpose()?
+            .unwrap_or(128 * 1024 * 1024))
+    }
+
     #[test]
     #[ignore]
     fn profile_sparse_copy_on_gpu() -> Result<()> {
-        let words = 128 * 1024 * 1024;
+        let words = words()?;
+        let populated = match std::env::var("BAD_ECON_COPY_DENSITY").as_deref() {
+            Ok("dense") => 8,
+            _ => 1,
+        };
         let device = crate::simulation::tests::device(64)?;
         let source = device.tensor(
             &(0..words)
-                .map(|index| u32::from(index / 4096 % 8 == 0) * 17)
+                .map(|index| u32::from(index / 4096 % 8 < populated) * 17)
                 .collect::<Vec<_>>(),
         );
         let target = device.empty(words);
@@ -390,6 +607,7 @@ mod copy_profile {
             for parts in [4, 8, 16, 32, 64] {
                 let groups = words.div_ceil(parts * 32 * 4);
                 let nonzero = device.tensor(&vec![1; groups]);
+                let current = device.tensor(&vec![1; groups]);
                 let launch = || {
                     SparseCopy::launch(
                         &device,
@@ -403,8 +621,11 @@ mod copy_profile {
                             source: source.clone().into_buffer_arg(),
                             target: target.clone().into_buffer_arg(),
                             nonzero: nonzero.clone().into_buffer_arg(),
+                            current: current.clone().into_buffer_arg(),
                             groups: groups as u32,
                             parts: parts as u32,
+                            ring_start: 0,
+                            ring_end: 0,
                         },
                     )
                 };
@@ -420,7 +641,10 @@ mod copy_profile {
                     start.elapsed().as_secs_f64() * 1000.0 / 3.0
                 );
                 assert_eq!(device.read_range(&target, 0, 4)?, [17; 4]);
-                assert_eq!(device.read_range(&target, words - 4, 4)?, [0; 4]);
+                assert_eq!(
+                    device.read_range(&target, words - 4, 4)?,
+                    [u32::from((words - 1) / 4096 % 8 < populated) * 17; 4]
+                );
             }
         }
         Ok(())
@@ -429,7 +653,7 @@ mod copy_profile {
     #[test]
     #[ignore]
     fn profile_contiguous_copy_on_gpu() -> Result<()> {
-        let words = 128 * 1024 * 1024;
+        let words = words()?;
         for workgroup in [64, 256] {
             let device = crate::simulation::tests::device(workgroup)?;
             let source = device.tensor(&vec![17; words]);

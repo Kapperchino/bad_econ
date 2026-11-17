@@ -169,12 +169,25 @@ pub(super) fn produce(
         baking.required(control, bread_needed, baking_remainder),
         value(state, config, comptime!(Field::Flour as u32), actor),
     );
+    let missing = positive(
+        value(state, config, comptime!(Field::NutritionNeed as u32), actor),
+        value(state, config, comptime!(Field::Bread as u32), actor),
+    );
+    let basic_flour = baking.required(control, missing, baking_remainder);
+    let baking_time = minimum(
+        ticks(time, 0),
+        multiply(control, basic_flour, config.home.baking_minutes),
+    )
+    .extract(LOW_WORD);
     let milled = minimum(
         minimum(
             milling.required(control, flour_needed, milling_remainder),
             value(state, config, comptime!(Field::Grain as u32), actor),
         ),
-        ticks(time / max(config.home.milling_minutes, 1), 0),
+        ticks(
+            (time - baking_time) / max(config.home.milling_minutes, 1),
+            0,
+        ),
     );
     let flour_output = milling.process(control, milled, milling_remainder);
     set32(

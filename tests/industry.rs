@@ -84,6 +84,16 @@ fn industrial_food_production_is_more_efficient_than_subsistence_on_gpu() -> Res
     };
     let scenario = Scenario::new(config)?;
     let mut initial = scenario.initial()?;
+    let farms = initial
+        .actors
+        .firm_indices()
+        .filter(|&firm| initial.actors.at(firm).kind == Good::Grain as u32)
+        .collect::<Vec<_>>();
+    for farm in farms {
+        let stock = initial.get(Field::Grain, farm);
+        initial.set(Field::Grain, farm, 0);
+        initial.set(Field::Grain, 0, initial.get(Field::Grain, 0) + stock);
+    }
     initial.day = 269;
     let mut simulation =
         Simulation::from_checkpoint(Checkpoint::new(&scenario, &initial)?, support::device(64)?)?;
@@ -219,6 +229,100 @@ fn luxury_production_requires_both_inputs_and_conserves_goods_on_gpu() -> Result
             );
             simulation.checkpoint()?.restore()?;
         }
+    }
+    Ok(())
+}
+
+#[test]
+fn affluent_households_fund_larger_luxury_orders_and_replace_used_stock_on_gpu() -> Result<()> {
+    use bad_econ::domain::food::{FoodIncome, FoodPolicy};
+    let mut config = Scenario::baseline(2, 42, Experiment::Concentrated)?
+        .config()
+        .clone();
+    config.economy = Economy::Industrial;
+    config.firms = 3;
+    config.food = Some(FoodPolicy::industrial());
+    config.prices = [9, 30, 20];
+    config.behavior.price_response = 0;
+    config.behavior.wage_increment = 0;
+    config.distribution_rate = 0;
+    config.demography.annual_births_per_million_fertile_women = 0;
+    let position = Position { x: 0, y: 0 };
+    let mut inventories = Good::food([0, 0, 10_000]);
+    inventories[Good::Clothes as usize - 1] = 1;
+    let mut stock = [0; Good::COUNT];
+    stock[Good::LuxuryClothes as usize - 1] = 10_000;
+    config.population = Some(Population {
+        households: [100_000, 10_000]
+            .into_iter()
+            .enumerate()
+            .map(|(index, cash)| HouseholdSeed {
+                identity: index as u64 + 1,
+                position,
+                cash,
+                inventories,
+                fatigue: 0,
+            })
+            .collect(),
+        firms: [Good::LuxuryClothes, Good::LuxuryFurniture, Good::Bread]
+            .into_iter()
+            .enumerate()
+            .map(|(index, good)| {
+                let mut inventory = stock;
+                inventory[good as usize - 1] = 10_000;
+                Ok(FirmSeed {
+                    identity: index as u64 + 3,
+                    position,
+                    owner: 1,
+                    good,
+                    cash: 0,
+                    inventories: inventory,
+                    capacity: 1,
+                    technique: Technique::new(20, 1, 1)?,
+                    wage: 1,
+                    price: 10,
+                })
+            })
+            .collect::<Result<_>>()?,
+    });
+    for income in [FoodIncome::Nominal, FoodIncome::PurchasingPower] {
+        config.food.as_mut().unwrap().income = income;
+        let scenario = Scenario::new(config.clone())?;
+        let mut initial = scenario.initial()?;
+        initial.day = 116;
+        let mut simulation = Simulation::from_checkpoint(
+            Checkpoint::new(&scenario, &initial)?,
+            support::device(64)?,
+        )?;
+        simulation.advance()?;
+        let dispatched = simulation.download()?;
+        let transit = |household| {
+            dispatched.values[(TRANSIT_FIELDS + Good::LuxuryClothes as usize - 1)
+                * dispatched.actors.len()
+                + household]
+        };
+        match income {
+            FoodIncome::Nominal => {
+                assert_eq!(transit(0), 1);
+                assert_eq!(transit(1), 1);
+            }
+            FoodIncome::PurchasingPower => {
+                assert!(transit(0) > transit(1));
+                assert!(transit(1) > 1);
+            }
+        }
+        for household in 0..2 {
+            assert!(
+                dispatched.get(Field::Cash, household)
+                    >= dispatched.get(Field::FoodNeed, household) * 20 * 30
+            );
+        }
+        for _ in 0..10 {
+            simulation.advance()?;
+        }
+        assert!(simulation.snapshot.consumption[Good::LuxuryClothes as usize - 1] > 0);
+        assert_eq!(simulation.snapshot.cash, initial.initial_cash);
+        simulation.checkpoint()?.restore()?;
     }
     Ok(())
 }

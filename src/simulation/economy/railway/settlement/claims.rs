@@ -5,6 +5,39 @@ mod tests;
 
 const SORT_DISPATCH: usize = 12;
 
+const SORT_TILE: usize = 2048;
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(super) enum SortMethod {
+    Merge,
+    #[cfg(test)]
+    Block256,
+    Block2048,
+}
+
+impl SortMethod {
+    fn tile(self) -> usize {
+        match self {
+            Self::Merge => 1,
+            #[cfg(test)]
+            Self::Block256 => 256,
+            Self::Block2048 => SORT_TILE,
+        }
+    }
+
+    pub(super) fn for_device(self, device: &Device) -> Self {
+        let hardware = &device.client.properties().hardware;
+        match (
+            hardware.max_shared_memory_size >= self.tile() * 12,
+            hardware.max_units_per_cube >= 256,
+            hardware.max_cube_dim.0 >= 256,
+        ) {
+            (true, true, true) => self,
+            _ => Self::Merge,
+        }
+    }
+}
+
 #[derive(CubeType)]
 struct Claim {
     resource: u32,
@@ -43,12 +76,19 @@ impl Claim {
 #[cube]
 pub(super) fn add_demand(words: &[Atomic<u32>], index: usize, overflow: usize, amount: Ticks) {
     let low = amount.extract(LOW_WORD);
-    let previous = words[index].fetch_add(low);
-    let carry = u32::cast_from(previous + low < previous);
+    let mut carry = 0u32;
+    if low > 0 {
+        let previous = words[index].fetch_add(low);
+        carry = u32::cast_from(previous + low < previous);
+    }
     let high = amount.extract(HIGH_WORD);
-    let previous_high = words[index + 1].fetch_add(high);
-    let before_carry = words[index + 1].fetch_add(carry);
-    if previous_high + high < previous_high || before_carry + carry < before_carry {
+    let increment = high + carry;
+    let mut overflowed = increment < high;
+    if increment > 0 {
+        let previous = words[index + 1].fetch_add(increment);
+        overflowed = overflowed || previous + increment < previous;
+    }
+    if overflowed {
         words[overflow].fetch_or(1);
     }
 }
@@ -143,8 +183,11 @@ pub(super) fn emit(input: &mut Input, invocation: u32) {
 #[derive(CubeType, CubeLaunch)]
 struct DispatchInput {
     progress: Box<[Atomic<u32>]>,
+    control: Box<[Atomic<u32>]>,
     dispatches: Box<[u32]>,
     workgroup: u32,
+    #[cube(comptime)]
+    execution: Execution,
 }
 
 struct ClaimDispatch;
@@ -160,7 +203,10 @@ impl GpuPass<DispatchInput> for PrepareClaims {
     type Output = ();
 
     fn execute(mut input: DispatchInput) {
-        let groups = ceildiv(input.progress[CLAIM_COUNT].load(), input.workgroup);
+        let mut groups = 0u32;
+        if execution_enabled(&input.progress, &input.control, comptime!(input.execution)) {
+            groups = ceildiv(input.progress[CLAIM_COUNT].load(), input.workgroup);
+        }
         input.dispatches[SORT_DISPATCH] = min(groups, 65535);
         input.dispatches[SORT_DISPATCH + 1] = ceildiv(max(groups, 1), 65535);
         input.dispatches[SORT_DISPATCH + 2] = 1;
@@ -189,22 +235,207 @@ pub(super) fn sorted_source(capacity: usize) -> u32 {
     (capacity * (FREIGHT_CLAIM_WORDS + passes as usize % 2)) as u32
 }
 
+pub(super) fn settlement_source(buffers: &Buffers) -> u32 {
+    match buffers.sorting {
+        SortMethod::Merge => sorted_source(buffers.claim_capacity),
+        method => block_sorted_source(buffers.claim_capacity, method.tile()),
+    }
+}
+
+fn block_sorted_source(capacity: usize, tile: usize) -> u32 {
+    let passes = capacity
+        .max(1)
+        .next_power_of_two()
+        .ilog2()
+        .saturating_sub(tile.ilog2());
+    (capacity * (FREIGHT_CLAIM_WORDS + passes as usize % 2)) as u32
+}
+
 pub(super) fn offsets_start(capacity: usize) -> u32 {
     (capacity * (FREIGHT_CLAIM_WORDS + crate::domain::railway::FREIGHT_CLAIM_SORT_WORDS)) as u32
 }
 
-pub(super) fn sort(device: &Device, buffers: &Buffers) {
+pub(super) fn sort_buffered(
+    device: &Device,
+    buffers: &Buffers,
+    control: &CubeTensor,
+    execution: Execution,
+) {
+    if buffers.claim_capacity > 0 {
+        match buffers.sorting {
+            SortMethod::Merge => sort_merges_buffered(device, buffers, control, execution),
+            method => sort_blocks_buffered(device, buffers, control, execution, method.tile()),
+        }
+    }
+}
+
+fn sort_merges_buffered(
+    device: &Device,
+    buffers: &Buffers,
+    control: &CubeTensor,
+    execution: Execution,
+) {
     ClaimDispatch::launch(
         device,
         CubeCount::Static(1, 1, 1),
         CubeDim::new_1d(1),
         DispatchInputLaunch {
             progress: buffers.progress.clone().into_buffer_arg(),
+            control: control.clone().into_buffer_arg(),
             dispatches: buffers.dispatches.clone().into_buffer_arg(),
             workgroup: device.workgroup,
+            execution,
         },
     );
     let mut width = 1;
+    let mut source = (buffers.claim_capacity * FREIGHT_CLAIM_WORDS) as u32;
+    while width < buffers.claim_capacity {
+        ClaimSort::launch(
+            device,
+            markets::dispatch(&buffers.dispatches, SORT_DISPATCH),
+            CubeDim::new_1d(device.workgroup),
+            SortInputLaunch {
+                claims: buffers.claims.clone().into_buffer_arg(),
+                progress: buffers.progress.clone().into_buffer_arg(),
+                capacity: buffers.claim_capacity as u32,
+                source,
+                width: width as u32,
+            },
+        );
+        source = (buffers.claim_capacity * (2 * FREIGHT_CLAIM_WORDS + 1) - source as usize) as u32;
+        width *= 2;
+    }
+}
+
+#[derive(CubeType, CubeLaunch)]
+struct BlockInput {
+    claims: Box<[u32]>,
+    progress: Box<[Atomic<u32>]>,
+    capacity: u32,
+    #[cube(comptime)]
+    tile: usize,
+}
+
+struct ClaimBlocks;
+struct SortClaimBlocks;
+
+impl System for ClaimBlocks {
+    type Input = BlockInput;
+    type Passes = gpu_passes![SortClaimBlocks];
+}
+
+#[cube]
+impl GpuPass<BlockInput> for SortClaimBlocks {
+    type Output = ();
+
+    fn execute(mut input: BlockInput) {
+        let count = input.progress[CLAIM_COUNT].load();
+        let start = CUBE_POS as u32 * comptime!(input.tile as u32);
+        if start < count {
+            let mut extent = 1u32;
+            while extent < min(count - start, comptime!(input.tile as u32)) {
+                extent *= 2;
+            }
+            let source = input.capacity * FREIGHT_CLAIM_WORDS as u32;
+            let mut keys = Shared::<[u64]>::new_slice(comptime!(input.tile));
+            let mut indices = Shared::<[u32]>::new_slice(comptime!(input.tile));
+            let mut slot = UNIT_POS;
+            while slot < extent {
+                let position = start + slot;
+                let mut key = u64::new(-1);
+                let mut index = u32::new(comptime!(i64::from(u32::MAX)));
+                if position < count {
+                    index = input.claims[(source + position) as usize];
+                    let claim = Claim::load(&input.claims, index);
+                    key = (u64::cast_from(claim.resource) << 32) | u64::cast_from(claim.priority);
+                }
+                keys[slot as usize] = key;
+                indices[slot as usize] = index;
+                slot += CUBE_DIM;
+            }
+            sync_cube();
+            let mut width = 2u32;
+            while width <= extent {
+                let mut stride = width / 2;
+                while stride > 0 {
+                    let mut slot = UNIT_POS;
+                    while slot < extent {
+                        let other = slot ^ stride;
+                        if other > slot {
+                            let key = keys[slot as usize];
+                            let index = indices[slot as usize];
+                            let other_key = keys[other as usize];
+                            let other_index = indices[other as usize];
+                            let smaller =
+                                other_key < key || other_key == key && other_index < index;
+                            let larger = key < other_key || other_key == key && index < other_index;
+                            let preferred = select(slot & width == 0, smaller, larger);
+                            keys[slot as usize] = select(preferred, other_key, key);
+                            indices[slot as usize] = select(preferred, other_index, index);
+                            keys[other as usize] = select(preferred, key, other_key);
+                            indices[other as usize] = select(preferred, index, other_index);
+                        }
+                        slot += CUBE_DIM;
+                    }
+                    sync_cube();
+                    stride /= 2;
+                }
+                width *= 2;
+            }
+            let mut slot = UNIT_POS;
+            while slot < min(count - start, comptime!(input.tile as u32)) {
+                input.claims[(source + start + slot) as usize] = indices[slot as usize];
+                slot += CUBE_DIM;
+            }
+        }
+    }
+}
+
+fn sort_blocks_buffered(
+    device: &Device,
+    buffers: &Buffers,
+    control: &CubeTensor,
+    execution: Execution,
+    tile: usize,
+) {
+    ClaimDispatch::launch(
+        device,
+        CubeCount::Static(1, 1, 1),
+        CubeDim::new_1d(1),
+        DispatchInputLaunch {
+            progress: buffers.progress.clone().into_buffer_arg(),
+            control: control.clone().into_buffer_arg(),
+            dispatches: buffers.dispatches.clone().into_buffer_arg(),
+            workgroup: tile as u32,
+            execution,
+        },
+    );
+    ClaimBlocks::launch(
+        device,
+        markets::dispatch(&buffers.dispatches, SORT_DISPATCH),
+        CubeDim::new_1d(256),
+        BlockInputLaunch {
+            claims: buffers.claims.clone().into_buffer_arg(),
+            progress: buffers.progress.clone().into_buffer_arg(),
+            capacity: buffers.claim_capacity as u32,
+            tile,
+        },
+    );
+    if buffers.claim_capacity > tile {
+        ClaimDispatch::launch(
+            device,
+            CubeCount::Static(1, 1, 1),
+            CubeDim::new_1d(1),
+            DispatchInputLaunch {
+                progress: buffers.progress.clone().into_buffer_arg(),
+                control: control.clone().into_buffer_arg(),
+                dispatches: buffers.dispatches.clone().into_buffer_arg(),
+                workgroup: device.workgroup,
+                execution,
+            },
+        );
+    }
+    let mut width = tile;
     let mut source = (buffers.claim_capacity * FREIGHT_CLAIM_WORDS) as u32;
     while width < buffers.claim_capacity {
         ClaimSort::launch(

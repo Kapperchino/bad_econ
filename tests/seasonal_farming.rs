@@ -83,6 +83,7 @@ fn crop_firms_accumulate_growing_work_and_release_only_at_harvest_on_gpu() -> Re
     initial.day = 269;
     for farm in 12..16 {
         initial.set(Field::CropWork, farm, 2110);
+        initial.set(Field::Demand, farm, 100);
     }
     let checkpoint = Checkpoint::new(&scenario, &initial)?;
     let mut simulation = Simulation::from_checkpoint(checkpoint, support::device(64)?)?;
@@ -110,6 +111,30 @@ fn crop_firms_accumulate_growing_work_and_release_only_at_harvest_on_gpu() -> Re
             harvested.get(Field::Produced, farm)
         );
     }
+    simulation.checkpoint()?.restore()?;
+    Ok(())
+}
+
+#[test]
+fn stocked_crop_firms_do_not_repeat_work_for_another_unneeded_harvest_on_gpu() -> Result<()> {
+    let mut config = farming_scenario(HouseholdProduction::Unavailable)?
+        .config()
+        .clone();
+    for firm in config.population.as_mut().unwrap().firms.iter_mut().take(4) {
+        firm.inventories[firm.good as usize - 1] = 10_000;
+    }
+    let scenario = Scenario::new(config)?;
+    let mut initial = scenario.initial()?;
+    initial.day = 59;
+    let mut simulation =
+        Simulation::from_checkpoint(Checkpoint::new(&scenario, &initial)?, support::device(64)?)?;
+    simulation.advance()?;
+    let state = simulation.download()?;
+    for farm in 12..16 {
+        assert_eq!(state.get(Field::Plan, farm), 0);
+        assert_eq!(state.get(Field::CropWork, farm), 0);
+    }
+    assert_eq!(simulation.snapshot.cash, initial.initial_cash);
     simulation.checkpoint()?.restore()?;
     Ok(())
 }
@@ -366,8 +391,8 @@ fn generated_food_reserves_and_capacity_cover_the_population_on_gpu() -> Result<
         for day in 2..=12 {
             simulation.advance()?;
             assert_eq!(
-                simulation.snapshot.shortages, 0,
-                "food shortage on day {day}"
+                simulation.snapshot.population.famine_exposure, 0,
+                "unmet basic nutrition on day {day}"
             );
         }
         simulation.checkpoint()?.restore()?;
@@ -450,6 +475,74 @@ fn stored_grain_and_recurring_harvests_feed_households_on_gpu() -> Result<()> {
         "harvested {annual_harvest}, consumed {annual_consumption}"
     );
     assert_eq!(simulation.snapshot.cash, initial.initial_cash);
+    simulation.checkpoint()?.restore()?;
+    Ok(())
+}
+#[test]
+fn richer_home_diets_preserve_basic_food_until_the_next_harvest_on_gpu() -> Result<()> {
+    let mut config = Scenario::industrial(1, 42, Experiment::Concentrated)?
+        .config()
+        .clone();
+    config.firms = 3;
+    config.distributors.clear();
+    config.land_access = Some(enterprise::LandAccess {
+        total_plots: 10,
+        allocations: vec![enterprise::LandGrant {
+            household: 1,
+            plots: 2,
+        }],
+    });
+    config.railway = railway::RailwayConfig::default();
+    config.rent = None;
+    config.research = None;
+    config.entrepreneurship.interested_per_mille = 0;
+    config.distribution_rate = 0;
+    config.demography.annual_births_per_million_fertile_women = 0;
+    config.demography.mortality.background_annual_ppm = [0; 5];
+    config.demography.mortality.occupational_annual_ppm = [0; Good::COUNT];
+    config.demography.mortality.cold_daily_ppm_at_seven_days = 0;
+    let position = Position { x: 500, y: 500 };
+    let mut inventories = Good::food([1000, 0, 96]);
+    inventories[Good::Tools as usize - 1] = 2;
+    config.population = Some(Population {
+        households: vec![HouseholdSeed {
+            identity: 1,
+            position,
+            cash: 1_000_000,
+            inventories,
+            fatigue: 0,
+        }],
+        firms: [Good::Grain, Good::Flour, Good::Bread]
+            .into_iter()
+            .enumerate()
+            .map(|(index, good)| {
+                Ok(FirmSeed {
+                    identity: index as u64 + 2,
+                    position,
+                    owner: 1,
+                    good,
+                    cash: 0,
+                    inventories: [0; Good::COUNT],
+                    capacity: 1,
+                    technique: Technique::new(20, u32::from(good.inputs()[0].is_some()), 1)?,
+                    wage: 12,
+                    price: 20,
+                })
+            })
+            .collect::<Result<_>>()?,
+    });
+    let mut simulation = Simulation::new(Scenario::new(config)?, support::device(64)?)?;
+    let cash = simulation.snapshot.cash;
+    for _ in 0..730 {
+        simulation.advance()?;
+        assert_eq!(
+            simulation.snapshot.population.famine_exposure, 0,
+            "day {}",
+            simulation.snapshot.day
+        );
+    }
+    assert_eq!(simulation.snapshot.population.deaths[2], 0);
+    assert_eq!(simulation.snapshot.cash, cash);
     simulation.checkpoint()?.restore()?;
     Ok(())
 }

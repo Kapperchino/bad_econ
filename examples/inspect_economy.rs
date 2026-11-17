@@ -93,6 +93,8 @@ struct Accounts {
     cash_median: u64,
     cash_p90: u64,
     paid: u64,
+    daily_salary: u64,
+    expected_income: u64,
     food_need: u64,
     deficit: u64,
     grain: u64,
@@ -143,6 +145,10 @@ fn household_summaries(
         }
         summary.cash += state.get(Field::Cash, index);
         summary.paid += state.get(Field::Employed, index);
+        summary.daily_salary += state
+            .get(Field::GrossIncome, index)
+            .saturating_sub(state.get(Field::OpeningGrossIncome, index));
+        summary.expected_income += state.get(Field::IncomeForecast, index) / 1000;
         summary.food_need += state.get(Field::FoodNeed, index);
         summary.deficit += state.get(Field::Shortage, index);
         summary.grain += state.get(Field::Grain, index);

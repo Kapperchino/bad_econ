@@ -68,6 +68,10 @@ pub(super) struct ActiveScanInput {
     pub bound: u32,
     pub divisor: u32,
     #[cube(comptime)]
+    pub histogram_bins: u32,
+    #[cube(comptime)]
+    pub source_workgroup: u32,
+    #[cube(comptime)]
     pub items: u32,
     #[cube(comptime)]
     pub mode: ScanMode,
@@ -94,6 +98,8 @@ impl GpuPass<ActiveScanInput> for ScanActiveBlocks {
             input.divisor,
             comptime!(input.items),
             comptime!(input.mode),
+            comptime!(input.histogram_bins),
+            comptime!(input.source_workgroup),
         );
     }
 }
@@ -105,6 +111,10 @@ pub(super) struct ActiveOffsetInput {
     pub offset: u32,
     pub bound: u32,
     pub divisor: u32,
+    #[cube(comptime)]
+    pub histogram_bins: u32,
+    #[cube(comptime)]
+    pub source_workgroup: u32,
     #[cube(comptime)]
     pub items: u32,
 }
@@ -129,6 +139,8 @@ impl GpuPass<ActiveOffsetInput> for AddActiveOffsets {
             input.bound,
             input.divisor,
             comptime!(input.items),
+            comptime!(input.histogram_bins),
+            comptime!(input.source_workgroup),
         );
     }
 }

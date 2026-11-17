@@ -20,6 +20,8 @@ use records::PendingRecord;
 use std::collections::BTreeMap;
 use systems::*;
 
+pub(super) const WAGE_DEPENDENCY: u32 = 10 << 24;
+
 #[derive(Clone, Default)]
 pub(super) struct MigrationRegistry {
     destinations: BTreeMap<usize, Position>,
@@ -101,9 +103,19 @@ impl RegistryPlan {
         migrations: &MigrationRegistry,
         requests: &[PendingRecord],
     ) -> Result<Option<Self>> {
+        Self::with_growth(scenario, metadata, migrations, requests, 0)
+    }
+
+    fn with_growth(
+        scenario: &Scenario,
+        metadata: &State,
+        migrations: &MigrationRegistry,
+        requests: &[PendingRecord],
+        additions: usize,
+    ) -> Result<Option<Self>> {
         let supported = requests.iter().all(|record| match record.request >> 24 {
             0 => record.request == 0,
-            2 | 3 => true,
+            2 | 3 | 10 => true,
             4 | 7 => scenario.config().finance.is_none(),
             5 => {
                 scenario.config().finance.is_none()
@@ -121,7 +133,7 @@ impl RegistryPlan {
                 let mut actors = requests
                     .iter()
                     .any(|record| matches!(record.request >> 24, 3 | 6))
-                    .then(|| metadata.actors.clone());
+                    .then(|| metadata.actors.clone_for_growth(additions));
                 let mut capacity_update = CapacityUpdate::Patch;
                 for record in requests {
                     let index = record.actor as usize;
@@ -179,7 +191,7 @@ impl RegistryPlan {
                     changes: requests
                         .iter()
                         .copied()
-                        .filter(|record| matches!(record.request >> 24, 3 | 6))
+                        .filter(|record| matches!(record.request >> 24, 3 | 6 | 10))
                         .collect(),
                     migrations: next,
                 }))
@@ -287,7 +299,7 @@ fn transition(
                     ticks(day + duration, 0),
                 );
             }
-            if kind == 3 {
+            if kind == 3 || kind == 10 {
                 store(
                     state,
                     comptime!(Field::MoveDue as u32) * config.state_stride + actor,
@@ -299,9 +311,10 @@ fn transition(
                     zero(),
                 );
             }
-            if kind == 3
+            if (kind == 3 || kind == 10)
                 && comptime!(
                     config.property_mode == crate::simulation::configuration::Feature::Enabled
+                        || config.economy == crate::domain::Economy::Industrial
                 )
             {
                 store(

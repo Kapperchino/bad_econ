@@ -77,6 +77,33 @@ fn fuel(state: &mut State, household: usize, good: Good, quantity: u64) {
 }
 
 #[test]
+fn optional_food_shortfalls_do_not_block_essential_fuel_purchases_on_gpu() -> Result<()> {
+    let mut config = heating_scenario(3)?.config().clone();
+    config.economy = Economy::Industrial;
+    config.food = Some(food::FoodPolicy::industrial());
+    config.prices = [9, 30, 20];
+    let population = config.population.as_mut().unwrap();
+    for household in &mut population.households {
+        household.cash = 100_000;
+    }
+    population.firms[2].inventories[Good::Bread as usize - 1] = 0;
+    let mut simulation = Simulation::new(Scenario::new(config)?, support::device(64)?)?;
+    let cash = simulation.snapshot.cash;
+    simulation.advance()?;
+    let state = simulation.download()?;
+    assert!(state.get(Field::FoodNeed, 0) > 4);
+    assert!(state.values[(TRANSIT_FIELDS + Good::Coal as usize - 1) * state.actors.len()] > 0);
+    simulation.advance()?;
+    let state = simulation.download()?;
+    assert_eq!(
+        state.get(Field::HeatingServed, 0),
+        state.get(Field::HeatingNeed, 0)
+    );
+    assert_eq!(simulation.snapshot.cash, cash);
+    Ok(())
+}
+
+#[test]
 fn subsistence_firewood_uses_land_tools_and_available_household_time_on_gpu() -> Result<()> {
     let mut config = heating_scenario(3)?.config().clone();
     config.demography.initial_household_members = 3;
@@ -398,6 +425,52 @@ fn households_replenish_either_fuel_after_counting_stock_and_pending_deliveries(
                 0,
             );
         }
+    }
+    Ok(())
+}
+
+#[test]
+fn fuel_purchases_compare_heat_prices_instead_of_market_order_on_gpu() -> Result<()> {
+    struct Offers {
+        coal: u32,
+        wood: u32,
+        preferred: Good,
+    }
+    for offers in [
+        Offers {
+            coal: 5,
+            wood: 2,
+            preferred: Good::Wood,
+        },
+        Offers {
+            coal: 3,
+            wood: 2,
+            preferred: Good::Coal,
+        },
+    ] {
+        let mut config = heating_scenario(1)?.config().clone();
+        config.behavior.price_response = 0;
+        config.distribution_rate = 0;
+        let population = config.population.as_mut().unwrap();
+        population.households[0].cash = 1000;
+        population.households[0].inventories[Good::Bread as usize - 1] = 100;
+        population.firms[0].price = offers.wood;
+        population.firms[1].price = offers.coal;
+        let scenario = Scenario::new(config)?;
+        let mut simulation = Simulation::new(scenario, support::device(64)?)?;
+        let cash = simulation.snapshot.cash;
+        simulation.advance()?;
+        let state = simulation.download()?;
+        let other = match offers.preferred {
+            Good::Coal => Good::Wood,
+            _ => Good::Coal,
+        };
+        let transit =
+            |good: Good| state.values[(TRANSIT_FIELDS + good as usize - 1) * state.actors.len()];
+        assert!(transit(offers.preferred) > 0);
+        assert_eq!(transit(other), 0);
+        assert_eq!(simulation.snapshot.cash, cash);
+        simulation.checkpoint()?.restore()?;
     }
     Ok(())
 }

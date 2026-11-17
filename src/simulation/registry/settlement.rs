@@ -23,6 +23,21 @@ pub(in crate::simulation) struct OwnerChange {
 }
 
 impl SettlementBatch {
+    pub fn required(
+        metadata: &State,
+        requests: &[PendingRecord],
+        migrations: &MigrationRegistry,
+    ) -> bool {
+        requests.iter().any(|record| match record.request >> 24 {
+            4 | 7 => true,
+            5 => migrations
+                .children(metadata.actors.at(record.actor as usize).identity)
+                .next()
+                .is_some(),
+            _ => false,
+        })
+    }
+
     pub fn new(
         device: &Device,
         scenario: &Scenario,
@@ -32,14 +47,7 @@ impl SettlementBatch {
         day: u64,
         migrations: &MigrationRegistry,
     ) -> Result<Option<Self>> {
-        match requests.iter().any(|record| match record.request >> 24 {
-            4 | 7 => true,
-            5 => migrations
-                .children(metadata.actors.at(record.actor as usize).identity)
-                .next()
-                .is_some(),
-            _ => false,
-        }) {
+        match Self::required(metadata, requests, migrations) {
             false => Ok(None),
             true => Self::prepare(device, scenario, metadata, state, requests, day, migrations)
                 .map(Some),

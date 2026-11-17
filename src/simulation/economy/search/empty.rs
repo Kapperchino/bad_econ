@@ -3,6 +3,21 @@ use super::*;
 pub(super) const BLOCK: u32 = 8;
 pub(super) const LIMIT: u32 = 2048;
 const FIELDS: u32 = 8;
+const CACHE_STATE_BITS: u32 = 4;
+const CACHE_STATE_MASK: u32 = (1 << CACHE_STATE_BITS) - 1;
+const CACHE_STOCKED_MASK: u32 = (1 << 12) - 1;
+const CACHE_SUMMARY_SHIFT: u32 = 16;
+const CACHE_SUMMARY_MASK: u32 = u32::MAX << CACHE_SUMMARY_SHIFT;
+const CACHE_ENTRIES_SHIFT: u32 = 30;
+const CACHE_WORD_MASK: u32 = LIMIT / 32 - 1;
+
+#[derive(Clone, Copy)]
+#[repr(u32)]
+enum CacheEntries {
+    Empty,
+    SingleWord,
+    MultipleWords,
+}
 
 #[derive(Clone, Copy)]
 enum Bound {
@@ -43,6 +58,7 @@ struct Winner {
     score: u32,
     cell: u32,
     rank: u32,
+    summary: u32,
 }
 
 #[derive(CubeType)]
@@ -53,6 +69,45 @@ struct Buyer {
     access: u32,
     cash: Ticks,
     rotation: u32,
+}
+
+#[cube]
+fn cache_word(config: &EconomyConfig, buyer: u32, word: u32) -> u32 {
+    select(
+        word < 8,
+        6 * config.actors + 8 * buyer + word,
+        18 * config.actors + comptime!(markets::EMPTY_CACHE_EXTRA_WORDS as u32) * buyer + word - 8,
+    )
+}
+
+#[cube]
+fn clear_cache(config: &EconomyConfig, cache: &mut [u32], buyer: u32, count: u32) {
+    for word in 0..ceildiv(max(count, 1), 32) {
+        cache[cache_word(config, buyer, word) as usize] = 0;
+    }
+}
+
+#[cube]
+fn record_word(summary: u32, word: u32) -> u32 {
+    let entries = summary >> CACHE_ENTRIES_SHIFT;
+    let first = (summary >> CACHE_SUMMARY_SHIFT) & CACHE_WORD_MASK;
+    let updated = match entries {
+        0 => u32::new(comptime!(CacheEntries::SingleWord as i64)),
+        1 => select(
+            first == word,
+            comptime!(CacheEntries::SingleWord as u32),
+            comptime!(CacheEntries::MultipleWords as u32),
+        ),
+        _ => u32::new(comptime!(CacheEntries::MultipleWords as i64)),
+    };
+    let first = select(
+        entries == comptime!(CacheEntries::Empty as u32),
+        word,
+        first,
+    );
+    (summary & !CACHE_SUMMARY_MASK)
+        | (updated << CACHE_ENTRIES_SHIFT)
+        | (first << CACHE_SUMMARY_SHIFT)
 }
 
 #[cube]
@@ -81,7 +136,7 @@ fn tree(config: &EconomyConfig, count: u32) -> bool {
 
 #[cube]
 pub(super) fn compacted(config: &EconomyConfig, count: u32) -> bool {
-    config.spatial_side == 1 && count <= LIMIT && tree(config, count)
+    config.spatial_side == 1 && count <= LIMIT
 }
 
 #[cube]
@@ -111,6 +166,77 @@ pub(super) fn sort(
     spatial: &[u32],
     scratch: &mut [u32],
     searches: &mut [u32],
+    #[comptime] mode: parallel::ScanMode,
+) {
+    let count = spatial[(config.spatial_side * config.spatial_side) as usize];
+    if CUBE_POS == 0 && count > 0 && count <= LIMIT {
+        let chunk = LIMIT / CUBE_DIM;
+        let start = UNIT_POS * chunk;
+        let end = min(start + chunk, count);
+        let mut offered = 0u32;
+        for member in start..end {
+            offered += u32::cast_from(index::Supply::load(&*scratch, config, member).offered);
+        }
+        let prefix = parallel::scan_prefix(offered, comptime!(mode));
+        let mut target = prefix.inclusive - offered;
+        for member in start..end {
+            if index::Supply::load(&*scratch, config, member).offered {
+                searches[(17 * config.actors + target) as usize] = member;
+                target += 1;
+            }
+        }
+        if UNIT_POS == 0 {
+            scratch[(7 * config.actors + count) as usize] = prefix.total;
+        }
+        let mut members = Shared::<[u32]>::new_slice(LIMIT as usize);
+        let length = 1u32 << (32 - (count - 1).leading_zeros());
+        let mut position = UNIT_POS;
+        while position < length {
+            let mut packed = u32::new(comptime!(i64::from(u32::MAX)));
+            if position < count {
+                packed = (scratch[(5 * config.actors + position) as usize] << 11) | position;
+            }
+            members[position as usize] = packed;
+            position += CUBE_DIM;
+        }
+        sync_cube();
+        let mut width = 2u32;
+        while width <= length {
+            let mut stride = width / 2;
+            while stride > 0 {
+                let mut position = UNIT_POS;
+                while position < length {
+                    let other = position ^ stride;
+                    if other > position {
+                        let low = min(members[position as usize], members[other as usize]);
+                        let high = max(members[position as usize], members[other as usize]);
+                        let ascending = position & width == 0;
+                        members[position as usize] = select(ascending, low, high);
+                        members[other as usize] = select(ascending, high, low);
+                    }
+                    position += CUBE_DIM;
+                }
+                sync_cube();
+                stride /= 2;
+            }
+            width *= 2;
+        }
+        let mut position = UNIT_POS;
+        while position < count {
+            scratch[(7 * config.actors + position) as usize] =
+                members[position as usize] & (LIMIT - 1);
+            position += CUBE_DIM;
+        }
+    }
+}
+
+#[cfg(test)]
+#[cube]
+pub(super) fn sort_scalar(
+    config: &EconomyConfig,
+    spatial: &[u32],
+    scratch: &mut [u32],
+    searches: &mut [u32],
 ) {
     let count = spatial[(config.spatial_side * config.spatial_side) as usize];
     let member = ABSOLUTE_POS as u32;
@@ -129,11 +255,18 @@ pub(super) fn sort(
         if index::Supply::load(&*scratch, config, member).offered {
             searches[(17 * config.actors + stocked_rank) as usize] = member;
         }
+        if member == 0 {
+            let mut total = 0u32;
+            for other in 0..count {
+                total += u32::cast_from(index::Supply::load(&*scratch, config, other).offered);
+            }
+            scratch[(7 * config.actors + count) as usize] = total;
+        }
     }
 }
 
 #[cube]
-fn write_bound(
+fn write_bound_scalar(
     actors: &[u32],
     config: &EconomyConfig,
     spatial: &[u32],
@@ -187,6 +320,90 @@ fn write_bound(
 }
 
 #[cube]
+fn write_bound_plane(
+    actors: &[u32],
+    config: &EconomyConfig,
+    spatial: &[u32],
+    scratch: &mut [u32],
+    node: u32,
+    start: u32,
+    end: u32,
+) {
+    let cells = config.spatial_side * config.spatial_side;
+    let mut price = u32::new(comptime!(i64::from(u32::MAX)));
+    let mut min_x = u32::new(comptime!(i64::from(u32::MAX)));
+    let mut max_x = 0u32;
+    let mut min_y = u32::new(comptime!(i64::from(u32::MAX)));
+    let mut max_y = 0u32;
+    let mut access = u32::new(comptime!(i64::from(u32::MAX)));
+    let mut stocked = 0u32;
+    let mut minimum_quote = u32::new(comptime!(i64::from(u32::MAX)));
+    let mut position = start + UNIT_POS_PLANE;
+    while position < end {
+        let member = scratch[(7 * config.actors + position) as usize];
+        let supply = index::Supply::load(&*scratch, config, member);
+        stocked += u32::cast_from(supply.offered);
+        if (supply.offered || supply.producer) && supply.quote > 0 {
+            minimum_quote = min(minimum_quote, supply.quote);
+        }
+        if supply.producer && !supply.offered && supply.quote > 0 {
+            let actor = spatial[(cells + 1 + member) as usize];
+            let stride = actors.len() / ActorLayout::WORDS;
+            let x = actors[ActorLayout::X * stride + actor as usize];
+            let y = actors[ActorLayout::Y * stride + actor as usize];
+            price = min(price, supply.quote);
+            min_x = min(min_x, x);
+            max_x = max(max_x, x);
+            min_y = min(min_y, y);
+            max_y = max(max_y, y);
+            if comptime!(config.railway.routes_enabled == Feature::Enabled)
+                && config.railway.nodes > 0
+            {
+                access = min(access, config.railway.access[actor as usize * 2 + 1]);
+            }
+        }
+        position += 32;
+    }
+    price = plane_min(price);
+    min_x = plane_min(min_x);
+    max_x = plane_max(max_x);
+    min_y = plane_min(min_y);
+    max_y = plane_max(max_y);
+    access = plane_min(access);
+    stocked = plane_sum(stocked);
+    minimum_quote = plane_min(minimum_quote);
+    if UNIT_POS_PLANE == 0 {
+        let base = 8 * config.actors + node * FIELDS;
+        scratch[(base + comptime!(Bound::Price as u32)) as usize] = price;
+        scratch[(base + comptime!(Bound::MinX as u32)) as usize] = min_x;
+        scratch[(base + comptime!(Bound::MaxX as u32)) as usize] = max_x;
+        scratch[(base + comptime!(Bound::MinY as u32)) as usize] = min_y;
+        scratch[(base + comptime!(Bound::MaxY as u32)) as usize] = max_y;
+        scratch[(base + comptime!(Bound::Access as u32)) as usize] = access;
+        scratch[(base + comptime!(Bound::Stocked as u32)) as usize] = stocked;
+        scratch[(base + comptime!(Bound::MinimumQuote as u32)) as usize] = minimum_quote;
+    }
+}
+
+#[cube]
+fn write_bound(
+    actors: &[u32],
+    config: &EconomyConfig,
+    spatial: &[u32],
+    scratch: &mut [u32],
+    node: u32,
+    start: u32,
+    end: u32,
+    #[comptime] mode: parallel::ScanMode,
+) {
+    if comptime!(mode == parallel::ScanMode::Plane) && PLANE_DIM == 32 {
+        write_bound_plane(actors, config, spatial, scratch, node, start, end);
+    } else {
+        write_bound_scalar(actors, config, spatial, scratch, node, start, end);
+    }
+}
+
+#[cube]
 pub(super) fn affordable(config: &EconomyConfig, scratch: &[u32], count: u32, cash: Ticks) -> bool {
     let mut affordable = true;
     if tree(config, count) {
@@ -200,17 +417,30 @@ pub(super) fn affordable(config: &EconomyConfig, scratch: &[u32], count: u32, ca
 #[cube]
 pub(super) fn stocked_count(config: &EconomyConfig, scratch: &[u32], count: u32) -> u32 {
     let mut stocked = count;
-    if tree(config, count) {
-        stocked = scratch[(8 * config.actors + FIELDS + comptime!(Bound::Stocked as u32)) as usize];
+    if count <= LIMIT {
+        stocked = select(
+            count == 0,
+            0u32,
+            scratch[(7 * config.actors + count) as usize],
+        );
     }
     stocked
 }
 
 #[cube]
-pub(super) fn bounds(actors: &[u32], config: &EconomyConfig, spatial: &[u32], scratch: &mut [u32]) {
+pub(super) fn bounds(
+    actors: &[u32],
+    config: &EconomyConfig,
+    spatial: &[u32],
+    scratch: &mut [u32],
+    #[comptime] mode: parallel::ScanMode,
+) {
     let count = spatial[(config.spatial_side * config.spatial_side) as usize];
     if count <= LIMIT {
-        let invocation = ABSOLUTE_POS as u32;
+        let mut invocation = ABSOLUTE_POS as u32;
+        if comptime!(mode == parallel::ScanMode::Plane) && PLANE_DIM == 32 {
+            invocation /= 32;
+        }
         let leaves = leaves(count);
         if tree(config, count) {
             for node in 4 * invocation + 1..min(4 * invocation + 5, 2 * leaves) {
@@ -218,7 +448,16 @@ pub(super) fn bounds(actors: &[u32], config: &EconomyConfig, spatial: &[u32], sc
                 let width = leaves / level * BLOCK;
                 let start = (node - level) * width;
                 let end = min(start + width, count);
-                write_bound(actors, config, spatial, scratch, node, min(start, end), end);
+                write_bound(
+                    actors,
+                    config,
+                    spatial,
+                    scratch,
+                    node,
+                    min(start, end),
+                    end,
+                    comptime!(mode),
+                );
             }
         } else if invocation < ceildiv(count, BLOCK) {
             write_bound(
@@ -229,6 +468,7 @@ pub(super) fn bounds(actors: &[u32], config: &EconomyConfig, spatial: &[u32], sc
                 invocation,
                 invocation * BLOCK,
                 min((invocation + 1) * BLOCK, count),
+                comptime!(mode),
             );
         }
     }
@@ -348,16 +588,14 @@ fn visit(
                 );
                 let score = supply.quote + days * config.delivery_penalty;
                 if comptime!(cache_mode == CacheMode::Capture) {
-                    let base = 6 * config.actors + 8 * buyer.actor;
                     if score < winner.score {
-                        #[unroll]
-                        for word in 0..8u32 {
-                            cache[(base + word) as usize] = 0;
-                        }
+                        clear_cache(config, cache, buyer.actor, count);
+                        winner.summary &= !CACHE_SUMMARY_MASK;
                     }
                     if score <= winner.score {
-                        let word = base + member / 32;
+                        let word = cache_word(config, buyer.actor, member / 32);
                         cache[word as usize] |= 1 << (member % 32);
+                        winner.summary = record_word(winner.summary, member / 32);
                     }
                 }
                 if score < winner.score || score == winner.score && preceding {
@@ -385,6 +623,7 @@ fn query_with_cache(
     y: u32,
     buyer_access: u32,
     cash: Ticks,
+    cache_header: u32,
     #[comptime] cache_mode: CacheMode,
 ) -> Offer {
     let count = spatial[(config.spatial_side * config.spatial_side) as usize];
@@ -404,6 +643,7 @@ fn query_with_cache(
         score: u32::new(comptime!(i64::from(u32::MAX))),
         cell: u32::new(comptime!(i64::from(u32::MAX))),
         rank: u32::new(comptime!(i64::from(u32::MAX))),
+        summary: cache_header,
     };
     if tree(config, count) {
         visit(
@@ -473,6 +713,9 @@ fn query_with_cache(
             }
         }
     }
+    if comptime!(cache_mode == CacheMode::Capture) {
+        cache[(14 * config.actors + buyer.actor) as usize] = winner.summary;
+    }
     Offer {
         actor: winner.actor,
         trip: winner.trip,
@@ -505,6 +748,7 @@ pub(super) fn query(
         y,
         buyer_access,
         cash,
+        0u32,
         comptime!(CacheMode::Discard),
     )
 }
@@ -517,30 +761,45 @@ fn cached_offer(
     cache: &[u32],
     parameters: &EconomyParameters,
     buyer: u32,
+    captured: u32,
 ) -> Offer {
     let count = spatial[1usize];
-    let rotation = (parameters.settlement_rotation + buyer) % max(count, 1);
-    let base = 6 * config.actors + 8 * buyer;
+    let entries = captured >> CACHE_ENTRIES_SHIFT;
     let mut chosen = u32::new(comptime!(i64::from(NO_ACTOR)));
-    let mut best = u32::new(comptime!(i64::from(u32::MAX)));
-    #[unroll]
-    for word in 0..8u32 {
-        let mask = cache[(base + word) as usize];
-        if mask != 0 {
-            let mut after = mask;
-            if word == rotation / 32 {
-                after &= u32::MAX << (rotation % 32);
+    match entries {
+        0 => (),
+        1 => {
+            let rotation = (parameters.settlement_rotation + buyer) % max(count, 1);
+            let word = (captured >> CACHE_SUMMARY_SHIFT) & CACHE_WORD_MASK;
+            let mask = cache[cache_word(config, buyer, word) as usize];
+            let start = select(word == rotation / 32, rotation % 32, 0);
+            let after = mask & (u32::MAX << start);
+            if mask != 0 {
+                chosen =
+                    word * 32 + select(after != 0, after.trailing_zeros(), mask.trailing_zeros());
             }
-            let selected = select(after != 0, after, mask);
-            let member = word * 32 + selected.trailing_zeros();
-            let rank = select(
-                member >= rotation,
-                member - rotation,
-                member + count - rotation,
-            );
-            if rank < best {
-                chosen = member;
-                best = rank;
+        }
+        _ => {
+            let rotation = (parameters.settlement_rotation + buyer) % max(count, 1);
+            let words = ceildiv(max(count, 1), 32);
+            let first = rotation / 32;
+            let mask = cache[cache_word(config, buyer, first) as usize];
+            let after = mask & (u32::MAX << (rotation % 32));
+            if after != 0 {
+                chosen = first * 32 + after.trailing_zeros();
+            }
+            let mut step = 1u32;
+            while chosen == NO_ACTOR && step < words {
+                let shifted = first + step;
+                let word = select(shifted < words, shifted, shifted - words);
+                let current = cache[cache_word(config, buyer, word) as usize];
+                if current != 0 {
+                    chosen = word * 32 + current.trailing_zeros();
+                }
+                step += 1;
+            }
+            if chosen == NO_ACTOR && mask != 0 {
+                chosen = first * 32 + mask.trailing_zeros();
             }
         }
     }
@@ -570,7 +829,17 @@ pub(super) fn cached_query(
     let valid = 14 * config.actors + buyer;
     let cash_low = 15 * config.actors + buyer;
     let cash_high = 16 * config.actors + buyer;
-    let cached = cache[valid as usize] == 1
+    let count = spatial[1usize];
+    let stocked = stocked_count(config, scratch, count);
+    let captured = cache[valid as usize];
+    let prior_stocked = (captured >> CACHE_STATE_BITS) & CACHE_STOCKED_MASK;
+    let unchanged = select(
+        parameters.traded_good() == comptime!(Good::Bread as u32),
+        stocked == prior_stocked,
+        stocked <= prior_stocked,
+    );
+    let cached = captured & CACHE_STATE_MASK > 0
+        && unchanged
         && cache[cash_low as usize] == cash.extract(LOW_WORD)
         && cache[cash_high as usize] == cash.extract(HIGH_WORD);
     let mut offer = Offer {
@@ -578,15 +847,15 @@ pub(super) fn cached_query(
         trip: 0u32,
     };
     if cached {
-        let selected = cached_offer(actors, config, spatial, &*cache, parameters, buyer);
+        let selected = cached_offer(
+            actors, config, spatial, &*cache, parameters, buyer, captured,
+        );
         offer.actor = selected.actor;
         offer.trip = selected.trip;
+        cache[valid as usize] = (captured & CACHE_SUMMARY_MASK) | 1 | (stocked << CACHE_STATE_BITS);
     } else {
-        let base = 6 * config.actors + 8 * buyer;
-        #[unroll]
-        for word in 0..8u32 {
-            cache[(base + word) as usize] = 0;
-        }
+        clear_cache(config, cache, buyer, count);
+        cache[valid as usize] = 0;
         let selected = query_with_cache(
             actors,
             config,
@@ -599,11 +868,11 @@ pub(super) fn cached_query(
             y,
             buyer_access,
             cash,
+            1 | (stocked << CACHE_STATE_BITS),
             comptime!(CacheMode::Capture),
         );
         offer.actor = selected.actor;
         offer.trip = selected.trip;
-        cache[valid as usize] = 1;
         cache[cash_low as usize] = cash.extract(LOW_WORD);
         cache[cash_high as usize] = cash.extract(HIGH_WORD);
     }

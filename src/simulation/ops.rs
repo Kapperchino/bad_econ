@@ -106,7 +106,10 @@ impl Device {
                 let options = burn_wgpu::RuntimeOptions::with_tasks_max(
                     std::env::var_os("CUBECL_WGPU_MAX_TASKS")
                         .is_none()
-                        .then_some(128),
+                        .then_some(match setup.backend {
+                            wgpu::Backend::Metal => 512,
+                            _ => 128,
+                        }),
                 )
                 .map_err(|error| anyhow!("{error}"))?;
                 let imported = burn_wgpu::try_init_device(setup, options)

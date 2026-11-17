@@ -27,7 +27,10 @@ pub struct EconomyParameters {
     pub clock: MarketClock,
     #[cube(comptime)]
     pub scan: super::parallel::ScanMode,
+    #[cube(comptime)]
+    pub empty_orders: EmptyOrderMode,
     pub day: u32,
+    pub matching_round: u32,
     pub settlement_rotation: u32,
     #[cube(comptime)]
     pub phase: Phase,
@@ -48,7 +51,9 @@ impl EconomyParameters {
         EconomyParametersLaunch {
             clock: self.clock,
             scan: self.scan,
+            empty_orders: self.empty_orders,
             day: self.day,
+            matching_round: self.matching_round,
             settlement_rotation: self.settlement_rotation,
             phase: self.phase,
             market: self.market,
@@ -72,6 +77,7 @@ impl EconomyParameters {
             self.settlement_rotation =
                 config.consumption_intervals[crate::domain::Good::COUNT + 1usize];
             self.good = config.consumption_intervals[crate::domain::Good::COUNT + 2usize];
+            self.matching_round = config.consumption_intervals[crate::domain::Good::COUNT + 4usize];
             config.heating_per_person =
                 config.consumption_intervals[crate::domain::Good::COUNT + 3usize];
         }
@@ -80,7 +86,8 @@ impl EconomyParameters {
     pub fn traded_good(&self) -> u32 {
         match comptime!(self.market) {
             MarketFlag::Input(InputMarket::Grain) => u32::new(Good::Grain as i64),
-            MarketFlag::Input(InputMarket::Other) | MarketFlag::Consumer => self.good,
+            MarketFlag::Input(InputMarket::Other) => self.good,
+            MarketFlag::Consumer(good) => u32::new(comptime!(good as i64)),
             MarketFlag::Household => u32::new(Good::Bread as i64),
             _ => u32::new(0),
         }
@@ -91,6 +98,13 @@ impl EconomyParameters {
 pub enum MarketClock {
     Scalars,
     Device,
+}
+
+#[derive(Clone, Copy, Debug, Default, Hash, PartialEq, Eq)]
+pub enum EmptyOrderMode {
+    #[default]
+    Settle,
+    FeedbackOnly,
 }
 
 #[derive(CubeType, CubeLaunch, Clone, Copy, Default)]

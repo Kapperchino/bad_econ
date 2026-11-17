@@ -36,7 +36,7 @@ pub(super) fn actor_settlement(
         if eligible {
             let mut status = KernelEventStatus::new(comptime!(EventStatus::Rejected));
             match comptime!(parameters.market) {
-                MarketFlag::Input(_) | MarketFlag::Consumer | MarketFlag::Household => {
+                MarketFlag::Input(_) | MarketFlag::Consumer(_) | MarketFlag::Household => {
                     status.replace(buyer_settlement(
                         state, actors, config, proposals, control, parameters, actor, other,
                         posting,
@@ -149,6 +149,17 @@ pub(super) fn buyer_settlement(
             minus(cash, cost),
         );
         set(state, config, slot, actor, incoming.value);
+        if good == comptime!(Good::Bread as u32)
+            && kind(actors, actor).is(comptime!(ActorKind::Household))
+        {
+            set(
+                state,
+                config,
+                comptime!(Field::FoodPrice as u32),
+                actor,
+                price,
+            );
+        }
         for input in 0u32..2 {
             if number(
                 state,
@@ -202,6 +213,88 @@ pub(super) fn buyer_settlement(
             actor,
             purchased.value,
         );
+    }
+    status
+}
+
+#[cube]
+fn empty_seller_bulk(parameters: &EconomyParameters) -> bool {
+    let good = parameters.traded_good();
+    good == comptime!(Good::Coal as u32)
+        || good == comptime!(Good::Wood as u32)
+        || good == comptime!(Good::LuxuryClothes as u32)
+        || good == comptime!(Good::LuxuryFurniture as u32)
+}
+
+#[cube]
+fn empty_seller_quantity(proposals: &[u32], parameters: &EconomyParameters, actor: u32) -> Ticks {
+    let base = actor as usize * ProposalLayout::WORDS;
+    select(
+        empty_seller_bulk(parameters),
+        ticks(
+            proposals[base + ProposalLayout::QUANTITY_LOW],
+            proposals[base + ProposalLayout::QUANTITY_HIGH],
+        ),
+        ticks(1, 0),
+    )
+}
+
+#[cube]
+pub(super) fn empty_seller_safe(
+    state: &mut [u32],
+    config: &EconomyConfig,
+    parameters: &EconomyParameters,
+    peer: u32,
+) -> bool {
+    let quantity = select(
+        empty_seller_bulk(parameters),
+        ticks(u32::MAX, 0),
+        ticks(1, 0),
+    );
+    let quote = number(state, config, comptime!(Field::Price as u32), peer);
+    let cost = times(quantity, quote);
+    let cash = plus(
+        value(state, config, comptime!(Field::Cash as u32), peer),
+        cost.value,
+    );
+    let sales = plus(
+        value(state, config, comptime!(Field::Sales as u32), peer),
+        quantity,
+    );
+    cost.faults
+        .union(cash.faults)
+        .union(sales.faults)
+        .is_empty()
+}
+
+#[cube]
+pub(super) fn empty_seller_settlement(
+    state: &mut [u32],
+    _actors: &[u32],
+    config: &EconomyConfig,
+    proposals: &[u32],
+    control: &[Atomic<u32>],
+    parameters: &EconomyParameters,
+    actor: u32,
+    peer: u32,
+    prior: &KernelEventStatus,
+) -> KernelEventStatus {
+    let quantity = empty_seller_quantity(proposals, parameters, actor);
+    let quote = number(state, config, comptime!(Field::Price as u32), peer);
+    let cost = multiply(control, quantity, quote);
+    let cash = plus(
+        value(state, config, comptime!(Field::Cash as u32), peer),
+        cost,
+    );
+    let sales = plus(
+        value(state, config, comptime!(Field::Sales as u32), peer),
+        quantity,
+    );
+    let faults = cash.faults.union(sales.faults);
+    let mut status = KernelEventStatus::new(comptime!(EventStatus::Rejected));
+    if !faults.is_empty() || prior.contains(comptime!(EventStatus::Faulted)) {
+        faults.record(control);
+        status.set(comptime!(EventStatus::Faulted));
     }
     status
 }

@@ -23,6 +23,8 @@ pub struct EconomyObservation {
     pub workforce: u64,
     pub subsistence: u64,
     pub inactive: u64,
+    #[serde(default)]
+    pub rural_employed: u64,
     pub household_cash: u64,
     pub active_by_good: [u64; Good::COUNT],
     pub business_types: [u64; 3],
@@ -45,6 +47,10 @@ impl EconomyObservation {
                             && state.get(Field::LivingMembers, index) > 0;
                         let subsistence = scenario.config().economy == Economy::Industrial
                             && state.get(Field::LandPlots, index) > 0;
+                        result.rural_employed += match subsistence {
+                            true => state.get(Field::Employed, index),
+                            false => 0,
+                        };
                         match (working, subsistence) {
                             (true, false) => result.workforce += 1,
                             (true, true) => result.subsistence += 1,
@@ -81,5 +87,9 @@ impl EconomyObservation {
                 }
                 Ok(result)
             })
+    }
+
+    pub fn wage_employed(&self, employed: u64) -> u64 {
+        employed.saturating_sub(self.rural_employed)
     }
 }

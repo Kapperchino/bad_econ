@@ -360,6 +360,12 @@ pub(super) enum HistogramScan {
 }
 
 #[derive(Clone, Copy)]
+pub(super) struct HistogramLayout {
+    pub bins: u32,
+    pub source_workgroup: u32,
+}
+
+#[derive(Clone, Copy)]
 pub(super) enum ActiveScanTile {
     Scalar,
     Tiled,
@@ -390,6 +396,31 @@ pub(super) fn scan_active(
     dispatches: &CubeTensor,
     output: HistogramScan,
 ) {
+    scan_histogram(
+        device,
+        buffer,
+        offset,
+        count,
+        control,
+        dispatches,
+        output,
+        HistogramLayout {
+            bins: 16,
+            source_workgroup: device.workgroup,
+        },
+    );
+}
+
+pub(super) fn scan_histogram(
+    device: &Device,
+    buffer: &CubeTensor,
+    offset: usize,
+    count: usize,
+    control: &CubeTensor,
+    dispatches: &CubeTensor,
+    output: HistogramScan,
+    layout: HistogramLayout,
+) {
     let items = ActiveScanTile::new(device, count).items();
     let span = device.workgroup * items;
     let mut levels = Vec::new();
@@ -414,6 +445,8 @@ pub(super) fn scan_active(
                 divisor,
                 items,
                 mode: ScanMode::new(device),
+                histogram_bins: layout.bins,
+                source_workgroup: layout.source_workgroup,
             },
         );
         levels.push(ScanLevel {
@@ -451,6 +484,8 @@ pub(super) fn scan_active(
                 bound: level.count as u32,
                 divisor: level.divisor,
                 items,
+                histogram_bins: layout.bins,
+                source_workgroup: layout.source_workgroup,
             },
         );
     }
@@ -465,12 +500,15 @@ fn scan_active_blocks(
     divisor: u32,
     #[comptime] items: u32,
     #[comptime] mode: ScanMode,
+    #[comptime] histogram_bins: u32,
+    #[comptime] source_workgroup: u32,
 ) {
     let count = ceildiv(
-        16 * ceildiv(
-            control[crate::simulation::flags::CONSTRUCTED_EVENTS_WORD].load(),
-            CUBE_DIM,
-        ),
+        histogram_bins
+            * ceildiv(
+                control[crate::simulation::flags::CONSTRUCTED_EVENTS_WORD].load(),
+                source_workgroup,
+            ),
         divisor,
     );
     let block = CUBE_POS as u32;
@@ -509,12 +547,15 @@ fn add_active_offsets(
     bound: u32,
     divisor: u32,
     #[comptime] items: u32,
+    #[comptime] histogram_bins: u32,
+    #[comptime] source_workgroup: u32,
 ) {
     let count = ceildiv(
-        16 * ceildiv(
-            control[crate::simulation::flags::CONSTRUCTED_EVENTS_WORD].load(),
-            CUBE_DIM,
-        ),
+        histogram_bins
+            * ceildiv(
+                control[crate::simulation::flags::CONSTRUCTED_EVENTS_WORD].load(),
+                source_workgroup,
+            ),
         divisor,
     );
     let block = CUBE_POS as u32;

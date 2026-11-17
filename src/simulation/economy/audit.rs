@@ -82,6 +82,7 @@ pub(in crate::simulation) struct AuditInput<'a> {
     pub partials: &'a CubeTensor,
     pub summary: &'a CubeTensor,
     pub control: &'a CubeTensor,
+    pub ring_mask: Option<&'a CubeTensor>,
     pub rings: RingValidation<'a>,
 }
 
@@ -142,6 +143,7 @@ enum Source {
     PriceField,
     PriceSquare,
     PricedFirm,
+    RuralEmployed,
 }
 
 pub(in crate::simulation) struct AuditBuffers {
@@ -165,6 +167,11 @@ impl AuditBuffers {
                     S::WORKFORCE | S::SUBSISTENCE | S::INACTIVE => {
                         definition.source = Source::Labor as u32;
                         definition.field = metric - S::WORKFORCE;
+                        definition.kind = 0;
+                    }
+                    S::RURAL_EMPLOYED => {
+                        definition.source = Source::RuralEmployed as u32;
+                        definition.field = Field::Employed as u32;
                         definition.kind = 0;
                     }
                     S::HOUSEHOLD_CASH => {
@@ -333,11 +340,38 @@ impl AuditBuffers {
     pub fn summarize(&self, device: &Device, input: AuditInput<'_>) -> Result<()> {
         let count = input.actors.meta.num_elements() / ActorLayout::WORDS;
         let argument = |tensor: &CubeTensor| tensor.clone().into_buffer_arg();
+        let ring_tracking = match input.ring_mask {
+            Some(_) => RingTracking::Observed,
+            None => RingTracking::Untracked,
+        };
+        let hardware = &device.client.properties().hardware;
+        let actor_ring_tracking = match (
+            &input.rings,
+            ring_tracking,
+            parallel::ScanMode::new(device),
+            input.config.state_stride % 32,
+            hardware.plane_size_min,
+            hardware.plane_size_max,
+        ) {
+            (RingValidation::All, RingTracking::Observed, parallel::ScanMode::Plane, 0, 32, 32) => {
+                RingTracking::ObservedPlane
+            }
+            _ => ring_tracking,
+        };
+        if let (RingValidation::All, Some(mask)) = (&input.rings, input.ring_mask) {
+            crate::simulation::tensor::reset_ring_mask(
+                device,
+                mask,
+                crate::simulation::tensor::RingMaskState::Empty,
+            );
+        }
+        let ring_mask = input.ring_mask.unwrap_or(input.control);
+        let validation_workgroup = 128;
         ActorValidation::launch(
             device,
             dispatch(
                 device,
-                count.div_ceil(device.workgroup as usize),
+                count.div_ceil(validation_workgroup as usize),
                 match input.rings {
                     RingValidation::All => Good::COUNT + 1,
                     RingValidation::Unchanged
@@ -345,12 +379,14 @@ impl AuditBuffers {
                     | RingValidation::Changed { .. } => 1,
                 },
             ),
-            CubeDim::new_1d(device.workgroup),
+            CubeDim::new_1d(validation_workgroup),
             ValidationInputLaunch {
                 state: argument(input.state),
                 actors: argument(input.actors),
                 config: input.config.launch(),
                 control: argument(input.control),
+                ring_mask: argument(ring_mask),
+                ring_tracking: actor_ring_tracking,
             },
         );
         let selected = |indices: &CubeTensor| {
@@ -370,6 +406,8 @@ impl AuditBuffers {
                     indices: argument(indices),
                     config: input.config.launch(),
                     control: argument(input.control),
+                    ring_mask: argument(ring_mask),
+                    ring_tracking,
                 },
             );
         };
@@ -493,6 +531,34 @@ fn summarize_metrics(input: &mut SummaryInput) {
             MetricPopulation::Firms => input.spatial[(firm_segment + cells) as usize],
         };
         let mut member = group * TILE_ACTORS as u32 + UNIT_POS;
+        if source == comptime!(Source::Field as u32) {
+            while member < min((group + 1) * TILE_ACTORS as u32, count) {
+                let actor = match comptime!(input.population) {
+                    MetricPopulation::Actors => member,
+                    MetricPopulation::Firms => {
+                        input.spatial[(firm_segment + cells + 1 + member) as usize]
+                    }
+                };
+                let mut selected = true;
+                if selected_kind != NO_ACTOR {
+                    let actor_kind = kind(actors, actor).bits();
+                    selected = selected_kind == actor_kind
+                        || (selected_kind == Good::COUNT as u32 + 1 && actor_kind > 0);
+                }
+                if selected {
+                    total = checked_sum(total, native(value(state, config, field, actor)), control);
+                }
+                member += CUBE_DIM;
+            }
+        }
+        let priced = match source {
+            14 | 15 | 16 => true,
+            _ => false,
+        };
+        let quoted = priced
+            || source == comptime!(Source::QuoteField as u32)
+            || source == comptime!(Source::QuoteSquare as u32)
+            || source == comptime!(Source::QuotedFirm as u32);
         while member < min((group + 1) * TILE_ACTORS as u32, count) {
             let actor = match comptime!(input.population) {
                 MetricPopulation::Actors => member,
@@ -504,25 +570,24 @@ fn summarize_metrics(input: &mut SummaryInput) {
             let selected_kind = selected_kind == NO_ACTOR
                 || selected_kind == actor_kind
                 || (selected_kind == Good::COUNT as u32 + 1 && actor_kind > 0);
-            let priced = source >= comptime!(Source::PriceField as u32);
-            let quoted = priced
-                || source == comptime!(Source::QuoteField as u32)
-                || source == comptime!(Source::QuoteSquare as u32)
-                || source == comptime!(Source::QuotedFirm as u32);
-            let status = number(
-                state,
-                config,
-                comptime!(Field::EnterpriseStatus as u32),
-                actor,
-            );
-            let trading = status
-                > comptime!(crate::domain::enterprise::EnterpriseState::Forming as u32)
-                && status
-                    < comptime!(crate::domain::enterprise::EnterpriseState::Liquidating as u32);
-            let stocked = actor_kind == comptime!(Good::Housing as u32)
-                || actor_kind == comptime!(Good::Railway as u32)
-                || native(value(state, config, actor_kind, actor)) > 0;
-            let selected = selected_kind && (!quoted || trading) && (!priced || stocked);
+            let mut selected = selected_kind;
+            if quoted && selected {
+                let status = number(
+                    state,
+                    config,
+                    comptime!(Field::EnterpriseStatus as u32),
+                    actor,
+                );
+                selected = status
+                    > comptime!(crate::domain::enterprise::EnterpriseState::Forming as u32)
+                    && status
+                        < comptime!(crate::domain::enterprise::EnterpriseState::Liquidating as u32);
+            }
+            if priced && selected {
+                selected = actor_kind == comptime!(Good::Housing as u32)
+                    || actor_kind == comptime!(Good::Railway as u32)
+                    || native(value(state, config, actor_kind, actor)) > 0;
+            }
             if selected {
                 let mut amount = native(value(state, config, field, actor));
                 match source {
@@ -613,6 +678,13 @@ fn summarize_metrics(input: &mut SummaryInput) {
                                     > 0;
                         let category = select(working, select(subsistence, 1u32, 0u32), 2u32);
                         amount = u64::cast_from(category == field);
+                    }
+                    17 => {
+                        amount *= u64::cast_from(
+                            comptime!(config.economy == crate::domain::Economy::Industrial)
+                                && number(state, config, comptime!(Field::LandPlots as u32), actor)
+                                    > 0,
+                        );
                     }
                     10 => {
                         amount = u64::cast_from(
@@ -710,6 +782,16 @@ struct ValidationInput {
     actors: Box<[u32]>,
     config: EconomyConfig,
     control: Box<[Atomic<u32>]>,
+    ring_mask: Box<[Atomic<u32>]>,
+    #[cube(comptime)]
+    ring_tracking: RingTracking,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+enum RingTracking {
+    Untracked,
+    Observed,
+    ObservedPlane,
 }
 
 struct ActorValidation;
@@ -721,6 +803,9 @@ struct SelectedValidationInput {
     indices: Box<[u32]>,
     config: EconomyConfig,
     control: Box<[Atomic<u32>]>,
+    ring_mask: Box<[Atomic<u32>]>,
+    #[cube(comptime)]
+    ring_tracking: RingTracking,
 }
 
 struct SelectedValidation;
@@ -742,8 +827,10 @@ impl GpuPass<SelectedValidationInput> for ValidateSelected {
                 &input.state,
                 &input.config,
                 &input.control,
+                &input.ring_mask,
                 input.indices[index as usize],
                 CUBE_POS_Y,
+                comptime!(input.ring_tracking),
             );
         }
     }
@@ -759,7 +846,14 @@ impl GpuPass<ValidationInput> for ValidateActors {
     type Output = ();
 
     fn execute(input: ValidationInput) {
-        validate_actors(&input.state, &input.actors, &input.config, &input.control);
+        validate_actors(
+            &input.state,
+            &input.actors,
+            &input.config,
+            &input.control,
+            &input.ring_mask,
+            comptime!(input.ring_tracking),
+        );
     }
 }
 
@@ -769,16 +863,42 @@ fn validate_actors(
     actors: &[u32],
     config: &EconomyConfig,
     control: &[Atomic<u32>],
+    ring_mask: &[Atomic<u32>],
+    #[comptime] ring_tracking: RingTracking,
 ) {
     let actor = (CUBE_POS_X + CUBE_POS_Z * CUBE_COUNT_X) * CUBE_DIM + UNIT_POS;
     let task = CUBE_POS_Y;
     match task {
-        0 => validate_actor(state, actors, config, control, actor),
-        _ => {
-            if actor < config.actors {
-                validate_ring(state, config, control, actor, task - 1);
-            }
+        0 => {
+            validate_actor(state, actors, config, control, actor);
+            household_histograms(state, actors, config, control, actor);
         }
+        _ => match comptime!(ring_tracking) {
+            RingTracking::ObservedPlane => {
+                validate_ring(
+                    state,
+                    config,
+                    control,
+                    ring_mask,
+                    actor,
+                    task - 1,
+                    ring_tracking,
+                );
+            }
+            _ => {
+                if actor < config.actors {
+                    validate_ring(
+                        state,
+                        config,
+                        control,
+                        ring_mask,
+                        actor,
+                        task - 1,
+                        ring_tracking,
+                    );
+                }
+            }
+        },
     }
 }
 
@@ -787,24 +907,41 @@ fn validate_ring(
     state: &[Ticks],
     config: &EconomyConfig,
     control: &[Atomic<u32>],
+    ring_mask: &[Atomic<u32>],
     actor: u32,
     good: u32,
+    #[comptime] ring_tracking: RingTracking,
 ) {
-    let held = value(state, config, TRANSIT_FIELDS as u32 + good, actor);
-    let mut in_ring = zero();
-    for slot in 0u32..config.ring {
-        in_ring = add_checked(
-            control,
-            in_ring,
-            value(
-                state,
-                config,
-                BASE_FIELDS as u32 + good * config.ring + slot,
-                actor,
-            ),
-        );
+    let mut held = 0u64;
+    if comptime!(ring_tracking != RingTracking::ObservedPlane) || actor < config.actors {
+        held = native(value(state, config, TRANSIT_FIELDS as u32 + good, actor));
     }
-    if !equal(in_ring, held) {
+    let mut in_ring = 0u64;
+    for slot in 0u32..config.ring {
+        let field = BASE_FIELDS as u32 + good * config.ring + slot;
+        let mut amount = zero();
+        if comptime!(ring_tracking != RingTracking::ObservedPlane) || actor < config.actors {
+            amount = value(state, config, field, actor);
+        }
+        let block = (field * config.state_stride + actor) * 2
+            / crate::simulation::tensor::SNAPSHOT_BLOCK_WORDS as u32;
+        match comptime!(ring_tracking) {
+            RingTracking::ObservedPlane => {
+                let present = plane_any(!equal(amount, zero()));
+                if present && UNIT_POS % 32 == 0 {
+                    ring_mask[block as usize].store(1);
+                }
+            }
+            RingTracking::Observed => {
+                if !equal(amount, zero()) {
+                    ring_mask[block as usize].store(1);
+                }
+            }
+            RingTracking::Untracked => (),
+        }
+        in_ring = checked_sum(in_ring, native(amount), control);
+    }
+    if in_ring != held {
         KernelFaults::new(comptime!(FaultFlags::TRANSIT_MISMATCH)).record(control);
     }
 }
@@ -812,7 +949,7 @@ fn validate_ring(
 #[cube]
 fn validate_actor(
     state: &[Ticks],
-    actors: &[u32],
+    _actors: &[u32],
     config: &EconomyConfig,
     control: &[Atomic<u32>],
     actor: u32,
@@ -856,42 +993,75 @@ fn validate_actor(
         ) {
             KernelFaults::new(comptime!(FaultFlags::UNSETTLED_COMMITMENTS)).record(control);
         }
-        if kind(actors, actor).is(comptime!(ActorKind::Household)) {
-            let cash = value(state, config, comptime!(Field::Cash as u32), actor);
-            let mut bin = WORD_BITS - cash.extract(LOW_WORD).leading_zeros();
-            if cash.extract(HIGH_WORD) > 0u32 {
-                bin = TICK_BITS - cash.extract(HIGH_WORD).leading_zeros();
-            }
-            control[(SummaryLayout::WEALTH_START as u32
-                + min(bin, SummaryLayout::WEALTH_BINS as u32 - 1)) as usize]
-                .fetch_add(1u32);
+        let mut transit = 0u64;
+        for good in 0u32..Good::COUNT as u32 {
+            let held = value(state, config, TRANSIT_FIELDS as u32 + good, actor);
+            transit = checked_sum(transit, native(held), control);
+        }
+        if transit
+            != native(value(
+                state,
+                config,
+                comptime!(Field::Transit as u32),
+                actor,
+            ))
+        {
+            KernelFaults::new(comptime!(FaultFlags::TRANSIT_MISMATCH)).record(control);
+        }
+    }
+}
+
+#[cube]
+fn household_histograms(
+    state: &[Ticks],
+    actors: &[u32],
+    config: &EconomyConfig,
+    control: &[Atomic<u32>],
+    actor: u32,
+) {
+    let histograms = Shared::<[Atomic<u32>]>::new_slice(comptime!(
+        SummaryLayout::WEALTH_BINS + SummaryLayout::REGIONS
+    ));
+    let mut index = UNIT_POS;
+    while index < SummaryLayout::WEALTH_BINS as u32 + SummaryLayout::REGIONS as u32 {
+        histograms[index as usize].store(0);
+        index += CUBE_DIM;
+    }
+    sync_cube();
+    if actor < config.actors && kind(actors, actor).is(comptime!(ActorKind::Household)) {
+        let cash = value(state, config, comptime!(Field::Cash as u32), actor);
+        let mut bin = WORD_BITS - cash.extract(LOW_WORD).leading_zeros();
+        if cash.extract(HIGH_WORD) > 0u32 {
+            bin = TICK_BITS - cash.extract(HIGH_WORD).leading_zeros();
+        }
+        histograms[min(bin, SummaryLayout::WEALTH_BINS as u32 - 1) as usize].fetch_add(1);
+        let shortage = number(state, config, comptime!(Field::Shortage as u32), actor);
+        if shortage > 0 {
             let x = actors[ActorLayout::X * (actors.len() / ActorLayout::WORDS) + actor as usize]
                 * SummaryLayout::REGION_SIDE as u32
                 / config.map_size;
             let y = actors[ActorLayout::Y * (actors.len() / ActorLayout::WORDS) + actor as usize]
                 * SummaryLayout::REGION_SIDE as u32
                 / config.map_size;
-            control[(SummaryLayout::REGIONS_START as u32
+            histograms[(SummaryLayout::WEALTH_BINS as u32
                 + y * SummaryLayout::REGION_SIDE as u32
                 + x) as usize]
-                .fetch_add(number(
-                    state,
-                    config,
-                    comptime!(Field::Shortage as u32),
-                    actor,
-                ));
+                .fetch_add(shortage);
         }
-        let mut transit = zero();
-        for good in 0u32..Good::COUNT as u32 {
-            let held = value(state, config, TRANSIT_FIELDS as u32 + good, actor);
-            transit = add_checked(control, transit, held);
+    }
+    sync_cube();
+    index = UNIT_POS;
+    while index < SummaryLayout::WEALTH_BINS as u32 + SummaryLayout::REGIONS as u32 {
+        let count = histograms[index as usize].load();
+        let target = select(
+            index < SummaryLayout::WEALTH_BINS as u32,
+            SummaryLayout::WEALTH_START as u32 + index,
+            SummaryLayout::REGIONS_START as u32 + index - SummaryLayout::WEALTH_BINS as u32,
+        );
+        if count > 0 {
+            control[target as usize].fetch_add(count);
         }
-        if !equal(
-            transit,
-            value(state, config, comptime!(Field::Transit as u32), actor),
-        ) {
-            KernelFaults::new(comptime!(FaultFlags::TRANSIT_MISMATCH)).record(control);
-        }
+        index += CUBE_DIM;
     }
 }
 
@@ -902,6 +1072,129 @@ mod tests {
         domain::{Experiment, Scenario},
         simulation::{Simulation, encode, registry, tests::device},
     };
+
+    #[test]
+    fn partitioned_audits_preserve_complete_summaries_after_gpu_days() -> Result<()> {
+        use crate::simulation::AuditExecution;
+
+        for workgroup in [32, 256] {
+            for scenario in [
+                Scenario::baseline(4097, 42, Experiment::Baseline)?,
+                Scenario::industrial(257, 42, Experiment::Baseline)?,
+            ] {
+                let mut simulation = Simulation::new(scenario, device(workgroup)?)?;
+                simulation.advance()?;
+                simulation.audit_execution = AuditExecution::Tiled;
+                let actual = simulation.observe()?;
+                let summary =
+                    simulation
+                        .device
+                        .read_range(&simulation.summary, 0, SummaryLayout::WORDS)?;
+                let control = simulation.device.read(&simulation.control)?;
+                simulation.audit_execution = AuditExecution::Original;
+                assert_eq!(actual, simulation.observe()?);
+                assert_eq!(
+                    summary,
+                    simulation
+                        .device
+                        .read_range(&simulation.summary, 0, SummaryLayout::WORDS,)?,
+                );
+                assert_eq!(control, simulation.device.read(&simulation.control)?);
+            }
+        }
+        Ok(())
+    }
+
+    #[test]
+    fn plane_ring_masks_match_individual_marks_with_partial_actor_groups_on_gpu() -> Result<()> {
+        let scenario = Scenario::baseline(4097, 42, Experiment::Baseline)?;
+        for workgroup in [32, 256] {
+            let simulation = Simulation::new(scenario.clone(), device(workgroup)?)?;
+            let mut state = scenario.initial()?;
+            let count = state.actors.len();
+            let good = Good::COUNT - 1;
+            let field = BASE_FIELDS + good * scenario.ring() + scenario.ring() - 1;
+            for actor in [0, 31, 32, count - 1] {
+                let amount = actor as u64 + 1;
+                state.values[field * count + actor] = amount;
+                state.values[(TRANSIT_FIELDS + good) * count + actor] = amount;
+                state.set(Field::Transit, actor, amount);
+            }
+            simulation.device.write(
+                &simulation.state,
+                bytemuck::cast_slice(&encode(&crate::simulation::tensor::state_values(
+                    &state.values,
+                    count,
+                    simulation.config.state_stride as usize,
+                ))),
+            );
+            let mask = simulation.snapshot_copy.ring_mask().expect("ring mask");
+            let hardware = &simulation.device.client.properties().hardware;
+            let tracking = match (
+                parallel::ScanMode::new(&simulation.device),
+                hardware.plane_size_min,
+                hardware.plane_size_max,
+            ) {
+                (parallel::ScanMode::Plane, 32, 32) => RingTracking::ObservedPlane,
+                _ => RingTracking::Observed,
+            };
+            crate::simulation::tensor::reset_ring_mask(
+                &simulation.device,
+                mask,
+                crate::simulation::tensor::RingMaskState::Empty,
+            );
+            ActorValidation::launch(
+                &simulation.device,
+                dispatch(
+                    &simulation.device,
+                    count.div_ceil(workgroup as usize),
+                    Good::COUNT + 1,
+                ),
+                CubeDim::new_1d(workgroup),
+                ValidationInputLaunch {
+                    state: simulation.state.clone().into_buffer_arg(),
+                    actors: simulation.actors.clone().into_buffer_arg(),
+                    config: simulation.config.launch(),
+                    control: simulation.control.clone().into_buffer_arg(),
+                    ring_mask: mask.clone().into_buffer_arg(),
+                    ring_tracking: tracking,
+                },
+            );
+            let coalesced = simulation.device.read(mask)?;
+            crate::simulation::tensor::reset_ring_mask(
+                &simulation.device,
+                mask,
+                crate::simulation::tensor::RingMaskState::Empty,
+            );
+            let indices = simulation
+                .device
+                .tensor(&(0..count as u32).collect::<Vec<_>>());
+            SelectedValidation::launch(
+                &simulation.device,
+                dispatch(
+                    &simulation.device,
+                    count.div_ceil(workgroup as usize),
+                    Good::COUNT,
+                ),
+                CubeDim::new_1d(workgroup),
+                SelectedValidationInputLaunch {
+                    state: simulation.state.clone().into_buffer_arg(),
+                    indices: indices.into_buffer_arg(),
+                    config: simulation.config.launch(),
+                    control: simulation.control.clone().into_buffer_arg(),
+                    ring_mask: mask.clone().into_buffer_arg(),
+                    ring_tracking: RingTracking::Observed,
+                },
+            );
+            assert_eq!(coalesced, simulation.device.read(mask)?);
+            assert!(coalesced.iter().any(|&value| value > 0));
+            assert_eq!(
+                FaultFlags::read(&simulation.device.read(&simulation.control)?)?,
+                FaultFlags::empty()
+            );
+        }
+        Ok(())
+    }
 
     #[derive(Clone, Copy)]
     enum TransitCase {

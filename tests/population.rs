@@ -15,14 +15,8 @@ fn industrial_household_liquidity_is_unequal_and_replays_on_gpu() -> Result<()> 
         .map(|household| initial.get(Field::Cash, household))
         .collect::<Vec<_>>();
     balances.sort_unstable();
-    let daily_expenses = u64::from(config.household_need)
-        * u64::from(config.demography.initial_household_members)
-        * u64::from(config.prices[2])
-        + u64::from(config.rent.map_or(0, |rent| rent.household_daily));
-    let weekly = balances
-        .iter()
-        .filter(|&&cash| cash <= 7 * daily_expenses)
-        .count();
+    let reference = config.household_cash;
+    let weekly = balances.iter().filter(|&&cash| cash <= reference).count();
     let seasonal = (0..config.households as usize)
         .filter_map(|household| initial.get(Field::Job, household).checked_sub(1))
         .filter(|&firm| {
@@ -34,8 +28,8 @@ fn industrial_household_liquidity_is_unequal_and_replays_on_gpu() -> Result<()> 
     let regular = config.households as usize - seasonal;
     assert!(seasonal > 0);
     assert!((regular * 55 / 100..=regular * 65 / 100).contains(&weekly));
-    assert!(balances[500] < 7 * daily_expenses);
-    assert!(balances[950] > 28 * daily_expenses);
+    assert!(balances[500] < reference);
+    assert!(balances[950] > 4 * reference);
     assert_eq!(
         initial.initial_cash,
         balances.iter().sum::<u64>() + u64::from(config.firms) * config.firm_cash
@@ -372,7 +366,8 @@ fn actor_rows_round_trip_on_gpu_and_reject_mismatched_lengths() -> Result<()> {
     use bad_econ::simulation::Simulation;
     let scenario = scenario()?;
     let expected = scenario.initial()?;
-    let mut simulation = Simulation::new(scenario.clone(), support::device(64)?)?;
+    let device = support::device(64)?;
+    let mut simulation = Simulation::new(scenario.clone(), device.clone())?;
     assert_eq!(simulation.download()?, expected);
     let encoded = serde_json::to_value(&expected)?;
     assert_eq!(
@@ -396,5 +391,59 @@ fn actor_rows_round_trip_on_gpu_and_reject_mismatched_lengths() -> Result<()> {
     let mut old = serde_json::to_value(&checkpoint)?;
     old["version"] = serde_json::json!(2);
     assert!(serde_json::from_value::<Checkpoint>(old).is_err());
+    let check_rows = |rows: &ActorRows| -> Result<()> {
+        let encoded = serde_json::to_value(rows)?;
+        assert_eq!(encoded.as_object().unwrap().len(), 6);
+        let decoded: ActorRows = serde_json::from_value(encoded)?;
+        assert_eq!(&decoded, rows);
+        assert_eq!(rows.iter().collect::<ActorRows>(), *rows);
+        let words = |rows: &ActorRows| {
+            rows.iter()
+                .flat_map(|actor| {
+                    [
+                        actor.identity as u32,
+                        (actor.identity >> 32) as u32,
+                        actor.position.x,
+                        actor.position.y,
+                        actor.kind,
+                        actor.owner,
+                        actor.capacity,
+                    ]
+                })
+                .collect::<Vec<_>>()
+        };
+        assert_eq!(device.read(&device.tensor(&words(rows)))?, words(&decoded));
+        Ok(())
+    };
+    let mut rows = expected.actors.clone();
+    for (index, kind) in [
+        (0, Good::Bread as u32),
+        (3, 0),
+        (0, 0),
+        (4, 0),
+        (5, 0),
+        (2, Good::Bread as u32),
+        (2, 0),
+        (5, Good::Bread as u32),
+        (4, Good::Bread as u32),
+        (4, 0),
+        (5, 0),
+    ] {
+        let mut actor = rows.at(index);
+        actor.kind = kind;
+        rows.set(index, actor);
+        check_rows(&rows)?;
+    }
+    for kind in [0, Good::Bread as u32, 0, Good::Tools as u32] {
+        let actor = Actor {
+            identity: 10_000 + rows.len() as u64,
+            position: Position { x: 1, y: 2 },
+            kind,
+            owner: 0,
+            capacity: 1,
+        };
+        rows = rows.iter().chain(std::iter::once(actor)).collect();
+        check_rows(&rows)?;
+    }
     Ok(())
 }

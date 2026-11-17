@@ -409,6 +409,106 @@ mod tests {
     }
 
     #[test]
+    fn division_preserves_zero_divisors_wide_edges_and_daily_rates_on_gpu() -> Result<()> {
+        let denominators = [
+            0,
+            1,
+            2,
+            3,
+            90,
+            125,
+            365,
+            1000,
+            65_535,
+            65_536,
+            1 << 31,
+            u32::MAX,
+        ];
+        let edges = [
+            0,
+            1,
+            u64::from(u32::MAX) - 1,
+            u64::from(u32::MAX),
+            1u64 << 32,
+            (1u64 << 32) + 1,
+            5_000_000_000,
+            20_000_000_000,
+            1_000_000_000_000,
+            (1u64 << 63) - 1,
+            1u64 << 63,
+            u64::MAX - 1,
+            u64::MAX,
+        ];
+        let cases = edges
+            .into_iter()
+            .flat_map(|value| {
+                denominators.into_iter().map(move |denominator| ProbeInput {
+                    left: value.into(),
+                    numerator: 0,
+                    denominator,
+                    right: 0u64.into(),
+                })
+            })
+            .chain((0..1024u64).map(|index| {
+                let draw = DrawKey {
+                    seed: 83,
+                    day: 0,
+                    phase: 0,
+                    actor: index,
+                    purpose: 0,
+                    index: 0,
+                }
+                .draw();
+                ProbeInput {
+                    left: draw.into(),
+                    numerator: 0,
+                    denominator: draw.rotate_left(19) as u32,
+                    right: 0u64.into(),
+                }
+            }))
+            .collect::<Vec<_>>();
+        for workgroup in [32, 256] {
+            let device = crate::simulation::tests::device(workgroup)?;
+            let input = device.tensor(bytemuck::cast_slice(&cases));
+            let output = device.empty(cases.len() * TICK_WORDS);
+            division_probe::launch(
+                &device.client,
+                device.count(cases.len()),
+                CubeDim::new_1d(workgroup),
+                input.into_buffer_arg(),
+                output.clone().into_buffer_arg(),
+            );
+            let actual = device.read(&output)?;
+            for (case, actual) in cases
+                .iter()
+                .zip(bytemuck::cast_slice::<u32, TickLayout>(&actual))
+            {
+                let expected = match case.denominator {
+                    0 => u64::MAX,
+                    divisor => u64::from(case.left) / u64::from(divisor),
+                };
+                assert_eq!(u64::from(*actual), expected, "{case:?}, WG{workgroup}");
+            }
+        }
+        Ok(())
+    }
+
+    #[cube(launch)]
+    fn division_probe(input: &[u32], output: &mut [u32]) {
+        let id = ABSOLUTE_POS;
+        if id < input.len() / ProbeInput::WORDS {
+            let base = id * ProbeInput::WORDS;
+            let numerator = ticks(
+                input[base + ProbeInput::LEFT + LOW_WORD],
+                input[base + ProbeInput::LEFT + HIGH_WORD],
+            );
+            let quotient = divide(numerator, input[base + ProbeInput::DENOMINATOR]);
+            output[id * TICK_WORDS + LOW_WORD] = quotient.extract(LOW_WORD);
+            output[id * TICK_WORDS + HIGH_WORD] = quotient.extract(HIGH_WORD);
+        }
+    }
+
+    #[test]
     fn portable_words_match_wide_oracle_on_gpu() -> Result<()> {
         check(crate::simulation::tests::device(TEST_WORKGROUP)?)
     }

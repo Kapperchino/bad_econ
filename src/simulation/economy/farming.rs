@@ -112,13 +112,44 @@ pub(super) fn starts(
     config: &EconomyConfig,
     control: &[Atomic<u32>],
     actor: u32,
+    good: u32,
     day: u32,
 ) -> Ticks {
     let demand = value(state, config, comptime!(Field::Demand as u32), actor);
     let buffered = production_target(control, demand);
+    let days = 365 - elapsed(config, day);
+    let target = multiply(control, buffered, days + 365);
+    let pending = HarvestYield::new(config).quantity(
+        control,
+        value(state, config, comptime!(Field::CropWork as u32), actor),
+    );
+    let available = add_checked(control, value(state, config, good, actor), pending);
+    let required = positive(target, available);
+    let work = divide(
+        add_checked(
+            control,
+            multiply(control, required, growing_days(config)),
+            ticks(364, 0),
+        ),
+        365,
+    );
+    let remaining = max(min(days, growing_days(config)), 1);
+    let daily = divide(
+        add_checked(control, work, ticks(remaining - 1, 0)),
+        remaining,
+    );
+    let recurring = proposed_starts(
+        KernelStarts {
+            coverage: u32::cast_from(config.coverage),
+            demand: buffered,
+            finished: value(state, config, good, actor),
+            pipeline: value(state, config, comptime!(Field::Pipeline as u32), actor),
+        },
+        control,
+    );
     select(
         cultivating(config, day),
-        maximum(buffered, ticks(1, 0)),
+        select(config.home.harvest_days == 365, recurring, daily),
         zero(),
     )
 }

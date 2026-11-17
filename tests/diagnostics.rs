@@ -103,7 +103,9 @@ fn business_accounts_measure_trading_cash_before_price_changes_and_payouts_on_gp
 
 #[test]
 fn occupations_partition_living_people_on_gpu() -> Result<()> {
-    let scenario = economy()?;
+    let mut config = economy()?.config().clone();
+    config.capacity = 1;
+    let scenario = Scenario::new(config)?;
     let mut simulation = Simulation::new(scenario.clone(), support::device(64)?)?;
     for _ in 0..3 {
         simulation.advance()?;

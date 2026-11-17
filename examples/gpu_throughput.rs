@@ -31,6 +31,8 @@ struct Arguments {
     #[arg(long)]
     max_day_ms: Option<NonZeroU32>,
     #[arg(long)]
+    max_median_ms: Option<NonZeroU32>,
+    #[arg(long)]
     output: PathBuf,
 }
 
@@ -77,6 +79,7 @@ fn main() -> Result<()> {
         let starting_day = simulation.snapshot.day;
         let readback_before = simulation.readback_bytes;
         let mut daily = Vec::new();
+        let mut durations = Vec::new();
         let mut slowest = Duration::ZERO;
         let start = Instant::now();
         for _ in 0..days {
@@ -84,6 +87,7 @@ fn main() -> Result<()> {
             simulation.advance()?;
             let elapsed = day_start.elapsed();
             slowest = slowest.max(elapsed);
+            durations.push(elapsed);
             let memory = simulation.memory_usage();
             eprintln!(
                 "{households} households day {}: {:.3}s, reserved={} bytes",
@@ -99,6 +103,8 @@ fn main() -> Result<()> {
             }));
         }
         let seconds = start.elapsed().as_secs_f64();
+        durations.sort_unstable();
+        let median = (durations[(durations.len() - 1) / 2] + durations[durations.len() / 2]) / 2;
         let readback_bytes = simulation.readback_bytes - readback_before;
         let final_state_hash = simulation.download()?.digest();
         match final_state_hash == expected_hash {
@@ -119,7 +125,9 @@ fn main() -> Result<()> {
             "startup_seconds": startup_seconds,
             "seconds": seconds,
             "max_day_milliseconds": slowest.as_secs_f64() * 1000.0,
+            "median_day_milliseconds": median.as_secs_f64() * 1000.0,
             "target_day_milliseconds": args.max_day_ms,
+            "target_median_milliseconds": args.max_median_ms,
             "readback_bytes": readback_bytes,
             "final_state_hash": final_state_hash,
             "state_hash_version": STATE_HASH_VERSION,
@@ -134,6 +142,17 @@ fn main() -> Result<()> {
                 Err(anyhow!(
                     "{households} households: slowest day was {:.3} ms, exceeding the strict {} ms budget; report saved to {}",
                     slowest.as_secs_f64() * 1000.0,
+                    limit,
+                    args.output.display(),
+                ))?
+            }
+            _ => (),
+        }
+        match args.max_median_ms {
+            Some(limit) if median >= Duration::from_millis(u64::from(limit.get())) => {
+                Err(anyhow!(
+                    "{households} households: median day was {:.3} ms, exceeding the strict {} ms budget; report saved to {}",
+                    median.as_secs_f64() * 1000.0,
                     limit,
                     args.output.display(),
                 ))?

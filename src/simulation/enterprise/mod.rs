@@ -1,6 +1,7 @@
 pub(super) mod management;
 mod opportunities;
 pub(super) mod ownership;
+pub(in crate::simulation) use opportunities::EntryQuoteMode;
 
 use super::{
     Device,
@@ -29,10 +30,43 @@ struct ProposalInput {
     output: Box<[u32]>,
     records: RecordCountBuffers,
     day: u32,
+    #[cube(comptime)]
+    quote_mode: opportunities::EntryQuoteMode,
 }
 
 struct EnterpriseProposals;
 struct ProposeEnterprises;
+struct EntryQuotes;
+struct PrepareEntryQuotes;
+
+impl System for EntryQuotes {
+    type Input = ProposalInput;
+    type Passes = gpu_passes![PrepareEntryQuotes];
+}
+
+#[cube]
+impl GpuPass<ProposalInput> for PrepareEntryQuotes {
+    type Output = ();
+
+    fn execute(mut input: ProposalInput) {
+        opportunities::prepare_quotes(
+            &mut input.state,
+            &input.actors,
+            &input.config,
+            &input.spatial,
+            &mut input.records.scratch,
+            input.day,
+        );
+        crate::simulation::economy::mobility::prepare_quotes(
+            &mut input.state,
+            &input.actors,
+            &input.config,
+            &input.spatial,
+            &mut input.records.scratch,
+            input.day,
+        );
+    }
+}
 
 impl System for EnterpriseProposals {
     type Input = ProposalInput;
@@ -49,8 +83,10 @@ impl GpuPass<ProposalInput> for ProposeEnterprises {
             &input.actors,
             &input.config,
             &input.spatial,
+            &input.records.scratch,
             &mut input.output,
             input.day,
+            comptime!(input.quote_mode),
         );
         ProposedRecord {
             buffers: input.records,
@@ -69,8 +105,10 @@ fn requests(
     actors: &[u32],
     config: &EconomyConfig,
     spatial: &[u32],
+    quotes: &[u32],
     output: &mut [u32],
     day: u32,
+    #[comptime] quote_mode: opportunities::EntryQuoteMode,
 ) -> u32 {
     let actor = ABSOLUTE_POS as u32;
     let mut action = 0u32;
@@ -78,7 +116,9 @@ fn requests(
         if comptime!(config.home_mode == Feature::Enabled)
             && actors[ActorLayout::KIND * (actors.len() / ActorLayout::WORDS) + actor as usize] == 0
         {
-            crate::simulation::economy::enterprises::mobility(state, actors, config, actor, day);
+            crate::simulation::economy::enterprises::mobility(
+                state, actors, config, spatial, quotes, actor, day, quote_mode,
+            );
         }
         let target = load(
             state,
@@ -126,7 +166,9 @@ fn requests(
         let mut proposal = 0;
         let review = !equal(target, zero()) || (day + actor) % 30 == 0;
         if eligible && review {
-            proposal = opportunities::discover(state, actors, config, spatial, actor, day);
+            proposal = opportunities::discover(
+                state, actors, config, spatial, quotes, actor, day, quote_mode,
+            );
             let source = select(proposal >> 24 == 8, (proposal & 0x00ffffff) - 1, actor);
             if !crate::simulation::economy::property::authorized(state, config, source, actor) {
                 proposal = 0;
@@ -155,8 +197,28 @@ fn requests(
             comptime!(Field::MoveTarget as u32) * config.state_stride + actor,
         )
         .extract(0usize);
-        if destination > 0 && moving == 0 && !lt(cash, ticks(100, 0)) {
-            action = 0x02000000u32 + destination;
+        if destination > 0 && moving == 0 {
+            let stride = actors.len() / ActorLayout::WORDS;
+            let target = destination as usize - 1;
+            let x = actors[ActorLayout::X * stride + actor as usize];
+            let y = actors[ActorLayout::Y * stride + actor as usize];
+            let dx = actors[ActorLayout::X * stride + target];
+            let dy = actors[ActorLayout::Y * stride + target];
+            let distance = max(x, dx) - min(x, dx) + max(y, dy) - min(y, dy);
+            let rural = !equal(
+                load(
+                    state,
+                    comptime!(Field::LandPlots as u32) * config.state_stride + actor,
+                ),
+                zero(),
+            );
+            let nearby = rural && distance <= config.commute_speed;
+            let migration = select(!lt(cash, ticks(100, 0)), 0x02000000u32 + destination, 0);
+            action = select(
+                nearby,
+                comptime!(crate::simulation::registry::WAGE_DEPENDENCY),
+                migration,
+            );
         }
         if moving > 0 && moving <= day {
             action = 0x03000000u32;
@@ -316,26 +378,333 @@ pub(super) fn propose(
     records: RecordBuffers<'_>,
     day: u32,
 ) {
+    propose_quotes(
+        device,
+        state,
+        actors,
+        config,
+        spatial,
+        records,
+        day,
+        opportunities::EntryQuoteMode::Cached,
+    );
+}
+
+fn propose_quotes(
+    device: &Device,
+    state: &CubeTensor,
+    actors: &CubeTensor,
+    config: &Configuration,
+    spatial: &CubeTensor,
+    records: RecordBuffers<'_>,
+    day: u32,
+    quote_mode: opportunities::EntryQuoteMode,
+) {
     let argument = |tensor: &CubeTensor| tensor.clone().into_buffer_arg();
     let cube_count = device.count(records.requests.meta.num_elements());
+    let input = || ProposalInputLaunch {
+        state: argument(state),
+        actors: argument(actors),
+        config: config.launch(),
+        spatial: argument(spatial),
+        output: argument(records.requests),
+        records: RecordCountBuffersLaunch {
+            births: argument(records.births),
+            scratch: argument(records.scratch),
+            scan: super::parallel::ScanMode::new(device),
+        },
+        day,
+        quote_mode,
+    };
+    EntryQuotes::launch(
+        device,
+        cube_count.clone(),
+        CubeDim::new_1d(device.workgroup),
+        input(),
+    );
     EnterpriseProposals::launch(
         device,
         cube_count,
         CubeDim::new_1d(device.workgroup),
-        ProposalInputLaunch {
-            state: argument(state),
-            actors: argument(actors),
-            config: config.launch(),
-            spatial: argument(spatial),
-            output: argument(records.requests),
-            records: RecordCountBuffersLaunch {
-                births: argument(records.births),
-                scratch: argument(records.scratch),
-                scan: super::parallel::ScanMode::new(device),
-            },
-            day,
-        },
+        input(),
     );
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::domain::{Experiment, HouseholdLiquidity, Scenario};
+    use crate::simulation::{Simulation, decode, encode};
+
+    #[derive(Clone, Copy, Debug)]
+    enum EntryInputs {
+        Stocked,
+        Missing,
+    }
+
+    #[test]
+    fn cached_migration_needs_preserve_destinations_and_compacted_records_on_gpu()
+    -> anyhow::Result<()> {
+        #[derive(Clone, Copy, Debug)]
+        enum Supplies {
+            Available,
+            MissingFood,
+            MissingHeat,
+        }
+
+        let device = crate::simulation::tests::device(64)?;
+        let mut config = Scenario::industrial(257, 42, Experiment::Baseline)?
+            .config()
+            .clone();
+        config.entrepreneurship.interested_per_mille = 0;
+        config.commute_speed = 1;
+        config.household_liquidity = HouseholdLiquidity::Uniform;
+        config.household_cash = 1_000_000;
+        let scenario = Scenario::new(config)?;
+        for day in [1, 20, 30, 120] {
+            for supplies in [
+                Supplies::Available,
+                Supplies::MissingFood,
+                Supplies::MissingHeat,
+            ] {
+                let expected = Simulation::new(scenario.clone(), device.clone())?;
+                let actual = Simulation::new(scenario.clone(), device.clone())?;
+                let mut initial = scenario.initial()?;
+                let firms = initial.actors.firm_indices().collect::<Vec<_>>();
+                let urban = firms
+                    .iter()
+                    .copied()
+                    .filter(|&firm| initial.actors.at(firm).kind == Good::Bread as u32)
+                    .collect::<Vec<_>>();
+                for owner in 0..scenario.config().households as usize {
+                    let position = initial.actors.at(owner).position;
+                    let employer = urban
+                        .iter()
+                        .copied()
+                        .max_by_key(|&firm| position.distance(initial.actors.at(firm).position))
+                        .expect("urban employer");
+                    initial.set(Field::Employer, owner, employer as u64 + 1);
+                    initial.set(Field::Employed, owner, 1);
+                    initial.set(Field::LivingMembers, owner, 1);
+                    initial.set(Field::LandPlots, owner, 0);
+                    initial.set(Field::NutritionNeed, owner, 1);
+                    initial.set(Field::HeatingNeed, owner, 2);
+                    initial.set(Field::MoveDue, owner, 0);
+                    initial.set(Field::MoveTarget, owner, 0);
+                    initial.set(Field::Shortage, owner, 0);
+                    initial.set(Field::EquityInvested, owner, 1);
+                }
+                for firm in firms {
+                    initial.set(
+                        Field::EnterpriseStatus,
+                        firm,
+                        EnterpriseState::Operating as u64,
+                    );
+                    initial.set(Field::Cash, firm, 1_000_000);
+                    initial.set(Field::Wage, firm, 10);
+                    initial.set(Field::LaborMinutes, firm, 480);
+                    initial.set(Field::Slots, firm, 100);
+                    initial.set(Field::Price, firm, 1);
+                    initial.set(
+                        Field::Bread,
+                        firm,
+                        match supplies {
+                            Supplies::MissingFood => 0,
+                            _ => 1_000_000,
+                        },
+                    );
+                    for field in [Field::Coal, Field::Wood] {
+                        initial.set(
+                            field,
+                            firm,
+                            match supplies {
+                                Supplies::MissingHeat => 0,
+                                _ => 1_000_000,
+                            },
+                        );
+                    }
+                }
+                for (simulation, mode) in [
+                    (&expected, EntryQuoteMode::Sampled),
+                    (&actual, EntryQuoteMode::Cached),
+                ] {
+                    device.write(
+                        &simulation.state,
+                        bytemuck::cast_slice(&encode(&crate::simulation::tensor::state_values(
+                            &initial.values,
+                            initial.actors.len(),
+                            simulation.config.state_stride as usize,
+                        ))),
+                    );
+                    let records = RecordBuffers {
+                        requests: &simulation.enterprise_requests,
+                        births: simulation.demography.birth_buffer(),
+                        scratch: &simulation.scratch,
+                    };
+                    propose_quotes(
+                        &device,
+                        &simulation.state,
+                        &simulation.actors,
+                        &simulation.config,
+                        &simulation.spatial,
+                        records,
+                        day,
+                        mode,
+                    );
+                }
+                let values = device.read(&actual.state)?;
+                assert_eq!(
+                    values,
+                    device.read(&expected.state)?,
+                    "day {day}, {supplies:?}"
+                );
+                let values = decode(&values);
+                let movers = (0..scenario.config().households as usize)
+                    .filter(|&owner| {
+                        values[Field::MoveTarget as usize * actual.config.state_stride as usize
+                            + owner]
+                            > 0
+                    })
+                    .count();
+                match supplies {
+                    Supplies::Available => assert!(movers > 0, "day {day}: no viable migration"),
+                    _ => assert_eq!(movers, 0, "day {day}, {supplies:?}"),
+                }
+                let pending = |simulation: &Simulation| {
+                    crate::simulation::registry::records::PendingRecords::read(
+                        &device,
+                        RecordBuffers {
+                            requests: &simulation.enterprise_requests,
+                            births: simulation.demography.birth_buffer(),
+                            scratch: &simulation.scratch,
+                        },
+                        &simulation.searches.requests,
+                    )
+                };
+                assert_eq!(pending(&actual)?.records, pending(&expected)?.records);
+            }
+        }
+        Ok(())
+    }
+
+    #[test]
+    fn cached_entry_quotes_preserve_sampled_proposals_and_household_state_on_gpu()
+    -> anyhow::Result<()> {
+        let device = crate::simulation::tests::device(64)?;
+        let mut config = Scenario::industrial(3000, 42, Experiment::Baseline)?
+            .config()
+            .clone();
+        config.entrepreneurship.interested_per_mille = 1000;
+        config.household_liquidity = HouseholdLiquidity::Uniform;
+        config.household_cash = 1_000_000;
+        let scenario = Scenario::new(config)?;
+        for (day, inputs) in [1, 20, 30, 120].into_iter().flat_map(|day| {
+            [EntryInputs::Stocked, EntryInputs::Missing]
+                .into_iter()
+                .map(move |inputs| (day, inputs))
+        }) {
+            let expected = Simulation::new(scenario.clone(), device.clone())?;
+            let actual = Simulation::new(scenario.clone(), device.clone())?;
+            let mut initial = scenario.initial()?;
+            for owner in 0..scenario.config().households as usize {
+                initial.set(
+                    Field::LivingMembers,
+                    owner,
+                    u64::from(scenario.config().demography.initial_household_members),
+                );
+                initial.set(Field::InvestmentFirm, owner, 0);
+                initial.set(Field::InvestmentGood, owner, 1);
+                initial.set(Field::Tools, owner, 2);
+                initial.set(Field::Wood, owner, 10);
+            }
+            for firm in initial.actors.firm_indices().collect::<Vec<_>>() {
+                let good = Good::from_index(initial.actors.at(firm).kind)?;
+                initial.set(
+                    Field::EnterpriseStatus,
+                    firm,
+                    match good {
+                        Good::Bread | Good::Flour => EnterpriseState::Operating as u64,
+                        _ => EnterpriseState::Dormant as u64,
+                    },
+                );
+                match good {
+                    Good::Bread => {
+                        initial.set(
+                            Field::Price,
+                            firm,
+                            u64::from(scenario.config().maximum_price),
+                        );
+                        initial.set(Field::Bread, firm, 0);
+                    }
+                    Good::Flour => {
+                        initial.set(Field::Price, firm, 1);
+                        initial.set(
+                            Field::Flour,
+                            firm,
+                            match inputs {
+                                EntryInputs::Stocked => 1_000_000,
+                                EntryInputs::Missing => 0,
+                            },
+                        );
+                    }
+                    _ => (),
+                }
+            }
+            for (simulation, quote_mode) in [
+                (&expected, opportunities::EntryQuoteMode::Sampled),
+                (&actual, opportunities::EntryQuoteMode::Cached),
+            ] {
+                device.write(
+                    &simulation.state,
+                    bytemuck::cast_slice(&encode(&initial.values)),
+                );
+                propose_quotes(
+                    &device,
+                    &simulation.state,
+                    &simulation.actors,
+                    &simulation.config,
+                    &simulation.spatial,
+                    RecordBuffers {
+                        requests: &simulation.enterprise_requests,
+                        births: simulation.demography.birth_buffer(),
+                        scratch: &simulation.scratch,
+                    },
+                    day,
+                    quote_mode,
+                );
+            }
+            let state = device.read(&actual.state)?;
+            assert_eq!(
+                state,
+                device.read(&expected.state)?,
+                "day {day}, {inputs:?}"
+            );
+            assert_eq!(
+                device.read(&actual.enterprise_requests)?,
+                device.read(&expected.enterprise_requests)?,
+                "day {day}, {inputs:?}"
+            );
+            let values = decode(&state);
+            let stride = actual.config.state_stride as usize;
+            let producers = (0..scenario.config().households as usize)
+                .filter(|&owner| values[Field::InvestmentGood as usize * stride + owner] >> 24 == 8)
+                .collect::<Vec<_>>();
+            match inputs {
+                EntryInputs::Stocked => {
+                    assert!(!producers.is_empty(), "day {day}: no producer discoveries");
+                    for owner in producers {
+                        assert_eq!(values[Field::ReplacementCost as usize * stride + owner], 1);
+                        assert_eq!(values[Field::SecondInputCost as usize * stride + owner], 0);
+                    }
+                }
+                EntryInputs::Missing => assert!(
+                    producers.is_empty(),
+                    "day {day}: unavailable input was accepted"
+                ),
+            }
+        }
+        Ok(())
+    }
 }
 
 pub(super) fn enter(
@@ -540,6 +909,11 @@ pub(in crate::simulation) fn form_households(
                 state.get(Field::LivingMembers, parent) - 1,
             );
             state.set(Field::Price, household, state.get(Field::Price, parent));
+            state.set(
+                Field::FoodPrice,
+                household,
+                state.get(Field::FoodPrice, parent),
+            );
             state.set(Field::EquipmentCondition, household, 1000);
             state.set(Field::SplitPerson, parent, 0);
             if let Some(property) = &scenario.config().property {
@@ -633,10 +1007,17 @@ pub(super) fn transitions(
                 state.actors.set(actor, household);
                 state.set(Field::MoveDue, actor, 0);
                 state.set(Field::MoveTarget, actor, 0);
-                if scenario.config().property.is_some() {
+                if scenario.config().property.is_some()
+                    || scenario.config().economy == crate::domain::Economy::Industrial
+                {
                     state.set(Field::LandPlots, actor, 0);
                     state.set(Field::CropWork, actor, 0);
                 }
+            }
+            10 => {
+                state.set(Field::MoveTarget, actor, 0);
+                state.set(Field::LandPlots, actor, 0);
+                state.set(Field::CropWork, actor, 0);
             }
             6 => {
                 let mut firm = state.actors.at(actor);

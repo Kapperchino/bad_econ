@@ -10,7 +10,7 @@ use bad_econ::{
 #[test]
 fn default_metric_food_recipes_and_opening_prices_on_gpu() -> Result<()> {
     let scenario = Scenario::industrial(96, 42, Experiment::Concentrated)?;
-    assert_eq!(scenario.config().prices, [697, 1087, 468]);
+    assert_eq!(scenario.config().prices, [9, 30, 20]);
     let mut simulation = Simulation::new(scenario.clone(), support::device(64)?)?;
     let opening = simulation.download()?;
     for (index, actor) in opening.actors.iter().enumerate() {
@@ -135,10 +135,126 @@ fn salary_scenario() -> Result<Scenario> {
     Scenario::new(config)
 }
 
+#[test]
+fn purchasing_power_supports_larger_baskets_as_food_becomes_affordable_on_gpu() -> Result<()> {
+    use bad_econ::domain::food::FoodIncome;
+    struct DietCase {
+        price: u32,
+        members: u32,
+        portions: u64,
+        income: FoodIncome,
+    }
+    for case in [
+        DietCase {
+            price: 20,
+            members: 1,
+            portions: 9,
+            income: FoodIncome::PurchasingPower,
+        },
+        DietCase {
+            price: 20,
+            members: 3,
+            portions: 9,
+            income: FoodIncome::PurchasingPower,
+        },
+        DietCase {
+            price: 10,
+            members: 3,
+            portions: 19,
+            income: FoodIncome::PurchasingPower,
+        },
+        DietCase {
+            price: 5,
+            members: 3,
+            portions: 30,
+            income: FoodIncome::PurchasingPower,
+        },
+        DietCase {
+            price: 3,
+            members: 3,
+            portions: 30,
+            income: FoodIncome::PurchasingPower,
+        },
+        DietCase {
+            price: 3,
+            members: 3,
+            portions: 3,
+            income: FoodIncome::Nominal,
+        },
+    ] {
+        let mut config = salary_scenario()?.config().clone();
+        config.food.as_mut().unwrap().income = case.income;
+        config.prices[2] = case.price;
+        config.demography.people = (1..=3)
+            .flat_map(|household| {
+                (0..case.members).map(move |member| PersonSeed {
+                    identity: 100 + household * 10 + u64::from(member),
+                    household,
+                    age_days: 30 * DAYS_PER_YEAR,
+                    sex: Sex::Male,
+                })
+            })
+            .collect();
+        let population = config.population.as_mut().unwrap();
+        for household in &mut population.households {
+            household.inventories[Good::Bread as usize - 1] = 1000;
+            household.cash = 0;
+        }
+        for firm in &mut population.firms {
+            firm.wage = 240;
+        }
+        let scenario = Scenario::new(config)?;
+        let mut initial = scenario.initial()?;
+        for household in 0..3 {
+            initial.set(Field::IncomeForecast, household, 240_000);
+        }
+        let mut simulation = Simulation::from_checkpoint(
+            Checkpoint::new(&scenario, &initial)?,
+            support::device(64)?,
+        )?;
+        let cash = simulation.snapshot.cash;
+        simulation.advance()?;
+        let state = simulation.download()?;
+        for household in 0..3 {
+            assert_eq!(state.get(Field::GrossIncome, household), 240);
+            assert_eq!(state.get(Field::FoodNeed, household), case.portions);
+            assert_eq!(state.get(Field::Consumed, household), case.portions);
+        }
+        assert_eq!(simulation.snapshot.cash, cash);
+        simulation.checkpoint()?.restore()?;
+    }
+    Ok(())
+}
+
 #[derive(Debug, PartialEq, Eq)]
 struct SalaryConsumption {
     salary: u64,
     portions: u64,
+}
+
+#[test]
+fn additional_food_orders_run_after_minimum_reserves_are_already_covered_on_gpu() -> Result<()> {
+    let mut config = salary_scenario()?.config().clone();
+    config.food = Some(FoodPolicy::industrial());
+    config.prices[2] = 3;
+    let population = config.population.as_mut().unwrap();
+    for household in &mut population.households {
+        household.cash = 1_000_000;
+        household.inventories[Good::Bread as usize - 1] = 5;
+    }
+    for firm in &mut population.firms {
+        firm.cash = 0;
+        firm.price = 3;
+        firm.inventories[Good::Bread as usize - 1] = 10_000;
+    }
+    let mut simulation = Simulation::new(Scenario::new(config)?, support::device(64)?)?;
+    simulation.advance()?;
+    let state = simulation.download()?;
+    for household in 0..3 {
+        assert_eq!(state.get(Field::FoodNeed, household), 10);
+        assert!(state.get(Field::Purchased, household) > 0);
+    }
+    Ok(())
 }
 
 #[test]

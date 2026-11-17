@@ -1,8 +1,55 @@
 use super::{
     Economy, Good, ScenarioConfig,
-    calendar::{CalendarDate, HarvestSeason, Weather},
+    calendar::{CalendarDate, HarvestSeason},
     enterprise::HouseholdProduction,
+    prices::StartingPrices,
 };
+
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub(super) enum InitialSettlement {
+    #[default]
+    Mixed,
+    Rural,
+}
+
+impl InitialSettlement {
+    pub fn new(config: &ScenarioConfig) -> Self {
+        match (
+            config.economy,
+            config.household_production,
+            &config.population,
+            &config.land_access,
+            config.food.map(|food| food.income),
+        ) {
+            (
+                Economy::Industrial,
+                HouseholdProduction::Available { .. },
+                None,
+                None,
+                Some(super::food::FoodIncome::PurchasingPower),
+            ) => Self::Rural,
+            _ => Self::Mixed,
+        }
+    }
+
+    fn spacing(self) -> usize {
+        match self {
+            Self::Mixed => 2,
+            Self::Rural => 10,
+        }
+    }
+
+    pub fn worker(self, household: usize) -> Option<usize> {
+        match household % self.spacing() + 1 == self.spacing() {
+            true => Some(household / self.spacing()),
+            false => None,
+        }
+    }
+
+    pub fn farmers(self, households: u32) -> u32 {
+        households - households / self.spacing() as u32
+    }
+}
 
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub(super) struct InitialEmployment {
@@ -10,6 +57,8 @@ pub(super) struct InitialEmployment {
     workers: usize,
     slots: usize,
     seasonal_days: u32,
+    household_daily: u64,
+    settlement: InitialSettlement,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -82,9 +131,13 @@ impl InitialEmployment {
                     .collect();
                 Self {
                     employers,
-                    workers: (config.households as usize / 2).min(slots),
+                    workers: (config.households as usize
+                        / InitialSettlement::new(config).spacing())
+                    .min(slots),
                     slots,
                     seasonal_days,
+                    household_daily: StartingPrices::configured(config).household_daily(config),
+                    settlement: InitialSettlement::new(config),
                 }
             }
             _ => Self::default(),
@@ -92,9 +145,9 @@ impl InitialEmployment {
     }
 
     pub fn employer(&self, household: usize) -> Option<usize> {
-        match (household % 2, household / 2 < self.workers) {
-            (1, true) => {
-                let slot = household / 2 * self.slots / self.workers;
+        match self.settlement.worker(household) {
+            Some(worker) if worker < self.workers => {
+                let slot = worker * self.slots / self.workers;
                 self.employers
                     .get(
                         self.employers
@@ -119,16 +172,6 @@ impl InitialEmployment {
             Some(Good::Grain | Good::Flax | Good::Cotton | Good::Dye) => self.seasonal_days,
             _ => 0,
         };
-        let members = config.demography.initial_household_members;
-        let food =
-            u64::from(config.household_need) * u64::from(members) * u64::from(config.prices[2]);
-        let coal = (members * Weather::default().heating_units_per_person).div_ceil(2);
-        let fuel_price = (config.wage * config.packet_minutes)
-            .div_ceil(config.packet_output)
-            .clamp(config.minimum_price, config.maximum_price);
-        let daily = food
-            + u64::from(coal) * u64::from(fuel_price)
-            + u64::from(config.rent.map_or(0, |rent| rent.household_daily));
-        crate::arithmetic::add(cash, daily * u64::from(days))
+        crate::arithmetic::add(cash, self.household_daily * u64::from(days))
     }
 }

@@ -27,8 +27,124 @@ fn request_totals(records: &[u32], resources: &[Atomic<u32>], count: u32) {
 }
 
 #[test]
-fn sorted_gpu_prefixes_match_wide_reference_with_repeated_visits_and_overflow() -> Result<()> {
+fn concurrent_demand_totals_preserve_high_word_carry_overflow_and_zero_additions_on_gpu()
+-> Result<()> {
+    struct DemandCase {
+        opening: u64,
+        overflow: u32,
+        amounts: Vec<u64>,
+    }
+    let cases = [
+        DemandCase {
+            opening: 1,
+            overflow: 0,
+            amounts: vec![u64::MAX],
+        },
+        DemandCase {
+            opening: u64::MAX,
+            overflow: 0,
+            amounts: vec![1],
+        },
+        DemandCase {
+            opening: u64::MAX - 17,
+            overflow: 0,
+            amounts: vec![0; 257],
+        },
+        DemandCase {
+            opening: 0,
+            overflow: 0,
+            amounts: vec![u64::from(u32::MAX); 1025],
+        },
+        DemandCase {
+            opening: 0,
+            overflow: 0,
+            amounts: vec![1u64 << 32; 1025],
+        },
+        DemandCase {
+            opening: 19,
+            overflow: 0,
+            amounts: (0..1025)
+                .map(|index| match index % 4 {
+                    0 => u64::MAX,
+                    1 => 1,
+                    2 => 1u64 << 32,
+                    _ => 0,
+                })
+                .collect(),
+        },
+        DemandCase {
+            opening: 7,
+            overflow: 1,
+            amounts: vec![0; 257],
+        },
+    ];
+    let records = cases
+        .iter()
+        .enumerate()
+        .flat_map(|(resource, case)| {
+            case.amounts.iter().flat_map(move |&amount| {
+                [resource as u32, 0, 0, amount as u32, (amount >> 32) as u32]
+            })
+        })
+        .collect::<Vec<_>>();
+    let mut initial = vec![0; cases.len() * RESOURCE_WORDS];
+    for (resource, case) in cases.iter().enumerate() {
+        let base = resource * RESOURCE_WORDS;
+        initial[base + REQUESTED] = case.opening as u32;
+        initial[base + REQUESTED + 1] = (case.opening >> 32) as u32;
+        initial[base + REQUEST_OVERFLOW] = case.overflow;
+    }
     for workgroup in [32, 64, 256] {
+        let device = crate::simulation::tests::device(workgroup)?;
+        let claims = device.tensor(&records);
+        let resources = device.tensor(&initial);
+        let count = records.len() / FREIGHT_CLAIM_WORDS;
+        request_totals::launch(
+            &device.client,
+            device.count(count),
+            CubeDim::new_1d(workgroup),
+            claims.into_buffer_arg(),
+            resources.clone().into_buffer_arg(),
+            count as u32,
+        );
+        let actual = device.read(&resources)?;
+        for (resource, case) in cases.iter().enumerate() {
+            let sum = u128::from(case.opening)
+                + case
+                    .amounts
+                    .iter()
+                    .map(|&amount| u128::from(amount))
+                    .sum::<u128>();
+            let base = resource * RESOURCE_WORDS;
+            assert_eq!(
+                u64::from(actual[base + REQUESTED])
+                    | (u64::from(actual[base + REQUESTED + 1]) << 32),
+                sum as u64,
+                "workgroup {workgroup}, resource {resource}"
+            );
+            assert_eq!(
+                actual[base + REQUEST_OVERFLOW],
+                case.overflow | u32::from(sum > u128::from(u64::MAX)),
+                "workgroup {workgroup}, resource {resource}"
+            );
+        }
+    }
+    Ok(())
+}
+
+#[test]
+fn sorted_gpu_prefixes_match_wide_reference_with_repeated_visits_and_overflow() -> Result<()> {
+    for (workgroup, sorting) in [
+        (32, SortMethod::Merge),
+        (64, SortMethod::Merge),
+        (256, SortMethod::Merge),
+        (32, SortMethod::Block256),
+        (64, SortMethod::Block256),
+        (256, SortMethod::Block256),
+        (32, SortMethod::Block2048),
+        (64, SortMethod::Block2048),
+        (256, SortMethod::Block2048),
+    ] {
         let mut config: ScenarioConfig =
             serde_json::from_str(include_str!("../../../../../../scenarios/railway.json"))?;
         let population = config.population.as_mut().unwrap();
@@ -48,10 +164,11 @@ fn sorted_gpu_prefixes_match_wide_reference_with_repeated_visits_and_overflow() 
         let regions = simulation.config.railway.region_count;
         simulation.config.railway.freight =
             Buffers::new(&device, actors as usize, regions as usize);
+        simulation.config.railway.freight.sorting = sorting.for_device(&device);
         let initial_capacity = simulation.config.railway.freight.claim_capacity;
         device.write(
             &simulation.config.railway.freight.progress,
-            &[0, 0, initial_capacity as u32 + 1, 0, 0],
+            &[0, 0, actors * 16 + 1, 0, 0],
         );
         assert!(matches!(
             prepare_claims(&device, &mut simulation.config)?,
@@ -178,7 +295,7 @@ fn sorted_gpu_prefixes_match_wide_reference_with_repeated_visits_and_overflow() 
         budgets[seller as usize + 3] = u64::from(u32::MAX) + 10;
         budgets[actors as usize] = 11;
         budgets[actors as usize + 1] = 101;
-        let mut resources = vec![0; budgets.len() * RESOURCE_WORDS];
+        let mut resources = vec![0; buffers.resources.meta.num_elements()];
         for (resource, &amount) in budgets.iter().enumerate() {
             resources[resource * RESOURCE_WORDS] = amount as u32;
             resources[resource * RESOURCE_WORDS + 1] = (amount >> 32) as u32;
@@ -210,7 +327,10 @@ fn sorted_gpu_prefixes_match_wide_reference_with_repeated_visits_and_overflow() 
         }
         device.write(&buffers.claims, &words);
         device.write(&buffers.resources, &resources);
-        device.write(&buffers.accounts, &vec![0; actors as usize * ACCOUNT_WORDS]);
+        device.write(
+            &buffers.accounts,
+            &vec![0; buffers.accounts.meta.num_elements()],
+        );
         device.write(&buffers.progress, &[0, 0, records.len() as u32, 0, 0]);
         request_totals::launch(
             &device.client,
@@ -224,7 +344,7 @@ fn sorted_gpu_prefixes_match_wide_reference_with_repeated_visits_and_overflow() 
             advance(stage);
         }
         let actual = device.read(&buffers.claims)?;
-        let source = sorted_source(buffers.claim_capacity) as usize;
+        let source = settlement_source(buffers) as usize;
         let sorted = actual[source..source + records.len()]
             .iter()
             .map(|&index| records[index as usize].clone())
@@ -239,6 +359,7 @@ fn sorted_gpu_prefixes_match_wide_reference_with_repeated_visits_and_overflow() 
         }
         assert_eq!(offsets[budgets.len()] as usize, records.len());
         let accounts = device.read(&buffers.accounts)?;
+        denied.resize(accounts.len() / ACCOUNT_WORDS, 0);
         assert_eq!(
             accounts
                 .chunks_exact(ACCOUNT_WORDS)
@@ -248,18 +369,250 @@ fn sorted_gpu_prefixes_match_wide_reference_with_repeated_visits_and_overflow() 
         );
         let actual_resources = device.read(&buffers.resources)?;
         for (resource, words) in actual_resources.chunks_exact(RESOURCE_WORDS).enumerate() {
-            assert_eq!(
-                u64::from(words[0]) | (u64::from(words[1]) << 32),
-                budgets[resource]
-            );
+            let budget = budgets.get(resource).copied().unwrap_or(0);
+            let sum = sums.get(resource).copied().unwrap_or(0);
+            assert_eq!(u64::from(words[0]) | (u64::from(words[1]) << 32), budget);
             assert_eq!(
                 words[REQUEST_OVERFLOW],
-                u32::from(sums[resource] > u128::from(u64::MAX))
+                u32::from(sum > u128::from(u64::MAX))
             );
             assert_eq!(
                 u64::from(words[REQUESTED]) | (u64::from(words[REQUESTED + 1]) << 32),
-                sums[resource] as u64
+                sum as u64
             );
+        }
+    }
+    Ok(())
+}
+
+struct ClaimSortProbe {
+    buffers: Buffers,
+    control: CubeTensor,
+    initial: Vec<u32>,
+    count: usize,
+}
+
+impl ClaimSortProbe {
+    fn new(device: &Device, capacity: usize, count: usize, sorting: SortMethod) -> Self {
+        let mut buffers = Buffers::new(device, 0, 0);
+        buffers.sorting = sorting.for_device(device);
+        buffers.claim_capacity = capacity;
+        let mut initial = vec![0xa5a5a5a5; capacity * 7 + 3];
+        for index in 0..count {
+            let group = (index / 3) as u32;
+            let resource = match group % 11 {
+                0 => u32::MAX,
+                _ => group.wrapping_mul(97) % 257,
+            };
+            let priority = match group % 13 {
+                0 => u32::MAX,
+                _ => group.wrapping_mul(31) % 4096,
+            };
+            initial[index * FREIGHT_CLAIM_WORDS..(index + 1) * FREIGHT_CLAIM_WORDS]
+                .copy_from_slice(&[
+                    resource,
+                    priority,
+                    index as u32,
+                    index as u32 ^ 17,
+                    u32::MAX,
+                ]);
+            initial[capacity * FREIGHT_CLAIM_WORDS + index] = index as u32;
+        }
+        buffers.claims = device.tensor(&initial);
+        Self {
+            buffers,
+            control: device.tensor(&vec![0; CONTROL_WORDS + 7]),
+            initial,
+            count,
+        }
+    }
+
+    fn reset(&self, device: &Device) {
+        device.write(&self.buffers.claims, &self.initial);
+        device.write(&self.buffers.progress, &[0, 0, self.count as u32, 0, 0, 0]);
+        device.write(&self.control, &vec![0; CONTROL_WORDS + 7]);
+    }
+
+    fn sort(&self, device: &Device, execution: Execution) {
+        sort_buffered(device, &self.buffers, &self.control, execution);
+    }
+
+    fn outcome(&self, device: &Device) -> Result<Vec<u32>> {
+        let actual = device.read(&self.buffers.claims)?;
+        let capacity = self.buffers.claim_capacity;
+        assert!(
+            actual[..capacity * FREIGHT_CLAIM_WORDS]
+                == self.initial[..capacity * FREIGHT_CLAIM_WORDS]
+        );
+        for start in [
+            capacity * FREIGHT_CLAIM_WORDS,
+            capacity * (FREIGHT_CLAIM_WORDS + 1),
+        ] {
+            assert!(
+                actual[start + self.count..start + capacity]
+                    == self.initial[start + self.count..start + capacity]
+            );
+        }
+        assert_eq!(actual[capacity * 7..], self.initial[capacity * 7..]);
+        let source = settlement_source(&self.buffers) as usize;
+        Ok(actual[source..source + self.count].to_vec())
+    }
+}
+
+#[test]
+fn block_claim_sort_preserves_stable_indices_partial_tiles_and_output_parity_on_gpu() -> Result<()>
+{
+    let device = crate::simulation::tests::device(64)?;
+    for capacity in [0usize, 1, 31, 2047, 2048, 2049, 5000, 8193] {
+        for count in [0, capacity.min(1), capacity / 2, capacity] {
+            let merge = ClaimSortProbe::new(&device, capacity, count, SortMethod::Merge);
+            merge.reset(&device);
+            merge.sort(&device, Execution::Immediate);
+            let expected = merge.outcome(&device)?;
+            for method in [SortMethod::Block256, SortMethod::Block2048] {
+                let blocked = ClaimSortProbe::new(&device, capacity, count, method);
+                blocked.reset(&device);
+                blocked.sort(&device, Execution::Immediate);
+                let actual = blocked.outcome(&device)?;
+                assert_eq!(
+                    actual
+                        .iter()
+                        .zip(&expected)
+                        .position(|(actual, expected)| actual != expected),
+                    None,
+                    "capacity {capacity}, count {count}, sorting {:?}",
+                    blocked.buffers.sorting,
+                );
+            }
+        }
+    }
+    Ok(())
+}
+
+#[test]
+fn empty_claim_sort_skips_dispatches_and_small_blocks_keep_their_dispatch_on_gpu() -> Result<()> {
+    let device = crate::simulation::tests::device(64)?;
+    for sorting in [SortMethod::Merge, SortMethod::Block2048] {
+        let probe = ClaimSortProbe::new(&device, 0, 0, sorting);
+        let dispatches = vec![0xa5a5a5a5; FREIGHT_DISPATCH_WORDS];
+        for execution in [Execution::Immediate, Execution::Initial, Execution::Retry] {
+            probe.reset(&device);
+            device.write(&probe.buffers.dispatches, &dispatches);
+            probe.sort(&device, execution);
+            assert_eq!(device.read(&probe.buffers.dispatches)?, dispatches);
+            assert_eq!(device.read(&probe.buffers.claims)?, probe.initial);
+            assert_eq!(device.read(&probe.buffers.progress)?, [0; 6]);
+        }
+    }
+    for capacity in [1, 128, SORT_TILE, SORT_TILE + 1] {
+        let probe = ClaimSortProbe::new(&device, capacity, capacity, SortMethod::Block2048);
+        probe.reset(&device);
+        probe.sort(&device, Execution::Immediate);
+        let workgroup = match probe.buffers.sorting {
+            SortMethod::Merge => device.workgroup as usize,
+            method => match capacity <= method.tile() {
+                true => method.tile(),
+                false => device.workgroup as usize,
+            },
+        };
+        let dispatches = device.read(&probe.buffers.dispatches)?;
+        assert_eq!(
+            dispatches[SORT_DISPATCH] as usize,
+            capacity.div_ceil(workgroup)
+        );
+        let expected = ClaimSortProbe::new(&device, capacity, capacity, SortMethod::Merge);
+        expected.reset(&device);
+        expected.sort(&device, Execution::Immediate);
+        assert_eq!(probe.outcome(&device)?, expected.outcome(&device)?);
+    }
+    Ok(())
+}
+
+#[test]
+fn block_claim_sort_preserves_disabled_retries_and_prior_gpu_faults() -> Result<()> {
+    let device = crate::simulation::tests::device(64)?;
+    for sorting in [SortMethod::Block256, SortMethod::Block2048] {
+        for execution in [Execution::Initial, Execution::Retry] {
+            for faults in [
+                FaultFlags::empty(),
+                FaultFlags::ARITHMETIC_OVERFLOW,
+                FaultFlags::CLAIM_CAPACITY,
+            ] {
+                let probe = ClaimSortProbe::new(&device, 5000, 128, sorting);
+                probe.reset(&device);
+                let mut control = vec![0; CONTROL_WORDS + 7];
+                control[crate::simulation::flags::FAULT_WORD] = faults.bits();
+                device.write(&probe.control, &control);
+                probe.sort(&device, execution);
+                match (execution, faults.is_empty()) {
+                    (Execution::Initial, true) => {
+                        let merge = ClaimSortProbe::new(&device, 5000, 128, SortMethod::Merge);
+                        merge.reset(&device);
+                        merge.sort(&device, execution);
+                        assert_eq!(probe.outcome(&device)?, merge.outcome(&device)?);
+                    }
+                    _ => assert_eq!(device.read(&probe.buffers.claims)?, probe.initial),
+                }
+                assert_eq!(device.read(&probe.control)?, control);
+            }
+        }
+    }
+    Ok(())
+}
+
+#[test]
+#[ignore]
+fn profile_block_claim_sort_against_global_merges_on_gpu() -> Result<()> {
+    use anyhow::{Context, anyhow};
+
+    let device = crate::simulation::tests::device(64)?;
+    for count in [0usize, 128, 5000, 70_000, 1_000_000] {
+        let probes = [
+            ClaimSortProbe::new(&device, 1_000_000, count, SortMethod::Merge),
+            ClaimSortProbe::new(&device, 1_000_000, count, SortMethod::Block256),
+            ClaimSortProbe::new(&device, 1_000_000, count, SortMethod::Block2048),
+        ];
+        let mut expected = None;
+        for probe in &probes {
+            probe.reset(&device);
+            probe.sort(&device, Execution::Initial);
+            let actual = probe.outcome(&device)?;
+            match &expected {
+                Some(expected) => assert_eq!(actual, *expected),
+                None => expected = Some(actual),
+            }
+        }
+        device.sync()?;
+        for sample in 0..7 {
+            let order = match sample % 3 {
+                0 => [0, 1, 2],
+                1 => [1, 2, 0],
+                _ => [2, 0, 1],
+            };
+            for index in order {
+                let probe = &probes[index];
+                probe.reset(&device);
+                device.sync()?;
+                let window = device
+                    .client
+                    .profile_start()
+                    .map_err(|error| anyhow!("{error:?}"))?;
+                let started = std::time::Instant::now();
+                probe.sort(&device, Execution::Initial);
+                let duration = device
+                    .client
+                    .profile_end(window)
+                    .map_err(|error| anyhow!("{error:?}"))?;
+                let method = duration.timing_method();
+                let measured =
+                    pollster::block_on(duration.resolve()).context("missing claim sort profile")?;
+                eprintln!(
+                    "CLAIM_SORT_PROFILE count={count} sorting={:?} sample={sample} wall_ms={:.3} {method}_ms={:.3}",
+                    probe.buffers.sorting,
+                    started.elapsed().as_secs_f64() * 1000.0,
+                    measured.duration().as_secs_f64() * 1000.0,
+                );
+            }
         }
     }
     Ok(())

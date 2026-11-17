@@ -1,4 +1,4 @@
-use super::{DemographyPolicy, Stage, kernels};
+use super::{DemographyPolicy, Stage, WorkerRemapping, kernels};
 use crate::simulation::{
     configuration::EconomyConfig,
     pass::GpuPass,
@@ -87,6 +87,47 @@ impl GpuPass<PopulationInput> for CountPopulation {
 pub(super) struct PopulationTotalsInput {
     pub sums: Box<[u64]>,
     pub output: Box<[u32]>,
+}
+
+#[derive(CubeType, CubeLaunch)]
+pub(super) struct WorkerRemappingInput {
+    pub state: Box<[u32]>,
+    pub previous_people: Box<[Vector<u32, Const<4>>]>,
+    pub people: Box<[Vector<u32, Const<4>>]>,
+    pub previous_ranges: Box<[Vector<u32, Const<2>>]>,
+    pub ranges: Box<[Vector<u32, Const<2>>]>,
+    pub stride: u32,
+    pub minimum_age: u32,
+    pub retirement_age: u32,
+    #[cube(comptime)]
+    pub remapping: WorkerRemapping,
+}
+
+pub(super) struct WorkerRemappingSystem;
+pub(super) struct RemapWorkers;
+
+impl System for WorkerRemappingSystem {
+    type Input = WorkerRemappingInput;
+    type Passes = gpu_passes![RemapWorkers];
+}
+
+#[cube]
+impl GpuPass<WorkerRemappingInput> for RemapWorkers {
+    type Output = ();
+
+    fn execute(mut input: WorkerRemappingInput) {
+        kernels::remap_workers(
+            &mut input.state,
+            &input.previous_people,
+            &input.people,
+            &input.previous_ranges,
+            &input.ranges,
+            input.stride,
+            input.minimum_age,
+            input.retirement_age,
+            comptime!(input.remapping),
+        );
+    }
 }
 
 pub(super) struct PopulationTotals;
@@ -192,6 +233,7 @@ impl GpuPass<FirmExtensionInput> for ExtendFirmRanges {
 pub(super) struct PopulationGrowthInput {
     pub source: Box<[Vector<u32, Const<4>>]>,
     pub target: Box<[Vector<u32, Const<4>>]>,
+    pub audited: Box<[Vector<u32, Const<4>>]>,
     pub old_ranges: Box<[u32]>,
     pub new_ranges: Box<[u32]>,
     pub people: u32,
@@ -213,6 +255,7 @@ impl GpuPass<PopulationGrowthInput> for CopyPeople {
         kernels::grow(
             &input.source,
             &mut input.target,
+            &mut input.audited,
             &input.old_ranges,
             &input.new_ranges,
             input.people,
@@ -223,6 +266,7 @@ impl GpuPass<PopulationGrowthInput> for CopyPeople {
 #[derive(CubeType, CubeLaunch)]
 pub(super) struct NewbornInput {
     pub target: Box<[Vector<u32, Const<4>>]>,
+    pub audited: Box<[Vector<u32, Const<4>>]>,
     pub old_ranges: Box<[u32]>,
     pub new_ranges: Box<[u32]>,
     pub births: Box<[u32]>,
@@ -245,6 +289,7 @@ impl GpuPass<NewbornInput> for WriteNewborns {
     fn execute(mut input: NewbornInput) {
         kernels::newborns(
             &mut input.target,
+            &mut input.audited,
             &input.old_ranges,
             &input.new_ranges,
             &input.births,

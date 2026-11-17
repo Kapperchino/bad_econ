@@ -1,5 +1,7 @@
 mod households;
 mod kernels;
+#[cfg(test)]
+mod remapping_tests;
 mod systems;
 use super::registry::records::PendingRecord;
 use super::{Device, layout::WORD_BYTES, system::System};
@@ -8,7 +10,11 @@ use anyhow::{Context, Result, anyhow};
 use burn_wgpu::CubeTensor;
 use bytemuck::{Pod, Zeroable};
 use cubecl::prelude::*;
-use std::{collections::HashMap, mem::offset_of};
+use std::{
+    collections::HashMap,
+    mem::offset_of,
+    sync::{Arc, Mutex},
+};
 use systems::*;
 
 const OBSERVATION_SHARDS: usize = 1024;
@@ -110,10 +116,30 @@ enum Stage {
     Mortality,
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum PersonSnapshot {
+    Current,
+    Dirty,
+}
+
+#[derive(Clone, Copy, Debug, Hash, PartialEq, Eq)]
+enum WorkerRemapping {
+    Births,
+    Formations,
+}
+
+#[derive(Clone, Copy)]
+enum WorkerSelection {
+    Identity(u64),
+    Eligible,
+    Inactive,
+}
+
 #[derive(Clone)]
 pub struct DemographyRuntime {
     people: CubeTensor,
     audited: CubeTensor,
+    snapshot: Arc<Mutex<PersonSnapshot>>,
     ranges: CubeTensor,
     policy: Policy,
     births: CubeTensor,
@@ -123,7 +149,7 @@ pub struct DemographyRuntime {
     seed: u64,
 }
 impl DemographyRuntime {
-    pub fn new(device: &Device, scenario: &Scenario, state: &State) -> Result<Self> {
+    pub fn new(device: &Device, scenario: &Scenario, state: &mut State) -> Result<Self> {
         let indexes = state
             .actors
             .iter()
@@ -161,6 +187,81 @@ impl DemographyRuntime {
             })
             .collect::<Result<Vec<_>>>()?;
         encoded.sort_by_key(|person| (person.household, person.identity[1], person.identity[0]));
+        let reordered = encoded.iter().zip(&state.people).any(|(person, original)| {
+            u64::from(person.identity[0]) | (u64::from(person.identity[1]) << 32)
+                != original.identity
+        });
+        let workers = state
+            .actors
+            .iter()
+            .enumerate()
+            .map(|(index, actor)| {
+                let selected = state.get(crate::domain::Field::Worker, index);
+                match (actor.kind, selected) {
+                    (0, selected) if selected != u64::from(u32::MAX) => {
+                        match state
+                            .people
+                            .get(selected as usize)
+                            .filter(|person| person.household == actor.identity)
+                        {
+                            Some(person) => WorkerSelection::Identity(person.identity),
+                            None if reordered
+                                || state.day > 0
+                                || state.get(crate::domain::Field::ParentHousehold, index) > 0
+                                || state
+                                    .people
+                                    .get(selected as usize)
+                                    .and_then(|person| indexes.get(&person.household))
+                                    .is_some_and(|&household| {
+                                        state.get(
+                                            crate::domain::Field::ParentHousehold,
+                                            household as usize,
+                                        ) == actor.identity
+                                    }) =>
+                            {
+                                WorkerSelection::Eligible
+                            }
+                            None => WorkerSelection::Inactive,
+                        }
+                    }
+                    _ => WorkerSelection::Inactive,
+                }
+            })
+            .collect::<Vec<_>>();
+        let mut selected = vec![None; state.actors.len()];
+        let policy = &scenario.config().demography;
+        for (index, person) in encoded.iter().enumerate() {
+            let household = person.household as usize;
+            let identity = u64::from(person.identity[0]) | (u64::from(person.identity[1]) << 32);
+            let choose = match workers[household] {
+                WorkerSelection::Identity(expected) => identity == expected,
+                WorkerSelection::Eligible => {
+                    selected[household].is_none()
+                        && person.cause == 0
+                        && person.age >= policy.minimum_work_age_years * DAYS_PER_YEAR
+                        && person.age < policy.retirement_age_years * DAYS_PER_YEAR
+                }
+                WorkerSelection::Inactive => false,
+            };
+            if choose {
+                selected[household] = Some(index as u64);
+            }
+        }
+        for (household, worker) in workers.into_iter().enumerate() {
+            match worker {
+                WorkerSelection::Inactive => (),
+                _ => state.set(
+                    crate::domain::Field::Worker,
+                    household,
+                    selected[household].unwrap_or(u64::from(u32::MAX)),
+                ),
+            }
+        }
+        if reordered {
+            state
+                .people
+                .sort_by_key(|person| (indexes[&person.household], person.identity));
+        }
         let mut ranges = vec![0; state.actors.len() * 2];
         for (index, person) in encoded.iter().enumerate() {
             let base = person.household as usize * 2;
@@ -196,6 +297,7 @@ impl DemographyRuntime {
         Ok(Self {
             people,
             audited,
+            snapshot: Arc::new(Mutex::new(PersonSnapshot::Current)),
             ranges: device.tensor(&ranges),
             policy,
             births: device.tensor(&vec![0; state.actors.len()]),
@@ -227,6 +329,7 @@ impl DemographyRuntime {
             )?,
             _ => super::tensor::empty(device, [0]),
         };
+        *self.snapshot.lock().expect("person snapshot state") = PersonSnapshot::Dirty;
         HouseholdDemography::launch(
             device,
             cube_count,
@@ -285,11 +388,17 @@ impl DemographyRuntime {
         }
     }
     pub fn copy(&self, device: &Device, direction: super::CopyDirection) {
-        let (source, target) = match direction {
-            super::CopyDirection::Save => (&self.people, &self.audited),
-            super::CopyDirection::Restore => (&self.audited, &self.people),
-        };
-        super::tensor::copy_contiguous(device, source, target);
+        let mut snapshot = self.snapshot.lock().expect("person snapshot state");
+        match (direction, *snapshot) {
+            (super::CopyDirection::Save, PersonSnapshot::Dirty) => {
+                super::tensor::copy_contiguous(device, &self.people, &self.audited);
+            }
+            (super::CopyDirection::Restore, _) => {
+                super::tensor::copy_contiguous(device, &self.audited, &self.people);
+            }
+            (super::CopyDirection::Save, PersonSnapshot::Current) => (),
+        }
+        *snapshot = PersonSnapshot::Current;
     }
     pub fn download(
         &self,
@@ -416,6 +525,41 @@ impl DemographyRuntime {
             cold_exposure: u64::from(totals[14]) + (u64::from(totals[15]) << 32),
         })
     }
+    pub(super) fn remap_workers_from(
+        &self,
+        device: &Device,
+        state: &CubeTensor,
+        stride: u32,
+        previous: &Self,
+    ) {
+        if !super::market_graphs::same_buffer(&self.people, &previous.people) {
+            let remapping = match self
+                .range_counts
+                .iter()
+                .skip(previous.range_counts.len())
+                .any(|&count| count > 0)
+            {
+                true => WorkerRemapping::Formations,
+                false => WorkerRemapping::Births,
+            };
+            WorkerRemappingSystem::launch(
+                device,
+                device.count(self.range_counts.len()),
+                CubeDim::new_1d(device.workgroup),
+                WorkerRemappingInputLaunch {
+                    state: state.clone().into_buffer_arg(),
+                    previous_people: previous.people.clone().into_buffer_arg(),
+                    people: self.people.clone().into_buffer_arg(),
+                    previous_ranges: previous.ranges.clone().into_buffer_arg(),
+                    ranges: self.ranges.clone().into_buffer_arg(),
+                    stride,
+                    minimum_age: self.policy.parameters.minimum_age,
+                    retirement_age: self.policy.parameters.retirement_age,
+                    remapping,
+                },
+            );
+        }
+    }
     pub(super) fn grow_births(
         &self,
         device: &Device,
@@ -447,6 +591,7 @@ impl DemographyRuntime {
         let grown = Self {
             people: device.empty(count.max(1) * PersonLayout::WORDS),
             audited: device.empty(count.max(1) * PersonLayout::WORDS),
+            snapshot: Arc::new(Mutex::new(PersonSnapshot::Current)),
             ranges: device.empty(actors * 2),
             policy: self.policy.clone(),
             births: self.births.clone(),
@@ -490,6 +635,7 @@ impl DemographyRuntime {
             PopulationGrowthInputLaunch {
                 source: argument(&self.people),
                 target: argument(&grown.people),
+                audited: argument(&grown.audited),
                 old_ranges: argument(&self.ranges),
                 new_ranges: argument(&grown.ranges),
                 people: self.count as u32,
@@ -501,6 +647,7 @@ impl DemographyRuntime {
             CubeDim::new_1d(device.workgroup),
             NewbornInputLaunch {
                 target: argument(&grown.people),
+                audited: argument(&grown.audited),
                 old_ranges: argument(&self.ranges),
                 new_ranges: argument(&grown.ranges),
                 births: argument(&self.births),
@@ -558,6 +705,7 @@ impl DemographyRuntime {
         let grown = Self {
             people: device.empty(count.max(1) * PersonLayout::WORDS),
             audited: device.empty(count.max(1) * PersonLayout::WORDS),
+            snapshot: Arc::new(Mutex::new(PersonSnapshot::Dirty)),
             ranges: device.tensor(&ranges),
             policy: self.policy.clone(),
             births: self.births.clone(),
@@ -612,5 +760,153 @@ impl DemographyRuntime {
     }
     pub fn birth_buffer(&self) -> &CubeTensor {
         &self.births
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::domain::Experiment;
+    use crate::simulation::Simulation;
+
+    #[test]
+    fn fused_person_growth_snapshots_preserve_shared_mutations_formations_and_restore_on_gpu()
+    -> Result<()> {
+        use crate::simulation::{CopyDirection, MemoryBudget, enterprise::HouseholdFormation};
+
+        let scenario = Scenario::baseline(97, 42, Experiment::Baseline)?;
+        for workgroup in [32, 256] {
+            let simulation = Simulation::new(
+                scenario.clone(),
+                crate::simulation::tests::device(workgroup)?,
+            )?;
+            let actors = simulation.actors().len();
+            let mut births = vec![0; actors];
+            births[0] = 1;
+            births[31] = 2;
+            births[96] = 1;
+            let records = births
+                .iter()
+                .enumerate()
+                .filter(|(_, birth)| **birth > 0)
+                .map(|(actor, &birth)| PendingRecord {
+                    actor: actor as u32,
+                    request: 0,
+                    birth,
+                })
+                .collect::<Vec<_>>();
+            simulation
+                .device
+                .write(simulation.demography.birth_buffer(), &births);
+            let fused = simulation.demography.grow_births(
+                &simulation.device,
+                &records,
+                simulation.metadata.next_identity,
+                &simulation.scratch,
+            )?;
+            let reference = simulation.demography.reference_births(
+                &simulation.device,
+                &births,
+                simulation.metadata.next_identity,
+            )?;
+            reference.copy(&simulation.device, CopyDirection::Save);
+            assert!(!Arc::ptr_eq(
+                &simulation.demography.snapshot,
+                &fused.snapshot
+            ));
+            assert_eq!(
+                *fused.snapshot.lock().expect("person snapshot state"),
+                PersonSnapshot::Current,
+            );
+            let grown = simulation.device.read(&fused.people)?;
+            assert_eq!(grown, simulation.device.read(&fused.audited)?);
+            assert_eq!(grown, simulation.device.read(&reference.people)?);
+            assert_eq!(grown, simulation.device.read(&reference.audited)?);
+            let shared = fused.clone();
+            assert!(Arc::ptr_eq(&shared.snapshot, &fused.snapshot));
+            let reference_state = simulation
+                .device
+                .tensor(&simulation.device.read(&simulation.state)?);
+            fused.before(
+                &simulation.device,
+                &simulation.state,
+                &simulation.actors,
+                &simulation.config,
+                Phase::Observation,
+                0,
+            )?;
+            reference.before(
+                &simulation.device,
+                &reference_state,
+                &simulation.actors,
+                &simulation.config,
+                Phase::Observation,
+                0,
+            )?;
+            assert_eq!(
+                *shared.snapshot.lock().expect("person snapshot state"),
+                PersonSnapshot::Dirty,
+            );
+            assert_eq!(
+                *simulation
+                    .demography
+                    .snapshot
+                    .lock()
+                    .expect("person snapshot state"),
+                PersonSnapshot::Current,
+            );
+            shared.copy(&simulation.device, CopyDirection::Save);
+            reference.copy(&simulation.device, CopyDirection::Save);
+            assert_eq!(
+                *fused.snapshot.lock().expect("person snapshot state"),
+                PersonSnapshot::Current,
+            );
+            let observed = simulation.device.read(&fused.people)?;
+            assert_eq!(observed, simulation.device.read(&fused.audited)?);
+            assert_eq!(observed, simulation.device.read(&reference.audited)?);
+            let person = bytemuck::cast_slice::<u32, PersonLayout>(&observed)[0];
+            let formations = [HouseholdFormation {
+                parent: 0,
+                household: actors,
+                person: u64::from(person.identity[0]) | (u64::from(person.identity[1]) << 32),
+            }];
+            let formed = fused.form_households(&simulation.device, &formations, actors + 1)?;
+            let expected =
+                reference.form_households(&simulation.device, &formations, actors + 1)?;
+            assert!(!Arc::ptr_eq(&formed.snapshot, &fused.snapshot));
+            assert_eq!(
+                *formed.snapshot.lock().expect("person snapshot state"),
+                PersonSnapshot::Dirty,
+            );
+            formed.copy(&simulation.device, CopyDirection::Save);
+            expected.copy(&simulation.device, CopyDirection::Save);
+            let households = simulation.device.read(&formed.people)?;
+            assert_eq!(households, simulation.device.read(&formed.audited)?);
+            assert_eq!(households, simulation.device.read(&expected.audited)?);
+            let mut corrupted = households.clone();
+            corrupted[PersonLayout::AGE] ^= 0x1234_5678;
+            simulation.device.write(&formed.people, &corrupted);
+            formed.copy(&simulation.device, CopyDirection::Restore);
+            assert_eq!(households, simulation.device.read(&formed.people)?);
+            let mut constrained = simulation.device.clone();
+            constrained.memory_budget = MemoryBudget::Reported { available_bytes: 2 };
+            assert!(
+                fused
+                    .grow_births(
+                        &constrained,
+                        &records,
+                        simulation.metadata.next_identity + 3,
+                        &simulation.scratch,
+                    )
+                    .is_err()
+            );
+            assert_eq!(observed, simulation.device.read(&fused.people)?);
+            assert_eq!(observed, simulation.device.read(&fused.audited)?);
+            assert_eq!(
+                *fused.snapshot.lock().expect("person snapshot state"),
+                PersonSnapshot::Current,
+            );
+        }
+        Ok(())
     }
 }

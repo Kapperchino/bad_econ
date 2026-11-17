@@ -16,7 +16,9 @@ pub(in crate::simulation) const LATCH_WORD: usize = CONTROL_WORDS;
 pub(in crate::simulation) const RANGE_SLOTS_WORD: usize = CONTROL_WORDS + 1;
 pub(in crate::simulation) const SEARCHES_WORD: usize = CONTROL_WORDS + 2;
 pub(in crate::simulation) const PREPARATION_ACTORS_WORD: usize = CONTROL_WORDS + 3;
+pub(in crate::simulation) const WIDE_ORDERS_WORD: usize = CONTROL_WORDS + 4;
 pub(in crate::simulation) const FEEDBACK_EVENTS_WORD: usize = PROGRESS_WORD;
+pub(in crate::simulation) const FEEDBACK_SOURCE_WORD: usize = COMPLETED_WORD;
 const MAX_RANGE_SPACING: u32 = 32;
 pub(in crate::simulation) const SEARCH_DISPATCH: usize = 0;
 pub(in crate::simulation) const SORT_DISPATCH: usize = 3;
@@ -26,6 +28,15 @@ pub(in crate::simulation) const QUEUE_DISPATCH: usize = 27;
 pub(in crate::simulation) const SEARCH_COMPACT_DISPATCH: usize = 30;
 pub(in crate::simulation) const PREPARATION_DISPATCH: usize = 33;
 pub(in crate::simulation) const COMPACTION_BLOCK: u32 = 256;
+pub(in crate::simulation) const EMPTY_CACHE_EXTRA_WORDS: usize = 56;
+pub(in crate::simulation) const SEARCH_REQUEST_FIELDS: usize = 18 + EMPTY_CACHE_EXTRA_WORDS;
+
+#[derive(Clone, Copy, Debug, Hash, PartialEq, Eq)]
+#[repr(u32)]
+pub(in crate::simulation) enum FeedbackSource {
+    Constructed,
+    Searches,
+}
 
 #[cube]
 pub(in crate::simulation) fn faults_clear(control: &[Atomic<u32>]) -> bool {
@@ -41,8 +52,9 @@ pub(in crate::simulation) struct SearchBuffers {
 impl SearchBuffers {
     pub fn new(device: &crate::simulation::Device, actors: usize) -> Self {
         Self {
-            requests: device.empty(actors * 18),
-            successes: device.empty(search_counts_offset(actors) + 2 * search_blocks(actors) + 512),
+            requests: device.empty(actors * SEARCH_REQUEST_FIELDS),
+            successes: device
+                .empty(search_counts_offset(actors) + 2 * search_blocks(actors) + 512 + actors),
             dispatches: device
                 .client
                 .memory_dedicated_allocation(144, |_| device.empty(36)),
@@ -56,6 +68,11 @@ pub(in crate::simulation) fn search_counts_offset(actors: usize) -> usize {
 
 pub(in crate::simulation) fn search_blocks(actors: usize) -> usize {
     actors.div_ceil(COMPACTION_BLOCK as usize)
+}
+
+#[cube]
+pub(in crate::simulation) fn filtered_count(actors: u32, peer: u32) -> u32 {
+    ceildiv(actors, 32) + 2 * ceildiv(actors, COMPACTION_BLOCK) + 512 + peer
 }
 
 pub(in crate::simulation) fn dispatch(
@@ -72,11 +89,45 @@ pub(in crate::simulation) fn dispatch(
     )
 }
 
+#[derive(Clone, Copy)]
+pub(in crate::simulation) enum PreparationWorkgroup {
+    Native,
+    #[cfg(test)]
+    Wide,
+}
+
+impl PreparationWorkgroup {
+    pub(in crate::simulation) fn width(self, device: &crate::simulation::Device) -> u32 {
+        match self {
+            Self::Native => device.workgroup,
+            #[cfg(test)]
+            Self::Wide => 256,
+        }
+    }
+}
+
+#[cfg(test)]
 pub(in crate::simulation) fn prepare_dispatch(
     device: &crate::simulation::Device,
     control: &burn_wgpu::CubeTensor,
     dispatches: &burn_wgpu::CubeTensor,
     capacity: usize,
+) {
+    prepare_dispatch_for(
+        device,
+        control,
+        dispatches,
+        capacity,
+        PreparationWorkgroup::Native,
+    );
+}
+
+pub(in crate::simulation) fn prepare_dispatch_for(
+    device: &crate::simulation::Device,
+    control: &burn_wgpu::CubeTensor,
+    dispatches: &burn_wgpu::CubeTensor,
+    capacity: usize,
+    preparation: PreparationWorkgroup,
 ) {
     DispatchPreparation::launch(
         device,
@@ -93,6 +144,7 @@ pub(in crate::simulation) fn prepare_dispatch(
                 )
                 .items(),
             preparation_resets: (search_counts_offset(capacity) + search_blocks(capacity)) as u32,
+            preparation_workgroup: preparation.width(device),
         },
     );
 }
@@ -104,6 +156,7 @@ struct DispatchInput {
     workgroup: u32,
     histogram_span: u32,
     preparation_resets: u32,
+    preparation_workgroup: u32,
 }
 
 struct DispatchPreparation;
@@ -125,6 +178,7 @@ impl GpuPass<DispatchInput> for PrepareCounts {
             input.workgroup,
             input.histogram_span,
             input.preparation_resets,
+            input.preparation_workgroup,
         );
     }
 }
@@ -136,6 +190,7 @@ fn prepare_counts(
     workgroup: u32,
     histogram_span: u32,
     preparation_resets: u32,
+    preparation_workgroup: u32,
 ) {
     control[LATCH_WORD].store(control[crate::simulation::flags::FAULT_WORD].load());
     let mut counts = Array::<u32>::new(12usize);
@@ -152,7 +207,10 @@ fn prepare_counts(
     if control.len() > PREPARATION_ACTORS_WORD {
         preparation_actors = control[PREPARATION_ACTORS_WORD].load();
     }
-    counts[11usize] = ceildiv(max(preparation_actors, preparation_resets), workgroup);
+    counts[11usize] = ceildiv(
+        max(preparation_actors, preparation_resets),
+        preparation_workgroup,
+    );
     for index in 0..12usize {
         let count = counts[index];
         dispatches[index * 3] = min(count, 65535);
@@ -213,7 +271,7 @@ pub(in crate::simulation) fn ranges(
         if comptime!(
             matches!(
                 parameters.market,
-                MarketFlag::Consumer | MarketFlag::Payroll
+                MarketFlag::Consumer(_) | MarketFlag::Payroll
             ) || parameters.market == MarketFlag::Labor
                 && config.bargaining.enabled == Feature::Disabled
         ) {
@@ -294,6 +352,35 @@ pub(in crate::simulation) fn radix_local(
     parameters: &EconomyParameters,
     id: u32,
 ) {
+    radix_local_keys(scratch, control, parameters, id, 0);
+}
+
+#[cube]
+fn radix_key(key: u32, base: u32) -> u32 {
+    select(key == u32::MAX, key, key - base)
+}
+
+#[cube]
+pub(in crate::simulation) fn radix_local_keys(
+    scratch: &mut [u32],
+    control: &[Atomic<u32>],
+    parameters: &EconomyParameters,
+    id: u32,
+    key_base: u32,
+) {
+    radix_local_digits(scratch, control, parameters, id, key_base, 4u32, 16u32);
+}
+
+#[cube]
+pub(in crate::simulation) fn radix_local_digits(
+    scratch: &mut [u32],
+    control: &[Atomic<u32>],
+    parameters: &EconomyParameters,
+    id: u32,
+    key_base: u32,
+    #[comptime] bits: u32,
+    histogram_bins: u32,
+) {
     let count = parameters.count;
     let active_count = active(control, parameters);
     let block = CUBE_POS as u32;
@@ -304,9 +391,9 @@ pub(in crate::simulation) fn radix_local(
     if block * CUBE_DIM < active_count {
         let mut keys = Shared::<[u32]>::new_slice(256usize);
         let mut items = Shared::<[u32]>::new_slice(256usize);
-        let mut starts = Shared::<[u32]>::new_slice(16usize);
-        let mut ends = Shared::<[u32]>::new_slice(16usize);
-        if UNIT_POS < 16 {
+        let mut starts = Shared::<[u32]>::new_slice((1u32 << bits) as usize);
+        let mut ends = Shared::<[u32]>::new_slice((1u32 << bits) as usize);
+        if UNIT_POS < (1u32 << bits) {
             starts[lane] = 0;
             ends[lane] = 0;
         }
@@ -317,8 +404,9 @@ pub(in crate::simulation) fn radix_local(
             item = scratch[(source + count + id) as usize];
         }
         #[unroll]
-        for pair in 0..2u32 {
-            let digit = (key >> (shift + 2 * pair)) & 3;
+        for pair in 0..(bits + 1) / 2 {
+            let mask = select(2 * pair + 1 < bits, 3u32, 1u32);
+            let digit = (radix_key(key, key_base) >> (shift + 2 * pair)) & mask;
             let encoded = select(digit < 3, 1u32 << (9 * digit), 0u32);
             let prefix = parallel::scan_prefix(encoded, comptime!(parameters.scan));
             let preceding = prefix.total & ((1u32 << (9 * digit)) - 1);
@@ -339,10 +427,12 @@ pub(in crate::simulation) fn radix_local(
             item = items[lane];
             sync_cube();
         }
-        let digit = (key >> shift) & 15;
+        let digit = (radix_key(key, key_base) >> shift) & ((1u32 << bits) - 1);
         let length = min(CUBE_DIM, active_count - block * CUBE_DIM);
-        let previous = (keys[(max(UNIT_POS, 1) - 1) as usize] >> shift) & 15;
-        let next = (keys[min(UNIT_POS + 1, CUBE_DIM - 1) as usize] >> shift) & 15;
+        let previous = (radix_key(keys[(max(UNIT_POS, 1) - 1) as usize], key_base) >> shift)
+            & ((1u32 << bits) - 1);
+        let next = (radix_key(keys[min(UNIT_POS + 1, CUBE_DIM - 1) as usize], key_base) >> shift)
+            & ((1u32 << bits) - 1);
         if id < active_count && (UNIT_POS == 0 || previous != digit) {
             starts[digit as usize] = UNIT_POS;
         }
@@ -355,7 +445,7 @@ pub(in crate::simulation) fn radix_local(
             scratch[(source + count + id) as usize] = item;
             scratch[(6 * count + id) as usize] = UNIT_POS - starts[digit as usize];
         }
-        if UNIT_POS < 16 {
+        if UNIT_POS < histogram_bins {
             scratch[(7 * count + UNIT_POS * blocks + block) as usize] = ends[lane] - starts[lane];
         }
     }
@@ -387,19 +477,64 @@ pub(in crate::simulation) fn radix_scatter_histogram(
     #[comptime] output: parallel::HistogramScan,
     #[comptime] items: u32,
 ) {
+    radix_scatter_keys(scratch, control, parameters, id, 0, output, items);
+}
+
+#[cube]
+pub(in crate::simulation) fn radix_scatter_keys(
+    scratch: &mut [u32],
+    control: &[Atomic<u32>],
+    parameters: &EconomyParameters,
+    id: u32,
+    key_base: u32,
+    #[comptime] output: parallel::HistogramScan,
+    #[comptime] items: u32,
+) {
+    radix_scatter_digits(
+        scratch,
+        control,
+        parameters,
+        id,
+        key_base,
+        comptime!(output),
+        4u32,
+        CUBE_DIM * items,
+        16 * ceildiv(parameters.count, CUBE_DIM),
+    );
+}
+
+#[cube]
+pub(in crate::simulation) fn radix_scatter_digits(
+    scratch: &mut [u32],
+    control: &[Atomic<u32>],
+    parameters: &EconomyParameters,
+    id: u32,
+    key_base: u32,
+    #[comptime] output: parallel::HistogramScan,
+    #[comptime] bits: u32,
+    histogram_span: u32,
+    histogram_bound: u32,
+) {
     let count = parameters.count;
     if id < active(control, parameters) {
         let blocks = ceildiv(active(control, parameters), CUBE_DIM);
         let source = parameters.sort_source;
         let destination = 2 * count - source;
         let key = scratch[(source + id) as usize];
-        let digit = (key >> parameters.sort_width) & 15;
+        let digit = (radix_key(key, key_base) >> parameters.sort_width) & ((1u32 << bits) - 1);
         let histogram = digit * blocks + CUBE_POS as u32;
         let mut target = scratch[(6 * count + id) as usize];
         if histogram > 0 {
             target += scratch[(7 * count + histogram - 1) as usize];
         }
-        target += radix_histogram_offset(scratch, count, histogram, output, items);
+        target += radix_histogram_offset(
+            scratch,
+            count,
+            histogram,
+            output,
+            histogram_span,
+            histogram_bound,
+        );
         scratch[(destination + target) as usize] = key;
         scratch[(destination + count + target) as usize] = scratch[(source + count + id) as usize];
     }
@@ -411,16 +546,16 @@ fn radix_histogram_offset(
     count: u32,
     histogram: u32,
     #[comptime] output: parallel::HistogramScan,
-    #[comptime] items: u32,
+    histogram_span: u32,
+    histogram_bound: u32,
 ) -> u32 {
     match comptime!(output) {
         parallel::HistogramScan::Complete => 0u32,
         parallel::HistogramScan::BlockLocal => {
-            let tile = (max(histogram, 1) - 1) / (CUBE_DIM * items);
+            let tile = (max(histogram, 1) - 1) / histogram_span;
             let mut offset = 0u32;
             if tile > 0 {
-                let bound = 16 * ceildiv(count, CUBE_DIM);
-                offset = scratch[(7 * count + bound + tile - 1) as usize];
+                offset = scratch[(7 * count + histogram_bound + tile - 1) as usize];
             }
             offset
         }
@@ -431,6 +566,7 @@ pub(in crate::simulation) fn feedback_boundary(
     device: &crate::simulation::Device,
     control: &burn_wgpu::CubeTensor,
     feedback: &burn_wgpu::CubeTensor,
+    source: FeedbackSource,
 ) {
     FeedbackBoundary::launch(
         device,
@@ -439,6 +575,7 @@ pub(in crate::simulation) fn feedback_boundary(
         FeedbackInputLaunch {
             control: control.clone().into_buffer_arg(),
             feedback: feedback.clone().into_buffer_arg(),
+            source,
         },
     );
 }
@@ -447,6 +584,8 @@ pub(in crate::simulation) fn feedback_boundary(
 struct FeedbackInput {
     control: Box<[Atomic<u32>]>,
     feedback: Box<[Atomic<u32>]>,
+    #[cube(comptime)]
+    source: FeedbackSource,
 }
 
 struct FeedbackBoundary;
@@ -462,12 +601,29 @@ impl GpuPass<FeedbackInput> for LatchFeedback {
     type Output = ();
 
     fn execute(input: FeedbackInput) {
-        latch_feedback(&input.control, &input.feedback);
+        latch_feedback(&input.control, &input.feedback, comptime!(input.source));
     }
 }
 
 #[cube]
-fn latch_feedback(control: &[Atomic<u32>], feedback: &[Atomic<u32>]) {
+fn latch_feedback(
+    control: &[Atomic<u32>],
+    feedback: &[Atomic<u32>],
+    #[comptime] requested: FeedbackSource,
+) {
+    let source = match comptime!(requested) {
+        FeedbackSource::Constructed => u32::new(comptime!(FeedbackSource::Constructed as i64)),
+        FeedbackSource::Searches => select(
+            control[WIDE_ORDERS_WORD].load() == 0,
+            comptime!(FeedbackSource::Searches as u32),
+            comptime!(FeedbackSource::Constructed as u32),
+        ),
+    };
     feedback[CONSTRUCTED_EVENTS_WORD].store(control[FAULT_WORD].load());
-    feedback[FEEDBACK_EVENTS_WORD].store(control[CONSTRUCTED_EVENTS_WORD].load());
+    feedback[FEEDBACK_SOURCE_WORD].store(source);
+    feedback[FEEDBACK_EVENTS_WORD].store(select(
+        source == comptime!(FeedbackSource::Searches as u32),
+        control[SEARCHES_WORD].load(),
+        control[CONSTRUCTED_EVENTS_WORD].load(),
+    ));
 }

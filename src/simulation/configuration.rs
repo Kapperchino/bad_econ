@@ -87,15 +87,22 @@ pub struct EconomyConfig {
     pub actors: u32,
     pub state_stride: u32,
     pub fields: u32,
+    #[cube(comptime)]
     pub ring: u32,
+    #[cube(comptime)]
     pub search_radius: u32,
+    #[cube(comptime)]
     pub map_size: u32,
+    #[cube(comptime)]
     pub commute_speed: u32,
+    #[cube(comptime)]
     pub shipment_speed: u32,
     pub railway: super::economy::railway::RailNetwork,
     pub household_need: u32,
     pub food_medium_salary: u32,
     pub food_rich_salary: u32,
+    #[cube(comptime)]
+    pub food_income: crate::domain::food::FoodIncome,
     pub wheat_kg_per_hectare: u32,
     #[cube(comptime)]
     pub economy: crate::domain::Economy,
@@ -104,13 +111,16 @@ pub struct EconomyConfig {
     pub work_cap: u32,
     pub reserved_minutes: u32,
     pub forecast_weight: u32,
+    #[cube(comptime)]
     pub coverage: u32,
     pub distribution_rate: u32,
     pub minimum_price: u32,
     pub maximum_price: u32,
+    #[cube(comptime)]
     pub delivery_penalty: u32,
     pub reserve_low: u32,
     pub reserve_high: u32,
+    #[cube(comptime)]
     pub spatial_side: u32,
     pub work_fatigue: u32,
     pub rest_recovery: u32,
@@ -156,6 +166,7 @@ pub struct Configuration {
     pub household_need: u32,
     pub food_medium_salary: u32,
     pub food_rich_salary: u32,
+    pub food_income: crate::domain::food::FoodIncome,
     pub wheat_kg_per_hectare: u32,
     pub economy: crate::domain::Economy,
     pub home: HomeProduction,
@@ -211,9 +222,11 @@ impl Configuration {
 
     pub fn new(device: &super::Device, scenario: &Scenario, state: &State) -> Self {
         let rentals = crate::domain::landlords::RentalRegistry::new(scenario, state);
-        Self::with_rentals(device, scenario, state, rentals)
+        let railway = super::economy::railway::Network::new(device, scenario, state);
+        Self::with_rentals(device, scenario, state, rentals, railway)
     }
 
+    #[cfg(test)]
     pub fn updated(
         &self,
         device: &super::Device,
@@ -221,8 +234,66 @@ impl Configuration {
         previous: &crate::domain::ActorRows,
         state: &State,
     ) -> Self {
-        let rentals = self.rentals.updated(scenario, previous, state);
-        Self::with_rentals(device, scenario, state, rentals)
+        self.updated_using(
+            device,
+            scenario,
+            previous,
+            state,
+            crate::domain::landlords::RentalChanges::Compared,
+        )
+    }
+
+    pub fn updated_for_registry(
+        &self,
+        device: &super::Device,
+        scenario: &Scenario,
+        previous: &crate::domain::ActorRows,
+        state: &State,
+        changes: &[usize],
+    ) -> Self {
+        self.updated_using(
+            device,
+            scenario,
+            previous,
+            state,
+            crate::domain::landlords::RentalChanges::Selected(changes),
+        )
+    }
+
+    fn updated_using(
+        &self,
+        device: &super::Device,
+        scenario: &Scenario,
+        previous: &crate::domain::ActorRows,
+        state: &State,
+        changes: crate::domain::landlords::RentalChanges<'_>,
+    ) -> Self {
+        let profile = std::env::var_os("BAD_ECON_PROFILE_STAGES").is_some();
+        let started = std::time::Instant::now();
+        let rentals = self.rentals.updated(scenario, previous, state, changes);
+        if profile {
+            eprintln!(
+                "CONFIG_PART Rentals {:.3}",
+                started.elapsed().as_secs_f64() * 1000.0
+            );
+        }
+        let started = std::time::Instant::now();
+        let railway = self.railway.updated(device, scenario, state);
+        if profile {
+            eprintln!(
+                "CONFIG_PART Railway {:.3}",
+                started.elapsed().as_secs_f64() * 1000.0
+            );
+        }
+        let started = std::time::Instant::now();
+        let updated = Self::with_rentals(device, scenario, state, rentals, railway);
+        if profile {
+            eprintln!(
+                "CONFIG_PART Buffers {:.3}",
+                started.elapsed().as_secs_f64() * 1000.0
+            );
+        }
+        updated
     }
 
     pub fn update_rentals(
@@ -255,6 +326,7 @@ impl Configuration {
         scenario: &Scenario,
         state: &State,
         rentals: crate::domain::landlords::RentalRegistry,
+        railway: super::economy::railway::Network,
     ) -> Self {
         let config = scenario.config();
         Self {
@@ -273,10 +345,13 @@ impl Configuration {
             map_size: config.map_size,
             commute_speed: config.commute_speed,
             shipment_speed: config.shipment_speed,
-            railway: super::economy::railway::Network::new(device, scenario, state),
+            railway,
             household_need: config.household_need,
             food_medium_salary: config.food.map_or(0, |food| food.medium_daily_salary),
             food_rich_salary: config.food.map_or(0, |food| food.rich_daily_salary),
+            food_income: config
+                .food
+                .map_or(crate::domain::food::FoodIncome::Nominal, |food| food.income),
             wheat_kg_per_hectare: config.food.map_or(0, |food| food.wheat_kg_per_hectare),
             economy: config.economy,
             home: HomeProduction::new(config.household_production),
@@ -284,10 +359,9 @@ impl Configuration {
             grain_farms: device.tensor(
                 &state
                     .actors
-                    .iter()
-                    .enumerate()
-                    .filter(|(_, actor)| actor.kind == Good::Grain as u32)
-                    .map(|(index, _)| index as u32)
+                    .firm_indices()
+                    .filter(|&index| state.actors.at(index).kind == Good::Grain as u32)
+                    .map(|index| index as u32)
                     .chain([u32::MAX])
                     .collect::<Vec<_>>(),
             ),
@@ -306,8 +380,9 @@ impl Configuration {
                                 region.plots,
                                 state
                                     .actors
+                                    .identities()
                                     .iter()
-                                    .position(|actor| actor.identity == region.landowner)
+                                    .position(|&identity| identity == region.landowner)
                                     .expect("validated landowner")
                                     as u32,
                             ]
@@ -325,7 +400,7 @@ impl Configuration {
                 &Good::ALL
                     .map(Good::consumption_interval)
                     .into_iter()
-                    .chain([0; 4])
+                    .chain([0; 5])
                     .collect::<Vec<_>>(),
             ),
             work_cap: config.work_cap,
@@ -402,6 +477,7 @@ impl Configuration {
             household_need: self.household_need,
             food_medium_salary: self.food_medium_salary,
             food_rich_salary: self.food_rich_salary,
+            food_income: self.food_income,
             wheat_kg_per_hectare: self.wheat_kg_per_hectare,
             economy: self.economy,
             home: self.home.launch(),

@@ -1,4 +1,5 @@
 use super::Device;
+use crate::domain::Good;
 use anyhow::Result;
 use burn::tensor::StreamId;
 use burn_wgpu::CubeTensor;
@@ -38,6 +39,7 @@ pub(super) struct MarketKey {
     pub phase: crate::domain::Phase,
     pub preparation: Preparation,
     pub routing: super::economy::railway::RouteAvailability,
+    pub freight: super::FreightExecution,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -47,8 +49,9 @@ pub(super) enum MarketProgram {
     BreadInput,
     Input,
     BreadConsumer,
-    Fuel,
-    Consumer,
+    Fuel(Good),
+    Consumer(Good),
+    LuxuryConsumer(Good),
     Household,
     Payroll,
     Distribution,
@@ -63,8 +66,11 @@ impl From<crate::domain::Market> for MarketProgram {
             Market::Input(Good::Bread) => Self::BreadInput,
             Market::Input(_) => Self::Input,
             Market::Consumer(Good::Bread) => Self::BreadConsumer,
-            Market::Consumer(Good::Coal | Good::Wood) => Self::Fuel,
-            Market::Consumer(_) => Self::Consumer,
+            Market::Consumer(good @ (Good::Coal | Good::Wood)) => Self::Fuel(good),
+            Market::Consumer(good @ (Good::LuxuryClothes | Good::LuxuryFurniture)) => {
+                Self::LuxuryConsumer(good)
+            }
+            Market::Consumer(good) => Self::Consumer(good),
             Market::Household => Self::Household,
             Market::Payroll => Self::Payroll,
             Market::Distribution => Self::Distribution,
@@ -211,7 +217,11 @@ mod tests {
     use super::*;
     use crate::domain::{Experiment, Field, Phase, Scenario};
     use crate::simulation::{
-        FreightActivity, Simulation, Trace, economy::sorting::MarketSort, encode, tensor,
+        FreightActivity, Simulation, Trace,
+        economy::sorting::MarketSort,
+        encode,
+        parameters::{EconomyParameters, MarketClock},
+        tensor,
     };
     use cubecl::prelude::*;
 
@@ -220,6 +230,73 @@ mod tests {
         if ABSOLUTE_POS == 0 {
             counter[0usize] += 1;
         }
+    }
+
+    #[cube(launch)]
+    fn record_consumer_good(counter: &mut [u32], parameters: EconomyParameters) {
+        if ABSOLUTE_POS == 0 {
+            let good = parameters.traded_good();
+            counter[good as usize - 1] += good;
+        }
+    }
+
+    #[test]
+    fn consumer_graphs_preserve_exact_goods_with_shared_buffers_on_gpu() -> Result<()> {
+        let mut device = crate::simulation::tests::device(64)?;
+        unsafe {
+            device.client.set_stream(StreamId::current());
+        }
+        let simulation = Simulation::new(
+            Scenario::baseline(1, 42, Experiment::Concentrated)?,
+            device.clone(),
+        )?;
+        let counter = device.tensor(&[0; Good::COUNT]);
+        let mut expected = vec![0; Good::COUNT];
+        let mut graphs = MarketGraphs::default();
+        for _ in 0..3 {
+            for good in [
+                Good::Coal,
+                Good::Wood,
+                Good::Linen,
+                Good::Cloth,
+                Good::LuxuryClothes,
+                Good::LuxuryFurniture,
+            ] {
+                let market = crate::domain::Market::Consumer(good);
+                let mut parameters =
+                    simulation.parameters(Phase::ProvisionPurchase, market, 0, 1)?;
+                parameters.clock = MarketClock::Scalars;
+                parameters.good = Good::Bread as u32;
+                let key = MarketKey {
+                    market: market.into(),
+                    phase: Phase::ProvisionPurchase,
+                    preparation: Preparation::First,
+                    routing: crate::simulation::economy::railway::RouteAvailability::Dormant,
+                    freight: crate::simulation::FreightExecution::Synchronous,
+                };
+                assert_eq!(
+                    graphs.run(&device, key, vec![counter.clone()], || {
+                        record_consumer_good::launch(
+                            &device.client,
+                            CubeCount::Static(1, 1, 1),
+                            CubeDim::new_1d(32),
+                            counter.clone().into_buffer_arg(),
+                            parameters.launch(),
+                        );
+                        Ok(7)
+                    })?,
+                    7,
+                );
+                expected[good as usize - 1] += good as u32;
+                assert_eq!(device.read(&counter)?, expected, "{good:?}");
+                assert!(!device.client.is_capturing());
+            }
+        }
+        assert_eq!(graphs.entries.len(), 6);
+        assert_eq!(graphs.records, 6);
+        assert_eq!(graphs.replays, 6);
+        assert_eq!(graphs.invalidations, 1);
+        Ok(())
     }
 
     #[test]
@@ -235,6 +312,7 @@ mod tests {
             phase: Phase::ProvisionPurchase,
             preparation: Preparation::First,
             routing: crate::simulation::economy::railway::RouteAvailability::Dormant,
+            freight: crate::simulation::FreightExecution::Synchronous,
         };
         let fallback = MarketKey {
             routing: crate::simulation::economy::railway::RouteAvailability::Available,

@@ -1,4 +1,7 @@
-use super::{DemographyPolicy, OBSERVATION_METRICS, OBSERVATION_SHARDS, PersonLayout as P, Stage};
+use super::{
+    DemographyPolicy, OBSERVATION_METRICS, OBSERVATION_SHARDS, PersonLayout as P, Stage,
+    WorkerRemapping,
+};
 use crate::simulation::configuration::EconomyConfig;
 use crate::{
     domain::{
@@ -47,7 +50,100 @@ fn probability_draw(high: f32, low: f32) -> Ticks {
 
 #[cube]
 fn rate(annual_ppm: u32) -> Ticks {
-    divide(times32(annual_ppm, 1_000_000), DAYS_PER_YEAR)
+    let daily = u64::cast_from(annual_ppm) * 1_000_000u64 / comptime!(DAYS_PER_YEAR as u64);
+    ticks(u32::cast_from(daily), u32::cast_from(daily >> 32))
+}
+
+#[repr(u32)]
+enum FamilySupport {
+    Secure,
+    Unfunded,
+    Deprived,
+    Unsettled,
+}
+
+#[cube]
+fn family_support(state: &mut [u32], config: &EconomyConfig, household: u32, food: u32) -> u32 {
+    let mut support = u32::new(comptime!(FamilySupport::Secure as i64));
+    if comptime!(config.economy == crate::domain::Economy::Industrial) {
+        let plots = get(state, config, comptime!(Field::LandPlots as u32), household);
+        let tools = load(
+            state,
+            comptime!(Field::Tools as u32) * config.state_stride + household,
+        );
+        let grain = times32(plots, config.home.annual_yield_per_plot);
+        let bread = select(
+            config.wheat_kg_per_hectare > 0,
+            divide(times(grain, 256).value, 125),
+            grain,
+        );
+        let grown = select(equal(tools, zero()), zero(), divide(bread, DAYS_PER_YEAR));
+        let bread_stock = load(
+            state,
+            comptime!(Field::Bread as u32) * config.state_stride + household,
+        );
+        let bread_delivery = load(
+            state,
+            (comptime!(crate::domain::TRANSIT_FIELDS as u32)
+                + comptime!(crate::domain::Good::Bread as u32)
+                - 1)
+                * config.state_stride
+                + household,
+        );
+        let reserves = divide(plus(bread_stock, bread_delivery).value, 90);
+        let purchased = positive(ticks(food, 0), plus(grown, reserves).value);
+        let food_cost = times(
+            purchased,
+            max(
+                get(state, config, comptime!(Field::FoodPrice as u32), household),
+                1,
+            ),
+        )
+        .value;
+        let cost = plus(
+            food_cost,
+            ticks(select(plots > 0, 0, config.household_rent), 0),
+        )
+        .value;
+        let income = divide(
+            load(
+                state,
+                comptime!(Field::IncomeForecast as u32) * config.state_stride + household,
+            ),
+            1000,
+        );
+        let savings = divide(
+            load(
+                state,
+                comptime!(Field::Cash as u32) * config.state_stride + household,
+            ),
+            90,
+        );
+        let available = plus(income, savings).value;
+        support = select(
+            lt(available, cost),
+            comptime!(FamilySupport::Unfunded as u32),
+            support,
+        );
+        let arrears = load(
+            state,
+            comptime!(Field::RentArrears as u32) * config.state_stride + household,
+        );
+        let housing = get(
+            state,
+            config,
+            comptime!(Field::HousingStatus as u32),
+            household,
+        );
+        let unsettled = !equal(arrears, zero())
+            || housing == comptime!(crate::domain::HousingState::Homeless as u32);
+        support = select(
+            unsettled,
+            comptime!(FamilySupport::Unsettled as u32),
+            support,
+        );
+    }
+    support
 }
 
 #[cube]
@@ -279,9 +375,20 @@ pub fn step(
             );
             let target = crate::simulation::economy::food::bread_target(
                 config,
-                salary,
-                (demand + 999) / 1000,
-                living,
+                crate::simulation::economy::food::BreadDemand {
+                    gross_income: salary,
+                    savings: load(
+                        state,
+                        comptime!(Field::Cash as u32) * config.state_stride + household,
+                    ),
+                    expected_income: load(
+                        state,
+                        comptime!(Field::IncomeForecast as u32) * config.state_stride + household,
+                    ),
+                    minimum: (demand + 999) / 1000,
+                    members: living,
+                    price: get(state, config, comptime!(Field::FoodPrice as u32), household),
+                },
             );
             put(
                 state,
@@ -314,9 +421,20 @@ pub fn step(
             let salary = positive(gross, opening);
             let target = crate::simulation::economy::food::bread_target(
                 config,
-                salary,
-                living * config.household_need,
-                living,
+                crate::simulation::economy::food::BreadDemand {
+                    gross_income: salary,
+                    savings: load(
+                        state,
+                        comptime!(Field::Cash as u32) * config.state_stride + household,
+                    ),
+                    expected_income: load(
+                        state,
+                        comptime!(Field::IncomeForecast as u32) * config.state_stride + household,
+                    ),
+                    minimum: living * config.household_need,
+                    members: living,
+                    price: get(state, config, comptime!(Field::FoodPrice as u32), household),
+                },
             );
             put(
                 state,
@@ -354,9 +472,20 @@ pub fn step(
             let salary = positive(gross, opening);
             let target = crate::simulation::economy::food::bread_target(
                 config,
-                salary,
-                total / 1000,
-                living,
+                crate::simulation::economy::food::BreadDemand {
+                    gross_income: salary,
+                    savings: load(
+                        state,
+                        comptime!(Field::Cash as u32) * config.state_stride + household,
+                    ),
+                    expected_income: load(
+                        state,
+                        comptime!(Field::IncomeForecast as u32) * config.state_stride + household,
+                    ),
+                    minimum: total / 1000,
+                    members: living,
+                    price: get(state, config, comptime!(Field::FoodPrice as u32), household),
+                },
             );
             put(
                 state,
@@ -409,6 +538,26 @@ pub fn step(
             );
             let cold_deficit =
                 (freezing_need - min(freezing_need, served)) * 1000 / max(freezing_need, 1);
+            let mut supported_births = zero();
+            if policy.parameters.births > 0 {
+                let infant_food = select(
+                    config.food_medium_salary > 0,
+                    config.household_need,
+                    (policy.food[0usize] * config.household_need + 999) / 1000,
+                );
+                let support = family_support(state, config, household, need + infant_food);
+                let support = select(
+                    comptime!(config.economy == crate::domain::Economy::Industrial)
+                        && max(deficit, cold_deficit) > 0,
+                    comptime!(FamilySupport::Deprived as u32),
+                    support,
+                );
+                supported_births = select(
+                    support == comptime!(FamilySupport::Secure as u32),
+                    rate(policy.parameters.births),
+                    zero(),
+                );
+            }
             let selected = get(state, config, comptime!(Field::Worker as u32), household);
             let employer = get(state, config, comptime!(Field::Employer as u32), household);
             let minutes = get(state, config, comptime!(Field::Hours as u32), household);
@@ -533,10 +682,13 @@ pub fn step(
                         samples[index as usize * 5 + 2],
                         samples[index as usize * 5 + 3],
                     );
-                    if fertile
-                        && lt(birth_draw, rate(policy.parameters.births))
-                        && births[household as usize] == 0
-                    {
+                    let fertility = select(
+                        comptime!(config.economy == crate::domain::Economy::Industrial)
+                            && max(exposure, cold_exposure) > 0,
+                        zero(),
+                        supported_births,
+                    );
+                    if fertile && lt(birth_draw, fertility) && births[household as usize] == 0 {
                         births[household as usize] =
                             1 + u32::cast_from(samples[index as usize * 5 + 4] >= 0.5);
                         people[base + P::COOLDOWN] = policy.parameters.spacing;
@@ -639,6 +791,73 @@ pub fn observe(
 }
 
 #[cube]
+pub(super) fn remap_workers(
+    state: &mut [u32],
+    previous_people: &[Vector<u32, Const<4>>],
+    people: &[Vector<u32, Const<4>>],
+    previous_ranges: &[Vector<u32, Const<2>>],
+    ranges: &[Vector<u32, Const<2>>],
+    stride: u32,
+    minimum_age: u32,
+    retirement_age: u32,
+    #[comptime] remapping: WorkerRemapping,
+) {
+    let household = ABSOLUTE_POS;
+    if household < ranges.len() {
+        let current = ranges[household];
+        let start = current.extract(0usize);
+        let count = current.extract(1usize);
+        let mut old_start = 0u32;
+        let mut old_count = 0u32;
+        if household < previous_ranges.len() {
+            let old = previous_ranges[household];
+            old_start = old.extract(0usize);
+            old_count = old.extract(1usize);
+        }
+        if count > 0 || old_count > 0 {
+            let coordinate = comptime!(Field::Worker as u32) * stride + household as u32;
+            let selected = load(state, coordinate).extract(0usize);
+            let mut worker = selected;
+            if old_count > 0 && selected >= old_start && selected - old_start < old_count {
+                match comptime!(remapping) {
+                    WorkerRemapping::Births => worker = start + selected - old_start,
+                    WorkerRemapping::Formations => {
+                        worker = u32::new(comptime!(i64::from(u32::MAX)));
+                        let identity = previous_people[selected as usize * (P::WORDS / 4)];
+                        for offset in 0..count {
+                            let person = people[(start + offset) as usize * (P::WORDS / 4)];
+                            if person.extract(P::IDENTITY) == identity.extract(P::IDENTITY)
+                                && person.extract(P::IDENTITY + 1)
+                                    == identity.extract(P::IDENTITY + 1)
+                            {
+                                worker = start + offset;
+                            }
+                        }
+                    }
+                }
+            }
+            if old_count == 0 {
+                worker = u32::new(comptime!(i64::from(u32::MAX)));
+            }
+            if worker == u32::MAX && selected != u32::MAX {
+                for offset in 0..count {
+                    let header = people[(start + offset) as usize * (P::WORDS / 4)];
+                    let status = people[(start + offset) as usize * (P::WORDS / 4) + 1];
+                    let age = header.extract(P::AGE);
+                    let eligible = age >= minimum_age
+                        && age < retirement_age
+                        && status.extract(P::CAUSE - 4) == 0;
+                    if eligible && worker == u32::MAX {
+                        worker = start + offset;
+                    }
+                }
+            }
+            store(state, coordinate, ticks(worker, 0));
+        }
+    }
+}
+
+#[cube]
 pub fn observation_totals(sums: &[u64], output: &mut [u32]) {
     let metric = ABSOLUTE_POS;
     if metric < OBSERVATION_METRICS && metric != 7 && metric != 15 {
@@ -676,10 +895,13 @@ mod tests {
                 (input[base + 6] >> 8) as f32 / 16777216.0,
                 (input[base + 7] >> 8) as f32 / 16777216.0,
             );
-            output[index * 4] = risk.extract(0usize);
-            output[index * 4 + 1] = risk.extract(1usize);
-            output[index * 4 + 2] = draw.extract(0usize);
-            output[index * 4 + 3] = draw.extract(1usize);
+            let daily = rate(input[base]);
+            output[index * 6] = risk.extract(0usize);
+            output[index * 6 + 1] = risk.extract(1usize);
+            output[index * 6 + 2] = draw.extract(0usize);
+            output[index * 6 + 3] = draw.extract(1usize);
+            output[index * 6 + 4] = daily.extract(0usize);
+            output[index * 6 + 5] = daily.extract(1usize);
         }
     }
 
@@ -759,9 +981,15 @@ mod tests {
             [1280, 480, 1000, 0, 0, 0, 8128, 113782],
             [100, 480, 1000, 0, 500, 0, 22, 55],
             [100, 480, 1000, 0, 0, 1, 99999, 11],
+            [0, 480, 1000, 0, 0, 0, 0, 0],
+            [4294, 480, 1000, 0, 0, 0, 1, 2],
+            [4295, 480, 1000, 0, 0, 0, 3, 4],
+            [20_000, 480, 1000, 0, 0, 0, 5, 6],
+            [1_000_000, 480, 1000, 0, 0, 0, 7, 8],
+            [u32::MAX, 480, 1000, 0, 0, 0, 9, 10],
         ];
         let input = device.tensor(bytemuck::cast_slice(&cases));
-        let output = device.empty(cases.len() * 4);
+        let output = device.empty(cases.len() * 6);
         let argument = |tensor: &CubeTensor| tensor.clone().into_buffer_arg();
         probe::launch(
             &device.client,
@@ -772,7 +1000,7 @@ mod tests {
         );
         let words = device.read(&output)?;
         let risks = words
-            .chunks_exact(4)
+            .chunks_exact(6)
             .map(|row| u64::from(row[0]) | (u64::from(row[1]) << 32))
             .collect::<Vec<_>>();
         assert_eq!(risks[0], 0);
@@ -784,11 +1012,19 @@ mod tests {
         assert!(risks[6] > risks[2]);
         assert!(risks[7] > risks[2]);
         assert!(risks[8] > risks[2]);
-        for (case, row) in cases.iter().zip(words.chunks_exact(4)) {
+        for (case, row) in cases.iter().zip(words.chunks_exact(6)) {
             let random = (u64::from(case[6] >> 8) << 24) | u64::from(case[7] >> 8);
             let expected = (u128::from(random) * u128::from(PROBABILITY_SCALE)) >> 48;
             let actual = u64::from(row[2]) | (u64::from(row[3]) << 32);
             assert_eq!(u128::from(actual), expected);
+            let expected_rate = u128::from(case[0]) * 1_000_000 / u128::from(DAYS_PER_YEAR);
+            let actual_rate = u64::from(row[4]) | (u64::from(row[5]) << 32);
+            assert_eq!(
+                u128::from(actual_rate),
+                expected_rate,
+                "annual rate {}",
+                case[0]
+            );
         }
         Ok(())
     }
@@ -798,6 +1034,7 @@ mod tests {
 pub(super) fn grow(
     source: &[Vector<u32, Const<4>>],
     target: &mut [Vector<u32, Const<4>>],
+    audited: &mut [Vector<u32, Const<4>>],
     old_ranges: &[u32],
     new_ranges: &[u32],
     people: u32,
@@ -807,13 +1044,17 @@ pub(super) fn grow(
         let person = index / (P::WORDS / 4);
         let household = source[person * (P::WORDS / 4)].extract(P::HOUSEHOLD) as usize;
         let offset = new_ranges[household * 2] - old_ranges[household * 2];
-        target[index + offset as usize * (P::WORDS / 4)] = source[index];
+        let destination = index + offset as usize * (P::WORDS / 4);
+        let value = source[index];
+        target[destination] = value;
+        audited[destination] = value;
     }
 }
 
 #[cube]
 pub(super) fn newborns(
     target: &mut [Vector<u32, Const<4>>],
+    audited: &mut [Vector<u32, Const<4>>],
     old_ranges: &[u32],
     new_ranges: &[u32],
     births: &[u32],
@@ -834,8 +1075,11 @@ pub(super) fn newborns(
         let mut status = Vector::<u32, Const<4>>::new(0);
         status.insert(P::SEX_AND_COLD_EXPOSURE - 4, births[household] - 1);
         target[base] = header;
+        audited[base] = header;
         target[base + 1] = status;
+        audited[base + 1] = status;
         target[base + 2] = Vector::new(0);
+        audited[base + 2] = Vector::new(0);
     }
 }
 

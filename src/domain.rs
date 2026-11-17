@@ -19,6 +19,7 @@ mod households;
 pub mod industry;
 pub mod landlords;
 mod payroll;
+mod prices;
 pub mod property;
 mod rent;
 pub use rent::{FIRM_RENT_GRACE_DAYS, HousingState, RentPolicy};
@@ -36,9 +37,9 @@ pub use population::{
 pub use resources::{ProductionSite, ResourceMap, ResourceRegion};
 
 pub const SCENARIO_VERSION: u32 = 2;
-const CHECKPOINT_VERSION: u32 = 21;
-pub const STATE_HASH_VERSION: &str = "bad-econ/state/CubekV2/v23";
-pub const USED_FIELDS: usize = Field::OpeningGrossIncome as usize + 1;
+const CHECKPOINT_VERSION: u32 = 23;
+pub const STATE_HASH_VERSION: &str = "bad-econ/state/CubekV2/v26";
+pub const USED_FIELDS: usize = Field::FoodPrice as usize + 1;
 pub const TRANSIT_FIELDS: usize = USED_FIELDS + Good::COUNT;
 pub const CONSUMPTION_FIELDS: usize = TRANSIT_FIELDS + Good::COUNT;
 pub const PRODUCTION_FIELDS: usize = CONSUMPTION_FIELDS + Good::COUNT;
@@ -183,6 +184,9 @@ pub enum Field {
     FarmHectares,
     HarvestedThisYear,
     OpeningGrossIncome,
+    PriceQuote,
+    IncomeForecast,
+    FoodPrice,
 }
 impl Field {
     pub fn inventory(good: Good) -> Self {
@@ -483,6 +487,7 @@ pub struct Scenario {
     rail_geography: railway::RailGeography,
     capacities: [u32; Good::COUNT],
     starting_stocks: [u64; Good::COUNT],
+    starting_prices: prices::StartingPrices,
     retailers: std::collections::BTreeMap<u64, enterprise::Distributor>,
     retail_demand: [u64; Good::COUNT],
     initial_actors: std::sync::Arc<ActorRows>,
@@ -515,8 +520,12 @@ impl Scenario {
         config.packet_minutes = 20;
         config.packet_output = 20;
         config.wage = 12;
-        config.prices = food::FoodPolicy::PRICES;
-        config.food = Some(food::FoodPolicy::default());
+        config.household_cash = 7
+            * (u64::from(config.household_need)
+                * u64::from(config.demography.initial_household_members)
+                * u64::from(food::FoodPolicy::PRICES[2])
+                + u64::from(config.rent.map_or(0, |rent| rent.household_daily)));
+        config.food = Some(food::FoodPolicy::industrial());
         if let enterprise::HouseholdProduction::Available {
             annual_yield_per_plot,
             ..
@@ -524,11 +533,7 @@ impl Scenario {
         {
             *annual_yield_per_plot = food::FoodPolicy::default().wheat_kg_per_hectare;
         }
-        config.household_cash = 7
-            * (u64::from(config.household_need)
-                * u64::from(config.demography.initial_household_members)
-                * u64::from(config.prices[2])
-                + u64::from(config.rent.map_or(0, |rent| rent.household_daily)));
+        config.prices = prices::StartingPrices::production(&config).food();
         config.household_liquidity = HouseholdLiquidity::PaycheckToPaycheck;
         config.behavior.wage_increment = 0;
         config.behavior.price_response = 1000;
@@ -786,7 +791,7 @@ impl Scenario {
                                 .output_ticks
                                 .into(),
                         ) as u32)
-                            .max(1)
+                            .max(20)
                             .min(config.capacity),
                     });
                 let starting_stocks =
@@ -843,7 +848,10 @@ impl Scenario {
                             ..
                         } = config.household_production
                         {
-                            let farms = u64::from(config.households.div_ceil(2));
+                            let farms = u64::from(
+                                employment::InitialSettlement::new(&config)
+                                    .farmers(config.households),
+                            );
                             goods[Good::Grain as usize - 1] = farms
                                 * u64::from(annual_yield_per_plot)
                                 * u64::from(
@@ -887,6 +895,7 @@ impl Scenario {
                 };
                 let resources = resources::ResourceGeography::new(&config)?;
                 let mut scenario = Self {
+                    starting_prices: prices::StartingPrices::configured(&config),
                     config,
                     totals,
                     resources,
@@ -1046,21 +1055,7 @@ impl Scenario {
         calendar::Weather { harvest, ..weather }
     }
     fn initial_price(&self, good: Good) -> u32 {
-        match (self.config.economy, good) {
-            (_, Good::Grain | Good::Flour | Good::Bread) => self.config.prices[good as usize - 1],
-            (_, Good::Housing) => self.config.rent.map_or(1, |rent| rent.household_daily),
-            (Economy::Agrarian, _) => good.initial_price(),
-            (Economy::Industrial, _) => {
-                (self.config.wage * self.config.packet_minutes).div_ceil(self.config.packet_output)
-                    + good
-                        .inputs()
-                        .into_iter()
-                        .flatten()
-                        .map(|input| self.initial_price(input))
-                        .sum::<u32>()
-            }
-        }
-        .clamp(self.config.minimum_price, self.config.maximum_price)
+        self.starting_prices.good(good)
     }
     pub fn opening_totals(&self) -> &InitialTotals {
         &self.totals
@@ -1124,7 +1119,7 @@ impl Scenario {
         let actors = self.actors() as u64;
         let batch = u64::from(self.config.batch_size).min(actors);
         self.state_len() as u64 * 8 * 2
-            + (self.state_len() as u64 * 2).div_ceil(1024) * 4
+            + (self.state_len() as u64 * 2).div_ceil(512) * 8
             + self
                 .config
                 .finance
@@ -1143,15 +1138,19 @@ impl Scenario {
             ) as u64
                 * 164
             + actors * 80
+            + actors * 56 * 4
+            + actors * 4
             + 12
             + match self.config.railway.companies.is_empty() {
                 true => 0,
                 false => {
                     let companies = self.config.railway.companies.len() as u64;
                     let stations = self.config.railway.stations().len() as u64;
-                    ((actors + self.rail_geography.regions.len() as u64)
+                    let growth = (actors / 64).next_power_of_two().clamp(64, 16_384);
+                    let freight_actors = (actors + growth).next_multiple_of(growth);
+                    ((freight_actors + self.rail_geography.regions.len() as u64)
                         * (railway::FREIGHT_RESOURCE_WORDS + 1) as u64
-                        + actors
+                        + freight_actors
                             * (railway::FREIGHT_ACCOUNT_WORDS
                                 + railway::FREIGHT_BOOKING_WORDS
                                 + railway::FREIGHT_QUEUE_WORDS
@@ -1162,6 +1161,11 @@ impl Scenario {
                         + companies * stations.pow(2) * railway::RAIL_ROUTE_WORDS as u64
                         + stations.pow(2) * self.ring() as u64
                         + companies.pow(2)
+                        + 2 * companies
+                        + 2
+                        + stations
+                        + 1
+                        + 2 * self.config.railway.segments.len() as u64
                         + railway::FREIGHT_DISPATCH_WORDS as u64
                         + 6)
                         * 4
@@ -1316,11 +1320,21 @@ impl Scenario {
                 firm,
                 distributor.margin_per_mille.into(),
             );
-            state.set(Field::ReplacementCost, firm, state.get(Field::Price, firm));
+            state.set(
+                Field::ReplacementCost,
+                firm,
+                self.initial_price(distributor.good).into(),
+            );
             state.set(
                 Field::Demand,
                 firm,
-                u64::from(state.actors.at(firm).capacity) * u64::from(distributor.units_per_shift),
+                match &self.config.population {
+                    None => self.retail_demand[distributor.good as usize - 1],
+                    Some(_) => {
+                        u64::from(state.actors.at(firm).capacity)
+                            * u64::from(distributor.units_per_shift)
+                    }
+                },
             );
             state.set_recipe(
                 firm,
@@ -1342,10 +1356,7 @@ impl Scenario {
             ] {
                 let good = state.get(input, actor);
                 if good > 0 {
-                    let price = match good {
-                        1..=3 => self.config.prices[good as usize - 1],
-                        _ => self.initial_price(Good::from_index(good as u32)?),
-                    };
+                    let price = self.initial_price(Good::from_index(good as u32)?);
                     state.set(field, actor, price.into());
                 }
             }
@@ -1375,6 +1386,7 @@ impl Scenario {
             );
             if state.actors.at(actor).kind == 0 {
                 state.set(Field::Price, actor, self.config.prices[2].into());
+                state.set(Field::FoodPrice, actor, self.config.prices[2].into());
             }
         }
         for setting in &self.config.working_conditions {
@@ -1462,8 +1474,11 @@ impl Scenario {
                 };
                 let retailer = self.retailers.get(&identity);
                 let position = match (kind, retailer) {
-                    (0, _) => match (config.household_production, index % 2) {
-                        (enterprise::HouseholdProduction::Available { .. }, 0) => self
+                    (0, _) => match (
+                        config.household_production,
+                        employment::InitialSettlement::new(&config).worker(index),
+                    ) {
+                        (enterprise::HouseholdProduction::Available { .. }, None) => self
                             .resources
                             .place(Good::Grain, identity, config, position),
                         _ => match self.initial_employment.employer(index) {
@@ -1537,9 +1552,12 @@ impl Scenario {
                     annual_yield_per_plot,
                     ..
                 },
-                0,
-            ) = (kind, config.household_production, actor % 2)
-            {
+                None,
+            ) = (
+                kind,
+                config.household_production,
+                employment::InitialSettlement::new(&config).worker(actor),
+            ) {
                 let plots = u64::from(config.demography.initial_household_members.div_ceil(2));
                 let harvest = u64::from(annual_yield_per_plot) * plots;
                 state.set(Field::Grain, actor, harvest);
@@ -1607,9 +1625,9 @@ impl Scenario {
                     state.set(
                         Field::Price,
                         actor,
-                        u64::from(match kind {
-                            1..=3 => config.prices[kind as usize - 1],
-                            _ => self.initial_price(output),
+                        u64::from(match retailer {
+                            Some(store) => self.starting_prices.retail(store, config),
+                            None => self.initial_price(output),
                         }),
                     );
                     state.set(
@@ -1660,6 +1678,8 @@ pub struct ActorRows {
     capacity: Vec<u32>,
     #[serde(skip)]
     firms: usize,
+    #[serde(skip)]
+    first_firm: usize,
 }
 impl ActorRows {
     #[inline]
@@ -1672,6 +1692,40 @@ impl ActorRows {
     pub(crate) fn identities(&self) -> &[u64] {
         &self.identity
     }
+    #[cfg(feature = "compute")]
+    pub(crate) fn clone_for_growth(&self, additions: usize) -> Self {
+        fn column<T: Copy>(values: &[T], capacity: usize) -> Vec<T> {
+            let mut column = Vec::with_capacity(capacity);
+            column.extend_from_slice(values);
+            column
+        }
+        let capacity = self.len() + additions;
+        Self {
+            identity: column(&self.identity, capacity),
+            x: column(&self.x, capacity),
+            y: column(&self.y, capacity),
+            kind: column(&self.kind, capacity),
+            owner: column(&self.owner, capacity),
+            capacity: column(&self.capacity, capacity),
+            firms: self.firms,
+            first_firm: self.first_firm,
+        }
+    }
+    #[cfg(all(test, feature = "compute"))]
+    pub(crate) fn growth_capacity(&self) -> usize {
+        [
+            self.identity.capacity(),
+            self.x.capacity(),
+            self.y.capacity(),
+            self.kind.capacity(),
+            self.owner.capacity(),
+            self.capacity.capacity(),
+        ]
+        .into_iter()
+        .min()
+        .unwrap_or(0)
+    }
+    #[cfg(test)]
     pub(crate) fn rental_prefix_matches(&self, current: &Self) -> bool {
         [
             current.x.get(..self.len()) == Some(self.x.as_slice()),
@@ -1682,6 +1736,7 @@ impl ActorRows {
         .into_iter()
         .all(std::convert::identity)
     }
+    #[cfg(test)]
     pub(crate) fn rental_changes(&self, current: &Self) -> Vec<usize> {
         match self.rental_prefix_matches(current) {
             true => Vec::new(),
@@ -1724,8 +1779,17 @@ impl ActorRows {
         self.kind[index] = actor.kind;
         self.owner[index] = actor.owner;
         self.capacity[index] = actor.capacity;
+        self.first_firm = match (actor.kind, index.cmp(&self.first_firm)) {
+            (0, std::cmp::Ordering::Equal) => self.kind[index + 1..]
+                .iter()
+                .position(|&kind| kind > 0)
+                .map_or(self.len(), |offset| index + 1 + offset),
+            (0, _) => self.first_firm,
+            _ => self.first_firm.min(index),
+        };
     }
     pub(crate) fn extend(&mut self, actors: impl IntoIterator<Item = Actor>) {
+        let start = self.len();
         let actors = actors.into_iter();
         let additional = actors.size_hint().0;
         self.identity.reserve(additional);
@@ -1743,6 +1807,13 @@ impl ActorRows {
             self.owner.push(actor.owner);
             self.capacity.push(actor.capacity);
         }
+        self.first_firm = match self.first_firm < start {
+            true => self.first_firm,
+            false => self.kind[start..]
+                .iter()
+                .position(|&kind| kind > 0)
+                .map_or(self.len(), |offset| start + offset),
+        };
     }
     #[inline]
     pub fn iter(&self) -> impl ExactSizeIterator<Item = Actor> + '_ {
@@ -1753,10 +1824,11 @@ impl ActorRows {
         (start..self.len()).map(|index| self.at(index))
     }
     pub(crate) fn firm_indices(&self) -> impl Iterator<Item = usize> + '_ {
-        self.kind
+        let start = self.first_firm;
+        self.kind[start..]
             .iter()
             .enumerate()
-            .filter_map(|(index, &kind)| (kind > 0).then_some(index))
+            .filter_map(move |(offset, &kind)| (kind > 0).then_some(start + offset))
     }
 }
 impl FromIterator<Actor> for ActorRows {
@@ -1793,6 +1865,11 @@ impl<'de> Deserialize<'de> for ActorRows {
         {
             true => Ok(Self {
                 firms: rows.kind.iter().filter(|&&kind| kind > 0).count(),
+                first_firm: rows
+                    .kind
+                    .iter()
+                    .position(|&kind| kind > 0)
+                    .unwrap_or(rows.kind.len()),
                 identity: rows.identity,
                 x: rows.x,
                 y: rows.y,
@@ -2857,7 +2934,7 @@ impl<'a> AuditedState<'a> {
         let land_limit = match &c.land_access {
             Some(land) => u64::from(land.total_plots),
             None => {
-                u64::from(c.households.div_ceil(2))
+                u64::from(employment::InitialSettlement::new(c).farmers(c.households))
                     * u64::from(c.demography.initial_household_members.div_ceil(2))
                     + commercial_land
             }

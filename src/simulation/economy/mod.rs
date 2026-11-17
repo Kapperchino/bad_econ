@@ -39,6 +39,7 @@ pub(in crate::simulation) mod food;
 mod household_production;
 pub(super) mod indexing;
 pub(in crate::simulation) mod landlords;
+pub(super) mod mobility;
 pub(super) mod opening;
 mod pricing;
 pub(in crate::simulation) mod property;
@@ -221,7 +222,7 @@ fn local(
                     }
                     let mut desired = proposed_starts(
                         KernelStarts {
-                            coverage: config.coverage,
+                            coverage: u32::cast_from(config.coverage),
                             demand,
                             finished: value(state, config, k.output(), id),
                             pipeline: value(state, config, comptime!(Field::Pipeline as u32), id),
@@ -229,7 +230,8 @@ fn local(
                         control,
                     );
                     if farming::farm(state, config, id, k.output()) {
-                        desired = farming::starts(state, config, control, id, parameters.day);
+                        desired =
+                            farming::starts(state, config, control, id, k.output(), parameters.day);
                     }
                     let quotient = divide(
                         add_checked(
@@ -351,24 +353,63 @@ fn local(
                     if comptime!(config.property_mode == Feature::Disabled) {
                         enterprises::construct_home(state, config, control, id);
                     }
-                    if comptime!(config.economy == crate::domain::Economy::Agrarian)
-                        || number(state, config, comptime!(Field::LandPlots as u32), id) > 0
-                    {
+                    let rural = comptime!(config.economy == crate::domain::Economy::Agrarian)
+                        || number(state, config, comptime!(Field::LandPlots as u32), id) > 0;
+                    let ration = times32(
+                        number(state, config, comptime!(Field::NutritionNeed as u32), id),
+                        number(state, config, comptime!(Field::FoodPrice as u32), id),
+                    );
+                    let unfunded = lt(
+                        value(state, config, comptime!(Field::Cash as u32), id),
+                        ration,
+                    );
+                    if rural || unfunded {
                         household_production::produce(state, config, control, id, parameters.day);
                     }
                 }
             }
             Phase::PhysicalClose => match k.bits() {
                 ActorKind::HOUSEHOLD_BITS => {
+                    let income = observed_blend(
+                        value(state, config, comptime!(Field::IncomeForecast as u32), id),
+                        KernelObservation {
+                            kind: comptime!(ObservationKind::Observed as u32),
+                            value: multiply(
+                                control,
+                                positive(
+                                    value(state, config, comptime!(Field::GrossIncome as u32), id),
+                                    value(
+                                        state,
+                                        config,
+                                        comptime!(Field::OpeningGrossIncome as u32),
+                                        id,
+                                    ),
+                                ),
+                                POLICY_SCALE,
+                            ),
+                        },
+                        POLICY_SCALE / 30,
+                        control,
+                    );
+                    set(
+                        state,
+                        config,
+                        comptime!(Field::IncomeForecast as u32),
+                        id,
+                        income,
+                    );
                     if config.heating_per_person > 0 {
                         consumption::heat(state, config, control, id);
                     }
+                    let bread = value(state, config, comptime!(Field::Bread as u32), id);
+                    let minimum_ration =
+                        value(state, config, comptime!(Field::NutritionNeed as u32), id);
+                    let reserve =
+                        food::consumption_reserve(state, config, control, id, parameters.day);
+                    let available = maximum(minimum_ration, positive(bread, reserve));
                     let consumed = minimum(
-                        value(state, config, comptime!(Field::Bread as u32), id),
-                        ticks(
-                            number(state, config, comptime!(Field::FoodNeed as u32), id),
-                            0u32,
-                        ),
+                        minimum(bread, available),
+                        value(state, config, comptime!(Field::FoodNeed as u32), id),
                     );
                     let remaining = minus(
                         value(state, config, comptime!(Field::Bread as u32), id),
@@ -395,13 +436,19 @@ fn local(
                         for offset in 0..Good::COUNT {
                             let interval = config.consumption_intervals[offset];
                             if interval > 1
-                                && (parameters.day + id) % max(interval, 1) == 0
+                                && ((parameters.day + id) % max(interval, 1) == 0
+                                    || consumption::scaled_luxury(config, offset as u32 + 1))
                                 && number(state, config, comptime!(Field::LivingMembers as u32), id)
                                     > 0
                             {
                                 let good = offset as u32 + 1;
                                 let stock = value(state, config, good, id);
-                                let used = minimum(stock, ticks(1, 0));
+                                let used = consumption::durable_use(
+                                    config,
+                                    stock,
+                                    good,
+                                    parameters.day + id,
+                                );
                                 set(state, config, good, id, minus(stock, used));
                                 increase(
                                     state,
@@ -524,7 +571,7 @@ fn local(
                 if k.is(comptime!(ActorKind::Household))
                     && comptime!(config.home_mode == Feature::Enabled)
                 {
-                    enterprises::household_quote(state, config, id);
+                    enterprises::household_quote(state, config, control, id);
                 }
                 if !k.is(comptime!(ActorKind::Household))
                     && k.bits() != comptime!(Good::Housing as u32)
@@ -583,30 +630,18 @@ fn local(
                         PRICE_INDEX_LIMIT + scaled,
                         PRICE_INDEX_LIMIT - scaled,
                     );
-                    let candidate = divide(
-                        add_checked(
-                            control,
-                            multiply(
-                                control,
-                                value(state, config, comptime!(Field::Price as u32), id),
-                                config.price_table[table_index as usize],
-                            ),
-                            ticks(select(positive_sign, PRICE_SCALE - 1, 0), 0u32),
-                        ),
-                        PRICE_SCALE,
-                    );
-                    set32(
+                    let response = pricing::response(
                         state,
                         config,
-                        comptime!(Field::Price as u32),
+                        control,
                         id,
-                        min(
-                            max(candidate.extract(LOW_WORD), config.minimum_price),
-                            config.maximum_price,
-                        ),
+                        k.output(),
+                        excess,
+                        config.price_table[table_index as usize],
                     );
+                    pricing::adjust(state, config, control, id, response);
                     set(state, config, comptime!(Field::Demand as u32), id, demand);
-                    enterprises::operating_plan(state, config, control, id);
+                    enterprises::operating_plan(state, actors, config, control, id);
 
                     let cap = divide(
                         divide(
@@ -692,7 +727,8 @@ fn propose(
                 search = k.is(comptime!(ActorKind::Household))
                     && number(state, config, comptime!(Field::Employed as u32), id) == 0u32
                     && (comptime!(config.economy == crate::domain::Economy::Agrarian)
-                        || number(state, config, comptime!(Field::LandPlots as u32), id) == 0);
+                        || number(state, config, comptime!(Field::LandPlots as u32), id) == 0
+                        || parameters.matching_round + 1 == MATCHING_ROUNDS as u32);
             }
             MarketFlag::Input(_) => {
                 good = parameters.traded_good();
@@ -824,26 +860,38 @@ fn propose(
                     }
                 }
             }
-            MarketFlag::Consumer => {
+            MarketFlag::Consumer(_) => {
                 good = parameters.traded_good();
                 if good == comptime!(Good::Coal as u32) || good == comptime!(Good::Wood as u32) {
-                    wanted = consumption::fuel_target(state, config, control, id, good);
+                    wanted = consumption::fuel_purchase_target(
+                        state, config, control, parameters, id, good,
+                    );
+                    let held = add_checked(
+                        control,
+                        value(state, config, good, id),
+                        value(state, config, TRANSIT_FIELDS as u32 + good - 1, id),
+                    );
                     search = k.is(comptime!(ActorKind::Household))
                         && number(state, config, comptime!(Field::LivingMembers as u32), id) > 0
                         && !lt(
                             value(state, config, comptime!(Field::Bread as u32), id),
-                            ticks(
-                                number(state, config, comptime!(Field::FoodNeed as u32), id),
-                                0,
-                            ),
-                        );
+                            ticks(food::minimum_daily(state, config, id), 0),
+                        )
+                        && lt(held, wanted)
+                        && !equal(purchasing_power, zero());
+                    if search {
+                        search = consumption::preferred_fuel(
+                            state, actors, config, &*spatial, parameters, id, good,
+                        ) == good;
+                    }
                 } else {
                     let interval = config.consumption_intervals[good as usize - 1];
                     let until_due =
                         (interval - (parameters.day + id) % max(interval, 1)) % max(interval, 1);
                     search = k.is(comptime!(ActorKind::Household))
                         && number(state, config, comptime!(Field::LivingMembers as u32), id) > 0
-                        && until_due <= config.coverage + config.ring;
+                        && (until_due <= config.coverage + config.ring
+                            || consumption::scaled_luxury(config, good));
                     let reserve = ticks(
                         number(state, config, comptime!(Field::FoodNeed as u32), id)
                             * (config.coverage + config.ring - 1),
@@ -862,7 +910,7 @@ fn propose(
                     let cash_reserve = multiply(
                         control,
                         reserve,
-                        number(state, config, comptime!(Field::Price as u32), id),
+                        number(state, config, comptime!(Field::FoodPrice as u32), id),
                     );
                     search = search
                         && !lt(food, reserve)
@@ -873,13 +921,26 @@ fn propose(
                     purchasing_power = consumption::budget(state, config, control, id, good);
                     search = search && !equal(purchasing_power, zero());
                     wanted = ticks(1, 0);
+                    if search {
+                        wanted = consumption::durable_target(
+                            state,
+                            actors,
+                            config,
+                            &*spatial,
+                            control,
+                            parameters,
+                            id,
+                            good,
+                            purchasing_power,
+                        );
+                    }
                 }
             }
             MarketFlag::Household => {
                 good = comptime!(Good::Bread as u32);
                 search = k.is(comptime!(ActorKind::Household));
                 wanted = ticks(
-                    number(state, config, comptime!(Field::FoodNeed as u32), id)
+                    food::purchase_daily(state, config, parameters, id)
                         * (config.coverage + config.ring - 1u32),
                     0u32,
                 );
@@ -1194,7 +1255,7 @@ fn propose(
                                                 number(
                                                     state,
                                                     config,
-                                                    comptime!(Field::Price as u32),
+                                                    comptime!(Field::FoodPrice as u32),
                                                     id,
                                                 ),
                                             );
@@ -1745,6 +1806,18 @@ fn construct_route(
                         },
                     );
                     event.transfer(config, bundles, slot, actor, zero, quantity);
+                    if good == comptime!(Good::Bread as u32)
+                        && kind(actors, actor).is(comptime!(ActorKind::Household))
+                    {
+                        event.transfer(
+                            config,
+                            bundles,
+                            comptime!(Field::FoodPrice as u32),
+                            actor,
+                            value(state, config, comptime!(Field::FoodPrice as u32), actor),
+                            value(state, config, comptime!(Field::Price as u32), other),
+                        );
+                    }
                     for input in 0u32..2 {
                         if number(
                             state,
@@ -2153,6 +2226,15 @@ fn summarize(
                     let category = select(working, select(subsistence, 1u32, 0u32), 2u32);
                     let metric = (SummaryLayout::WORKFORCE + category) as usize;
                     totals[metric] = add_checked(control, totals[metric], ticks(1, 0));
+                    totals[SummaryLayout::RURAL_EMPLOYED as usize] = add_checked(
+                        control,
+                        totals[SummaryLayout::RURAL_EMPLOYED as usize],
+                        select(
+                            subsistence,
+                            value(state, config, comptime!(Field::Employed as u32), actor),
+                            zero(),
+                        ),
+                    );
                     totals[SummaryLayout::HOUSEHOLD_CASH as usize] = add_checked(
                         control,
                         totals[SummaryLayout::HOUSEHOLD_CASH as usize],
@@ -2399,6 +2481,13 @@ pub fn economy(
                         control[CONSTRUCTED_EVENTS_WORD].store(0);
                         control[RANGE_SLOTS_WORD].store(0);
                         control[markets::SEARCHES_WORD].store(0);
+                        control[search::INPUT_MINIMUM_QUOTE_WORD].store(u32::MAX);
+                        if comptime!(
+                            parameters.empty_orders
+                                == crate::simulation::parameters::EmptyOrderMode::FeedbackOnly
+                        ) {
+                            control[markets::WIDE_ORDERS_WORD].store(0);
+                        }
                     }
                     if comptime!(matches!(
                         stage,
@@ -2451,9 +2540,9 @@ pub fn economy(
                     control[id as usize].store(0);
                 }
             }
-            EconomyStage::RecordFeedback => {
-                record_feedback(state, config, proposals, bundles, control, parameters, id)
-            }
+            EconomyStage::RecordFeedback => record_feedback(
+                state, config, &*spatial, proposals, bundles, control, parameters, id,
+            ),
             EconomyStage::ApplyFeedback => apply_feedback(state, config, control, id),
             EconomyStage::IndexCount => {
                 index_count(state, actors, config, spatial, bundles, parameters, id)
@@ -2552,7 +2641,7 @@ fn discoverable(
     let market = comptime!(parameters.market);
     match market {
         MarketFlag::Labor => number(state, config, comptime!(Field::Slots as u32), firm) > 0,
-        MarketFlag::Input(_) | MarketFlag::Consumer | MarketFlag::Household => {
+        MarketFlag::Input(_) | MarketFlag::Consumer(_) | MarketFlag::Household => {
             let good = parameters.traded_good();
             let distributor = number(
                 state,
@@ -2953,6 +3042,7 @@ fn scaled(control: &[Atomic<u32>], value: Ticks, numerator: u32, denominator: u3
 fn record_feedback(
     state: &mut [u32],
     config: &EconomyConfig,
+    requests: &[u32],
     proposals: &mut [u32],
     outcomes: &mut [u32],
     feedback: &[Atomic<u32>],
@@ -2967,20 +3057,25 @@ fn record_feedback(
     if id < count && feedback[CONSTRUCTED_EVENTS_WORD].load() == 0 {
         let index = match comptime!(parameters.discovery) {
             Discovery::Indexed => {
-                outcomes[(parameters.sort_source + parameters.count + id) as usize]
+                let source = feedback[markets::FEEDBACK_SOURCE_WORD].load();
+                if source == comptime!(markets::FeedbackSource::Searches as u32) {
+                    requests[id as usize]
+                } else {
+                    outcomes[(parameters.sort_source + parameters.count + id) as usize]
+                }
             }
             #[cfg(test)]
             _ => id,
         };
+        let actor = parameters.offset + index;
+        let firm = proposals[actor as usize * ProposalLayout::WORDS + ProposalLayout::ACTOR];
         let status = KernelEventStatus::load(outcomes, parameters.status_start + index);
-        if status.contains(comptime!(EventStatus::Rejected)) {
-            let actor = parameters.offset + index;
+        if firm != NO_ACTOR && status.contains(comptime!(EventStatus::Rejected)) {
             if comptime!(parameters.market == MarketFlag::Household)
                 && number(state, config, comptime!(Field::FoodAccess as u32), actor) == 0
             {
                 set32(state, config, comptime!(Field::FoodAccess as u32), actor, 3);
             }
-            let firm = proposals[actor as usize * ProposalLayout::WORDS + ProposalLayout::ACTOR];
             let base = CONTROL_WORDS as u32 + firm * TICK_WORDS as u32;
             let quantity =
                 proposals[actor as usize * ProposalLayout::WORDS + ProposalLayout::QUANTITY_LOW];

@@ -6,6 +6,13 @@ use cubecl::prelude::*;
 pub(in crate::simulation) const PRODUCER_ENTRY: u32 = 8 << 24;
 pub(in crate::simulation) const DISTRIBUTOR_ENTRY: u32 = 9 << 24;
 
+#[derive(Clone, Copy, Debug, Hash, PartialEq, Eq)]
+pub(in crate::simulation) enum EntryQuoteMode {
+    Cached,
+    #[cfg_attr(not(test), allow(dead_code))]
+    Sampled,
+}
+
 pub(in crate::simulation) struct EntryPlan {
     pub owner: usize,
     pub good: Good,
@@ -123,7 +130,12 @@ impl EntryPlan {
         {
             true => Ok(plan),
             false => Err(anyhow!(
-                "enterprise entry lacks invested funds, materials, or a valid quote"
+                "enterprise entry lacks invested funds, materials, or a valid quote: owner {owner}, cash {}, tools {}, wood {}, arrears {}, quote {}",
+                state.get(Field::Cash, owner),
+                state.get(Field::Tools, owner),
+                state.get(Field::Wood, owner),
+                state.get(Field::RentArrears, owner),
+                plan.price,
             )),
         }
     }
@@ -204,13 +216,47 @@ fn input_price(
 }
 
 #[cube]
+pub(super) fn prepare_quotes(
+    state: &mut [u32],
+    actors: &[u32],
+    config: &EconomyConfig,
+    spatial: &[u32],
+    quotes: &mut [u32],
+    day: u32,
+) {
+    let member = ABSOLUTE_POS as u32;
+    if member < firms(spatial, config) {
+        let source = firm_at(spatial, config, member);
+        let inputs = number(
+            state,
+            config,
+            source,
+            comptime!(Field::BasicInputTicks as u32),
+        );
+        #[unroll]
+        for slot in 0..2u32 {
+            let good = number(
+                state,
+                config,
+                source,
+                comptime!(Field::BasicFirstInput as u32) + slot,
+            );
+            quotes[(2 * config.actors + 2 * source + slot) as usize] =
+                input_price(state, actors, config, spatial, source, good, inputs, day);
+        }
+    }
+}
+
+#[cube]
 pub(in crate::simulation) fn discover(
     state: &mut [u32],
     actors: &[u32],
     config: &EconomyConfig,
     spatial: &[u32],
+    quotes: &[u32],
     owner: u32,
     day: u32,
+    #[comptime] quote_mode: EntryQuoteMode,
 ) -> u32 {
     let cash = load(
         state,
@@ -247,37 +293,11 @@ pub(in crate::simulation) fn discover(
                     source,
                     comptime!(Field::BasicInputTicks as u32),
                 );
-                let first_input = number(
-                    state,
-                    config,
-                    source,
-                    comptime!(Field::BasicFirstInput as u32),
+                let first = entry_quote(
+                    state, actors, config, spatial, quotes, source, inputs, day, 0, quote_mode,
                 );
-                let second_input = number(
-                    state,
-                    config,
-                    source,
-                    comptime!(Field::BasicSecondInput as u32),
-                );
-                let first = input_price(
-                    state,
-                    actors,
-                    config,
-                    spatial,
-                    source,
-                    first_input,
-                    inputs,
-                    day,
-                );
-                let second = input_price(
-                    state,
-                    actors,
-                    config,
-                    spatial,
-                    source,
-                    second_input,
-                    inputs,
-                    day,
+                let second = entry_quote(
+                    state, actors, config, spatial, quotes, source, inputs, day, 1, quote_mode,
                 );
                 if first < u32::MAX && second < u32::MAX {
                     let labor = number(
@@ -292,8 +312,19 @@ pub(in crate::simulation) fn discover(
                         source,
                         comptime!(Field::BasicOutputTicks as u32),
                     );
+                    let seasonal = config.home.harvest_days < 365
+                        && (kind == comptime!(Good::Grain as u32)
+                            || kind == comptime!(Good::Flax as u32)
+                            || kind == comptime!(Good::Cotton as u32)
+                            || kind == comptime!(Good::Dye as u32));
+                    let work_days = select(
+                        seasonal,
+                        min(211u32, 365 - config.home.harvest_days),
+                        365u32,
+                    );
+                    let payroll = divide(times32(labor * wage, work_days), 365);
                     let cost = plus(
-                        plus(times32(labor, wage), times32(inputs, first + second)).value,
+                        plus(payroll, times32(inputs, first + second)).value,
                         ticks(config.firm_rent, 0),
                     )
                     .value;
@@ -354,4 +385,31 @@ pub(in crate::simulation) fn discover(
         );
     }
     selected
+}
+
+#[cube]
+fn entry_quote(
+    state: &mut [u32],
+    actors: &[u32],
+    config: &EconomyConfig,
+    spatial: &[u32],
+    quotes: &[u32],
+    source: u32,
+    quantity: u32,
+    day: u32,
+    slot: u32,
+    #[comptime] mode: EntryQuoteMode,
+) -> u32 {
+    match comptime!(mode) {
+        EntryQuoteMode::Cached => quotes[(2 * config.actors + 2 * source + slot) as usize],
+        EntryQuoteMode::Sampled => {
+            let good = number(
+                state,
+                config,
+                source,
+                comptime!(Field::BasicFirstInput as u32) + slot,
+            );
+            input_price(state, actors, config, spatial, source, good, quantity, day)
+        }
+    }
 }

@@ -13,6 +13,8 @@ pub const FAULT_WORD: usize = offset_of!(ControlLayout, faults) / size_of::<u32>
 pub const COMPLETED_WORD: usize = offset_of!(ControlLayout, completed) / size_of::<u32>();
 pub const DEPENDENCY_FLAGS_WORD: usize = offset_of!(ControlLayout, phase_data) / size_of::<u32>();
 pub const CONSTRUCTED_EVENTS_WORD: usize = offset_of!(ControlLayout, phase_data) / size_of::<u32>();
+pub(super) const CLAIM_CAPACITY_LOW_WORD: usize = CONTROL_WORDS + 5;
+pub(super) const CLAIM_CAPACITY_HIGH_WORD: usize = CONTROL_WORDS + 6;
 
 #[repr(C)]
 #[derive(Clone, Copy, Pod, Zeroable)]
@@ -41,7 +43,7 @@ pub enum InputMarket {
 pub enum MarketFlag {
     Labor,
     Input(InputMarket),
-    Consumer,
+    Consumer(Good),
     Household,
     Payroll,
     Distribution,
@@ -52,7 +54,7 @@ impl From<Market> for MarketFlag {
             Market::Labor => Self::Labor,
             Market::Input(Good::Grain) => Self::Input(InputMarket::Grain),
             Market::Input(_) => Self::Input(InputMarket::Other),
-            Market::Consumer(_) => Self::Consumer,
+            Market::Consumer(good) => Self::Consumer(good),
             Market::Household => Self::Household,
             Market::Payroll => Self::Payroll,
             Market::Distribution => Self::Distribution,
@@ -100,6 +102,7 @@ bitflags::bitflags! {
         const PAYROLL_MISMATCH = 1 << 6;
         const RESEARCH_MISMATCH = 1 << 7;
         const PROPERTY_CAPACITY = 1 << 8;
+        const CLAIM_CAPACITY = 1 << 9;
     }
 }
 impl FaultFlags {
@@ -297,7 +300,7 @@ mod tests {
     #[cube(launch)]
     fn concurrent_flags(control: &[Atomic<u32>]) {
         let id = ABSOLUTE_POS as u32;
-        match id % 9 {
+        match id % 10 {
             0 => KernelFaults::new(comptime!(FaultFlags::ARITHMETIC_OVERFLOW)).record(control),
             1 => KernelFaults::new(comptime!(FaultFlags::INVALID_COORDINATE)).record(control),
             2 => KernelFaults::new(comptime!(FaultFlags::TRANSIT_UNDERFLOW)).record(control),
@@ -306,7 +309,8 @@ mod tests {
             5 => KernelFaults::new(comptime!(FaultFlags::DEMAND_OVERFLOW)).record(control),
             6 => KernelFaults::new(comptime!(FaultFlags::PAYROLL_MISMATCH)).record(control),
             7 => KernelFaults::new(comptime!(FaultFlags::RESEARCH_MISMATCH)).record(control),
-            _ => KernelFaults::new(comptime!(FaultFlags::PROPERTY_CAPACITY)).record(control),
+            8 => KernelFaults::new(comptime!(FaultFlags::PROPERTY_CAPACITY)).record(control),
+            _ => KernelFaults::new(comptime!(FaultFlags::CLAIM_CAPACITY)).record(control),
         }
         match id % 2 {
             0 => {

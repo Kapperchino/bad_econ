@@ -209,6 +209,7 @@ pub struct SummaryLayout {
     pub workforce: TickLayout,
     pub subsistence: TickLayout,
     pub inactive: TickLayout,
+    pub rural_employed: TickLayout,
     pub household_cash: TickLayout,
     pub active_by_good: [TickLayout; Good::COUNT],
     pub business_types: [TickLayout; 3],
@@ -257,6 +258,7 @@ impl SummaryLayout {
     pub const WORKFORCE: u32 = (offset_of!(Self, workforce) / TICK_BYTES) as u32;
     pub const SUBSISTENCE: u32 = (offset_of!(Self, subsistence) / TICK_BYTES) as u32;
     pub const INACTIVE: u32 = (offset_of!(Self, inactive) / TICK_BYTES) as u32;
+    pub const RURAL_EMPLOYED: u32 = (offset_of!(Self, rural_employed) / TICK_BYTES) as u32;
     pub const HOUSEHOLD_CASH: u32 = (offset_of!(Self, household_cash) / TICK_BYTES) as u32;
     pub const ACTIVE_BY_GOOD: u32 = (offset_of!(Self, active_by_good) / TICK_BYTES) as u32;
     pub const BUSINESS_TYPES: u32 = (offset_of!(Self, business_types) / TICK_BYTES) as u32;

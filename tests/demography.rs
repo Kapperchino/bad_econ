@@ -3,6 +3,213 @@ use super::support;
 use anyhow::Result;
 use bad_econ::{domain::*, runtime::SimulationCommand, simulation::Simulation};
 
+#[repr(usize)]
+#[derive(Clone, Copy, Debug)]
+enum FamilyResources {
+    Unfunded,
+    Earnings,
+    Savings,
+    FoodReserve,
+    Subsistence,
+    Recovering,
+    ColdRecovering,
+}
+
+impl FamilyResources {
+    const ALL: [Self; 7] = [
+        Self::Unfunded,
+        Self::Earnings,
+        Self::Savings,
+        Self::FoodReserve,
+        Self::Subsistence,
+        Self::Recovering,
+        Self::ColdRecovering,
+    ];
+    const HOUSEHOLDS: usize = 512;
+
+    fn household(self, offset: usize) -> HouseholdSeed {
+        let cash = match self {
+            Self::Unfunded => 1,
+            Self::Earnings | Self::FoodReserve | Self::Subsistence => 0,
+            Self::Savings | Self::Recovering | Self::ColdRecovering => 10_000,
+        };
+        let mut inventories = match self {
+            Self::FoodReserve => Good::food([0, 0, 1000]),
+            Self::Subsistence => Good::food([1460, 0, 20]),
+            _ => Good::food([0, 0, 20]),
+        };
+        inventories[Good::Tools as usize - 1] = match self {
+            Self::Subsistence => 1,
+            _ => 0,
+        };
+        HouseholdSeed {
+            identity: (self as usize * Self::HOUSEHOLDS + offset + 1) as u64,
+            position: Position { x: 500, y: 500 },
+            cash,
+            inventories,
+            fatigue: 0,
+        }
+    }
+}
+
+fn industrial_fertility_scenario(households: Vec<HouseholdSeed>) -> Result<Scenario> {
+    use bad_econ::domain::demography::{DAYS_PER_YEAR, PersonSeed, Sex};
+    let count = households.len() as u32;
+    let mut config = Scenario::baseline(count, 19, Experiment::Concentrated)?
+        .config()
+        .clone();
+    config.economy = Economy::Industrial;
+    config.firms = 3;
+    config.food = Some(food::FoodPolicy::default());
+    config.prices = [9, 30, 20];
+    config.household_production = enterprise::HouseholdProduction::industrial();
+    config.distribution_rate = 0;
+    config.entrepreneurship.interested_per_mille = 0;
+    config.expansion.small_business_per_mille = 0;
+    config.expansion.industrial_per_mille = 0;
+    config.research = None;
+    config.rent = None;
+    config.demography.annual_births_per_million_fertile_women = 1_000_000;
+    config.demography.mortality.background_annual_ppm = [0; 5];
+    config.demography.mortality.cold_daily_ppm_at_seven_days = 0;
+    config.demography.mortality.famine_daily_ppm_at_thirty_days = 0;
+    config.demography.mortality.occupational_annual_ppm = [0; Good::COUNT];
+    config.demography.people = households
+        .iter()
+        .map(|household| PersonSeed {
+            identity: 10_000_000 + household.identity,
+            household: household.identity,
+            age_days: 30 * DAYS_PER_YEAR,
+            sex: Sex::Female,
+        })
+        .collect();
+    let allocations = households
+        .iter()
+        .filter(|household| household.inventories[Good::Tools as usize - 1] > 0)
+        .map(|household| enterprise::LandGrant {
+            household: household.identity,
+            plots: 2,
+        })
+        .collect::<Vec<_>>();
+    config.land_access = Some(enterprise::LandAccess {
+        total_plots: allocations.len() as u32 * 2 + 100,
+        allocations,
+    });
+    config.population = Some(Population {
+        households,
+        firms: [Good::Grain, Good::Flour, Good::Bread]
+            .into_iter()
+            .enumerate()
+            .map(|(index, good)| FirmSeed {
+                identity: u64::from(count) + index as u64 + 1,
+                position: Position { x: 500, y: 500 },
+                owner: 1,
+                good,
+                cash: 0,
+                inventories: [0; Good::COUNT],
+                capacity: 1,
+                technique: Technique {
+                    labor_minutes: 20,
+                    input_ticks: u32::from(good != Good::Grain),
+                    output_ticks: 1,
+                },
+                wage: 1,
+                price: 20,
+            })
+            .collect(),
+    });
+    Scenario::new(config)
+}
+
+#[test]
+fn industrial_births_follow_family_resources_instead_of_daily_employment_on_gpu() -> Result<()> {
+    use bad_econ::domain::demography::Occupation;
+    let households = FamilyResources::ALL
+        .into_iter()
+        .flat_map(|resources| {
+            (0..FamilyResources::HOUSEHOLDS).map(move |offset| resources.household(offset))
+        })
+        .collect();
+    let scenario = industrial_fertility_scenario(households)?;
+    let mut initial = scenario.initial()?;
+    initial.day = 120;
+    for offset in 0..FamilyResources::HOUSEHOLDS {
+        initial.set(
+            Field::IncomeForecast,
+            FamilyResources::Earnings as usize * FamilyResources::HOUSEHOLDS + offset,
+            100_000,
+        );
+        initial.people
+            [FamilyResources::Recovering as usize * FamilyResources::HOUSEHOLDS + offset]
+            .famine_exposure = 5000;
+        initial.people
+            [FamilyResources::ColdRecovering as usize * FamilyResources::HOUSEHOLDS + offset]
+            .cold_exposure = 5000;
+    }
+    let mut simulation =
+        Simulation::from_checkpoint(Checkpoint::new(&scenario, &initial)?, support::device(64)?)?;
+    for _ in 0..7 {
+        simulation.advance()?;
+    }
+    let state = simulation.download()?;
+    let mut births = [0; FamilyResources::ALL.len()];
+    for person in state.people.iter().filter(|person| person.age_days < 7) {
+        births[(person.household as usize - 1) / FamilyResources::HOUSEHOLDS] += 1;
+    }
+    for resources in [
+        FamilyResources::Unfunded,
+        FamilyResources::Recovering,
+        FamilyResources::ColdRecovering,
+    ] {
+        assert_eq!(births[resources as usize], 0, "{resources:?}: {births:?}");
+    }
+    for resources in [
+        FamilyResources::Earnings,
+        FamilyResources::Savings,
+        FamilyResources::FoodReserve,
+        FamilyResources::Subsistence,
+    ] {
+        assert!(births[resources as usize] > 0, "{resources:?}: {births:?}");
+    }
+    assert!(
+        simulation.snapshot.population.occupations[Occupation::Unemployed as usize]
+            > simulation.snapshot.population.occupations[Occupation::WageWorker as usize]
+    );
+    assert!(simulation.snapshot.population.living > initial.initial_population);
+    assert_eq!(simulation.snapshot.cash, initial.initial_cash);
+    simulation.checkpoint()?.restore()?;
+    Ok(())
+}
+
+#[test]
+fn industrial_deprivation_blocks_births_even_with_funded_households_on_gpu() -> Result<()> {
+    let households = (0..FamilyResources::HOUSEHOLDS)
+        .map(|offset| {
+            let mut household = FamilyResources::Savings.household(offset);
+            household.identity = offset as u64 + 1;
+            household.inventories = [0; Good::COUNT];
+            household
+        })
+        .collect();
+    let scenario = industrial_fertility_scenario(households)?;
+    let mut initial = scenario.initial()?;
+    initial.day = 120;
+    let mut simulation =
+        Simulation::from_checkpoint(Checkpoint::new(&scenario, &initial)?, support::device(64)?)?;
+    for _ in 0..7 {
+        simulation.advance()?;
+    }
+    assert_eq!(simulation.snapshot.population.births, 0);
+    assert_eq!(
+        simulation.snapshot.population.living,
+        initial.initial_population
+    );
+    assert!(simulation.snapshot.population.famine_exposure > 0);
+    assert_eq!(simulation.snapshot.cash, initial.initial_cash);
+    simulation.checkpoint()?.restore()?;
+    Ok(())
+}
+
 #[test]
 fn births_grow_the_person_registry_and_checkpoint_without_creating_money() -> Result<()> {
     let mut config = Scenario::baseline(2000, 19, Experiment::Concentrated)?
