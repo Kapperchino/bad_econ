@@ -1687,8 +1687,9 @@ pub(super) fn compact(
             let position = (actor + count - parameters.settlement_rotation) % count;
             let block = position / markets::COMPACTION_BLOCK;
             let word = position / 32;
-            let kept = successes[word as usize].load() & (1u32 << (position % 32));
-            if kept != 0 {
+            let kept = successes[word as usize].load();
+            let bit = 1u32 << (position % 32);
+            if kept & bit != 0 {
                 let mut slot = 0u32;
                 if block > 0 {
                     slot = successes[(masks + block - 1) as usize].load();
@@ -1696,8 +1697,7 @@ pub(super) fn compact(
                 for preceding in block * (markets::COMPACTION_BLOCK / 32)..word {
                     slot += successes[preceding as usize].load().count_ones();
                 }
-                let mask = (1u32 << (position % 32)) - 1;
-                slot += (successes[word as usize].load() & mask).count_ones();
+                slot += (kept & (bit - 1)).count_ones();
                 scratch[slot as usize] = peer;
                 scratch[(count + slot) as usize] = actor;
             }

@@ -5,20 +5,26 @@ use serde::Serialize;
 #[serde(tag = "source", rename_all = "snake_case")]
 pub enum MemoryBudget {
     Reported { available_bytes: u64 },
+    Dedicated { available_bytes: u64 },
     Unreported,
 }
 
 impl MemoryBudget {
     pub(super) fn gpu(adapter: &wgpu::Adapter) -> Self {
-        match available_memory(adapter) {
-            Some(available_bytes) => Self::Reported { available_bytes },
-            None => Self::Unreported,
+        available_memory(adapter).unwrap_or(Self::Unreported)
+    }
+
+    fn from_driver(device_type: wgpu::DeviceType, available_bytes: u64) -> Self {
+        match device_type {
+            wgpu::DeviceType::DiscreteGpu => Self::Dedicated { available_bytes },
+            _ => Self::Reported { available_bytes },
         }
     }
 
     pub fn bytes(self) -> u64 {
         match self {
             Self::Reported { available_bytes } => available_bytes / 2,
+            Self::Dedicated { available_bytes } => available_bytes,
             Self::Unreported => 4 * 1024 * 1024 * 1024,
         }
     }
@@ -43,11 +49,17 @@ pub(super) fn metal_available_memory(
     }
 }
 
-fn available_memory(adapter: &wgpu::Adapter) -> Option<u64> {
-    match adapter.get_info().backend {
+fn available_memory(adapter: &wgpu::Adapter) -> Option<MemoryBudget> {
+    let info = adapter.get_info();
+    match info.backend {
         #[cfg(target_vendor = "apple")]
-        wgpu::Backend::Metal => unsafe { adapter.as_hal::<wgpu::hal::api::Metal>() }
-            .map(|adapter| metal_available_memory(adapter.raw_device())),
+        wgpu::Backend::Metal => {
+            unsafe { adapter.as_hal::<wgpu::hal::api::Metal>() }.map(|adapter| {
+                MemoryBudget::Reported {
+                    available_bytes: metal_available_memory(adapter.raw_device()),
+                }
+            })
+        }
         #[cfg(any(
             windows,
             target_os = "linux",
@@ -55,7 +67,7 @@ fn available_memory(adapter: &wgpu::Adapter) -> Option<u64> {
             target_os = "freebsd",
             target_os = "macos"
         ))]
-        wgpu::Backend::Vulkan => vulkan_available_memory(adapter),
+        wgpu::Backend::Vulkan => vulkan_available_memory(adapter, info.device_type),
         #[cfg(windows)]
         wgpu::Backend::Dx12 => unsafe { adapter.as_hal::<wgpu::hal::api::Dx12>() }
             .and_then(|adapter| {
@@ -66,7 +78,12 @@ fn available_memory(adapter: &wgpu::Adapter) -> Option<u64> {
                     )
                     .ok()
             })
-            .map(|memory| memory.Budget.saturating_sub(memory.CurrentUsage)),
+            .map(|memory| {
+                MemoryBudget::from_driver(
+                    info.device_type,
+                    memory.Budget.saturating_sub(memory.CurrentUsage),
+                )
+            }),
         _ => None,
     }
 }
@@ -78,7 +95,10 @@ fn available_memory(adapter: &wgpu::Adapter) -> Option<u64> {
     target_os = "freebsd",
     target_os = "macos"
 ))]
-fn vulkan_available_memory(adapter: &wgpu::Adapter) -> Option<u64> {
+fn vulkan_available_memory(
+    adapter: &wgpu::Adapter,
+    device_type: wgpu::DeviceType,
+) -> Option<MemoryBudget> {
     use ash::vk;
 
     enum MemoryReport {
@@ -124,4 +144,8 @@ fn vulkan_available_memory(adapter: &wgpu::Adapter) -> Option<u64> {
             MemoryReport::Capacity => heap.size,
         })
         .max()
+        .map(|available_bytes| match report {
+            MemoryReport::Budget => MemoryBudget::from_driver(device_type, available_bytes),
+            MemoryReport::Capacity => MemoryBudget::Reported { available_bytes },
+        })
 }

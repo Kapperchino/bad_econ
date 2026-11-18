@@ -58,7 +58,7 @@ fn gpu_memory_budget_rejects_scenarios_before_allocation() -> Result<()> {
     eprintln!("{} memory budget: {:?}", device.name, device.memory_budget);
     assert!(matches!(
         device.memory_budget,
-        MemoryBudget::Reported { .. }
+        MemoryBudget::Reported { .. } | MemoryBudget::Dedicated { .. }
     ));
     assert!(device.memory_budget.bytes() > 0);
     device.memory_budget = MemoryBudget::Reported {

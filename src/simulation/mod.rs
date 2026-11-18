@@ -1099,15 +1099,14 @@ impl Simulation {
             false => stride as u64 * self.scenario.fields() as u64 * 16,
         };
         let additional = state_bytes + count as u64 * 192;
-        match self
-            .device
-            .reclaim_memory(additional)?
-            .bytes_reserved
-            .saturating_add(additional)
-            <= self.device.memory_budget.bytes()
-        {
+        let reserved = self.device.reclaim_memory(additional)?.bytes_reserved;
+        let required = reserved.saturating_add(additional);
+        let budget = self.device.memory_budget.bytes();
+        match required <= budget {
             true => (),
-            false => Err(anyhow!("registry growth exceeds the device memory budget"))?,
+            false => Err(anyhow!(
+                "registry growth exceeds the device memory budget of {budget} bytes: {reserved} reserved and {additional} estimated for growth"
+            ))?,
         }
         let state = batch.grow(&self.device, &self.state, self.scenario.fields());
         checkpoint("GrowState");
@@ -1351,10 +1350,11 @@ impl Simulation {
         );
         next.snapshot = next.observe_rings(rings)?;
         checkpoint("Observe");
-        match next.device.reclaim_memory(0)?.bytes_reserved <= next.device.memory_budget.bytes() {
+        let reserved = next.device.reclaim_memory(0)?.bytes_reserved;
+        match reserved <= budget {
             true => *self = next,
             false => Err(anyhow!(
-                "registry allocation exceeds the device memory budget"
+                "registry allocation exceeds the device memory budget of {budget} bytes: {reserved} reserved"
             ))?,
         }
         checkpoint("RegistryCommit");

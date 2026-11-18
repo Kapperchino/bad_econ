@@ -1321,19 +1321,17 @@ impl GpuPass<AdmissionInput> for AdmitFreightClaims {
     type Output = ();
 
     fn execute(mut input: AdmissionInput) {
-        for word in 0..3usize {
-            let empty = select(word == 0, 0u32, 1u32);
-            input.dispatches[CLAIM_ACTIVE_DISPATCH + word] = empty;
-            input.dispatches[CLAIM_RESOURCE_DISPATCH + word] = empty;
-        }
+        let mut admitted = false;
         if comptime!(input.execution != Execution::Immediate)
             && execution_enabled(&input.progress, &input.control, comptime!(input.execution))
         {
             let count = atomic_ticks(&input.progress, CLAIM_COUNT);
+            let requested = !equal(count, zero());
+            let exceeds_capacity = lt(ticks(input.capacity, 0), count);
             if comptime!(input.execution == Execution::Initial) {
-                input.progress[INITIAL_CLAIMS].store(u32::cast_from(!equal(count, zero())));
+                input.progress[INITIAL_CLAIMS].store(u32::cast_from(requested));
             }
-            if lt(ticks(input.capacity, 0), count) {
+            if exceeds_capacity {
                 input.control[crate::simulation::flags::CLAIM_CAPACITY_LOW_WORD]
                     .store(count.extract(LOW_WORD));
                 input.control[crate::simulation::flags::CLAIM_CAPACITY_HIGH_WORD]
@@ -1342,15 +1340,18 @@ impl GpuPass<AdmissionInput> for AdmitFreightClaims {
                     .fetch_or(comptime!(FaultFlags::CLAIM_CAPACITY.bits()));
                 atomic_store(&input.progress, CLAIM_COUNT, zero());
             }
-            let admitted = !equal(atomic_ticks(&input.progress, CLAIM_COUNT), zero())
-                && input.control[crate::simulation::flags::FAULT_WORD].load() == 0;
-            for word in 0..3usize {
-                let empty = select(word == 0, 0u32, 1u32);
-                input.dispatches[CLAIM_ACTIVE_DISPATCH + word] =
-                    select(admitted, input.dispatches[9usize + word], empty);
-                input.dispatches[CLAIM_RESOURCE_DISPATCH + word] =
-                    select(admitted, input.dispatches[word], empty);
+            admitted = requested && !exceeds_capacity;
+        }
+        for word in 0..3usize {
+            let empty = select(word == 0, 0u32, 1u32);
+            let mut active = empty;
+            let mut resources = empty;
+            if admitted {
+                active = input.dispatches[9usize + word];
+                resources = input.dispatches[word];
             }
+            input.dispatches[CLAIM_ACTIVE_DISPATCH + word] = active;
+            input.dispatches[CLAIM_RESOURCE_DISPATCH + word] = resources;
         }
     }
 }
