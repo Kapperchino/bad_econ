@@ -181,8 +181,9 @@ impl GpuPass<QuantityInput> for SettleQuantities {
 
     fn execute(mut input: QuantityInput) {
         input.parameters.refresh(&mut input.config);
-        let job = CUBE_POS as u32;
-        if job < input.control[RANGE_SLOTS_WORD].load() && input.control[LATCH_WORD].load() == 0 {
+        let jobs = markets::job_count(&input.control, RANGE_SLOTS_WORD);
+        let mut job = CUBE_POS as u32;
+        while job < jobs {
             let count = input.parameters.count;
             let source = input.parameters.sort_source;
             let start = input.scratch[(5 * count + job) as usize];
@@ -268,6 +269,8 @@ impl GpuPass<QuantityInput> for SettleQuantities {
                 input.control[PROGRESS_WORD].fetch_max(length);
                 input.control[COMPLETED_WORD].fetch_add(length);
             }
+            sync_cube();
+            job += CUBE_COUNT as u32;
         }
     }
 }

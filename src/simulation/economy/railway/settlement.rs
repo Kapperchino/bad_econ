@@ -410,10 +410,14 @@ pub fn launch_buffered(
         );
     }
     let active_groups = parameters.count.div_ceil(device.workgroup) as usize;
-    let resource_groups = (config.railway.firms as usize
-        + config.railway.region_count as usize
-        + parameters.count as usize)
-        .div_ceil(device.workgroup as usize);
+    let seller_bound = match parameters.good {
+        good if good == Good::Bread as u32 => parameters.count as usize,
+        _ => 0,
+    };
+    let resource_groups =
+        (config.railway.firms as usize + config.railway.region_count as usize + seller_bound)
+            .div_ceil(device.workgroup as usize);
+    let reset_groups = resource_groups.max(active_groups);
     let dispatch = match (execution, stage) {
         (_, Stage::Queue | Stage::AdmitClaims) => CubeCount::Static(1, 1, 1).into(),
         (Execution::Initial | Execution::Retry, Stage::EmitClaims) => {
@@ -428,7 +432,7 @@ pub fn launch_buffered(
             markets::dispatch(&buffers.dispatches, 9, active_groups)
         }
         (Execution::Retry, Stage::Reset) => {
-            markets::dispatch(&buffers.dispatches, RETRY_RESET_DISPATCH, resource_groups)
+            markets::dispatch(&buffers.dispatches, RETRY_RESET_DISPATCH, reset_groups)
         }
         (Execution::Retry, Stage::CountClaims | Stage::Release) => markets::dispatch(
             &buffers.dispatches,
@@ -436,7 +440,7 @@ pub fn launch_buffered(
             resource_groups,
         ),
         (_, Stage::Initialize | Stage::Reset) => {
-            markets::dispatch(&buffers.dispatches, 6, resource_groups)
+            markets::dispatch(&buffers.dispatches, 6, reset_groups)
         }
         (_, Stage::ClaimOffsets) => device
             .count((config.actors + config.railway.region_count) as usize + 1)

@@ -1032,8 +1032,9 @@ fn search(
     parameters: &EconomyParameters,
     #[comptime] source: index::SupplySource,
 ) {
-    let job = CUBE_POS as u32;
-    if job < control[SEARCHES_WORD].load() && control[LATCH_WORD].load() == 0 {
+    let jobs = markets::job_count(control, SEARCHES_WORD);
+    let mut job = CUBE_POS as u32;
+    while job < jobs {
         let id = searches[job as usize];
         let wanted = ticks(
             searches[(config.actors + id) as usize],
@@ -1626,6 +1627,8 @@ fn search(
                 record_wide_order(control, parameters, quantity);
             }
         }
+        sync_cube();
+        job += CUBE_COUNT as u32;
     }
 }
 

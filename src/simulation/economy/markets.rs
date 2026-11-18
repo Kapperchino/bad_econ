@@ -102,6 +102,32 @@ pub(in crate::simulation) fn dispatch(
     }
 }
 
+pub(in crate::simulation) fn job_dispatch(
+    dispatches: &burn_wgpu::CubeTensor,
+    offset: usize,
+    capacity: usize,
+) -> crate::simulation::system::Dispatch {
+    match dispatches.device {
+        cubecl::Device::Metal(_) => {
+            const WORKGROUPS_PER_CORE: usize = 32;
+            let cores = dispatches
+                .client
+                .properties()
+                .hardware
+                .num_streaming_multiprocessors
+                .unwrap_or(16);
+            let groups = capacity.min(cores as usize * WORKGROUPS_PER_CORE).max(1);
+            cubecl::CubeCount::Static(groups as u32, 1, 1).into()
+        }
+        _ => dispatch(dispatches, offset, capacity),
+    }
+}
+
+#[cube]
+pub(in crate::simulation) fn job_count(control: &[Atomic<u32>], #[comptime] word: usize) -> u32 {
+    select(control[LATCH_WORD].load() == 0, control[word].load(), 0)
+}
+
 #[derive(Clone, Copy)]
 pub(in crate::simulation) enum PreparationWorkgroup {
     Native,

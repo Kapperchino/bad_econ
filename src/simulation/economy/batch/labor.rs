@@ -264,8 +264,9 @@ fn settle_labor(
     control: &[Atomic<u32>],
     parameters: &EconomyParameters,
 ) {
-    let job = CUBE_POS as u32;
-    if job < control[RANGE_SLOTS_WORD].load() && control[LATCH_WORD].load() == 0 {
+    let jobs = markets::job_count(control, RANGE_SLOTS_WORD);
+    let mut job = CUBE_POS as u32;
+    while job < jobs {
         let count = parameters.count;
         let start = scratch[(5 * count + job) as usize];
         let length = scratch[(6 * count + job) as usize];
@@ -305,6 +306,8 @@ fn settle_labor(
             control[PROGRESS_WORD].fetch_max(length);
             control[COMPLETED_WORD].fetch_add(length);
         }
+        sync_cube();
+        job += CUBE_COUNT as u32;
     }
 }
 
@@ -427,8 +430,13 @@ mod tests {
                 words[second_used] = case.second_used.into();
                 let mut proposals = vec![0; count * ProposalLayout::WORDS];
                 let mut scratch = vec![0; actual.scratch.meta.num_elements()];
+                let first_length = match case_index {
+                    0 => case.length / 2,
+                    _ => case.length,
+                };
                 for slot in 0..case.length {
                     let actor = (slot + 17) % 513;
+                    let peer = peer + usize::from(slot >= first_length);
                     proposals[actor * ProposalLayout::WORDS + ProposalLayout::ACTOR] = peer as u32;
                     scratch[slot] = peer as u32;
                     scratch[count + slot] = actor as u32;
@@ -439,10 +447,15 @@ mod tests {
                     scratch[4 * count + actor] = enumflags2::BitFlags::from_flag(status).bits();
                 }
                 scratch[5 * count] = 0;
-                scratch[6 * count] = case.length as u32;
+                scratch[6 * count] = first_length as u32;
                 let mut control = vec![0; actual.control.meta.num_elements()];
                 control[CONSTRUCTED_EVENTS_WORD] = case.length as u32;
                 control[RANGE_SLOTS_WORD] = 1;
+                if first_length < case.length {
+                    scratch[5 * count + 1] = first_length as u32;
+                    scratch[6 * count + 1] = (case.length - first_length) as u32;
+                    control[RANGE_SLOTS_WORD] = 2;
+                }
                 for simulation in [&actual, &expected] {
                     device.write(&simulation.state, bytemuck::cast_slice(&words));
                     device.write(&simulation.proposals, bytemuck::cast_slice(&proposals));

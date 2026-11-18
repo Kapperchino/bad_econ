@@ -1286,7 +1286,10 @@ impl Simulation {
             searches: markets::SearchBuffers::new(&self.device, count),
             market_sort: economy::sorting::MarketSort::default(),
             market_graphs: market_graphs::MarketGraphs::default(),
-            market_replay: MarketReplay::RegistryGrowth,
+            market_replay: match self.device.cube {
+                cubecl::Device::Metal(_) => MarketReplay::Reusable,
+                _ => MarketReplay::RegistryGrowth,
+            },
             freight_activity: self.freight_activity,
             freight_execution: self.freight_execution,
             #[cfg(test)]
@@ -2027,9 +2030,11 @@ impl Simulation {
                     count.div_ceil(workgroup as usize),
                 ),
                 economy::search::SearchStage::Search
-                | economy::search::SearchStage::SearchIndexed => {
-                    markets::dispatch(&self.searches.dispatches, markets::SEARCH_DISPATCH, count)
-                }
+                | economy::search::SearchStage::SearchIndexed => markets::job_dispatch(
+                    &self.searches.dispatches,
+                    markets::SEARCH_DISPATCH,
+                    count,
+                ),
                 economy::search::SearchStage::SearchFuel
                 | economy::search::SearchStage::SearchHousehold
                 | economy::search::SearchStage::Compact => markets::dispatch(
@@ -2256,7 +2261,7 @@ impl Simulation {
         match market {
             Market::Payroll => economy::batch::payroll::PayrollSettlement::launch(
                 &self.device,
-                markets::dispatch(&self.searches.dispatches, markets::QUEUE_DISPATCH, count),
+                markets::job_dispatch(&self.searches.dispatches, markets::QUEUE_DISPATCH, count),
                 cubecl::CubeDim::new_1d(self.device.workgroup),
                 economy::batch::payroll::PayrollInputLaunch {
                     state: self.state.buffer_arg(),
@@ -2271,7 +2276,11 @@ impl Simulation {
             Market::Labor if self.scenario.config().bargaining.is_none() => {
                 economy::batch::labor::LaborSettlement::launch(
                     &self.device,
-                    markets::dispatch(&self.searches.dispatches, markets::QUEUE_DISPATCH, count),
+                    markets::job_dispatch(
+                        &self.searches.dispatches,
+                        markets::QUEUE_DISPATCH,
+                        count,
+                    ),
                     cubecl::CubeDim::new_1d(self.device.workgroup),
                     economy::batch::labor::LaborInputLaunch {
                         state: self.state.buffer_arg(),
@@ -2286,7 +2295,7 @@ impl Simulation {
                 Good::Wood | Good::Coal | Good::LuxuryClothes | Good::LuxuryFurniture,
             ) => economy::batch::quantity::QuantitySettlement::launch(
                 &self.device,
-                markets::dispatch(&self.searches.dispatches, markets::QUEUE_DISPATCH, count),
+                markets::job_dispatch(&self.searches.dispatches, markets::QUEUE_DISPATCH, count),
                 cubecl::CubeDim::new_1d(self.device.workgroup),
                 economy::batch::quantity::QuantityInputLaunch {
                     state: self.state.buffer_arg(),
@@ -2337,8 +2346,90 @@ impl Simulation {
             ] {
                 freight(stage);
             }
+            if let (Trace::Discard, FreightExecution::Buffered) = (trace, self.freight_execution) {
+                self.finish_freight(&parameters, trace, device_profile)?;
+            }
         }
         Ok(parameters.sort_source)
+    }
+
+    fn finish_freight(
+        &mut self,
+        parameters: &EconomyParameters,
+        trace: Trace,
+        device_profile: &profiling::MarketProfile,
+    ) -> Result<MatchingState> {
+        use economy::railway::settlement::{self, Stage};
+        let freight = |simulation: &Self, stage, execution| {
+            simulation.freight_stage(parameters, stage, execution, device_profile)
+        };
+        let mut matching = MatchingState::Searching;
+        match (trace, self.freight_activity, self.freight_execution) {
+            (Trace::Discard, FreightActivity::Dormant, _) => {
+                freight(self, Stage::Commit, settlement::Execution::Immediate);
+                freight(self, Stage::Release, settlement::Execution::Immediate);
+            }
+            (Trace::Discard, _, FreightExecution::Buffered) => {
+                let storage = settlement::ClaimStorage::new(&self.config);
+                for &execution in storage.executions() {
+                    if let settlement::Execution::Retry = execution {
+                        for stage in [
+                            Stage::Queue,
+                            Stage::Reset,
+                            Stage::Propose,
+                            Stage::CountClaims,
+                        ] {
+                            freight(self, stage, execution);
+                        }
+                    }
+                    for &stage in storage.stages() {
+                        freight(self, stage, execution);
+                    }
+                    let commit = match execution {
+                        settlement::Execution::Initial => Stage::Commit,
+                        _ => Stage::CommitFinal,
+                    };
+                    freight(self, commit, execution);
+                    freight(self, Stage::Release, execution);
+                }
+            }
+            _ => {
+                let mut round = settlement::Round::Initial;
+                while let Some(commit) = round.commit() {
+                    if let settlement::Round::Retry = round {
+                        freight(self, Stage::Queue, settlement::Execution::Immediate);
+                        freight(self, Stage::Reset, settlement::Execution::Immediate);
+                        freight(self, Stage::Propose, settlement::Execution::Immediate);
+                        freight(self, Stage::CountClaims, settlement::Execution::Immediate);
+                    }
+                    let preparation = settlement::prepare_market_claims(
+                        &self.device,
+                        &mut self.config,
+                        &self.control,
+                    )?;
+                    self.readback_bytes += (4 * WORD_BYTES) as u64;
+                    matching = match preparation.searches {
+                        0 => MatchingState::Exhausted,
+                        _ => MatchingState::Searching,
+                    };
+                    let claims = preparation.claims;
+                    if let settlement::ClaimWork::Ready = claims {
+                        freight(self, Stage::EmitClaims, settlement::Execution::Immediate);
+                        freight(self, Stage::SortClaims, settlement::Execution::Immediate);
+                        freight(self, Stage::Resolve, settlement::Execution::Immediate);
+                    }
+                    freight(self, commit, settlement::Execution::Immediate);
+                    freight(self, Stage::Release, settlement::Execution::Immediate);
+                    round = round.next(claims);
+                }
+            }
+        }
+        let execution = match (trace, self.freight_execution) {
+            (Trace::Discard, FreightExecution::Buffered) => settlement::Execution::Initial,
+            _ => settlement::Execution::Immediate,
+        };
+        freight(self, Stage::Accounts, execution);
+        Ok(matching)
     }
 
     fn device_market(
@@ -2435,76 +2526,10 @@ impl Simulation {
                 result?
             }
         };
-        if regional_transport {
-            use economy::railway::settlement::{self, Stage};
-            let freight = |simulation: &Self, stage, execution| {
-                simulation.freight_stage(&parameters, stage, execution, &device_profile)
-            };
-            match (trace, self.freight_activity, self.freight_execution) {
-                (Trace::Discard, FreightActivity::Dormant, _) => {
-                    freight(self, Stage::Commit, settlement::Execution::Immediate);
-                    freight(self, Stage::Release, settlement::Execution::Immediate);
-                }
-                (Trace::Discard, _, FreightExecution::Buffered) => {
-                    let storage = settlement::ClaimStorage::new(&self.config);
-                    for &execution in storage.executions() {
-                        if let settlement::Execution::Retry = execution {
-                            for stage in [
-                                Stage::Queue,
-                                Stage::Reset,
-                                Stage::Propose,
-                                Stage::CountClaims,
-                            ] {
-                                freight(self, stage, execution);
-                            }
-                        }
-                        for &stage in storage.stages() {
-                            freight(self, stage, execution);
-                        }
-                        let commit = match execution {
-                            settlement::Execution::Initial => Stage::Commit,
-                            _ => Stage::CommitFinal,
-                        };
-                        freight(self, commit, execution);
-                        freight(self, Stage::Release, execution);
-                    }
-                }
-                _ => {
-                    let mut round = settlement::Round::Initial;
-                    while let Some(commit) = round.commit() {
-                        if let settlement::Round::Retry = round {
-                            freight(self, Stage::Queue, settlement::Execution::Immediate);
-                            freight(self, Stage::Reset, settlement::Execution::Immediate);
-                            freight(self, Stage::Propose, settlement::Execution::Immediate);
-                            freight(self, Stage::CountClaims, settlement::Execution::Immediate);
-                        }
-                        let preparation = settlement::prepare_market_claims(
-                            &self.device,
-                            &mut self.config,
-                            &self.control,
-                        )?;
-                        self.readback_bytes += (4 * WORD_BYTES) as u64;
-                        matching = match preparation.searches {
-                            0 => MatchingState::Exhausted,
-                            _ => MatchingState::Searching,
-                        };
-                        let claims = preparation.claims;
-                        if let settlement::ClaimWork::Ready = claims {
-                            freight(self, Stage::EmitClaims, settlement::Execution::Immediate);
-                            freight(self, Stage::SortClaims, settlement::Execution::Immediate);
-                            freight(self, Stage::Resolve, settlement::Execution::Immediate);
-                        }
-                        freight(self, commit, settlement::Execution::Immediate);
-                        freight(self, Stage::Release, settlement::Execution::Immediate);
-                        round = round.next(claims);
-                    }
-                }
-            }
-            let execution = match (trace, self.freight_execution) {
-                (Trace::Discard, FreightExecution::Buffered) => settlement::Execution::Initial,
-                _ => settlement::Execution::Immediate,
-            };
-            freight(self, Stage::Accounts, execution);
+        if let (true, Trace::Record, _) | (true, _, FreightExecution::Synchronous) =
+            (regional_transport, trace, self.freight_execution)
+        {
+            matching = self.finish_freight(&parameters, trace, &device_profile)?;
         }
         if let (
             Trace::Discard,

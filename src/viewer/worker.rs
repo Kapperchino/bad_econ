@@ -119,6 +119,7 @@ pub(super) fn run(
         if let (WorkerState::Active, RuntimeState::Running, true) =
             (&workflow, &simulation.status, Instant::now() >= next_day)
         {
+            next_day = Instant::now() + speed.period();
             let result = simulation.advance().and_then(|()| {
                 let cue = match target.reached(simulation.snapshot.day) {
                     true => {
@@ -133,7 +134,6 @@ pub(super) fn run(
             if let Err(error) = result {
                 publisher.error(&simulation, error);
             }
-            next_day = Instant::now() + speed.period();
         }
     }
     Ok(())

@@ -108,7 +108,7 @@ Measure initialization and the first simulated days, including GPU compilation o
 cargo run --release --example startup_throughput -- --sizes 1000000 --days 3 --output /tmp/startup.json
 ```
 
-This reports scenario generation, device setup, simulation initialization, and each day's phase timings separately, plus a final state hash. Use a separate process for each size when comparing startup; later sizes in the same process can reuse compiled kernels. GPU driver caches can also make subsequent launches faster. Most input markets share compiled kernels across goods; grain and household bread retain dedicated kernels. Consumer kernels specialize by good.
+This reports scenario generation, device setup, simulation initialization, and each day's phase timings separately, plus a final state hash. Use a separate process for each size when comparing startup; later sizes in the same process can reuse compiled kernels. On macOS, CubeCL caches generated Metal shaders under `target/environment` when run from this checkout. The first run compiles each kernel as its market becomes active. Later runs of the same build reuse those shaders. Most input markets share compiled kernels across goods; grain and household bread retain dedicated kernels. Consumer kernels specialize by good.
 
 To enforce a median below 300 ms after warming the complete measured trajectory:
 
@@ -118,7 +118,7 @@ cargo run --locked --release --example gpu_throughput -- --sizes 1000000 --seed 
 
 This checks that the preflight and timed runs reach identical state hashes, records the median and slowest day, and saves the report before failing if the median is 300 ms or longer. Startup and reporting time are excluded from individual step timings. The benchmark uses the application's allocator and records active and reserved GPU memory for each day.
 
-Metal records market graphs with a fixed maximum number of workgroups. On each replay, the GPU reads the current dispatch counts and skips inactive workgroups. Vulkan uses indirect dispatch and defaults to 128 tasks per command batch. Set `CUBECL_WGPU_MAX_TASKS` to override Vulkan batching.
+On Metal, workgroups read the active market queues on the GPU. Cooperative supplier searches and settlements reuse a bounded pool of workgroups across jobs. Other market passes check their dispatch sizes during graph replay. Vulkan uses indirect dispatch and defaults to 128 tasks per command batch. Set `CUBECL_WGPU_MAX_TASKS` to override Vulkan batching.
 
 Use `--max-day-ms 300` to enforce the same strict limit on every measured day.
 

@@ -40,7 +40,7 @@ cubecl = { version = "=0.12.0-pre.2", default-features = false, features = ["vul
 
 [target.'cfg(target_os = "macos")'.dependencies]
 burn = { version = "=0.23.0-pre.2", default-features = false, features = ["metal"], optional = true }
-cubecl = { version = "=0.12.0-pre.2", default-features = false, features = ["metal"], optional = true }
+cubecl = { version = "=0.12.0-pre.2", default-features = false, features = ["metal", "persistence"], optional = true }
 
 [target.'cfg(target_vendor = "apple")'.dependencies]
 objc2 = { version = "0.6", optional = true }

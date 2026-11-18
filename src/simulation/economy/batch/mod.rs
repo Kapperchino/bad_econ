@@ -272,7 +272,7 @@ pub(in crate::simulation) fn settle_consumers(
     };
     ConsumerPrefix::launch(
         device,
-        markets::dispatch(
+        markets::job_dispatch(
             dispatches,
             markets::QUEUE_DISPATCH,
             parameters.count as usize,
@@ -302,8 +302,9 @@ fn settle_units(
     parameters: &EconomyParameters,
     #[comptime] execution: UnitSettlementExecution,
 ) {
-    let job = CUBE_POS as u32;
-    if job < control[RANGE_SLOTS_WORD].load() && control[LATCH_WORD].load() == 0 {
+    let jobs = markets::job_count(control, RANGE_SLOTS_WORD);
+    let mut job = CUBE_POS as u32;
+    while job < jobs {
         let count = parameters.count;
         let start = scratch[(5 * count + job) as usize];
         let length = scratch[(6 * count + job) as usize];
@@ -373,6 +374,8 @@ fn settle_units(
             control[PROGRESS_WORD].fetch_max(length);
             control[COMPLETED_WORD].fetch_add(length);
         }
+        sync_cube();
+        job += CUBE_COUNT as u32;
     }
 }
 
