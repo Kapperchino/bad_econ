@@ -1894,18 +1894,22 @@ impl Simulation {
             let started = Instant::now();
             let window = device_profile.start(&self.device);
             let dispatch = match stage {
-                EconomyStage::GroupExecute => {
-                    markets::dispatch(&self.searches.dispatches, markets::RANGE_DISPATCH)
-                }
+                EconomyStage::GroupExecute => markets::dispatch(
+                    &self.searches.dispatches,
+                    markets::RANGE_DISPATCH,
+                    count.div_ceil(self.device.workgroup as usize),
+                ),
                 EconomyStage::GroupPrepare
                 | EconomyStage::GroupFinalize
                 | EconomyStage::GroupRadixLocal
                 | EconomyStage::GroupRadixScatter
                 | EconomyStage::GroupRemainder
-                | EconomyStage::GroupRanges => {
-                    markets::dispatch(&self.searches.dispatches, markets::SORT_DISPATCH)
-                }
-                _ => self.device.count(invocations),
+                | EconomyStage::GroupRanges => markets::dispatch(
+                    &self.searches.dispatches,
+                    markets::SORT_DISPATCH,
+                    count.div_ceil(self.device.workgroup as usize),
+                ),
+                _ => self.device.count(invocations).into(),
             };
             match stage {
                 EconomyStage::MarketBoundary => {
@@ -1987,16 +1991,27 @@ impl Simulation {
                 _ => self.device.workgroup,
             };
             let dispatch = match stage {
-                economy::search::SearchStage::SearchSpatialFuel => self.device.count(count),
-                economy::search::SearchStage::EmptySort => cubecl::CubeCount::Static(1, 1, 1),
-                economy::search::SearchStage::EmptyBounds => self.device.count(
-                    economy::search::empty_bounds_invocations(members, parameters.scan),
-                ),
-                economy::search::SearchStage::FilterEmpty => self.device.count(count.div_ceil(32)),
-                economy::search::SearchStage::FinishFiltered => self.device.count(members),
-                economy::search::SearchStage::Index => self.device.count(
-                    members.div_ceil(DISCOVERY_BLOCK as usize) * self.device.workgroup as usize,
-                ),
+                economy::search::SearchStage::SearchSpatialFuel => self.device.count(count).into(),
+                economy::search::SearchStage::EmptySort => {
+                    cubecl::CubeCount::Static(1, 1, 1).into()
+                }
+                economy::search::SearchStage::EmptyBounds => self
+                    .device
+                    .count(economy::search::empty_bounds_invocations(
+                        members,
+                        parameters.scan,
+                    ))
+                    .into(),
+                economy::search::SearchStage::FilterEmpty => {
+                    self.device.count(count.div_ceil(32)).into()
+                }
+                economy::search::SearchStage::FinishFiltered => self.device.count(members).into(),
+                economy::search::SearchStage::Index => self
+                    .device
+                    .count(
+                        members.div_ceil(DISCOVERY_BLOCK as usize) * self.device.workgroup as usize,
+                    )
+                    .into(),
                 economy::search::SearchStage::Prepare
                 | economy::search::SearchStage::PrepareCandidates => {
                     cubecl::calculate_cube_count_elemwise(
@@ -2004,19 +2019,24 @@ impl Simulation {
                         count.max(1),
                         cubecl::CubeDim::new_1d(workgroup),
                     )
+                    .into()
                 }
-                economy::search::SearchStage::PrepareSelected => {
-                    markets::dispatch(&self.searches.dispatches, markets::PREPARATION_DISPATCH)
-                }
+                economy::search::SearchStage::PrepareSelected => markets::dispatch(
+                    &self.searches.dispatches,
+                    markets::PREPARATION_DISPATCH,
+                    count.div_ceil(workgroup as usize),
+                ),
                 economy::search::SearchStage::Search
                 | economy::search::SearchStage::SearchIndexed => {
-                    markets::dispatch(&self.searches.dispatches, markets::SEARCH_DISPATCH)
+                    markets::dispatch(&self.searches.dispatches, markets::SEARCH_DISPATCH, count)
                 }
                 economy::search::SearchStage::SearchFuel
                 | economy::search::SearchStage::SearchHousehold
-                | economy::search::SearchStage::Compact => {
-                    markets::dispatch(&self.searches.dispatches, markets::SEARCH_COMPACT_DISPATCH)
-                }
+                | economy::search::SearchStage::Compact => markets::dispatch(
+                    &self.searches.dispatches,
+                    markets::SEARCH_COMPACT_DISPATCH,
+                    count.div_ceil(workgroup as usize),
+                ),
             };
             economy::search::MarketSearch::launch(
                 &self.device,
@@ -2236,7 +2256,7 @@ impl Simulation {
         match market {
             Market::Payroll => economy::batch::payroll::PayrollSettlement::launch(
                 &self.device,
-                markets::dispatch(&self.searches.dispatches, markets::QUEUE_DISPATCH),
+                markets::dispatch(&self.searches.dispatches, markets::QUEUE_DISPATCH, count),
                 cubecl::CubeDim::new_1d(self.device.workgroup),
                 economy::batch::payroll::PayrollInputLaunch {
                     state: self.state.buffer_arg(),
@@ -2251,7 +2271,7 @@ impl Simulation {
             Market::Labor if self.scenario.config().bargaining.is_none() => {
                 economy::batch::labor::LaborSettlement::launch(
                     &self.device,
-                    markets::dispatch(&self.searches.dispatches, markets::QUEUE_DISPATCH),
+                    markets::dispatch(&self.searches.dispatches, markets::QUEUE_DISPATCH, count),
                     cubecl::CubeDim::new_1d(self.device.workgroup),
                     economy::batch::labor::LaborInputLaunch {
                         state: self.state.buffer_arg(),
@@ -2266,7 +2286,7 @@ impl Simulation {
                 Good::Wood | Good::Coal | Good::LuxuryClothes | Good::LuxuryFurniture,
             ) => economy::batch::quantity::QuantitySettlement::launch(
                 &self.device,
-                markets::dispatch(&self.searches.dispatches, markets::QUEUE_DISPATCH),
+                markets::dispatch(&self.searches.dispatches, markets::QUEUE_DISPATCH, count),
                 cubecl::CubeDim::new_1d(self.device.workgroup),
                 economy::batch::quantity::QuantityInputLaunch {
                     state: self.state.buffer_arg(),
@@ -2370,7 +2390,7 @@ impl Simulation {
                 false,
                 profiling::MarketProfile::Disabled,
                 _,
-                cubecl::Device::Wgpu(_),
+                cubecl::Device::Wgpu(_) | cubecl::Device::Metal(_),
             ) if self.market_replay.clock(market.into()) == parameters::MarketClock::Device => {
                 parameters::MarketClock::Device
             }
@@ -3087,7 +3107,7 @@ impl Simulation {
         let previous_execution = self.freight_execution;
         let previous_status = self.status.clone();
         self.freight_execution = match self.device.cube {
-            cubecl::Device::Wgpu(_) => FreightExecution::Buffered,
+            cubecl::Device::Wgpu(_) | cubecl::Device::Metal(_) => FreightExecution::Buffered,
             _ => FreightExecution::Synchronous,
         };
         let mut attempt = AdvanceAttempt::Pending;

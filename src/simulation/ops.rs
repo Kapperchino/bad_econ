@@ -21,6 +21,17 @@ const STATE_BUFFER_BYTES: usize = 16 * 1024 * 1024;
 const MAX_READBACK_WORDS: usize = 4 * 1024 * 1024;
 const DIRECT_READBACK_WORDS: usize = 1024;
 
+struct WorkgroupSize(u32);
+
+impl WorkgroupSize {
+    fn new(size: u32) -> Result<Self> {
+        match WORKGROUP_SIZES.contains(&size) {
+            true => Ok(Self(size)),
+            false => Err(anyhow!("workgroup must be one of {WORKGROUP_SIZES:?}")),
+        }
+    }
+}
+
 enum TensorAllocation {
     Pooled,
     Dedicated,
@@ -38,6 +49,40 @@ pub struct Device {
     pub memory_budget: MemoryBudget,
 }
 impl Device {
+    #[cfg(target_os = "macos")]
+    pub fn headless(workgroup: u32) -> Result<Self> {
+        use cubecl::metal::{MetalDevice, device::all_devices};
+        use objc2_metal::{MTLDevice, MTLGPUFamily};
+
+        let workgroup = WorkgroupSize::new(workgroup)?;
+        let devices = all_devices();
+        let discrete = devices
+            .iter()
+            .filter(|gpu| !gpu.hasUnifiedMemory())
+            .enumerate()
+            .map(|(index, gpu)| (gpu, MetalDevice::DiscreteGpu(index)));
+        let integrated = devices
+            .iter()
+            .filter(|gpu| gpu.hasUnifiedMemory())
+            .enumerate()
+            .map(|(index, gpu)| (gpu, MetalDevice::IntegratedGpu(index)));
+        let (gpu, kind) = discrete
+            .chain(integrated)
+            .find(|(gpu, _)| gpu.supportsFamily(MTLGPUFamily::Metal3))
+            .context("no GPU supporting Metal 3")?;
+        let cube = cubecl::Device::metal(kind)?;
+        let memory_budget = MemoryBudget::Reported {
+            available_bytes: super::memory::metal_available_memory(gpu),
+        };
+        Ok(Self::gpu(
+            cube,
+            gpu.name().to_string(),
+            workgroup,
+            memory_budget,
+        ))
+    }
+
+    #[cfg(not(target_os = "macos"))]
     pub fn headless(workgroup: u32) -> Result<Self> {
         let instance = wgpu::Instance::new(wgpu::InstanceDescriptor {
             backends: wgpu::Backends::VULKAN | wgpu::Backends::METAL,
@@ -90,6 +135,7 @@ impl Device {
         )
     }
     pub fn import(setup: WgpuSetup, workgroup: u32) -> Result<Self> {
+        let workgroup = WorkgroupSize::new(workgroup)?;
         match setup
             .device
             .features()
@@ -100,33 +146,41 @@ impl Device {
                 "CubeK integer reductions require GPU SHADER_INT64 support"
             ))?,
         }
-        match WORKGROUP_SIZES.contains(&workgroup) {
-            true => {
-                let name = format!("{} / {:?}", setup.adapter.get_info().name, setup.backend);
-                let memory_budget = MemoryBudget::gpu(&setup.adapter);
-                let options = burn_wgpu::RuntimeOptions::with_tasks_max(
-                    std::env::var_os("CUBECL_WGPU_MAX_TASKS")
-                        .is_none()
-                        .then_some(match setup.backend {
-                            wgpu::Backend::Metal => 512,
-                            _ => 128,
-                        }),
-                )
-                .map_err(|error| anyhow!("{error}"))?;
-                let imported = burn_wgpu::try_init_device(setup, options)
-                    .map_err(|error| anyhow!("{error}"))?;
-                let cube = cubecl::Device::Wgpu(imported);
-                let client = cube.client();
-                let name = format!("{name} / {}", client.name());
-                Ok(Self {
-                    client,
-                    cube,
-                    name,
-                    workgroup,
-                    memory_budget,
-                })
-            }
-            false => Err(anyhow!("workgroup must be one of {WORKGROUP_SIZES:?}")),
+        let name = format!("{} / {:?}", setup.adapter.get_info().name, setup.backend);
+        let memory_budget = MemoryBudget::gpu(&setup.adapter);
+        let options = burn_wgpu::RuntimeOptions::with_tasks_max(
+            std::env::var_os("CUBECL_WGPU_MAX_TASKS")
+                .is_none()
+                .then_some(match setup.backend {
+                    wgpu::Backend::Metal => 512,
+                    _ => 128,
+                }),
+        )
+        .map_err(|error| anyhow!("{error}"))?;
+        let imported =
+            burn_wgpu::try_init_device(setup, options).map_err(|error| anyhow!("{error}"))?;
+        Ok(Self::gpu(
+            cubecl::Device::Wgpu(imported),
+            name,
+            workgroup,
+            memory_budget,
+        ))
+    }
+
+    fn gpu(
+        cube: cubecl::Device,
+        name: String,
+        workgroup: WorkgroupSize,
+        memory_budget: MemoryBudget,
+    ) -> Self {
+        let client = cube.client();
+        let name = format!("{name} / {}", client.name());
+        Self {
+            client,
+            cube,
+            name,
+            workgroup: workgroup.0,
+            memory_budget,
         }
     }
     pub fn tensor(&self, words: &[u32]) -> CubeTensor {
@@ -275,18 +329,15 @@ impl Device {
         )
     }
     pub fn cpu(workgroup: u32) -> Result<Self> {
-        let cube = cubecl::Device::cpu().map_err(|error| anyhow::anyhow!("{error}"))?;
-        let client = cube.client();
-        match WORKGROUP_SIZES.contains(&workgroup) {
-            true => Ok(Self {
-                client,
-                cube,
-                name: "CubeCL CPU / LLVM".into(),
-                workgroup,
-                memory_budget: MemoryBudget::Unreported,
-            }),
-            false => Err(anyhow!("workgroup must be one of {WORKGROUP_SIZES:?}")),
-        }
+        let workgroup = WorkgroupSize::new(workgroup)?;
+        let cube = cubecl::Device::cpu()?;
+        Ok(Self {
+            client: cube.client(),
+            cube,
+            name: "CubeCL CPU / LLVM".into(),
+            workgroup: workgroup.0,
+            memory_budget: MemoryBudget::Unreported,
+        })
     }
 }
 

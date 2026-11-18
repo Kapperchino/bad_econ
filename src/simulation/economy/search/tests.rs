@@ -1920,13 +1920,15 @@ fn consumer_preparation_clears_inactive_requests_and_preserves_captured_retries_
                         markets::dispatch(
                             &simulation.searches.dispatches,
                             markets::PREPARATION_DISPATCH,
+                            count.div_ceil(workgroup as usize),
                         )
                     }
                     _ => cubecl::calculate_cube_count_elemwise(
                         &device.client,
                         count,
                         CubeDim::new_1d(workgroup),
-                    ),
+                    )
+                    .into(),
                 };
                 let resets = markets::search_counts_offset(count) + markets::search_blocks(count);
                 device.write(&simulation.searches.successes, &vec![37; resets]);
@@ -2348,8 +2350,9 @@ impl SearchProbe {
             SearchStage::PrepareSelected => markets::dispatch(
                 &simulation.searches.dispatches,
                 markets::PREPARATION_DISPATCH,
+                count.div_ceil(device.workgroup as usize),
             ),
-            _ => device.count(count),
+            _ => device.count(count).into(),
         };
         MarketSearch::launch(
             device,

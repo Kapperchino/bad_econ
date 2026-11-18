@@ -426,7 +426,11 @@ fn encode_keys(
         let launch = |stage| {
             RadixSort::launch(
                 device,
-                markets::dispatch(dispatches, markets::SORT_DISPATCH),
+                markets::dispatch(
+                    dispatches,
+                    markets::SORT_DISPATCH,
+                    count.div_ceil(layout.source_workgroup as usize),
+                ),
                 CubeDim::new_1d(layout.source_workgroup),
                 SortInputLaunch {
                     scratch: scratch.buffer_arg(),

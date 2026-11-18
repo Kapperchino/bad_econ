@@ -359,6 +359,7 @@ pub(super) fn scan_histogram(
             crate::simulation::markets::dispatch(
                 dispatches,
                 crate::simulation::markets::HISTOGRAM_DISPATCH + index * 3,
+                level.blocks,
             ),
             CubeDim::new_1d(device.workgroup),
             ActiveScanInputLaunch {
@@ -389,6 +390,7 @@ pub(super) fn scan_histogram(
             crate::simulation::markets::dispatch(
                 dispatches,
                 crate::simulation::markets::HISTOGRAM_DISPATCH + index * 3,
+                level.blocks,
             ),
             CubeDim::new_1d(device.workgroup),
             ActiveOffsetInputLaunch {

@@ -2,7 +2,7 @@
 
 A Rust simulation of households, farms, factories, trade, and research across 22 goods and services. Runs on the GPU with Burn/CubeCL and includes a Bevy viewer.
 
-Requires the [pinned Rust toolchain](rust-toolchain.toml) and a GPU supporting `SHADER_INT64`. The Linux viewer also needs ALSA development libraries.
+Requires the [pinned Rust toolchain](rust-toolchain.toml) and a GPU with Metal 3 support on macOS or `SHADER_INT64` support on Vulkan. The Linux viewer also needs ALSA development libraries.
 
 ## Run
 
@@ -14,7 +14,7 @@ cargo run --release -- run --scenario scenarios/institutions.json --days 12
 
 GPU and the industrial economy are the defaults. Use `--economy agrarian` for the simpler food economy, or load a [scenario](scenarios/) with its own population and settings.
 
-Simulation compute uses Vulkan on Windows and Linux, and Metal on macOS, preferring a high-performance GPU. On supported Vulkan devices, CubeCL's native SPIR-V compiler uses GPU buffer addresses, allowing large populations to exceed the regular wgpu 2 GiB storage binding limit. The device name includes `wgpu<spirv>` when this path is active; total VRAM must still fit the scenario.
+Simulation compute uses Vulkan on Windows and Linux, and CubeCL's native Metal backend on macOS, preferring a high-performance GPU. On supported Vulkan devices, CubeCL's native SPIR-V compiler uses GPU buffer addresses, allowing large populations to exceed the regular wgpu 2 GiB storage binding limit. The device name includes `wgpu<spirv>` when this path is active; total VRAM must still fit the scenario.
 
 - `--seed N`: generation seed; defaults to 42.
 - `--output PATH`: save results as JSON.
@@ -118,7 +118,7 @@ cargo run --locked --release --example gpu_throughput -- --sizes 1000000 --seed 
 
 This checks that the preflight and timed runs reach identical state hashes, records the median and slowest day, and saves the report before failing if the median is 300 ms or longer. Startup and reporting time are excluded from individual step timings. The benchmark uses the application's allocator and records active and reserved GPU memory for each day.
 
-Metal uses 512-task command batches by default. Set `CUBECL_WGPU_MAX_TASKS` to override batching.
+Metal records market graphs with a fixed maximum number of workgroups. On each replay, the GPU reads the current dispatch counts and skips inactive workgroups. Vulkan uses indirect dispatch and defaults to 128 tasks per command batch. Set `CUBECL_WGPU_MAX_TASKS` to override Vulkan batching.
 
 Use `--max-day-ms 300` to enforce the same strict limit on every measured day.
 

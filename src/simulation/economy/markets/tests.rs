@@ -48,7 +48,11 @@ fn empty_indirect_queues_skip_work_after_active_dispatches_on_gpu() -> Result<()
         prepare_dispatch(&device, &control, &buffers.dispatches, 129);
         DispatchProbe::launch(
             &device,
-            dispatch(&buffers.dispatches, SORT_DISPATCH),
+            dispatch(
+                &buffers.dispatches,
+                SORT_DISPATCH,
+                129u32.div_ceil(device.workgroup) as usize,
+            ),
             CubeDim::new_1d(device.workgroup),
             DispatchProbeInputLaunch {
                 executed: executed.buffer_arg(),
@@ -413,10 +417,12 @@ impl ProposalCase {
         };
         let launch = |stage| {
             let dispatch = match stage {
-                ProposalStage::RecordSearch | ProposalStage::CompactSearch => {
-                    dispatch(&buffers.dispatches, SEARCH_COMPACT_DISPATCH)
-                }
-                _ => device.count(count),
+                ProposalStage::RecordSearch | ProposalStage::CompactSearch => dispatch(
+                    &buffers.dispatches,
+                    SEARCH_COMPACT_DISPATCH,
+                    count.div_ceil(device.workgroup as usize),
+                ),
+                _ => device.count(count).into(),
             };
             ProposalSystem::launch(
                 device,

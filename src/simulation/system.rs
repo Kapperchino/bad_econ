@@ -62,6 +62,21 @@ impl AsBufferArg for CubeTensor {
     }
 }
 
+pub enum Dispatch {
+    Grid(CubeCount),
+    Bounded {
+        counts: BufferArg,
+        offset: usize,
+        max_groups: u32,
+    },
+}
+
+impl From<CubeCount> for Dispatch {
+    fn from(count: CubeCount) -> Self {
+        Self::Grid(count)
+    }
+}
+
 pub trait System: Sized + Send + Sync + 'static {
     type Input: LaunchArg;
     type Passes: GpuPass<Self::Input, Output = ()>;
@@ -90,15 +105,45 @@ pub trait System: Sized + Send + Sync + 'static {
 
     fn launch(
         device: &Device,
-        count: CubeCount,
+        count: impl Into<Dispatch>,
         dimensions: CubeDim,
         input: <Self::Input as LaunchArg>::RuntimeArg,
     ) {
-        launch_system::launch::<Self>(&device.client, count, dimensions, input);
+        match count.into() {
+            Dispatch::Grid(count) => {
+                launch_system::launch::<Self>(&device.client, count, dimensions, input)
+            }
+            Dispatch::Bounded {
+                counts,
+                offset,
+                max_groups,
+            } => {
+                let grid = CubeCount::Static(
+                    max_groups.clamp(1, 65535),
+                    max_groups.div_ceil(65535).max(1),
+                    1,
+                );
+                launch_bounded::launch::<Self>(
+                    &device.client,
+                    grid,
+                    dimensions,
+                    input,
+                    counts,
+                    offset,
+                );
+            }
+        }
     }
 }
 
 #[cube(launch)]
 fn launch_system<S: System>(input: S::Input) {
     S::Passes::execute(input);
+}
+
+#[cube(launch)]
+fn launch_bounded<S: System>(input: S::Input, counts: &[u32], #[comptime] offset: usize) {
+    if CUBE_POS_X < counts[offset] && CUBE_POS_Y < counts[offset + 1] {
+        S::Passes::execute(input);
+    }
 }

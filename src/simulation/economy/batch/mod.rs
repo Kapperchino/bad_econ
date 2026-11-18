@@ -272,13 +272,21 @@ pub(in crate::simulation) fn settle_consumers(
     };
     ConsumerPrefix::launch(
         device,
-        markets::dispatch(dispatches, markets::QUEUE_DISPATCH),
+        markets::dispatch(
+            dispatches,
+            markets::QUEUE_DISPATCH,
+            parameters.count as usize,
+        ),
         CubeDim::new_1d(device.workgroup),
         input(),
     );
     ConsumerTail::launch(
         device,
-        markets::dispatch(dispatches, markets::SORT_DISPATCH),
+        markets::dispatch(
+            dispatches,
+            markets::SORT_DISPATCH,
+            parameters.count.div_ceil(device.workgroup) as usize,
+        ),
         CubeDim::new_1d(device.workgroup),
         input(),
     );

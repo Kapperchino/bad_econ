@@ -162,15 +162,14 @@ pub(super) fn matmul(
 pub(super) fn uniform(device: &Device, shape: impl Into<Shape>, seed: u64) -> Result<CubeTensor> {
     let output = empty(device, shape);
     if output.meta.num_elements() > 0 {
-        cubek::random::with_seed(seed, || {
-            cubek::random::random_uniform(
-                &device.client,
-                0.0,
-                1.0,
-                output.clone().binding(),
-                f32::elem_type_native(),
-            )
-        })?;
+        cubek::random::random_uniform(
+            &device.client,
+            0.0,
+            1.0,
+            output.clone().binding(),
+            f32::elem_type_native(),
+            seed,
+        )?;
     }
     Ok(output)
 }

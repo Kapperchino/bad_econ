@@ -16,28 +16,30 @@ pub struct KernelDeficit {
     pub upper: u32,
 }
 
-#[cube]
-fn product96(value: Ticks, weight: u32) -> Vector<u32, Const<3>> {
-    let low = times32(value.extract(LOW_WORD), weight);
-    let high = times32(value.extract(HIGH_WORD), weight);
-    let middle = low.extract(HIGH_WORD) + high.extract(LOW_WORD);
-    let mut result = Vector::<u32, Const<3>>::new(low.extract(LOW_WORD));
-    result.insert(1usize, middle);
-    result.insert(
-        2usize,
-        high.extract(HIGH_WORD) + u32::cast_from(middle < low.extract(HIGH_WORD)),
-    );
-    result
+#[derive(CubeType, Clone, Copy)]
+struct Product96 {
+    low: u32,
+    middle: u32,
+    high: u32,
 }
 
 #[cube]
-fn wide_le(left: Vector<u32, Const<3>>, right: Vector<u32, Const<3>>) -> bool {
-    left.extract(2usize) < right.extract(2usize)
-        || (left.extract(2usize) == right.extract(2usize)
-            && left.extract(1usize) < right.extract(1usize))
-        || (left.extract(2usize) == right.extract(2usize)
-            && left.extract(1usize) == right.extract(1usize)
-            && left.extract(0usize) <= right.extract(0usize))
+fn product96(value: Ticks, weight: u32) -> Product96 {
+    let low = times32(value.extract(LOW_WORD), weight);
+    let high = times32(value.extract(HIGH_WORD), weight);
+    let middle = low.extract(HIGH_WORD) + high.extract(LOW_WORD);
+    Product96 {
+        low: low.extract(LOW_WORD),
+        middle,
+        high: high.extract(HIGH_WORD) + u32::cast_from(middle < low.extract(HIGH_WORD)),
+    }
+}
+
+#[cube]
+fn wide_le(left: &Product96, right: &Product96) -> bool {
+    left.high < right.high
+        || (left.high == right.high && left.middle < right.middle)
+        || (left.high == right.high && left.middle == right.middle && left.low <= right.low)
 }
 
 #[cube]
@@ -49,11 +51,11 @@ pub fn service_deficit(need: Ticks, delivered: Ticks, weight: u32) -> KernelDefi
         let mut high = weight + 1;
         for _ in 0..10u32 {
             let middle = (lower + high) / 2;
-            let covered = wide_le(product96(need, middle), numerator);
+            let covered = wide_le(&product96(need, middle), &numerator);
             lower = select(covered, middle, lower);
             high = select(covered, high, middle);
         }
-        let exact = wide_le(numerator, product96(need, lower));
+        let exact = wide_le(&numerator, &product96(need, lower));
         upper = lower + u32::cast_from(!exact);
     }
     KernelDeficit { lower, upper }

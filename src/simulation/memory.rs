@@ -24,26 +24,30 @@ impl MemoryBudget {
     }
 }
 
+#[cfg(target_vendor = "apple")]
+pub(super) fn metal_available_memory(
+    device: &objc2::runtime::ProtocolObject<dyn objc2_metal::MTLDevice>,
+) -> u64 {
+    use objc2_metal::MTLDevice;
+
+    let available = device
+        .recommendedMaxWorkingSetSize()
+        .saturating_sub(device.currentAllocatedSize() as u64);
+    match device.hasUnifiedMemory() {
+        true => {
+            let mut system = sysinfo::System::new();
+            system.refresh_memory();
+            available.min(system.available_memory())
+        }
+        false => available,
+    }
+}
+
 fn available_memory(adapter: &wgpu::Adapter) -> Option<u64> {
     match adapter.get_info().backend {
         #[cfg(target_vendor = "apple")]
-        wgpu::Backend::Metal => {
-            unsafe { adapter.as_hal::<wgpu::hal::api::Metal>() }.map(|adapter| {
-                use objc2_metal::MTLDevice;
-                let device = adapter.raw_device();
-                let available = device
-                    .recommendedMaxWorkingSetSize()
-                    .saturating_sub(device.currentAllocatedSize() as u64);
-                match device.hasUnifiedMemory() {
-                    true => {
-                        let mut system = sysinfo::System::new();
-                        system.refresh_memory();
-                        available.min(system.available_memory())
-                    }
-                    false => available,
-                }
-            })
-        }
+        wgpu::Backend::Metal => unsafe { adapter.as_hal::<wgpu::hal::api::Metal>() }
+            .map(|adapter| metal_available_memory(adapter.raw_device())),
         #[cfg(any(
             windows,
             target_os = "linux",

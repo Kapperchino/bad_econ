@@ -409,28 +409,39 @@ pub fn launch_buffered(
             },
         );
     }
+    let active_groups = parameters.count.div_ceil(device.workgroup) as usize;
+    let resource_groups = (config.railway.firms as usize
+        + config.railway.region_count as usize
+        + parameters.count as usize)
+        .div_ceil(device.workgroup as usize);
     let dispatch = match (execution, stage) {
-        (_, Stage::Queue | Stage::AdmitClaims) => CubeCount::Static(1, 1, 1),
+        (_, Stage::Queue | Stage::AdmitClaims) => CubeCount::Static(1, 1, 1).into(),
         (Execution::Initial | Execution::Retry, Stage::EmitClaims) => {
-            markets::dispatch(&buffers.dispatches, CLAIM_ACTIVE_DISPATCH)
+            markets::dispatch(&buffers.dispatches, CLAIM_ACTIVE_DISPATCH, active_groups)
         }
-        (Execution::Initial | Execution::Retry, Stage::Resolve) => {
-            markets::dispatch(&buffers.dispatches, CLAIM_RESOURCE_DISPATCH)
-        }
+        (Execution::Initial | Execution::Retry, Stage::Resolve) => markets::dispatch(
+            &buffers.dispatches,
+            CLAIM_RESOURCE_DISPATCH,
+            resource_groups,
+        ),
         (_, Stage::Propose | Stage::EmitClaims | Stage::Commit | Stage::CommitFinal) => {
-            markets::dispatch(&buffers.dispatches, 9)
+            markets::dispatch(&buffers.dispatches, 9, active_groups)
         }
         (Execution::Retry, Stage::Reset) => {
-            markets::dispatch(&buffers.dispatches, RETRY_RESET_DISPATCH)
+            markets::dispatch(&buffers.dispatches, RETRY_RESET_DISPATCH, resource_groups)
         }
-        (Execution::Retry, Stage::CountClaims | Stage::Release) => {
-            markets::dispatch(&buffers.dispatches, RETRY_RESOURCE_DISPATCH)
+        (Execution::Retry, Stage::CountClaims | Stage::Release) => markets::dispatch(
+            &buffers.dispatches,
+            RETRY_RESOURCE_DISPATCH,
+            resource_groups,
+        ),
+        (_, Stage::Initialize | Stage::Reset) => {
+            markets::dispatch(&buffers.dispatches, 6, resource_groups)
         }
-        (_, Stage::Initialize | Stage::Reset) => markets::dispatch(&buffers.dispatches, 6),
-        (_, Stage::ClaimOffsets) => {
-            device.count((config.actors + config.railway.region_count) as usize + 1)
-        }
-        _ => markets::dispatch(&buffers.dispatches, 0),
+        (_, Stage::ClaimOffsets) => device
+            .count((config.actors + config.railway.region_count) as usize + 1)
+            .into(),
+        _ => markets::dispatch(&buffers.dispatches, 0, resource_groups),
     };
     match stage {
         Stage::SortClaims => claims::sort_buffered(device, buffers, control, execution),

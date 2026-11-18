@@ -28,7 +28,7 @@ def measure(executable, target, count, output):
     print(f'Starting {target}: {count} tests', flush=True)
     with (output / f'{target}.log').open('w', encoding='utf-8') as log, subprocess.Popen(
         [executable, '--test-threads=1', '--color', 'never'],
-        stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True, encoding='utf-8', errors='replace'
+        stdout=subprocess.PIPE, stderr=log, text=True, encoding='utf-8', errors='replace'
     ) as process:
         for line in process.stdout:
             log.write(line)

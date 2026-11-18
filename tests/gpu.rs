@@ -53,6 +53,8 @@ fn gpu_memory_budget_rejects_scenarios_before_allocation() -> Result<()> {
     let scenario = Scenario::baseline(1_000_000, 42, Experiment::Transport)?;
     assert!(scenario.memory_estimate() > 4 * 1024 * 1024 * 1024);
     let mut device = support::device(64)?;
+    #[cfg(target_os = "macos")]
+    assert!(matches!(device.cube, cubecl::Device::Metal(_)));
     eprintln!("{} memory budget: {:?}", device.name, device.memory_budget);
     assert!(matches!(
         device.memory_budget,

@@ -78,15 +78,28 @@ pub(in crate::simulation) fn filtered_count(actors: u32, peer: u32) -> u32 {
 pub(in crate::simulation) fn dispatch(
     control: &burn_wgpu::CubeTensor,
     offset: usize,
-) -> cubecl::CubeCount {
-    let handle = control.handle.clone();
-    let size = handle.size_in_used();
-    cubecl::CubeCount::Dynamic(
-        handle
-            .offset_start((offset * 4) as u64)
-            .offset_end(size - ((offset + 3) * 4) as u64)
-            .binding(),
-    )
+    max_groups: usize,
+) -> crate::simulation::system::Dispatch {
+    use crate::simulation::system::Dispatch;
+
+    match control.device {
+        cubecl::Device::Metal(_) => Dispatch::Bounded {
+            counts: control.buffer_arg(),
+            offset,
+            max_groups: u32::try_from(max_groups).expect("dispatch exceeds GPU indexing capacity"),
+        },
+        _ => {
+            let handle = control.handle.clone();
+            let size = handle.size_in_used();
+            cubecl::CubeCount::Dynamic(
+                handle
+                    .offset_start((offset * 4) as u64)
+                    .offset_end(size - ((offset + 3) * 4) as u64)
+                    .binding(),
+            )
+            .into()
+        }
+    }
 }
 
 #[derive(Clone, Copy)]

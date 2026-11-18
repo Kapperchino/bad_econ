@@ -254,7 +254,11 @@ pub(super) fn sort_buffered(
                 dispatch(tile as u32);
                 ClaimBlocks::launch(
                     device,
-                    markets::dispatch(&buffers.dispatches, SORT_DISPATCH),
+                    markets::dispatch(
+                        &buffers.dispatches,
+                        SORT_DISPATCH,
+                        buffers.claim_capacity.div_ceil(tile),
+                    ),
                     CubeDim::new_1d(256),
                     BlockInputLaunch {
                         claims: buffers.claims.buffer_arg(),
@@ -277,7 +281,11 @@ fn merge_passes(device: &Device, buffers: &Buffers, mut width: usize) {
     while width < buffers.claim_capacity {
         ClaimSort::launch(
             device,
-            markets::dispatch(&buffers.dispatches, SORT_DISPATCH),
+            markets::dispatch(
+                &buffers.dispatches,
+                SORT_DISPATCH,
+                buffers.claim_capacity.div_ceil(device.workgroup as usize),
+            ),
             CubeDim::new_1d(device.workgroup),
             SortInputLaunch {
                 claims: buffers.claims.buffer_arg(),
