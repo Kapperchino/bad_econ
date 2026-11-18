@@ -37,7 +37,7 @@ impl GpuPass<DispatchProbeInput> for CountDispatches {
 #[test]
 fn empty_indirect_queues_skip_work_after_active_dispatches_on_gpu() -> Result<()> {
     let device = crate::simulation::tests::device(64)?;
-    let buffers = SearchBuffers::new(&device, 129);
+    let dispatches = SearchBuffers::dispatch_buffer(&device);
     let control = device.empty(CONTROL_WORDS + 3);
     let executed = device.tensor(&[17]);
     let mut expected = 17;
@@ -45,11 +45,11 @@ fn empty_indirect_queues_skip_work_after_active_dispatches_on_gpu() -> Result<()
         let mut words = vec![0; CONTROL_WORDS + 3];
         words[CONSTRUCTED_EVENTS_WORD] = active;
         device.write(&control, &words);
-        prepare_dispatch(&device, &control, &buffers.dispatches, 129);
+        prepare_dispatch(&device, &control, &dispatches, 129);
         DispatchProbe::launch(
             &device,
             dispatch(
-                &buffers.dispatches,
+                &dispatches,
                 SORT_DISPATCH,
                 129u32.div_ceil(device.workgroup) as usize,
             ),
@@ -120,7 +120,7 @@ fn compaction_and_ranges_preserve_buffers_after_unlatched_faults_on_gpu() -> Res
             scratch: simulation.scratch.buffer_arg(),
             control: simulation.control.buffer_arg(),
             parameters: parameters.launch(),
-            stage: search::SearchStage::Compact,
+            program: search::SearchStage::Compact.program(&simulation.config),
             status_reset: search::StatusReset::Full,
         },
     );

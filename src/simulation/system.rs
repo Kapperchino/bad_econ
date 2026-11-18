@@ -66,7 +66,7 @@ pub enum Dispatch {
     Grid(CubeCount),
     Bounded {
         counts: BufferArg,
-        offset: usize,
+        offset: u32,
         max_groups: u32,
     },
 }
@@ -142,8 +142,8 @@ fn launch_system<S: System>(input: S::Input) {
 }
 
 #[cube(launch)]
-fn launch_bounded<S: System>(input: S::Input, counts: &[u32], #[comptime] offset: usize) {
-    if CUBE_POS_X < counts[offset] && CUBE_POS_Y < counts[offset + 1] {
+fn launch_bounded<S: System>(input: S::Input, counts: &[u32], offset: u32) {
+    if CUBE_POS_X < counts[offset as usize] && CUBE_POS_Y < counts[offset as usize + 1] {
         S::Passes::execute(input);
     }
 }

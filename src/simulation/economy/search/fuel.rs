@@ -25,6 +25,7 @@ pub(super) fn search(
     scratch: &[u32],
     control: &[Atomic<u32>],
     parameters: &EconomyParameters,
+    #[comptime] suppliers: SupplierSearch,
     #[comptime] order: SearchOrder,
 ) {
     let job = ABSOLUTE_POS as u32;
@@ -66,8 +67,7 @@ pub(super) fn search(
             let px = actors[ActorLayout::X * (actors.len() / ActorLayout::WORDS) + id as usize];
             let py = actors[ActorLayout::Y * (actors.len() / ActorLayout::WORDS) + id as usize];
             let radius = config.search_radius;
-            let whole_map =
-                comptime!(config.spatial_side == 1 && config.map_size <= config.search_radius);
+            let whole_map = comptime!(matches!(suppliers, SupplierSearch::SingleCell { .. }));
             let maximum_delivery_cost = times32(
                 max(ceildiv(radius, config.shipment_speed), 1),
                 config.delivery_penalty,
@@ -321,6 +321,7 @@ pub(super) fn search(
                     trip: 0u32,
                 };
                 let cacheable = cells == 1
+                    && empty::cache_fits(config, &*searches, spatial[cells as usize])
                     && (stocked == 0
                         || parameters.traded_good() != comptime!(Good::Bread as u32)
                             && empty::compacted(config, spatial[cells as usize]));

@@ -469,7 +469,7 @@ fn compacted_goods_buyers_match_event_checks_rejections_and_faults_on_gpu() -> R
                     control: simulation.control.buffer_arg(),
                     parameters: parameters.launch(),
                     status_reset: search::StatusReset::Active,
-                    stage: search::SearchStage::Compact,
+                    program: search::SearchStage::Compact.program(&simulation.config),
                 },
             );
             let expected_control = device.tensor(&vec![0; CONTROL_WORDS]);

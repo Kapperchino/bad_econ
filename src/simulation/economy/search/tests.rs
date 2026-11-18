@@ -651,7 +651,7 @@ impl SearchProbe {
             &vec![NO_ACTOR; count * ProposalLayout::WORDS],
         );
         let mut searches = match cache {
-            CacheRefresh::Reset => vec![0; count * 18],
+            CacheRefresh::Reset => vec![0; simulation.searches.requests.meta.num_elements()],
             CacheRefresh::Retain => device.read(&simulation.searches.requests)?,
         };
         searches[..count * 6].fill(0);
@@ -703,7 +703,7 @@ impl SearchProbe {
                     control: simulation.control.buffer_arg(),
                     parameters: parameters.launch(),
                     status_reset: StatusReset::Full,
-                    stage: SearchStage::Index,
+                    program: SearchStage::Index.program(&simulation.config),
                 },
             );
             if matches!(parameters.market, MarketFlag::Consumer(_)) {
@@ -729,12 +729,20 @@ impl SearchProbe {
                             control: simulation.control.buffer_arg(),
                             parameters: parameters.launch(),
                             status_reset: StatusReset::Full,
-                            stage,
+                            program: stage.program(&simulation.config),
                         },
                     );
                 }
             }
         }
+        let stage = match execution {
+            SearchExecution::Prepare => SearchStage::Prepare,
+            SearchExecution::ScalarFuel => SearchStage::SearchFuel,
+            SearchExecution::ScalarHousehold => SearchStage::SearchHousehold,
+            SearchExecution::SpatialFuel => SearchStage::SearchSpatialFuel,
+            SearchExecution::Cached => SearchStage::SearchIndexed,
+            _ => SearchStage::Search,
+        };
         match execution {
             SearchExecution::Serial => EconomySystem::launch_single(
                 device,
@@ -771,14 +779,7 @@ impl SearchProbe {
                     control: simulation.control.buffer_arg(),
                     parameters: parameters.launch(),
                     status_reset: StatusReset::Full,
-                    stage: match execution {
-                        SearchExecution::Prepare => SearchStage::Prepare,
-                        SearchExecution::ScalarFuel => SearchStage::SearchFuel,
-                        SearchExecution::ScalarHousehold => SearchStage::SearchHousehold,
-                        SearchExecution::SpatialFuel => SearchStage::SearchSpatialFuel,
-                        SearchExecution::Cached => SearchStage::SearchIndexed,
-                        _ => SearchStage::Search,
-                    },
+                    program: stage.program(&simulation.config),
                 },
             ),
         }
@@ -1568,6 +1569,45 @@ fn indexed_empty_suppliers_preserve_rotated_ties_across_cells_on_gpu() -> Result
 }
 
 #[test]
+fn supplier_cache_capacity_preserves_rotated_ties_at_the_inline_boundary_on_gpu() -> Result<()> {
+    for (good, suppliers, fields, cached) in [
+        (Good::Linen, 256, 18, 1),
+        (Good::Linen, 257, 19, 1),
+        (Good::Grain, 257, 18, 0),
+    ] {
+        let mut probe =
+            SearchProbe::with_suppliers(SupplyCase::Empty, 0, Market::Consumer(good), suppliers)?;
+        let count = probe.state.actors.len();
+        assert_eq!(
+            probe.simulation.searches.requests.meta.num_elements(),
+            count * fields
+        );
+        probe.state.set(Field::inventory(good), 0, 0);
+        for firm in 1..count {
+            probe.state.set(Field::Price, firm, 1);
+        }
+        for rotation in [0, suppliers - 1, suppliers] {
+            probe.parameters.settlement_rotation = rotation;
+            let expected = probe.outcome(SearchExecution::Serial)?;
+            assert_eq!(
+                expected.proposal[ProposalLayout::ACTOR],
+                rotation % suppliers + 1
+            );
+            let actual =
+                probe.outcome_with_cache(SearchExecution::ScalarFuel, 64, CacheRefresh::Retain)?;
+            assert_eq!(actual, expected);
+            let header = probe.simulation.device.read_range(
+                &probe.simulation.searches.requests,
+                14 * count,
+                1,
+            )?[0];
+            assert_eq!(header & 1, cached);
+        }
+    }
+    Ok(())
+}
+
+#[test]
 fn empty_supplier_cache_summary_preserves_empty_single_word_and_cross_word_ties_on_gpu()
 -> Result<()> {
     #[derive(Clone, Copy, Debug)]
@@ -1948,7 +1988,7 @@ fn consumer_preparation_clears_inactive_requests_and_preserves_captured_retries_
                         control: simulation.control.buffer_arg(),
                         parameters: parameters.launch(),
                         status_reset: StatusReset::Full,
-                        stage,
+                        program: stage.program(&simulation.config),
                     },
                 );
                 assert_eq!(
@@ -2370,7 +2410,7 @@ impl SearchProbe {
                 control: simulation.control.buffer_arg(),
                 parameters: self.parameters.launch(),
                 status_reset: StatusReset::Active,
-                stage,
+                program: stage.program(&simulation.config),
             },
         );
         markets::prepare_dispatch(

@@ -1,7 +1,9 @@
 use super::*;
+use crate::domain::SupplierCacheLayout;
 
 pub(super) const BLOCK: u32 = 8;
-pub(super) const LIMIT: u32 = 2048;
+pub(super) const LIMIT: u32 = SupplierCacheLayout::SUPPLIER_LIMIT as u32;
+const INLINE_WORDS: u32 = SupplierCacheLayout::INLINE_WORDS as u32;
 const FIELDS: u32 = 8;
 const CACHE_STATE_BITS: u32 = 4;
 const CACHE_STATE_MASK: u32 = (1 << CACHE_STATE_BITS) - 1;
@@ -74,10 +76,18 @@ struct Buyer {
 #[cube]
 fn cache_word(config: &EconomyConfig, buyer: u32, word: u32) -> u32 {
     select(
-        word < 8,
-        6 * config.actors + 8 * buyer + word,
-        18 * config.actors + comptime!(markets::EMPTY_CACHE_EXTRA_WORDS as u32) * buyer + word - 8,
+        word < INLINE_WORDS,
+        6 * config.actors + INLINE_WORDS * buyer + word,
+        (comptime!(markets::SEARCH_REQUEST_FIELDS as u32) + word - INLINE_WORDS) * config.actors
+            + buyer,
     )
+}
+
+#[cube]
+pub(super) fn cache_fits(config: &EconomyConfig, searches: &[u32], suppliers: u32) -> bool {
+    let extra = max(ceildiv(suppliers, 32), INLINE_WORDS) - INLINE_WORDS;
+    let fields = comptime!(markets::SEARCH_REQUEST_FIELDS) + extra as usize;
+    fields * config.actors as usize <= searches.len()
 }
 
 #[cube]

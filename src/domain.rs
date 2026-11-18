@@ -35,6 +35,7 @@ pub use population::{
     BehaviorPolicy, FirmSeed, HouseholdSeed, InitialTotals, Population, Technique,
 };
 pub use resources::{ProductionSite, ResourceMap, ResourceRegion};
+pub(crate) use supply::SupplierCacheLayout;
 
 pub const SCENARIO_VERSION: u32 = 2;
 const CHECKPOINT_VERSION: u32 = 23;
@@ -1105,7 +1106,7 @@ impl Scenario {
             ) as u64
                 * 164
             + actors * 80
-            + actors * 56 * 4
+            + actors * SupplierCacheLayout::new(&self.initial_actors).extra_words as u64 * 4
             + actors * 4
             + 12
             + match self.config.railway.companies.is_empty() {
@@ -1134,7 +1135,7 @@ impl Scenario {
                         + 1
                         + 2 * self.config.railway.segments.len() as u64
                         + railway::FREIGHT_DISPATCH_WORDS as u64
-                        + 6)
+                        + railway::FREIGHT_PROGRESS_WORDS as u64)
                         * 4
                 }
             }

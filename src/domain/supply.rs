@@ -1,4 +1,34 @@
-use super::{Good, ScenarioConfig, enterprise::HouseholdProduction};
+use super::{ActorRows, Good, ScenarioConfig, enterprise::HouseholdProduction};
+
+pub(crate) struct SupplierCacheLayout {
+    pub extra_words: usize,
+}
+
+impl SupplierCacheLayout {
+    pub const INLINE_WORDS: usize = 8;
+    pub const SUPPLIER_LIMIT: usize = 2048;
+
+    pub fn new(actors: &ActorRows) -> Self {
+        let mut producers = [0usize; Good::COUNT];
+        for firm in actors.firm_indices() {
+            producers[actors.kind[firm] as usize - 1] += 1;
+        }
+        let largest = Good::ALL
+            .into_iter()
+            .filter(|good| {
+                matches!(good, Good::Coal | Good::Wood) || good.consumption_interval() > 1
+            })
+            .map(|good| producers[good as usize - 1])
+            .max()
+            .unwrap_or(0);
+        Self {
+            extra_words: largest
+                .min(Self::SUPPLIER_LIMIT)
+                .div_ceil(u32::BITS as usize)
+                .saturating_sub(Self::INLINE_WORDS),
+        }
+    }
+}
 
 pub(super) struct StartingReserves {
     pub household_stock: u64,

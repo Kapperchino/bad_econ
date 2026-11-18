@@ -199,7 +199,7 @@ fn plane_tick_prefix(value: Ticks) -> TickPrefix {
         stride *= 2;
     }
     let plane = UNIT_POS / PLANE_DIM;
-    let mut planes = Shared::<[Ticks]>::new_slice(256usize);
+    let mut planes = WorkgroupTree::planes::<Ticks>();
     if UNIT_POS_PLANE == min(PLANE_DIM, CUBE_DIM - plane * PLANE_DIM) - 1 {
         planes[plane as usize] = inclusive;
     }

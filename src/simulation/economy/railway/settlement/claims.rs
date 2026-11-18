@@ -3,8 +3,6 @@ use super::*;
 #[cfg(test)]
 mod tests;
 
-const SORT_DISPATCH: usize = 12;
-
 const SORT_TILE: usize = 2048;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -14,7 +12,7 @@ pub(super) enum SortMethod {
 }
 
 impl SortMethod {
-    fn tile(self) -> usize {
+    pub(super) fn tile(self) -> usize {
         match self {
             Self::Merge => 1,
             Self::Block2048 => SORT_TILE,
@@ -116,11 +114,9 @@ fn emit_claim(input: &mut Input, claim: Claim) {
 
 #[cube]
 pub(super) fn emit(input: &mut Input, invocation: u32) {
-    if invocation < input.progress[ACTIVE].load() {
-        let priority = input.queue[invocation as usize];
-        let buyer = input.scratch
-            [(input.parameters.sort_source + input.parameters.count + priority) as usize]
-            + input.parameters.offset;
+    if invocation < active_bookings(&*input) {
+        let priority = booking_priority(&*input, invocation);
+        let buyer = booking_buyer(&*input, priority);
         if input.bookings[buyer as usize * FREIGHT_BOOKING_WORDS]
             == comptime!(BookingState::Ready as u32)
         {
@@ -164,40 +160,10 @@ pub(super) fn emit(input: &mut Input, invocation: u32) {
 }
 
 #[derive(CubeType, CubeLaunch)]
-struct DispatchInput {
-    progress: Box<[Atomic<u32>]>,
+struct SortInput {
     control: Box<[Atomic<u32>]>,
-    dispatches: Box<[u32]>,
-    workgroup: u32,
     #[cube(comptime)]
     execution: Execution,
-}
-
-struct ClaimDispatch;
-struct PrepareClaims;
-
-impl System for ClaimDispatch {
-    type Input = DispatchInput;
-    type Passes = gpu_passes![PrepareClaims];
-}
-
-#[cube]
-impl GpuPass<DispatchInput> for PrepareClaims {
-    type Output = ();
-
-    fn execute(mut input: DispatchInput) {
-        let mut groups = 0u32;
-        if execution_enabled(&input.progress, &input.control, comptime!(input.execution)) {
-            groups = ceildiv(input.progress[CLAIM_COUNT].load(), input.workgroup);
-        }
-        input.dispatches[SORT_DISPATCH] = min(groups, 65535);
-        input.dispatches[SORT_DISPATCH + 1] = ceildiv(max(groups, 1), 65535);
-        input.dispatches[SORT_DISPATCH + 2] = 1;
-    }
-}
-
-#[derive(CubeType, CubeLaunch)]
-struct SortInput {
     claims: Box<[u32]>,
     progress: Box<[Atomic<u32>]>,
     capacity: u32,
@@ -233,57 +199,54 @@ pub(super) fn sort_buffered(
     buffers: &Buffers,
     control: &CubeTensor,
     execution: Execution,
-) {
+) -> usize {
+    let mut launches = 0;
     if buffers.claim_capacity > 0 {
-        let dispatch = |workgroup| {
-            ClaimDispatch::launch_single(
+        if let Execution::Immediate(_) = execution {
+            admit_claims(device, buffers, control, execution);
+            launches += 1;
+        }
+        let tile = buffers.sorting.tile();
+        if let SortMethod::Block2048 = buffers.sorting {
+            ClaimBlocks::launch(
                 device,
-                DispatchInputLaunch {
+                markets::dispatch(
+                    &buffers.dispatches,
+                    BLOCK_SORT_DISPATCH,
+                    buffers.claim_capacity.div_ceil(tile),
+                ),
+                CubeDim::new_1d(256),
+                BlockInputLaunch {
+                    claims: buffers.claims.buffer_arg(),
                     progress: buffers.progress.buffer_arg(),
+                    capacity: buffers.claim_capacity as u32,
+                    tile,
                     control: control.buffer_arg(),
-                    dispatches: buffers.dispatches.buffer_arg(),
-                    workgroup,
                     execution,
                 },
             );
-        };
-        let tile = buffers.sorting.tile();
-        match buffers.sorting {
-            SortMethod::Merge => dispatch(device.workgroup),
-            _ => {
-                dispatch(tile as u32);
-                ClaimBlocks::launch(
-                    device,
-                    markets::dispatch(
-                        &buffers.dispatches,
-                        SORT_DISPATCH,
-                        buffers.claim_capacity.div_ceil(tile),
-                    ),
-                    CubeDim::new_1d(256),
-                    BlockInputLaunch {
-                        claims: buffers.claims.buffer_arg(),
-                        progress: buffers.progress.buffer_arg(),
-                        capacity: buffers.claim_capacity as u32,
-                        tile,
-                    },
-                );
-                if buffers.claim_capacity > tile {
-                    dispatch(device.workgroup);
-                }
-            }
+            launches += 1;
         }
-        merge_passes(device, buffers, tile);
+        launches += merge_passes(device, buffers, control, execution, tile);
     }
+    launches
 }
 
-fn merge_passes(device: &Device, buffers: &Buffers, mut width: usize) {
+fn merge_passes(
+    device: &Device,
+    buffers: &Buffers,
+    control: &CubeTensor,
+    execution: Execution,
+    mut width: usize,
+) -> usize {
+    let mut launches = 0;
     let mut source = (buffers.claim_capacity * FREIGHT_CLAIM_WORDS) as u32;
     while width < buffers.claim_capacity {
         ClaimSort::launch(
             device,
             markets::dispatch(
                 &buffers.dispatches,
-                SORT_DISPATCH,
+                MERGE_SORT_DISPATCH,
                 buffers.claim_capacity.div_ceil(device.workgroup as usize),
             ),
             CubeDim::new_1d(device.workgroup),
@@ -293,15 +256,22 @@ fn merge_passes(device: &Device, buffers: &Buffers, mut width: usize) {
                 capacity: buffers.claim_capacity as u32,
                 source,
                 width: width as u32,
+                control: control.buffer_arg(),
+                execution,
             },
         );
         source = (buffers.claim_capacity * (2 * FREIGHT_CLAIM_WORDS + 1) - source as usize) as u32;
         width *= 2;
+        launches += 1;
     }
+    launches
 }
 
 #[derive(CubeType, CubeLaunch)]
 struct BlockInput {
+    control: Box<[Atomic<u32>]>,
+    #[cube(comptime)]
+    execution: Execution,
     claims: Box<[u32]>,
     progress: Box<[Atomic<u32>]>,
     capacity: u32,
@@ -324,7 +294,9 @@ impl GpuPass<BlockInput> for SortClaimBlocks {
     fn execute(mut input: BlockInput) {
         let count = input.progress[CLAIM_COUNT].load();
         let start = CUBE_POS as u32 * comptime!(input.tile as u32);
-        if start < count {
+        if start < count
+            && execution_enabled(&input.progress, &input.control, comptime!(input.execution))
+        {
             let mut extent = 1u32;
             while extent < min(count - start, comptime!(input.tile as u32)) {
                 extent *= 2;
@@ -391,7 +363,9 @@ impl GpuPass<SortInput> for SortClaims {
     fn execute(mut input: SortInput) {
         let invocation = ABSOLUTE_POS as u32;
         let count = input.progress[CLAIM_COUNT].load();
-        if invocation < count {
+        if invocation < count
+            && execution_enabled(&input.progress, &input.control, comptime!(input.execution))
+        {
             let index = input.claims[(input.source + invocation) as usize];
             let claim = Claim::load(&input.claims, index);
             let start = invocation / (2 * input.width) * (2 * input.width);

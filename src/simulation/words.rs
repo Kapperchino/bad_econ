@@ -84,17 +84,7 @@ pub fn positive(a: Ticks, b: Ticks) -> Ticks {
 }
 #[cube]
 pub fn times32(a: u32, b: u32) -> Ticks {
-    let al = a & HALF_WORD_MASK;
-    let ah = a >> HALF_WORD_BITS;
-    let bl = b & HALF_WORD_MASK;
-    let bh = b >> HALF_WORD_BITS;
-    let low = al * bl;
-    let middle1 = ah * bl + (low >> HALF_WORD_BITS);
-    let middle2 = al * bh + (middle1 & HALF_WORD_MASK);
-    ticks(
-        (middle2 << HALF_WORD_BITS) | (low & HALF_WORD_MASK),
-        ah * bh + (middle1 >> HALF_WORD_BITS) + (middle2 >> HALF_WORD_BITS),
-    )
+    ticks(a * b, u32::mul_hi(a, b))
 }
 #[cube]
 pub fn times(a: Ticks, b: u32) -> CheckedTicks {

@@ -26,13 +26,10 @@ pub struct RailNetwork {
     pub enabled: Feature,
     #[cube(comptime)]
     pub routes_enabled: Feature,
-    #[cube(comptime)]
     pub nodes: u32,
     pub company_count: u32,
     pub segment_count: u32,
-    #[cube(comptime)]
     pub speed_multiplier: u32,
-    #[cube(comptime)]
     pub length_unit: u32,
     pub stations: Box<[u32]>,
     pub access: Box<[u32]>,
@@ -1207,11 +1204,7 @@ impl FreightRequest {
                 + max(
                     ceildiv(
                         config.railway.routes[base],
-                        comptime!(
-                            config
-                                .shipment_speed
-                                .wrapping_mul(config.railway.speed_multiplier)
-                        ),
+                        config.shipment_speed * config.railway.speed_multiplier,
                     ),
                     1,
                 );
@@ -1270,11 +1263,7 @@ fn quotes(config: &mut EconomyConfig) {
                 days: max(
                     ceildiv(
                         config.railway.routes[base],
-                        comptime!(
-                            config
-                                .shipment_speed
-                                .wrapping_mul(config.railway.speed_multiplier)
-                        ),
+                        config.shipment_speed * config.railway.speed_multiplier,
                     ),
                     1,
                 ),
@@ -1334,11 +1323,7 @@ pub(super) fn delivery_days(config: &EconomyConfig, request: DeliveryRequest) ->
                 + max(
                     ceildiv(
                         config.railway.routes[base],
-                        comptime!(
-                            config
-                                .shipment_speed
-                                .wrapping_mul(config.railway.speed_multiplier)
-                        ),
+                        config.shipment_speed * config.railway.speed_multiplier,
                     ),
                     1,
                 );

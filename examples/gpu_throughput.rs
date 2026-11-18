@@ -73,8 +73,10 @@ fn main() -> Result<()> {
         let preflight_seconds = preflight_start.elapsed().as_secs_f64();
         let startup = Instant::now();
         let mut simulation = starting_simulation(scenario, device, args.start_day)?;
+        simulation.device.sync()?;
         let startup_seconds = startup.elapsed().as_secs_f64();
         (0..args.warmup).try_for_each(|_| simulation.advance())?;
+        simulation.device.sync()?;
         let starting_day = simulation.snapshot.day;
         let readback_before = simulation.readback_bytes;
         let mut daily = Vec::new();
@@ -83,6 +85,7 @@ fn main() -> Result<()> {
         for _ in 0..days {
             let day_start = Instant::now();
             simulation.advance()?;
+            simulation.device.sync()?;
             let elapsed = day_start.elapsed();
             durations.push(elapsed);
             let memory = simulation.memory_usage();

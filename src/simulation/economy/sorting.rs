@@ -497,20 +497,13 @@ impl System for SortDispatch {
 }
 
 #[cube]
-fn store_dispatch(dispatches: &mut [u32], offset: usize, groups: u32) {
-    dispatches[offset] = min(groups, 65535);
-    dispatches[offset + 1] = ceildiv(max(groups, 1), 65535);
-    dispatches[offset + 2] = 1;
-}
-
-#[cube]
 impl GpuPass<SortDispatchInput> for PrepareSort {
     type Output = ();
 
     fn execute(mut input: SortDispatchInput) {
         let active = input.control[crate::simulation::flags::CONSTRUCTED_EVENTS_WORD].load();
         let groups = ceildiv(active, input.source_workgroup);
-        store_dispatch(
+        markets::store_dispatch(
             &mut input.dispatches,
             comptime!(markets::SORT_DISPATCH),
             groups,
@@ -518,7 +511,7 @@ impl GpuPass<SortDispatchInput> for PrepareSort {
         let mut count = input.bins * groups;
         for level in 0..6usize {
             let groups = ceildiv(count, input.histogram_span);
-            store_dispatch(
+            markets::store_dispatch(
                 &mut input.dispatches,
                 comptime!(markets::HISTOGRAM_DISPATCH) + level * 3,
                 groups,

@@ -92,6 +92,12 @@ pub(super) fn vector_width(device: &Device, elements: usize) -> usize {
 }
 
 pub(super) fn floats(device: &Device, shape: impl Into<Shape>, values: &[f32]) -> CubeTensor {
+    let shape = shape.into();
+    assert_eq!(
+        shape.num_elements(),
+        values.len(),
+        "float upload shape mismatch"
+    );
     let handle = match values.len() {
         0 => device.client.empty(size_of::<f32>()),
         _ => device
@@ -101,7 +107,7 @@ pub(super) fn floats(device: &Device, shape: impl Into<Shape>, values: &[f32]) -
     CubeTensor::new_contiguous(
         device.client.clone(),
         device.cube.clone(),
-        shape.into(),
+        shape,
         handle,
         DType::F32,
     )
@@ -122,10 +128,20 @@ pub(super) fn empty(device: &Device, shape: impl Into<Shape>) -> CubeTensor {
 }
 
 pub(super) fn reshape(tensor: &CubeTensor, shape: impl Into<Shape>) -> CubeTensor {
+    let shape = shape.into();
+    assert_eq!(
+        shape.num_elements(),
+        tensor.meta.num_elements(),
+        "reshape size mismatch"
+    );
+    assert!(
+        tensor.is_contiguous() && !tensor.meta.is_tiled(),
+        "reshape requires contiguous rows"
+    );
     CubeTensor::new_contiguous(
         tensor.client.clone(),
         tensor.device.clone(),
-        shape.into(),
+        shape,
         tensor.handle.clone(),
         tensor.dtype,
     )

@@ -10,7 +10,8 @@ pub(crate) const FREIGHT_BOOKING_WORDS: usize = 2;
 pub(crate) const FREIGHT_QUEUE_WORDS: usize = 2;
 pub(crate) const FREIGHT_CLAIM_WORDS: usize = 5;
 pub(crate) const FREIGHT_CLAIM_SORT_WORDS: usize = 2;
-pub(crate) const FREIGHT_DISPATCH_WORDS: usize = 27;
+pub(crate) const FREIGHT_DISPATCH_WORDS: usize = 24;
+pub(crate) const FREIGHT_PROGRESS_WORDS: usize = 5;
 
 #[derive(Clone, Copy, Debug, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(deny_unknown_fields)]

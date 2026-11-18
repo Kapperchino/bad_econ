@@ -78,14 +78,9 @@ pub(super) fn checked_vector<N: Size>(
 }
 
 #[cube]
-pub fn rescale<N: Size>(
-    values: &mut [Vector<f32, N>],
-    control: &[Atomic<u32>],
-    scale: f32,
-    length: u32,
-) {
+pub fn rescale<N: Size>(values: &mut [Vector<f32, N>], control: &[Atomic<u32>], scale: f32) {
     let index = ABSOLUTE_POS;
-    if index < length as usize / N::value() {
+    if index < values.len() {
         values[index] = checked_vector(values[index] / Vector::new(scale), control);
     }
 }
@@ -96,10 +91,11 @@ pub fn vector_add<N: Size>(
     right: &[Vector<f32, N>],
     output: &mut [Vector<f32, N>],
     control: &[Atomic<u32>],
-    length: u32,
+    start: u32,
+    count: u32,
 ) {
-    let index = ABSOLUTE_POS;
-    if index < length as usize * 2 / N::value() {
+    if ABSOLUTE_POS < count as usize {
+        let index = start as usize + ABSOLUTE_POS;
         output[index] = checked_vector(left[index] + right[index], control);
     }
 }

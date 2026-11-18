@@ -34,7 +34,7 @@ use crate::{
 use anyhow::{Context, Result, anyhow};
 use burn_wgpu::{CubeBackend, CubeTensor};
 use bytemuck::Zeroable;
-use economy::{EconomyStage, markets, scheduler};
+use economy::{EconomyStage, markets, railway::settlement, scheduler};
 use enterprise::{management, ownership};
 use flags::{
     CONTROL_WORDS, ControlLayout, DependencyShape, EventStatus, FaultFlags, SchedulerControl,
@@ -84,6 +84,17 @@ enum MarketReplay {
 enum FreightExecution {
     Synchronous,
     Buffered,
+}
+
+impl FreightExecution {
+    fn initial(self, trace: Trace) -> settlement::Execution {
+        match (trace, self) {
+            (Trace::Discard, Self::Buffered) => {
+                settlement::Execution::Buffered(settlement::Wave::Initial)
+            }
+            _ => settlement::Execution::Immediate(settlement::Wave::Initial),
+        }
+    }
 }
 
 #[derive(Clone, Copy, PartialEq, Eq)]
@@ -442,7 +453,7 @@ impl Simulation {
         let enterprise_requests = device.tensor(&vec![0; initial.actors.len()]);
         let day = initial.day;
         let audit = economy::audit::AuditBuffers::new(&device, &initial.actors);
-        let searches = markets::SearchBuffers::new(&device, initial.actors.len());
+        let searches = markets::SearchBuffers::new(&device, &initial.actors);
         let mut simulation = Self {
             scenario,
             device,
@@ -1249,6 +1260,7 @@ impl Simulation {
         let management = management::EnterpriseManagement::new(&self.device, &metadata);
         let audit = economy::audit::AuditBuffers::new(&self.device, &metadata.actors);
         checkpoint("Miscellaneous");
+        let searches = markets::SearchBuffers::new(&self.device, &metadata.actors);
         let mut next = Self {
             scenario: self.scenario.clone(),
             device: self.device.clone(),
@@ -1282,7 +1294,7 @@ impl Simulation {
             proposals: self.device.empty(count * ProposalLayout::WORDS),
             events: self.device.empty(event_words),
             scratch: self.device.empty(scratch_words),
-            searches: markets::SearchBuffers::new(&self.device, count),
+            searches,
             market_sort: economy::sorting::MarketSort::default(),
             market_graphs: market_graphs::MarketGraphs::default(),
             market_replay: match self.device.cube {
@@ -1782,25 +1794,25 @@ impl Simulation {
     fn freight_stage(
         &self,
         parameters: &EconomyParameters,
-        stage: economy::railway::settlement::Stage,
-        execution: economy::railway::settlement::Execution,
+        stage: settlement::Stage,
+        execution: settlement::Execution,
         profile: &profiling::MarketProfile,
     ) {
-        let window = profile.start(&self.device);
-        economy::railway::settlement::launch_buffered(
-            &self.device,
-            &self.state,
-            &self.actors,
-            &self.spatial,
-            &self.config,
-            &self.proposals,
-            &self.scratch,
-            &self.control,
-            parameters,
-            stage,
-            execution,
-        );
-        profile.end(&self.device, window, "FREIGHT", stage);
+        profile.freight(&self.device, stage, execution.wave(), || {
+            settlement::launch_buffered(
+                &self.device,
+                &self.state,
+                &self.actors,
+                &self.spatial,
+                &self.config,
+                &self.proposals,
+                &self.scratch,
+                &self.control,
+                parameters,
+                stage,
+                execution,
+            )
+        });
     }
     fn market(
         &mut self,
@@ -2058,6 +2070,7 @@ impl Simulation {
                     scratch: self.scratch.buffer_arg(),
                     control: self.control.buffer_arg(),
                     parameters: parameters.launch(),
+                    program: stage.program(&self.config),
                     status_reset: match (market, trace) {
                         (Market::Input(_) | Market::Consumer(Good::Coal | Good::Wood), _) => {
                             economy::search::StatusReset::Active
@@ -2065,7 +2078,6 @@ impl Simulation {
                         (_, Trace::Record) => economy::search::StatusReset::Full,
                         (_, Trace::Discard) => economy::search::StatusReset::Active,
                     },
-                    stage,
                 },
             );
             device_profile.end(&self.device, window, "SEARCH", stage);
@@ -2235,16 +2247,11 @@ impl Simulation {
             EconomyStage::GroupSort,
         );
         let freight = |stage| {
-            let execution = match (trace, self.freight_execution) {
-                (Trace::Discard, FreightExecution::Buffered) => {
-                    economy::railway::settlement::Execution::Initial
-                }
-                _ => economy::railway::settlement::Execution::Immediate,
-            };
+            let execution = self.freight_execution.initial(trace);
             self.freight_stage(&parameters, stage, execution, device_profile)
         };
         if regional_transport {
-            freight(economy::railway::settlement::Stage::Snapshot);
+            freight(settlement::Stage::Snapshot);
         }
         launch(EconomyStage::GroupRanges, count, &parameters);
         launch(EconomyStage::MarketBoundary, 1, &parameters);
@@ -2338,11 +2345,10 @@ impl Simulation {
         launch(EconomyStage::MarketBoundary, 1, &parameters);
         if regional_transport {
             for stage in [
-                economy::railway::settlement::Stage::Initialize,
-                economy::railway::settlement::Stage::Queue,
-                economy::railway::settlement::Stage::Reset,
-                economy::railway::settlement::Stage::Propose,
-                economy::railway::settlement::Stage::CountClaims,
+                settlement::Stage::Initialize,
+                settlement::Stage::Queue,
+                settlement::Stage::Propose,
+                settlement::Stage::CountClaims,
             ] {
                 freight(stage);
             }
@@ -2359,49 +2365,45 @@ impl Simulation {
         trace: Trace,
         device_profile: &profiling::MarketProfile,
     ) -> Result<MatchingState> {
-        use economy::railway::settlement::{self, Stage};
+        use settlement::{Execution, Stage, Wave};
         let freight = |simulation: &Self, stage, execution| {
             simulation.freight_stage(parameters, stage, execution, device_profile)
+        };
+        let prepare_retry = |simulation: &Self, execution: Execution| {
+            if execution.wave() == Wave::Retry {
+                for stage in [
+                    Stage::Queue,
+                    Stage::Reset,
+                    Stage::Propose,
+                    Stage::CountClaims,
+                ] {
+                    freight(simulation, stage, execution);
+                }
+            }
         };
         let mut matching = MatchingState::Searching;
         match (trace, self.freight_activity, self.freight_execution) {
             (Trace::Discard, FreightActivity::Dormant, _) => {
-                freight(self, Stage::Commit, settlement::Execution::Immediate);
-                freight(self, Stage::Release, settlement::Execution::Immediate);
+                let execution = Execution::Immediate(Wave::Initial);
+                freight(self, Stage::Commit, execution);
+                freight(self, Stage::Release, execution);
             }
             (Trace::Discard, _, FreightExecution::Buffered) => {
                 let storage = settlement::ClaimStorage::new(&self.config);
                 for &execution in storage.executions() {
-                    if let settlement::Execution::Retry = execution {
-                        for stage in [
-                            Stage::Queue,
-                            Stage::Reset,
-                            Stage::Propose,
-                            Stage::CountClaims,
-                        ] {
-                            freight(self, stage, execution);
-                        }
-                    }
+                    prepare_retry(self, execution);
                     for &stage in storage.stages() {
                         freight(self, stage, execution);
                     }
-                    let commit = match execution {
-                        settlement::Execution::Initial => Stage::Commit,
-                        _ => Stage::CommitFinal,
-                    };
-                    freight(self, commit, execution);
+                    freight(self, Stage::Commit, execution);
                     freight(self, Stage::Release, execution);
                 }
             }
             _ => {
-                let mut round = settlement::Round::Initial;
-                while let Some(commit) = round.commit() {
-                    if let settlement::Round::Retry = round {
-                        freight(self, Stage::Queue, settlement::Execution::Immediate);
-                        freight(self, Stage::Reset, settlement::Execution::Immediate);
-                        freight(self, Stage::Propose, settlement::Execution::Immediate);
-                        freight(self, Stage::CountClaims, settlement::Execution::Immediate);
-                    }
+                let mut next_wave = Some(Wave::Initial);
+                while let Some(wave) = next_wave {
+                    let execution = Execution::Immediate(wave);
+                    prepare_retry(self, execution);
                     let preparation = settlement::prepare_market_claims(
                         &self.device,
                         &mut self.config,
@@ -2414,21 +2416,17 @@ impl Simulation {
                     };
                     let claims = preparation.claims;
                     if let settlement::ClaimWork::Ready = claims {
-                        freight(self, Stage::EmitClaims, settlement::Execution::Immediate);
-                        freight(self, Stage::SortClaims, settlement::Execution::Immediate);
-                        freight(self, Stage::Resolve, settlement::Execution::Immediate);
+                        freight(self, Stage::EmitClaims, execution);
+                        freight(self, Stage::SortClaims, execution);
+                        freight(self, Stage::Resolve, execution);
                     }
-                    freight(self, commit, settlement::Execution::Immediate);
-                    freight(self, Stage::Release, settlement::Execution::Immediate);
-                    round = round.next(claims);
+                    freight(self, Stage::Commit, execution);
+                    freight(self, Stage::Release, execution);
+                    next_wave = wave.next(claims);
                 }
             }
         }
-        let execution = match (trace, self.freight_execution) {
-            (Trace::Discard, FreightExecution::Buffered) => settlement::Execution::Initial,
-            _ => settlement::Execution::Immediate,
-        };
-        freight(self, Stage::Accounts, execution);
+        freight(self, Stage::Accounts, self.freight_execution.initial(trace));
         Ok(matching)
     }
 
@@ -2457,7 +2455,7 @@ impl Simulation {
         };
         let profile = self.day + 1 == profiling_day()
             && std::env::var_os("BAD_ECON_PROFILE_STAGES").is_some();
-        let device_profile = profiling::MarketProfile::new(self.day + 1);
+        let device_profile = profiling::MarketProfile::new(&self.device, self.day + 1);
         self.initialize_market(market, trace, &parameters);
         parameters.clock = match (
             trace,
@@ -2584,7 +2582,8 @@ impl Simulation {
                 submission_started.elapsed().as_secs_f64() * 1000.0
             );
         }
-        device_profile.resolve(market, self.matching_round);
+        self.readback_bytes +=
+            device_profile.resolve(market, self.matching_round, &self.config, &self.control)?;
         Ok(matching)
     }
     #[cfg(test)]
@@ -3156,25 +3155,23 @@ impl Simulation {
                 .and_then(|error| error.downcast_ref::<ClaimCapacityDemand>())
                 .map(|demand| demand.records.get());
             attempt = match required {
-                Some(records) => match economy::railway::settlement::reserve_claims(
-                    &self.device,
-                    &mut self.config,
-                    records,
-                ) {
-                    Ok(()) => {
-                        self.status = previous_status.clone();
-                        self.market_graphs = market_graphs::MarketGraphs::default();
-                        AdvanceAttempt::Pending
+                Some(records) => {
+                    match settlement::reserve_claims(&self.device, &mut self.config, records) {
+                        Ok(()) => {
+                            self.status = previous_status.clone();
+                            self.market_graphs = market_graphs::MarketGraphs::default();
+                            AdvanceAttempt::Pending
+                        }
+                        Err(error) => {
+                            self.status = RuntimeState::Fault {
+                                last_audited_day: self.audited_day,
+                                message: error.to_string(),
+                            };
+                            result = Err(error);
+                            AdvanceAttempt::Complete
+                        }
                     }
-                    Err(error) => {
-                        self.status = RuntimeState::Fault {
-                            last_audited_day: self.audited_day,
-                            message: error.to_string(),
-                        };
-                        result = Err(error);
-                        AdvanceAttempt::Complete
-                    }
-                },
+                }
                 None => AdvanceAttempt::Complete,
             };
         }

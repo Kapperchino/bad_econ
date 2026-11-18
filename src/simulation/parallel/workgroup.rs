@@ -14,6 +14,13 @@ pub(in crate::simulation) struct WorkgroupTree;
 
 #[cube]
 impl WorkgroupTree {
+    pub fn planes<T: CubePrimitive>() -> Shared<[T]> {
+        let hardware = comptime::hardware_properties().comptime();
+        Shared::<[T]>::new_slice(comptime!(
+            MAX_WORKGROUP_SIZE.div_ceil(hardware.plane_size_min.max(1)) as usize
+        ))
+    }
+
     pub fn lanes<T: CubePrimitive>(value: T) -> Shared<[T]> {
         let mut lanes = Shared::<[T]>::new_slice(MAX_WORKGROUP_SIZE as usize);
         lanes[UNIT_POS as usize] = value;

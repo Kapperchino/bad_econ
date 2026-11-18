@@ -129,18 +129,11 @@ impl DeviceMatrix {
                 let left = tensor::reshape(&self.data, [2, self.rows, self.columns]);
                 let right = tensor::reshape(&right.data, [2, right.rows, right.columns]);
                 tensor::matmul(device, &left, &right, &output.data)?;
-                let elements = output.rows * output.columns * 2;
-                let width = tensor::vector_width(device, elements);
                 VectorRescaling::launch_vectorized(
                     device,
-                    elements / width,
-                    RescaleInputLaunch {
-                        values: output.data.buffer_arg(),
-                        control: control.buffer_arg(),
-                        scale: self.scale as f32,
-                        length: elements as u32,
-                    },
-                    width,
+                    &output.data,
+                    &control,
+                    self.scale as f32,
                 );
                 faults(device, &control)?;
                 Ok(output)

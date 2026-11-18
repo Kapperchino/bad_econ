@@ -345,19 +345,13 @@ impl DeviceVector {
             true => {
                 let output = Self::empty(device, self.length);
                 let control = device.tensor(&[0; CONTROL_WORDS]);
-                let width = tensor::vector_width(device, self.length * 2);
-                VectorAddition::launch_vectorized(
-                    device,
-                    self.length * 2 / width,
-                    AdditionInputLaunch {
-                        left: self.data.buffer_arg(),
-                        right: other.data.buffer_arg(),
-                        output: output.data.buffer_arg(),
-                        control: control.buffer_arg(),
-                        length: self.length as u32,
-                    },
-                    width,
-                );
+                Addition {
+                    left: &self.data,
+                    right: &other.data,
+                    output: &output.data,
+                    control: &control,
+                }
+                .launch(device);
                 faults(device, &control)?;
                 Ok(output)
             }
@@ -376,17 +370,7 @@ impl DeviceVector {
                 let right = tensor::reshape(&other.data, [2, self.length, 1]);
                 let product = tensor::reshape(&output.data, [2, 1, 1]);
                 tensor::matmul(device, &left, &right, &product)?;
-                VectorRescaling::launch_vectorized(
-                    device,
-                    1,
-                    RescaleInputLaunch {
-                        values: output.data.buffer_arg(),
-                        control: control.buffer_arg(),
-                        scale: scale as f32,
-                        length: 2,
-                    },
-                    2,
-                );
+                VectorRescaling::launch_vectorized(device, &output.data, &control, scale as f32);
                 faults(device, &control)?;
                 Ok(output)
             }
@@ -468,18 +452,11 @@ impl DeviceOperator {
             &tensor::reshape(&weights.data, [2, self.columns, 1]),
             &tensor::reshape(&product.data, [2, self.rows, 1]),
         )?;
-        let elements = self.rows * 2;
-        let width = tensor::vector_width(device, elements);
         VectorRescaling::launch_vectorized(
             device,
-            elements / width,
-            RescaleInputLaunch {
-                values: product.data.buffer_arg(),
-                control: control.buffer_arg(),
-                scale: self.matrix.scale as f32,
-                length: elements as u32,
-            },
-            width,
+            &product.data,
+            control,
+            self.matrix.scale as f32,
         );
         let rows = device.empty((self.rows * 2).max(2));
         CertificateRows::launch_elements(

@@ -61,17 +61,18 @@ fn update<N: Size>(
     scale: f32,
 ) {
     let length = values.meta.num_elements();
-    IterationUpdate::<N>::launch_elements(
-        device,
-        length / N::value(),
-        IterationInputLaunch {
-            values: values.buffer_arg(),
-            rhs: rhs.buffer_arg(),
-            control: control.buffer_arg(),
-            scale,
-            length: length as u32,
-        },
-    );
+    if length > 0 {
+        IterationUpdate::<N>::launch_elements(
+            device,
+            length / N::value(),
+            IterationInputLaunch {
+                values: values.buffer_arg(),
+                rhs: rhs.buffer_arg(),
+                control: control.buffer_arg(),
+                scale,
+            },
+        );
+    }
 }
 
 #[derive(CubeType, CubeLaunch)]
@@ -80,7 +81,6 @@ struct IterationInput<N: Size> {
     rhs: Box<[Vector<f32, N>]>,
     control: Box<[Atomic<u32>]>,
     scale: f32,
-    length: u32,
 }
 
 #[derive(CubeType)]
@@ -104,7 +104,7 @@ impl<N: Size> GpuPass<IterationInput<N>> for RescaleIterate {
 
     fn execute(input: IterationInput<N>) -> RescaledIterate<N> {
         let mut value = Vector::<f32, N>::new(0.0);
-        if ABSOLUTE_POS < input.length as usize / N::value() {
+        if ABSOLUTE_POS < input.values.len() {
             value = kernels::checked_vector(
                 input.values[ABSOLUTE_POS] / Vector::new(input.scale),
                 &input.control,
@@ -122,7 +122,7 @@ impl<N: Size> GpuPass<RescaledIterate<N>> for AddForcing {
     type Output = ();
 
     fn execute(mut input: RescaledIterate<N>) {
-        if ABSOLUTE_POS < input.buffers.length as usize / N::value() {
+        if ABSOLUTE_POS < input.buffers.values.len() {
             input.buffers.values[ABSOLUTE_POS] = kernels::checked_vector(
                 input.value + input.buffers.rhs[ABSOLUTE_POS],
                 &input.buffers.control,

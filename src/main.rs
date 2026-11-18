@@ -241,11 +241,20 @@ fn benchmark(scenario: Scenario, args: &Cli) -> Result<()> {
     for scenario in scenarios {
         let startup = Instant::now();
         let mut simulation = args.simulation(scenario)?;
+        simulation.device.sync()?;
         let startup_seconds = startup.elapsed().as_secs_f64();
         let households = simulation.scenario.config().households;
         let estimate = simulation.scenario.memory_estimate();
         let fingerprint = simulation.scenario.fingerprint()?;
-        (0..args.warmup).try_for_each(|_| simulation.advance())?;
+        let mut first_day_seconds = None;
+        for day in 0..args.warmup {
+            let start = Instant::now();
+            simulation.advance()?;
+            if day == 0 || day + 1 == args.warmup {
+                simulation.device.sync()?;
+            }
+            first_day_seconds.get_or_insert_with(|| start.elapsed().as_secs_f64());
+        }
         let starting_day = simulation.snapshot.day;
         let mut daily = Vec::new();
         let start = Instant::now();
@@ -253,19 +262,20 @@ fn benchmark(scenario: Scenario, args: &Cli) -> Result<()> {
         for _ in 0..args.days {
             let day_start = Instant::now();
             simulation.advance()?;
+            simulation.device.sync()?;
+            let day_seconds = day_start.elapsed().as_secs_f64();
+            first_day_seconds.get_or_insert(day_seconds);
             let memory = simulation.memory_usage();
             eprintln!(
                 "{households} households day {}: {:.3}s, reserved={} bytes",
-                simulation.snapshot.day,
-                day_start.elapsed().as_secs_f64(),
-                memory.bytes_reserved
+                simulation.snapshot.day, day_seconds, memory.bytes_reserved
             );
-            daily.push(serde_json::json!({"day":simulation.snapshot.day,"seconds":day_start.elapsed().as_secs_f64(),"phases":simulation.timings,"memory":memory}));
+            daily.push(serde_json::json!({"day":simulation.snapshot.day,"seconds":day_seconds,"phases":simulation.timings,"memory":memory}));
         }
         let seconds = start.elapsed().as_secs_f64();
         let readback_bytes = simulation.readback_bytes - readback_before;
         let state_hash = simulation.download()?.digest();
-        reports.push(serde_json::json!({"households":households,"firms":simulation.scenario.config().firms,"scenario":simulation.scenario.config(),"scenario_hash":fingerprint,"device":simulation.device.name,"workgroup":args.workgroup,"days":args.days,"starting_day":starting_day,"warmup_days":args.warmup,"startup_seconds":startup_seconds,"seconds":seconds,"days_per_second":f64::from(args.days)/seconds,"readback_bytes":readback_bytes,"final_state_hash":state_hash,"state_hash_version":STATE_HASH_VERSION,"profile":bad_econ::arithmetic::PROFILE,"policy_table_hash":bad_econ::arithmetic::table_hash(),"estimated_bytes":estimate,"memory_budget_bytes":simulation.device.memory_budget.bytes(),"memory_budget":simulation.device.memory_budget,"daily":daily,"snapshot":simulation.snapshot}));
+        reports.push(serde_json::json!({"households":households,"firms":simulation.scenario.config().firms,"scenario":simulation.scenario.config(),"scenario_hash":fingerprint,"device":simulation.device.name,"workgroup":args.workgroup,"days":args.days,"starting_day":starting_day,"warmup_days":args.warmup,"startup_seconds":startup_seconds,"first_day_seconds":first_day_seconds,"seconds":seconds,"days_per_second":f64::from(args.days)/seconds,"readback_bytes":readback_bytes,"final_state_hash":state_hash,"state_hash_version":STATE_HASH_VERSION,"profile":bad_econ::arithmetic::PROFILE,"policy_table_hash":bad_econ::arithmetic::table_hash(),"estimated_bytes":estimate,"memory_budget_bytes":simulation.device.memory_budget.bytes(),"memory_budget":simulation.device.memory_budget,"daily":daily,"snapshot":simulation.snapshot}));
         output(&args.output, &reports)?;
     }
     Ok(())

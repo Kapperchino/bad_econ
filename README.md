@@ -108,7 +108,7 @@ Measure initialization and the first simulated days, including GPU compilation o
 cargo run --release --example startup_throughput -- --sizes 1000000 --days 3 --output /tmp/startup.json
 ```
 
-This reports scenario generation, device setup, simulation initialization, and each day's phase timings separately, plus a final state hash. Use a separate process for each size when comparing startup; later sizes in the same process can reuse compiled kernels. On macOS, CubeCL caches generated Metal shaders under `target/environment` when run from this checkout. The first run compiles each kernel as its market becomes active. Later runs of the same build reuse those shaders. Most input markets share compiled kernels across goods; grain and household bread retain dedicated kernels. Consumer kernels specialize by good.
+This reports scenario generation, device setup, simulation initialization, and each day's phase timings separately, plus a final state hash. Use a separate process for each size when comparing startup; later sizes in the same process can reuse compiled kernels. On macOS, CubeCL caches generated Metal shaders under `target/environment` when run from this checkout. The first run compiles each kernel as its market becomes active. Later runs of the same build reuse those shaders. Most input markets share compiled kernels across goods; grain and household bread retain dedicated kernels. Consumer kernels specialize by good. Map dimensions, ring lengths, and rail-network sizes are runtime arguments. Supplier searches specialize the single-cell and neighborhood cases and the shipment-speed divisor used to score offers.
 
 To enforce a median below 300 ms after warming the complete measured trajectory:
 
@@ -132,6 +132,20 @@ cargo run --release -- benchmark --sizes 1000000 --seed 42 --warmup 2 --days 10 
 
 Profiling records kernel specializations and dispatch sizes, and bypasses recorded sort graphs so their kernels can be timed. Profiling changes submission and synchronization overhead; measure overall throughput separately with `--kernel-profile` omitted, and run benchmarks without concurrent GPU tests. Payroll settles funded batches cooperatively, with ordered handling when escrow is insufficient. Rail infrastructure uses a workgroup per company, parallel regional capacity updates, and deterministic material allocation in region order. Freight reservations, capacity consumption, and inter-company payments use parallel GPU passes; deterministic arbitration resolves oversubscribed resources without a serial freight dispatcher.
 
-Input markets share recorded GPU work across goods with the same kernel sequence, refreshing dates, goods, rotations, and heating demand from device memory. Consumer recordings retain their specialized good. Supplier quotes, stocks, and availability flags are stored together for search locality; household searches reuse cached positions and sampling strides. Bread input searches rank candidates cooperatively across a workgroup. Large economies reserve room for state growth at initialization and release upload buffers before daily timing. Rental updates reuse the spatial index and refresh changed tenants while housing sites remain unchanged. After the daily audit, registry changes revalidate delivery rings only for affected rows.
+To measure freight waves on a specific simulation day, run a railway scenario with the wave profiler enabled.
+
+```sh
+BAD_ECON_PROFILE_FREIGHT=1 BAD_ECON_PROFILE_DAY=3 cargo run --release -- benchmark --scenario scenarios/railway.json --warmup 2 --days 1 --output /tmp/railway.json
+```
+
+Each `FREIGHT_WAVE` line reports the market, matching round, bookings entering the wave, bookings queued for the next wave, submitted dispatches, and elapsed milliseconds. The initial window covers booking initialization through capacity release. The retry window covers queue preparation through release. Dispatch counts include submissions with empty work grids. Each market reads 12 bytes of counters and fault status after the windows close. `timing=device` identifies GPU timestamps. A faulted market reports the fault flags. The benchmark JSON records initialization and the first completed day separately, and daily timings include completion of the final GPU work. First-day compilation cost depends on the local shader cache.
+
+To compare one-, two-, and four-wide contiguous `f32` addition, run the GPU microbenchmark. It checks every output at 1,048,576 and 1,048,577 elements, including the scalar tail, and times batches of warmed launches at three workgroup sizes.
+
+```sh
+cargo test --release --locked --lib benchmark_f32_addition_widths_on_gpu -- --ignored --nocapture
+```
+
+Input markets share recorded GPU work across goods with the same kernel sequence, refreshing dates, goods, rotations, and heating demand from device memory. Consumer recordings retain their specialized good. Supplier searches read quotes, stocks, and availability flags together. Single-cell consumer markets cache tied offers from empty suppliers in one bit per supplier per buyer. Each buyer has room for 256 suppliers in the request buffer. The actor registry determines how many additional words to allocate, up to 2,048 suppliers per buyer. Searches that exceed the allocation still use the same offer ranking and rotation. Household searches reuse cached positions and sampling strides. Bread input searches rank candidates cooperatively across a workgroup. Large economies reserve room for state growth at initialization and release upload buffers before daily timing. Rental updates reuse the spatial index and refresh changed tenants while housing sites remain unchanged. After the daily audit, registry changes revalidate delivery rings only for affected rows.
 
 Code: [domain](src/domain.rs), [simulation](src/simulation/), [viewer](src/viewer.rs), [tests](tests/).

@@ -2,8 +2,9 @@ use super::kernels;
 use crate::simulation::{
     Device,
     pass::GpuPass,
-    system::{System, gpu_passes},
+    system::{AsBufferArg, System, gpu_passes},
 };
+use burn_wgpu::CubeTensor;
 use cubecl::prelude::*;
 use std::marker::PhantomData;
 
@@ -12,7 +13,6 @@ pub(super) struct RescaleInput<N: Size> {
     pub(super) values: Box<[Vector<f32, N>]>,
     pub(super) control: Box<[Atomic<u32>]>,
     pub(super) scale: f32,
-    pub(super) length: u32,
 }
 
 pub(super) struct VectorRescaling<N: Size = Const<1>>(PhantomData<N>);
@@ -21,32 +21,35 @@ pub(super) struct RescaleVector;
 impl VectorRescaling {
     pub(super) fn launch_vectorized(
         device: &Device,
-        elements: usize,
-        input: RescaleInputLaunch<Const<1>>,
-        width: usize,
+        values: &CubeTensor,
+        control: &CubeTensor,
+        scale: f32,
     ) {
-        let launch = match width {
+        let elements = values.meta.num_elements();
+        let launch = match crate::simulation::tensor::vector_width(device, elements) {
             4 => Self::launch_sized::<Const<4>>,
             3 => Self::launch_sized::<Const<3>>,
             2 => Self::launch_sized::<Const<2>>,
             _ => Self::launch_sized::<Const<1>>,
         };
-        launch(device, elements, input);
+        if elements > 0 {
+            launch(device, values, control, scale);
+        }
     }
 
     fn launch_sized<N: Size>(
         device: &Device,
-        elements: usize,
-        input: RescaleInputLaunch<Const<1>>,
+        values: &CubeTensor,
+        control: &CubeTensor,
+        scale: f32,
     ) {
         VectorRescaling::<N>::launch_elements(
             device,
-            elements,
+            values.meta.num_elements() / N::value(),
             RescaleInputLaunch {
-                values: input.values,
-                control: input.control,
-                scale: input.scale,
-                length: input.length,
+                values: values.buffer_arg(),
+                control: control.buffer_arg(),
+                scale,
             },
         );
     }
@@ -62,54 +65,63 @@ impl<N: Size> GpuPass<RescaleInput<N>> for RescaleVector {
     type Output = ();
 
     fn execute(mut input: RescaleInput<N>) {
-        kernels::rescale::<N>(&mut input.values, &input.control, input.scale, input.length);
+        kernels::rescale::<N>(&mut input.values, &input.control, input.scale);
     }
 }
 
 #[derive(CubeType, CubeLaunch)]
 pub(super) struct AdditionInput<N: Size> {
-    pub(super) left: Box<[Vector<f32, N>]>,
-    pub(super) right: Box<[Vector<f32, N>]>,
-    pub(super) output: Box<[Vector<f32, N>]>,
-    pub(super) control: Box<[Atomic<u32>]>,
-    pub(super) length: u32,
+    left: Box<[Vector<f32, N>]>,
+    right: Box<[Vector<f32, N>]>,
+    output: Box<[Vector<f32, N>]>,
+    control: Box<[Atomic<u32>]>,
+    start: u32,
+    count: u32,
 }
 
 pub(super) struct VectorAddition<N: Size = Const<1>>(PhantomData<N>);
 pub(super) struct AddVectors;
 
-impl VectorAddition {
-    pub(super) fn launch_vectorized(
-        device: &Device,
-        elements: usize,
-        input: AdditionInputLaunch<Const<1>>,
-        width: usize,
-    ) {
-        let launch = match width {
-            4 => Self::launch_sized::<Const<4>>,
-            3 => Self::launch_sized::<Const<3>>,
-            2 => Self::launch_sized::<Const<2>>,
-            _ => Self::launch_sized::<Const<1>>,
-        };
-        launch(device, elements, input);
+pub(super) struct Addition<'a> {
+    pub left: &'a CubeTensor,
+    pub right: &'a CubeTensor,
+    pub output: &'a CubeTensor,
+    pub control: &'a CubeTensor,
+}
+
+impl Addition<'_> {
+    pub(super) fn launch(&self, device: &Device) {
+        let elements = self.output.meta.num_elements();
+        match crate::simulation::tensor::vector_width(device, elements) {
+            4 => self.launch_sized::<Const<4>>(device),
+            3 => self.launch_sized::<Const<3>>(device),
+            2 => self.launch_sized::<Const<2>>(device),
+            _ => self.launch_sized::<Const<1>>(device),
+        }
     }
 
-    fn launch_sized<N: Size>(
-        device: &Device,
-        elements: usize,
-        input: AdditionInputLaunch<Const<1>>,
-    ) {
-        VectorAddition::<N>::launch_elements(
-            device,
-            elements,
-            AdditionInputLaunch {
-                left: input.left,
-                right: input.right,
-                output: input.output,
-                control: input.control,
-                length: input.length,
-            },
-        );
+    fn launch_sized<N: Size>(&self, device: &Device) {
+        let elements = self.output.meta.num_elements();
+        let vectors = elements / N::value();
+        self.launch_range::<N>(device, 0..vectors);
+        self.launch_range::<Const<1>>(device, vectors * N::value()..elements);
+    }
+
+    fn launch_range<N: Size>(&self, device: &Device, range: std::ops::Range<usize>) {
+        if !range.is_empty() {
+            VectorAddition::<N>::launch_elements(
+                device,
+                range.len(),
+                AdditionInputLaunch {
+                    left: self.left.buffer_arg(),
+                    right: self.right.buffer_arg(),
+                    output: self.output.buffer_arg(),
+                    control: self.control.buffer_arg(),
+                    start: range.start as u32,
+                    count: range.len() as u32,
+                },
+            );
+        }
     }
 }
 
@@ -128,7 +140,8 @@ impl<N: Size> GpuPass<AdditionInput<N>> for AddVectors {
             &input.right,
             &mut input.output,
             &input.control,
-            input.length,
+            input.start,
+            input.count,
         );
     }
 }
@@ -455,5 +468,65 @@ impl GpuPass<SignedVectorReadInput> for EncodeSignedVector {
             &input.control,
             input.length,
         );
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::simulation::tensor;
+    use anyhow::Result;
+
+    #[test]
+    #[ignore = "GPU vector width benchmark"]
+    fn benchmark_f32_addition_widths_on_gpu() -> Result<()> {
+        let repeats = 64;
+        for workgroup in [32, 64, 256] {
+            let device = crate::simulation::tests::device(workgroup)?;
+            for length in [1_048_576, 1_048_577] {
+                let values = (0..length).map(|i| (i % 251) as f32).collect::<Vec<_>>();
+                let left = tensor::floats(&device, [length], &values);
+                let right = tensor::floats(&device, [length], &vec![1.0; length]);
+                let output = tensor::empty(&device, [length]);
+                let control = device.tensor(&[0; super::super::CONTROL_WORDS]);
+                let addition = Addition {
+                    left: &left,
+                    right: &right,
+                    output: &output,
+                    control: &control,
+                };
+                for width in [1, 2, 4] {
+                    let launch = || match width {
+                        4 => addition.launch_sized::<Const<4>>(&device),
+                        2 => addition.launch_sized::<Const<2>>(&device),
+                        _ => addition.launch_sized::<Const<1>>(&device),
+                    };
+                    device.write(&output, &vec![f32::NAN.to_bits(); length]);
+                    launch();
+                    device.sync()?;
+                    let window = device.client.profile_start()?;
+                    for _ in 0..repeats {
+                        launch();
+                    }
+                    let duration = device.client.profile_end(window)?;
+                    let method = duration.timing_method();
+                    let elapsed =
+                        pollster::block_on(duration.resolve()).expect("timed GPU additions");
+                    eprintln!(
+                        "ADD length={length} workgroup={workgroup} width={width} timing={method} ms={:.4}",
+                        elapsed.duration().as_secs_f64() * 1000.0 / f64::from(repeats)
+                    );
+                    let actual = device.client.read_one(output.handle.clone())?;
+                    assert!(
+                        bytemuck::cast_slice::<_, f32>(&actual)[..length]
+                            .iter()
+                            .zip(&values)
+                            .all(|(&actual, &left)| actual == left + 1.0)
+                    );
+                    super::super::faults(&device, &control)?;
+                }
+            }
+        }
+        Ok(())
     }
 }

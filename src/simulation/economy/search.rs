@@ -1,4 +1,5 @@
 use super::*;
+use crate::simulation::configuration::Configuration;
 use crate::simulation::{
     flags::InputMarket,
     markets::{LATCH_WORD, SEARCHES_WORD},
@@ -448,6 +449,54 @@ pub(super) struct Candidate {
 }
 
 #[cube]
+impl Candidate {
+    fn replace(&mut self, other: Candidate) {
+        self.eligible = other.eligible;
+        self.seen_supply = other.seen_supply;
+        self.empty = other.empty;
+        self.quantity = other.quantity;
+        self.score = other.score;
+        self.trip = other.trip;
+    }
+}
+
+#[derive(CubeType)]
+struct CandidateTile {
+    eligible: Shared<[u32]>,
+    seen_supply: Shared<[u32]>,
+    empty: Shared<[u32]>,
+    quantity: Shared<[Ticks]>,
+    score: Shared<[Ticks]>,
+    trip: Shared<[u32]>,
+    firm: Shared<[u32]>,
+}
+
+#[cube]
+impl CandidateTile {
+    fn new(#[comptime] lanes: usize) -> Self {
+        CandidateTile {
+            eligible: Shared::<[u32]>::new_slice(lanes),
+            seen_supply: Shared::<[u32]>::new_slice(lanes),
+            empty: Shared::<[u32]>::new_slice(lanes),
+            quantity: Shared::<[Ticks]>::new_slice(lanes),
+            score: Shared::<[Ticks]>::new_slice(lanes),
+            trip: Shared::<[u32]>::new_slice(lanes),
+            firm: Shared::<[u32]>::new_slice(lanes),
+        }
+    }
+
+    fn store(&mut self, lane: usize, offer: &Candidate, firm: u32) {
+        self.eligible[lane] = u32::cast_from(offer.eligible);
+        self.seen_supply[lane] = u32::cast_from(offer.seen_supply);
+        self.empty[lane] = u32::cast_from(offer.empty);
+        self.quantity[lane] = offer.quantity;
+        self.score[lane] = offer.score;
+        self.trip[lane] = offer.trip;
+        self.firm[lane] = firm;
+    }
+}
+
+#[cube]
 fn minimum_delivery_days(config: &EconomyConfig, buyer_access: u32, seller: u32, trip: u32) -> u32 {
     let mut days = max(ceildiv(trip, config.shipment_speed), 1);
     if comptime!(config.railway.routes_enabled == Feature::Enabled) && config.railway.nodes > 0 {
@@ -805,6 +854,42 @@ pub(in crate::simulation) enum SearchStage {
     Compact,
 }
 
+#[derive(Clone, Copy, Debug, Hash, PartialEq, Eq)]
+enum SupplierSearch {
+    Inactive,
+    SingleCell { shipment_speed: u32 },
+    Neighborhood { shipment_speed: u32 },
+}
+
+#[derive(Clone, Copy, Debug, Hash, PartialEq, Eq)]
+pub(in crate::simulation) struct SearchProgram {
+    stage: SearchStage,
+    suppliers: SupplierSearch,
+}
+
+impl SearchStage {
+    pub(in crate::simulation) fn program(self, config: &Configuration) -> SearchProgram {
+        let shipment_speed = config.shipment_speed;
+        let suppliers = match self {
+            Self::Search
+            | Self::SearchIndexed
+            | Self::SearchFuel
+            | Self::SearchHousehold
+            | Self::SearchSpatialFuel => {
+                match config.spatial_side == 1 && config.map_size <= config.search_radius {
+                    true => SupplierSearch::SingleCell { shipment_speed },
+                    false => SupplierSearch::Neighborhood { shipment_speed },
+                }
+            }
+            _ => SupplierSearch::Inactive,
+        };
+        SearchProgram {
+            stage: self,
+            suppliers,
+        }
+    }
+}
+
 pub(in crate::simulation) fn empty_bounds_invocations(
     members: usize,
     mode: parallel::ScanMode,
@@ -834,7 +919,7 @@ pub(in crate::simulation) struct SearchInput {
     #[cube(comptime)]
     pub status_reset: StatusReset,
     #[cube(comptime)]
-    pub stage: SearchStage,
+    pub program: SearchProgram,
 }
 
 pub(in crate::simulation) struct MarketSearch;
@@ -850,9 +935,19 @@ impl GpuPass<SearchInput> for Search {
     type Output = ();
 
     fn execute(mut input: SearchInput) {
+        match comptime!(input.program.suppliers) {
+            SupplierSearch::SingleCell { shipment_speed } => {
+                input.config.spatial_side = 1;
+                input.config.shipment_speed = shipment_speed;
+            }
+            SupplierSearch::Neighborhood { shipment_speed } => {
+                input.config.shipment_speed = shipment_speed;
+            }
+            SupplierSearch::Inactive => (),
+        }
         input.parameters.refresh(&mut input.config);
         if input.control[LATCH_WORD].load() == 0 {
-            match comptime!(input.stage) {
+            match comptime!(input.program.stage) {
                 SearchStage::Index => index::build(
                     &mut input.state,
                     &input.actors,
@@ -892,7 +987,7 @@ impl GpuPass<SearchInput> for Search {
                     &mut input.scratch,
                     &input.parameters,
                     ABSOLUTE_POS as u32,
-                    comptime!(match input.stage {
+                    comptime!(match input.program.stage {
                         SearchStage::PrepareCandidates => PreparationRound::Capture,
                         SearchStage::PrepareSelected => PreparationRound::Selected,
                         _ => PreparationRound::First,
@@ -910,7 +1005,8 @@ impl GpuPass<SearchInput> for Search {
                     &input.scratch,
                     &input.control,
                     &input.parameters,
-                    comptime!(match input.stage {
+                    comptime!(input.program.suppliers),
+                    comptime!(match input.program.stage {
                         SearchStage::SearchIndexed => index::SupplySource::Index,
                         _ => index::SupplySource::State,
                     }),
@@ -928,7 +1024,8 @@ impl GpuPass<SearchInput> for Search {
                     &input.scratch,
                     &input.control,
                     &input.parameters,
-                    comptime!(match input.stage {
+                    comptime!(input.program.suppliers),
+                    comptime!(match input.program.stage {
                         SearchStage::SearchSpatialFuel => fuel::SearchOrder::Spatial,
                         _ => fuel::SearchOrder::Compact,
                     }),
@@ -1030,6 +1127,7 @@ fn search(
     scratch: &[u32],
     control: &[Atomic<u32>],
     parameters: &EconomyParameters,
+    #[comptime] suppliers: SupplierSearch,
     #[comptime] source: index::SupplySource,
 ) {
     let jobs = markets::job_count(control, SEARCHES_WORD);
@@ -1064,8 +1162,7 @@ fn search(
         let px = actors[ActorLayout::X * (actors.len() / ActorLayout::WORDS) + id as usize];
         let py = actors[ActorLayout::Y * (actors.len() / ActorLayout::WORDS) + id as usize];
         let radius = config.search_radius;
-        let whole_map =
-            comptime!(config.spatial_side == 1 && config.map_size <= config.search_radius);
+        let whole_map = comptime!(matches!(suppliers, SupplierSearch::SingleCell { .. }));
         let maximum_delivery_cost = times32(
             max(ceildiv(radius, config.shipment_speed), 1),
             config.delivery_penalty,
@@ -1094,14 +1191,14 @@ fn search(
         let mut empty_quantity = zero();
         let mut empty_trip = 0u32;
         let mut empty_score = ticks(u32::MAX, u32::MAX);
-        let mut candidates = Shared::<[u32]>::new_slice(comptime!(match source {
-            index::SupplySource::Index => 256usize * 9,
-            index::SupplySource::State => 32usize * 9,
-        }));
+        let lanes = comptime!(match source {
+            index::SupplySource::Index => crate::simulation::ops::MAX_WORKGROUP_SIZE as usize,
+            index::SupplySource::State => 32usize,
+        });
+        let mut candidates = CandidateTile::new(lanes);
         let candidate_faults =
-            Shared::<[Atomic<u32>]>::new_slice(comptime!(match (parameters.market, source) {
-                (MarketFlag::Labor, index::SupplySource::Index) => 256usize * CONTROL_WORDS,
-                (MarketFlag::Labor, index::SupplySource::State) => 32usize * CONTROL_WORDS,
+            Shared::<[Atomic<u32>]>::new_slice(comptime!(match parameters.market {
+                MarketFlag::Labor => lanes * CONTROL_WORDS,
                 _ => 1usize,
             }));
         let fault_words = comptime!(match parameters.market {
@@ -1242,7 +1339,7 @@ fn search(
                             }
                             seen_supply =
                                 parallel::reduce::<u32>(offered, comptime!(Reduction::Sum)) > 0;
-                            offset += 32;
+                            offset += CUBE_DIM;
                         }
                     }
                     if skipped == 0 {
@@ -1263,12 +1360,18 @@ fn search(
                             candidate_faults[fault_start + crate::simulation::flags::FAULT_WORD]
                                 .store(0);
                         }
-                        candidates[lane * 9] = 0;
-                        candidates[lane * 9 + 1] = 0;
-                        candidates[lane * 9 + 2] = 0;
+                        let mut offer = Candidate {
+                            eligible: false,
+                            seen_supply: false,
+                            empty: false,
+                            quantity: zero(),
+                            score: zero(),
+                            trip: 0,
+                        };
+                        let mut firm = u32::new(comptime!(i64::from(NO_ACTOR)));
                         if UNIT_POS < width && j + UNIT_POS < limit {
                             let rotated = begin + (cursor + UNIT_POS * stride) % max(length, 1);
-                            let firm = spatial[(side * side + 1 + rotated) as usize];
+                            firm = spatial[(side * side + 1 + rotated) as usize];
                             let supply = index::Supply::for_search(
                                 state, actors, config, scratch, parameters, rotated, firm, source,
                             );
@@ -1328,7 +1431,7 @@ fn search(
                                 }
                             }
                             if relevant {
-                                let offer = match comptime!(parameters.market) {
+                                offer.replace(match comptime!(parameters.market) {
                                     MarketFlag::Consumer(_) => consumer_candidate(
                                         config,
                                         id,
@@ -1353,24 +1456,16 @@ fn search(
                                         purchasing_power,
                                         &supply,
                                     ),
-                                };
-                                candidates[lane * 9] = u32::cast_from(offer.eligible);
-                                candidates[lane * 9 + 1] = u32::cast_from(offer.seen_supply);
-                                candidates[lane * 9 + 2] = u32::cast_from(offer.empty);
-                                candidates[lane * 9 + 3] = offer.quantity.extract(LOW_WORD);
-                                candidates[lane * 9 + 4] = offer.quantity.extract(HIGH_WORD);
-                                candidates[lane * 9 + 5] = offer.score.extract(LOW_WORD);
-                                candidates[lane * 9 + 6] = offer.score.extract(HIGH_WORD);
-                                candidates[lane * 9 + 7] = offer.trip;
-                                candidates[lane * 9 + 8] = firm;
+                                });
                             }
                         }
+                        candidates.store(lane, &offer, firm);
                         sync_cube();
                         let mut cooperative = false;
                         if comptime!(source == index::SupplySource::Index) {
                             cooperative = CUBE_DIM >= 32;
-                            let eligible = candidates[lane * 9];
-                            let score = ticks(candidates[lane * 9 + 5], candidates[lane * 9 + 6]);
+                            let eligible = u32::cast_from(offer.eligible);
+                            let score = offer.score;
                             let counted = eligible
                                 * u32::cast_from(
                                     comptime!(!matches!(parameters.market, MarketFlag::Input(_)))
@@ -1391,7 +1486,7 @@ fn search(
                             if comptime!(parameters.market == MarketFlag::Household) {
                                 seen_supply = seen_supply
                                     || parallel::reduce::<u32>(
-                                        candidates[lane * 9 + 1] * included,
+                                        u32::cast_from(offer.seen_supply) * included,
                                         comptime!(Reduction::Sum),
                                     ) > 0;
                             }
@@ -1405,33 +1500,27 @@ fn search(
                                 );
                                 if winner != NO_ACTOR {
                                     let slot = winner as usize;
-                                    chosen = candidates[slot * 9 + 8];
-                                    quantity =
-                                        ticks(candidates[slot * 9 + 3], candidates[slot * 9 + 4]);
-                                    trip = candidates[slot * 9 + 7];
-                                    best =
-                                        ticks(candidates[slot * 9 + 5], candidates[slot * 9 + 6]);
+                                    chosen = candidates.firm[slot];
+                                    quantity = candidates.quantity[slot];
+                                    trip = candidates.trip[slot];
+                                    best = candidates.score[slot];
                                 }
                             }
                             if chosen == NO_ACTOR {
                                 let fallback = group_winner(
                                     CandidateRank {
-                                        active: candidates[lane * 9 + 2] * included,
+                                        active: u32::cast_from(offer.empty) * included,
                                         score,
                                     },
                                     comptime!(parameters.scan),
                                 );
                                 if fallback != NO_ACTOR {
                                     let slot = fallback as usize;
-                                    let score =
-                                        ticks(candidates[slot * 9 + 5], candidates[slot * 9 + 6]);
+                                    let score = candidates.score[slot];
                                     if lt(score, empty_score) {
-                                        empty_seller = candidates[slot * 9 + 8];
-                                        empty_quantity = ticks(
-                                            candidates[slot * 9 + 3],
-                                            candidates[slot * 9 + 4],
-                                        );
-                                        empty_trip = candidates[slot * 9 + 7];
+                                        empty_seller = candidates.firm[slot];
+                                        empty_quantity = candidates.quantity[slot];
+                                        empty_trip = candidates.trip[slot];
                                         empty_score = score;
                                     }
                                 }
@@ -1442,15 +1531,15 @@ fn search(
                             source == index::SupplySource::State
                                 && parameters.scan == crate::simulation::parallel::ScanMode::Plane
                         ) {
-                            cooperative = PLANE_DIM == 32 && CUBE_DIM == 32;
+                            cooperative = CUBE_DIM <= PLANE_DIM;
                             if cooperative {
-                                let eligible = candidates[lane * 9];
+                                let eligible = u32::cast_from(offer.eligible);
                                 let counted = eligible
                                     * u32::cast_from(
                                         comptime!(!matches!(
                                             parameters.market,
                                             MarketFlag::Input(_)
-                                        )) || candidates[lane * 9 + 6] == 0,
+                                        )) || offer.score.extract(HIGH_WORD) == 0,
                                     );
                                 let preceding = plane_exclusive_sum(counted);
                                 let visited = UNIT_POS < width
@@ -1459,7 +1548,7 @@ fn search(
                                 let included = u32::cast_from(visited);
                                 let total = plane_sum(counted * included);
                                 seen_supply = seen_supply
-                                    || plane_sum(candidates[lane * 9 + 1] * included) > 0;
+                                    || plane_sum(u32::cast_from(offer.seen_supply) * included) > 0;
                                 if comptime!(parameters.market == MarketFlag::Labor) {
                                     let faults = candidate_faults
                                         [fault_start + crate::simulation::flags::FAULT_WORD]
@@ -1469,8 +1558,7 @@ fn search(
                                             .fetch_or(faults);
                                     }
                                 }
-                                let score =
-                                    ticks(candidates[lane * 9 + 5], candidates[lane * 9 + 6]);
+                                let score = offer.score;
                                 let mut order = score;
                                 if comptime!(parameters.market == MarketFlag::Labor) {
                                     order =
@@ -1479,40 +1567,34 @@ fn search(
                                 let winner = plane_winner(CandidateRank {
                                     active: eligible * included,
                                     score: order,
-                                });
+                                })
+                                .lane;
                                 let fallback = plane_winner(CandidateRank {
-                                    active: candidates[lane * 9 + 2] * included,
+                                    active: u32::cast_from(offer.empty) * included,
                                     score,
-                                });
+                                })
+                                .lane;
                                 if winner != NO_ACTOR {
                                     let slot = winner as usize;
-                                    let score =
-                                        ticks(candidates[slot * 9 + 5], candidates[slot * 9 + 6]);
+                                    let score = candidates.score[slot];
                                     let mut improves = lt(score, best);
                                     if comptime!(parameters.market == MarketFlag::Labor) {
                                         improves = lt(best, score);
                                     }
                                     if improves || chosen == NO_ACTOR {
-                                        chosen = candidates[slot * 9 + 8];
-                                        quantity = ticks(
-                                            candidates[slot * 9 + 3],
-                                            candidates[slot * 9 + 4],
-                                        );
-                                        trip = candidates[slot * 9 + 7];
+                                        chosen = candidates.firm[slot];
+                                        quantity = candidates.quantity[slot];
+                                        trip = candidates.trip[slot];
                                         best = score;
                                     }
                                 }
                                 if fallback != NO_ACTOR {
                                     let slot = fallback as usize;
-                                    let score =
-                                        ticks(candidates[slot * 9 + 5], candidates[slot * 9 + 6]);
+                                    let score = candidates.score[slot];
                                     if lt(score, empty_score) {
-                                        empty_seller = candidates[slot * 9 + 8];
-                                        empty_quantity = ticks(
-                                            candidates[slot * 9 + 3],
-                                            candidates[slot * 9 + 4],
-                                        );
-                                        empty_trip = candidates[slot * 9 + 7];
+                                        empty_seller = candidates.firm[slot];
+                                        empty_quantity = candidates.quantity[slot];
+                                        empty_trip = candidates.trip[slot];
                                         empty_score = score;
                                     }
                                 }
@@ -1534,20 +1616,18 @@ fn search(
                                                 .fetch_or(faults);
                                         }
                                     }
-                                    seen_supply = seen_supply || candidates[slot * 9 + 1] != 0;
-                                    let amount =
-                                        ticks(candidates[slot * 9 + 3], candidates[slot * 9 + 4]);
-                                    let score =
-                                        ticks(candidates[slot * 9 + 5], candidates[slot * 9 + 6]);
-                                    let distance = candidates[slot * 9 + 7];
-                                    let firm = candidates[slot * 9 + 8];
-                                    if candidates[slot * 9 + 2] != 0 && lt(score, empty_score) {
+                                    seen_supply = seen_supply || candidates.seen_supply[slot] != 0;
+                                    let amount = candidates.quantity[slot];
+                                    let score = candidates.score[slot];
+                                    let distance = candidates.trip[slot];
+                                    let firm = candidates.firm[slot];
+                                    if candidates.empty[slot] != 0 && lt(score, empty_score) {
                                         empty_seller = firm;
                                         empty_quantity = amount;
                                         empty_trip = distance;
                                         empty_score = score;
                                     }
-                                    let eligible = candidates[slot * 9] != 0;
+                                    let eligible = candidates.eligible[slot] != 0;
                                     let mut improves = lt(score, best);
                                     if comptime!(parameters.market == MarketFlag::Labor) {
                                         improves = lt(best, score);
@@ -1733,39 +1813,29 @@ impl workgroup::TreeStorage for CandidateTree {
 #[cube]
 fn group_winner(rank: CandidateRank, #[comptime] mode: parallel::ScanMode) -> u32 {
     let mut winner = u32::new(comptime!(i64::from(NO_ACTOR)));
-    if comptime!(mode == parallel::ScanMode::Plane) && PLANE_DIM == 32 {
-        let high = select(rank.active > 0, rank.score.extract(HIGH_WORD), u32::MAX);
-        let minimum_high = plane_min(high);
-        let low = select(
-            rank.active > 0 && high == minimum_high,
-            rank.score.extract(LOW_WORD),
-            u32::MAX,
-        );
-        let minimum_low = plane_min(low);
-        let lane = plane_min(select(
-            rank.active > 0 && high == minimum_high && low == minimum_low,
-            UNIT_POS,
-            NO_ACTOR,
-        ));
-        let mut scores = Shared::<[u64]>::new_slice(8usize);
-        let mut lanes = Shared::<[u32]>::new_slice(8usize);
-        let plane = UNIT_POS / 32;
-        if UNIT_POS_PLANE == 0 {
-            scores[plane as usize] =
-                u64::cast_from(minimum_low) | (u64::cast_from(minimum_high) << 32);
-            lanes[plane as usize] = lane;
-        }
-        sync_cube();
-        let mut best = u64::new(-1);
-        for plane in 0..ceildiv(CUBE_DIM, 32) {
-            let score = scores[plane as usize];
-            let lane = lanes[plane as usize];
-            if score < best || score == best && lane < winner {
-                best = score;
-                winner = lane;
+    if comptime!(mode == parallel::ScanMode::Plane) {
+        let local = plane_winner(rank);
+        if CUBE_DIM <= PLANE_DIM {
+            winner = local.lane;
+        } else {
+            let mut scores = WorkgroupTree::planes::<u64>();
+            let mut lanes = WorkgroupTree::planes::<u32>();
+            if UNIT_POS_PLANE == 0 {
+                scores[PLANE_POS as usize] = local.score;
+                lanes[PLANE_POS as usize] = local.lane;
             }
+            sync_cube();
+            let mut best = u64::new(-1);
+            for plane in 0..ceildiv(CUBE_DIM, PLANE_DIM) {
+                let score = scores[plane as usize];
+                let lane = lanes[plane as usize];
+                if score < best || score == best && lane < winner {
+                    best = score;
+                    winner = lane;
+                }
+            }
+            sync_cube();
         }
-        sync_cube();
     } else {
         let score = u64::cast_from(rank.score.extract(LOW_WORD))
             | (u64::cast_from(rank.score.extract(HIGH_WORD)) << 32);
@@ -1780,8 +1850,14 @@ fn group_winner(rank: CandidateRank, #[comptime] mode: parallel::ScanMode) -> u3
     winner
 }
 
+#[derive(CubeType)]
+struct RankedLane {
+    lane: u32,
+    score: u64,
+}
+
 #[cube]
-fn plane_winner(rank: CandidateRank) -> u32 {
+fn plane_winner(rank: CandidateRank) -> RankedLane {
     let high = select(rank.active > 0, rank.score.extract(HIGH_WORD), u32::MAX);
     let minimum_high = plane_min(high);
     let low = select(
@@ -1790,9 +1866,12 @@ fn plane_winner(rank: CandidateRank) -> u32 {
         u32::MAX,
     );
     let minimum_low = plane_min(low);
-    plane_min(select(
-        rank.active > 0 && high == minimum_high && low == minimum_low,
-        UNIT_POS,
-        NO_ACTOR,
-    ))
+    RankedLane {
+        lane: plane_min(select(
+            rank.active > 0 && high == minimum_high && low == minimum_low,
+            UNIT_POS,
+            NO_ACTOR,
+        )),
+        score: u64::cast_from(minimum_low) | (u64::cast_from(minimum_high) << 32),
+    }
 }

@@ -426,11 +426,14 @@ impl ClaimSortProbe {
 
     fn reset(&self, device: &Device) {
         device.write(&self.buffers.claims, &self.initial);
-        device.write(&self.buffers.progress, &[0, 0, self.count as u32, 0, 0, 0]);
+        device.write(&self.buffers.progress, &[0, 0, self.count as u32, 0, 0]);
         device.write(&self.control, &vec![0; CONTROL_WORDS + 7]);
     }
 
     fn sort(&self, device: &Device, execution: Execution) {
+        if let (Execution::Buffered(_), 1..) = (execution, self.buffers.claim_capacity) {
+            admit_claims(device, &self.buffers, &self.control, execution);
+        }
         sort_buffered(device, &self.buffers, &self.control, execution);
     }
 
@@ -464,11 +467,11 @@ fn block_claim_sort_preserves_stable_indices_partial_tiles_and_output_parity_on_
         for count in [0, capacity.min(1), capacity / 2, capacity] {
             let merge = ClaimSortProbe::new(&device, capacity, count, SortMethod::Merge);
             merge.reset(&device);
-            merge.sort(&device, Execution::Immediate);
+            merge.sort(&device, Execution::Immediate(Wave::Initial));
             let expected = merge.outcome(&device)?;
             let blocked = ClaimSortProbe::new(&device, capacity, count, SortMethod::Block2048);
             blocked.reset(&device);
-            blocked.sort(&device, Execution::Immediate);
+            blocked.sort(&device, Execution::Immediate(Wave::Initial));
             let actual = blocked.outcome(&device)?;
             assert_eq!(
                 actual, expected,
@@ -486,34 +489,38 @@ fn empty_claim_sort_skips_dispatches_and_small_blocks_keep_their_dispatch_on_gpu
     for sorting in [SortMethod::Merge, SortMethod::Block2048] {
         let probe = ClaimSortProbe::new(&device, 0, 0, sorting);
         let dispatches = vec![0xa5a5a5a5; FREIGHT_DISPATCH_WORDS];
-        for execution in [Execution::Immediate, Execution::Initial, Execution::Retry] {
+        for execution in [
+            Execution::Immediate(Wave::Initial),
+            Execution::Buffered(Wave::Initial),
+            Execution::Buffered(Wave::Retry),
+        ] {
             probe.reset(&device);
             device.write(&probe.buffers.dispatches, &dispatches);
             probe.sort(&device, execution);
             assert_eq!(device.read(&probe.buffers.dispatches)?, dispatches);
             assert_eq!(device.read(&probe.buffers.claims)?, probe.initial);
-            assert_eq!(device.read(&probe.buffers.progress)?, [0; 6]);
+            assert_eq!(
+                device.read(&probe.buffers.progress)?,
+                [0; FREIGHT_PROGRESS_WORDS]
+            );
         }
     }
     for capacity in [1, 128, SORT_TILE, SORT_TILE + 1] {
         let probe = ClaimSortProbe::new(&device, capacity, capacity, SortMethod::Block2048);
         probe.reset(&device);
-        probe.sort(&device, Execution::Immediate);
-        let workgroup = match probe.buffers.sorting {
-            SortMethod::Merge => device.workgroup as usize,
-            method => match capacity <= method.tile() {
-                true => method.tile(),
-                false => device.workgroup as usize,
-            },
-        };
+        probe.sort(&device, Execution::Immediate(Wave::Initial));
         let dispatches = device.read(&probe.buffers.dispatches)?;
         assert_eq!(
-            dispatches[SORT_DISPATCH] as usize,
-            capacity.div_ceil(workgroup)
+            dispatches[BLOCK_SORT_DISPATCH] as usize,
+            capacity.div_ceil(probe.buffers.sorting.tile())
+        );
+        assert_eq!(
+            dispatches[MERGE_SORT_DISPATCH] as usize,
+            capacity.div_ceil(device.workgroup as usize)
         );
         let expected = ClaimSortProbe::new(&device, capacity, capacity, SortMethod::Merge);
         expected.reset(&device);
-        expected.sort(&device, Execution::Immediate);
+        expected.sort(&device, Execution::Immediate(Wave::Initial));
         assert_eq!(probe.outcome(&device)?, expected.outcome(&device)?);
     }
     Ok(())
@@ -522,7 +529,10 @@ fn empty_claim_sort_skips_dispatches_and_small_blocks_keep_their_dispatch_on_gpu
 #[test]
 fn block_claim_sort_preserves_disabled_retries_and_prior_gpu_faults() -> Result<()> {
     let device = crate::simulation::tests::device(64)?;
-    for execution in [Execution::Initial, Execution::Retry] {
+    for execution in [
+        Execution::Buffered(Wave::Initial),
+        Execution::Buffered(Wave::Retry),
+    ] {
         for faults in [
             FaultFlags::empty(),
             FaultFlags::ARITHMETIC_OVERFLOW,
@@ -535,7 +545,7 @@ fn block_claim_sort_preserves_disabled_retries_and_prior_gpu_faults() -> Result<
             device.write(&probe.control, &control);
             probe.sort(&device, execution);
             match (execution, faults.is_empty()) {
-                (Execution::Initial, true) => {
+                (Execution::Buffered(Wave::Initial), true) => {
                     let merge = ClaimSortProbe::new(&device, 5000, 128, SortMethod::Merge);
                     merge.reset(&device);
                     merge.sort(&device, execution);

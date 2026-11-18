@@ -431,7 +431,7 @@ impl FitFixture {
                     progress: buffers.progress.buffer_arg(),
                     parameters: self.parameters.launch(),
                     stage: Stage::Propose,
-                    execution: Execution::Immediate,
+                    execution: Execution::Immediate(Wave::Initial),
                 },
                 quantity_low: quantity as u32,
                 quantity_high: (quantity >> 32) as u32,
@@ -732,6 +732,7 @@ impl FreightLoad {
 fn freight_execution(
     source: Seller,
     load: FreightLoad,
+    buyers: usize,
     workgroup: u32,
     execution: Execution,
 ) -> Result<Vec<u32>> {
@@ -744,10 +745,12 @@ fn freight_execution(
     let template = population.households[0].clone();
     population
         .households
-        .extend((0..381).map(|index| HouseholdSeed {
-            identity: 100 + index,
-            ..template.clone()
-        }));
+        .extend(
+            (population.households.len()..buyers).map(|index| HouseholdSeed {
+                identity: 100 + index as u64,
+                ..template.clone()
+            }),
+        );
     if let FreightLoad::Cascading = load {
         population.households.truncate(15);
     }
@@ -889,19 +892,22 @@ fn freight_execution(
     advance(Stage::Initialize);
     let buffers = &simulation.config.railway.freight;
     assert_eq!(
-        device.read(&buffers.progress)?[PENDING] as usize,
+        device.read(&buffers.progress)?[Wave::Initial as usize] as usize,
         accepted.len()
     );
     let mut pending = 1;
     let mut waves = 0;
     while pending > 0 {
         wave.set(match (execution, waves) {
-            (Execution::Immediate, _) => Execution::Immediate,
-            (_, 0) => Execution::Initial,
-            _ => Execution::Retry,
+            (Execution::Immediate(_), 0) => Execution::Immediate(Wave::Initial),
+            (Execution::Immediate(_), _) => Execution::Immediate(Wave::Retry),
+            (_, 0) => Execution::Buffered(Wave::Initial),
+            _ => Execution::Buffered(Wave::Retry),
         });
         advance(Stage::Queue);
-        advance(Stage::Reset);
+        if waves > 0 {
+            advance(Stage::Reset);
+        }
         let bookings = device.read(&buffers.bookings)?;
         let resources = device.read(&buffers.resources)?;
         let previous_control = device.read(&simulation.control)?;
@@ -910,7 +916,10 @@ fn freight_execution(
         let expected_resources = device.read(&buffers.resources)?;
         let expected_control = device.read(&simulation.control)?;
         let mut fresh = bookings;
-        for booking in fresh.chunks_exact_mut(FREIGHT_BOOKING_WORDS) {
+        for booking in fresh
+            .chunks_exact_mut(FREIGHT_BOOKING_WORDS)
+            .take(shipments)
+        {
             if booking[0] == BookingState::Retrying as u32 {
                 booking[0] = BookingState::Pending as u32;
             }
@@ -924,7 +933,8 @@ fn freight_execution(
         assert_eq!(device.read(&simulation.control)?, expected_control);
         match waves {
             0 => {
-                let active = device.read_range(&buffers.progress, ACTIVE, 1)?[0] as usize;
+                let active =
+                    device.read_range(&buffers.progress, Wave::Initial as usize, 1)?[0] as usize;
                 let queued = device.read_range(&buffers.queue, 0, active)?;
                 let buyers = device.read_range(
                     &simulation.scratch,
@@ -970,10 +980,7 @@ fn freight_execution(
             }
             _ => (),
         }
-        advance(match waves {
-            0 => Stage::Commit,
-            _ => Stage::CommitFinal,
-        });
+        advance(Stage::Commit);
         let committed = device.read(&buffers.resources)?;
         for (resource_id, resource) in committed
             .chunks_exact(RESOURCE_WORDS)
@@ -990,7 +997,10 @@ fn freight_execution(
             );
         }
         advance(Stage::Release);
-        pending = progress(&device, &simulation.config, &simulation.control)?.pending;
+        pending = match wave.get().wave() {
+            Wave::Initial => device.read(&buffers.progress)?[Wave::Retry as usize],
+            Wave::Retry => 0,
+        };
         let bookings = device.read(&buffers.bookings)?;
         if waves == 0 {
             let first_wave = match load {
@@ -1034,8 +1044,8 @@ fn freight_execution(
     assert_eq!(device.read(&simulation.state)?, settled);
     assert_eq!(device.read(&buffers.accounts)?, accounts);
     assert_eq!(
-        progress(&device, &simulation.config, &simulation.control)?.pending,
-        0
+        device.read(&buffers.progress)?[Wave::Initial as usize] as usize,
+        accepted.len()
     );
     wave.set(execution);
     advance(Stage::Accounts);
@@ -1116,11 +1126,37 @@ fn buffered_freight_matches_immediate_settlement_and_retries_on_gpu() -> Result<
             (Seller::Household, 256),
         ] {
             assert_eq!(
-                freight_execution(source, load, workgroup, Execution::Initial)?,
-                freight_execution(source, load, workgroup, Execution::Immediate)?,
+                freight_execution(
+                    source,
+                    load,
+                    389,
+                    workgroup,
+                    Execution::Buffered(Wave::Initial)
+                )?,
+                freight_execution(
+                    source,
+                    load,
+                    389,
+                    workgroup,
+                    Execution::Immediate(Wave::Initial)
+                )?,
                 "{source:?} {load:?} workgroup {workgroup}"
             );
         }
+    }
+    Ok(())
+}
+
+#[test]
+fn retry_queue_preserves_booking_priority_at_cube_boundaries_on_gpu() -> Result<()> {
+    for buyers in [63, 64, 65, 70, 71, 72] {
+        freight_execution(
+            Seller::Firm(Good::Bread),
+            FreightLoad::Constrained,
+            buyers,
+            64,
+            Execution::Buffered(Wave::Initial),
+        )?;
     }
     Ok(())
 }
@@ -1218,10 +1254,10 @@ fn buffered_claim_admission_preserves_zero_wide_counts_and_prior_faults_on_gpu()
     ] {
         let mut control = vec![0; crate::simulation::flags::CLAIM_CAPACITY_HIGH_WORD + 1];
         control[crate::simulation::flags::FAULT_WORD] = case.faults.bits();
-        let progress = [7, 11, case.count as u32, (case.count >> 32) as u32, 13, 0];
+        let progress = [7, 11, case.count as u32, (case.count >> 32) as u32, 13];
         let mut dispatches = vec![37; FREIGHT_DISPATCH_WORDS];
         dispatches[..3].copy_from_slice(&[3, 2, 1]);
-        dispatches[9..12].copy_from_slice(&[5, 7, 1]);
+        dispatches[BOOKING_DISPATCH..BOOKING_DISPATCH + 3].copy_from_slice(&[5, 7, 1]);
         device.write(&simulation.control, &control);
         device.write(&buffers.progress, &progress);
         device.write(&buffers.dispatches, &dispatches);
@@ -1236,14 +1272,13 @@ fn buffered_claim_admission_preserves_zero_wide_counts_and_prior_faults_on_gpu()
             &simulation.control,
             &parameters,
             Stage::AdmitClaims,
-            Execution::Initial,
+            Execution::Buffered(Wave::Initial),
         );
         let actual_control = device.read(&simulation.control)?;
         let actual_progress = device.read(&buffers.progress)?;
         let mut expected_progress = progress;
         match case.faults.is_empty() {
             true => {
-                expected_progress[INITIAL_CLAIMS] = u32::from(case.count > 0);
                 if case.count > capacity {
                     control[crate::simulation::flags::FAULT_WORD] =
                         FaultFlags::CLAIM_CAPACITY.bits();
@@ -1269,6 +1304,16 @@ fn buffered_claim_admission_preserves_zero_wide_counts_and_prior_faults_on_gpu()
         dispatches[CLAIM_ACTIVE_DISPATCH..CLAIM_ACTIVE_DISPATCH + 3].copy_from_slice(&active);
         dispatches[CLAIM_RESOURCE_DISPATCH..CLAIM_RESOURCE_DISPATCH + 3]
             .copy_from_slice(&resources);
+        let count = match case.dispatch {
+            AdmissionDispatch::Active => case.count as usize,
+            AdmissionDispatch::Empty => 0,
+        };
+        for (offset, width) in [
+            (BLOCK_SORT_DISPATCH, buffers.sorting.tile()),
+            (MERGE_SORT_DISPATCH, device.workgroup as usize),
+        ] {
+            dispatches[offset..offset + 3].copy_from_slice(&[count.div_ceil(width) as u32, 1, 1]);
+        }
         assert_eq!(device.read(&buffers.dispatches)?, dispatches);
     }
     let error = simulation
@@ -1322,13 +1367,13 @@ fn disabled_buffered_freight_retry_preserves_all_settlement_buffers_on_gpu() -> 
         buffers.queue.clone(),
         buffers.claims.clone(),
     ];
-    for (initial_claims, faults) in [
+    for (retry_bookings, faults) in [
         (0, FaultFlags::empty()),
         (1, FaultFlags::ARITHMETIC_OVERFLOW),
     ] {
         let mut control = vec![0; crate::simulation::flags::CLAIM_CAPACITY_HIGH_WORD + 1];
         control[crate::simulation::flags::FAULT_WORD] = faults.bits();
-        let progress = [7, 11, 17, 0, 13, initial_claims];
+        let progress = [7, retry_bookings, 17, 0, 13];
         let mut stale_dispatches = initial_dispatches.clone();
         stale_dispatches[CLAIM_ACTIVE_DISPATCH..CLAIM_ACTIVE_DISPATCH + 3]
             .copy_from_slice(&[11, 13, 1]);
@@ -1351,7 +1396,7 @@ fn disabled_buffered_freight_retry_preserves_all_settlement_buffers_on_gpu() -> 
             Stage::SortClaims,
             Stage::ClaimOffsets,
             Stage::Resolve,
-            Stage::CommitFinal,
+            Stage::Commit,
             Stage::Release,
             Stage::Accounts,
         ] {
@@ -1366,7 +1411,7 @@ fn disabled_buffered_freight_retry_preserves_all_settlement_buffers_on_gpu() -> 
                 &simulation.control,
                 &parameters,
                 stage,
-                Execution::Retry,
+                Execution::Buffered(Wave::Retry),
             );
         }
         for (tensor, expected) in tensors.iter().zip(expected) {
@@ -1375,15 +1420,14 @@ fn disabled_buffered_freight_retry_preserves_all_settlement_buffers_on_gpu() -> 
         assert_eq!(device.read(&buffers.progress)?, progress);
         assert_eq!(device.read(&simulation.control)?[..control.len()], control);
         let dispatches = device.read(&buffers.dispatches)?;
-        assert_eq!(dispatches[9], 0);
-        assert_eq!(dispatches[12], 0);
-        assert_eq!(dispatches[..9], initial_dispatches[..9]);
+        assert_eq!(dispatches[BOOKING_DISPATCH], 0);
+        assert_eq!(dispatches[BLOCK_SORT_DISPATCH], 0);
         assert_eq!(
-            dispatches[RETRY_RESOURCE_DISPATCH..RETRY_RESOURCE_DISPATCH + 3],
-            [0, 1, 1],
+            dispatches[..BOOKING_DISPATCH],
+            initial_dispatches[..BOOKING_DISPATCH]
         );
         assert_eq!(
-            dispatches[RETRY_RESET_DISPATCH..RETRY_RESET_DISPATCH + 3],
+            dispatches[RETRY_RESOURCE_DISPATCH..RETRY_RESOURCE_DISPATCH + 3],
             [0, 1, 1],
         );
         assert_eq!(
@@ -1397,13 +1441,12 @@ fn disabled_buffered_freight_retry_preserves_all_settlement_buffers_on_gpu() -> 
     }
     let mut dispatches = initial_dispatches;
     dispatches[..3].copy_from_slice(&[2, 3, 1]);
-    dispatches[6..9].copy_from_slice(&[5, 7, 1]);
     device.write(&buffers.dispatches, &dispatches);
     device.write(
         &simulation.control,
         &vec![0; simulation.control.meta.num_elements()],
     );
-    device.write(&buffers.progress, &[7, 11, 17, 0, 13, 1]);
+    device.write(&buffers.progress, &[7, 11, 17, 0, 13]);
     launch_buffered(
         &device,
         &simulation.state,
@@ -1415,19 +1458,15 @@ fn disabled_buffered_freight_retry_preserves_all_settlement_buffers_on_gpu() -> 
         &simulation.control,
         &parameters,
         Stage::Queue,
-        Execution::Retry,
+        Execution::Buffered(Wave::Retry),
     );
     let actual = device.read(&buffers.dispatches)?;
-    assert_eq!(actual[..9], dispatches[..9]);
+    assert_eq!(actual[..BOOKING_DISPATCH], dispatches[..BOOKING_DISPATCH]);
     assert_eq!(
         actual[RETRY_RESOURCE_DISPATCH..RETRY_RESOURCE_DISPATCH + 3],
         dispatches[..3],
     );
-    assert_eq!(
-        actual[RETRY_RESET_DISPATCH..RETRY_RESET_DISPATCH + 3],
-        dispatches[6..9],
-    );
-    assert_eq!(device.read(&buffers.progress)?, [0, 7, 17, 0, 13, 1]);
+    assert_eq!(device.read(&buffers.progress)?, [7, 11, 0, 0, 0]);
     Ok(())
 }
 

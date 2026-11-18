@@ -116,17 +116,11 @@ impl Supply {
     }
 }
 
-#[derive(Clone, Copy)]
-enum IndexReduction {
-    Workgroup,
-    Plane,
-}
-
 #[cube]
-fn reduce_minimum(value: u32, #[comptime] reduction: IndexReduction) -> u32 {
+fn reduce_minimum(value: u32, #[comptime] reduction: parallel::ScanMode) -> u32 {
     match comptime!(reduction) {
-        IndexReduction::Workgroup => parallel::reduce::<u32>(value, comptime!(Reduction::Minimum)),
-        IndexReduction::Plane => plane_min(value),
+        parallel::ScanMode::Shared => parallel::reduce::<u32>(value, comptime!(Reduction::Minimum)),
+        parallel::ScanMode::Plane => plane_min(value),
     }
 }
 
@@ -142,61 +136,25 @@ pub(super) fn build(
     control: &[Atomic<u32>],
     parameters: &EconomyParameters,
 ) {
-    let cooperative = comptime!(parameters.scan == crate::simulation::parallel::ScanMode::Plane)
-        && PLANE_DIM == 32;
-    if cooperative {
-        build_blocks(
-            state,
-            actors,
-            config,
-            spatial,
-            scratch,
-            searches,
-            successes,
-            control,
-            parameters,
-            comptime!(IndexReduction::Plane),
-        );
-    } else {
-        build_blocks(
-            state,
-            actors,
-            config,
-            spatial,
-            scratch,
-            searches,
-            successes,
-            control,
-            parameters,
-            comptime!(IndexReduction::Workgroup),
-        );
-    }
-}
-
-#[cube]
-fn build_blocks(
-    state: &mut [u32],
-    actors: &[u32],
-    config: &EconomyConfig,
-    spatial: &mut [u32],
-    scratch: &mut [u32],
-    searches: &mut [u32],
-    successes: &[Atomic<u32>],
-    control: &[Atomic<u32>],
-    parameters: &EconomyParameters,
-    #[comptime] reduction: IndexReduction,
-) {
+    let reduction = comptime!(parameters.scan);
     let cells = config.spatial_side * config.spatial_side;
     let count = spatial[cells as usize];
     let start = CUBE_POS as u32 * (DISCOVERY_BLOCK / BLOCK);
     let end = min(start + DISCOVERY_BLOCK / BLOCK, ceildiv(count, BLOCK));
     let width = match comptime!(reduction) {
-        IndexReduction::Plane => 32u32,
-        IndexReduction::Workgroup => CUBE_DIM,
+        parallel::ScanMode::Plane => min(PLANE_DIM, CUBE_DIM),
+        parallel::ScanMode::Shared => CUBE_DIM,
     };
-    let lane = UNIT_POS % width;
-    let step = CUBE_DIM / width;
-    let mut block = start + UNIT_POS / width;
+    let lane = match comptime!(reduction) {
+        parallel::ScanMode::Plane => UNIT_POS_PLANE,
+        parallel::ScanMode::Shared => UNIT_POS,
+    };
+    let step = ceildiv(CUBE_DIM, width);
+    let mut block = start
+        + match comptime!(reduction) {
+            parallel::ScanMode::Plane => PLANE_POS,
+            parallel::ScanMode::Shared => 0u32,
+        };
     let good = parameters.traded_good();
     let mut minimum_quote = u32::new(comptime!(i64::from(u32::MAX)));
     let mut minimum_eligible = u32::new(comptime!(i64::from(u32::MAX)));

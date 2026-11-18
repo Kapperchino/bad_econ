@@ -263,10 +263,23 @@ impl Device {
             _ => self.empty(words),
         }
     }
+    fn logical_words(tensor: &CubeTensor) -> usize {
+        tensor.meta.num_elements() * tensor.elem_size() / WORD_BYTES
+    }
     pub fn read(&self, tensor: &CubeTensor) -> Result<Vec<u32>> {
-        self.read_range(tensor, 0, tensor.meta.shape()[0])
+        self.read_range(tensor, 0, Self::logical_words(tensor))
     }
     pub fn read_range(&self, tensor: &CubeTensor, start: usize, length: usize) -> Result<Vec<u32>> {
+        let available =
+            Self::logical_words(tensor).min(tensor.handle.size_in_used() as usize / WORD_BYTES);
+        let end = start
+            .checked_add(length)
+            .context("readback range overflow")?;
+        if end > available {
+            Err(anyhow!(
+                "readback range {start}..{end} exceeds {available} words"
+            ))?;
+        }
         let chunk = match length {
             0..=DIRECT_READBACK_WORDS => length.max(1),
             _ => (1usize << length.ilog2()).min(MAX_READBACK_WORDS),
@@ -290,6 +303,11 @@ impl Device {
         Ok(words)
     }
     pub fn write(&self, tensor: &CubeTensor, words: &[u32]) {
+        assert!(
+            words.len() <= Self::logical_words(tensor)
+                && size_of_val(words) as u64 <= tensor.handle.size_in_used(),
+            "write exceeds GPU tensor bounds"
+        );
         #[cfg(target_endian = "little")]
         let bytes = burn::tensor::Bytes::from_elems(words.to_vec());
         #[cfg(target_endian = "big")]
@@ -435,6 +453,22 @@ impl EconomyOps for CubeBackend {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn readback_checks_word_ranges_before_slicing_gpu_buffers() -> Result<()> {
+        let device = crate::simulation::tests::device(64)?;
+        let buffer = device.tensor(&[10, 20, 30]);
+        let matrix = super::super::tensor::reshape(&buffer, [1, 3]);
+        assert_eq!(device.read(&matrix)?, [10, 20, 30]);
+        assert_eq!(device.read_range(&buffer, 1, 2)?, [20, 30]);
+        let empty = super::super::tensor::empty(&device, [2, 0]);
+        assert!(device.read(&empty)?.is_empty());
+        assert!(device.read_range(&empty, 0, 1).is_err());
+        assert!(device.read_range(&buffer, 3, 0)?.is_empty());
+        assert!(device.read_range(&buffer, 2, 2).is_err());
+        assert!(device.read_range(&buffer, usize::MAX, 1).is_err());
+        Ok(())
+    }
 
     #[test]
     fn reusable_state_buffers_preserve_logical_bounds_and_clear_stale_snapshots() -> Result<()> {

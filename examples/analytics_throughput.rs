@@ -70,6 +70,7 @@ fn main() -> Result<()> {
         }
         let reference = serde_json::to_value(reference)?;
         solve()?;
+        device.sync()?;
         let mut milliseconds = Vec::new();
         for _ in 0..args.trials.get() {
             let start = Instant::now();

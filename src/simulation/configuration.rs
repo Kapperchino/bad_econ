@@ -88,15 +88,10 @@ pub struct EconomyConfig {
     pub actors: u32,
     pub state_stride: u32,
     pub fields: u32,
-    #[cube(comptime)]
     pub ring: u32,
-    #[cube(comptime)]
     pub search_radius: u32,
-    #[cube(comptime)]
     pub map_size: u32,
-    #[cube(comptime)]
     pub commute_speed: u32,
-    #[cube(comptime)]
     pub shipment_speed: u32,
     pub railway: super::economy::railway::RailNetwork,
     pub household_need: u32,
@@ -112,16 +107,13 @@ pub struct EconomyConfig {
     pub work_cap: u32,
     pub reserved_minutes: u32,
     pub forecast_weight: u32,
-    #[cube(comptime)]
     pub coverage: u32,
     pub distribution_rate: u32,
     pub minimum_price: u32,
     pub maximum_price: u32,
-    #[cube(comptime)]
     pub delivery_penalty: u32,
     pub reserve_low: u32,
     pub reserve_high: u32,
-    #[cube(comptime)]
     pub spatial_side: u32,
     pub work_fatigue: u32,
     pub rest_recovery: u32,

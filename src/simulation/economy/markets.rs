@@ -28,8 +28,7 @@ pub(in crate::simulation) const QUEUE_DISPATCH: usize = 27;
 pub(in crate::simulation) const SEARCH_COMPACT_DISPATCH: usize = 30;
 pub(in crate::simulation) const PREPARATION_DISPATCH: usize = 33;
 pub(in crate::simulation) const COMPACTION_BLOCK: u32 = 256;
-pub(in crate::simulation) const EMPTY_CACHE_EXTRA_WORDS: usize = 56;
-pub(in crate::simulation) const SEARCH_REQUEST_FIELDS: usize = 18 + EMPTY_CACHE_EXTRA_WORDS;
+pub(in crate::simulation) const SEARCH_REQUEST_FIELDS: usize = 18;
 
 #[derive(Clone, Copy, Debug, Hash, PartialEq, Eq)]
 #[repr(u32)]
@@ -50,15 +49,23 @@ pub(in crate::simulation) struct SearchBuffers {
 }
 
 impl SearchBuffers {
-    pub fn new(device: &crate::simulation::Device, actors: usize) -> Self {
+    pub fn new(device: &crate::simulation::Device, rows: &crate::domain::ActorRows) -> Self {
+        let actors = rows.len();
+        let layout = crate::domain::SupplierCacheLayout::new(rows);
         Self {
-            requests: device.empty(actors * SEARCH_REQUEST_FIELDS),
+            requests: device.empty(actors * (SEARCH_REQUEST_FIELDS + layout.extra_words)),
             successes: device
                 .empty(search_counts_offset(actors) + 2 * search_blocks(actors) + 512 + actors),
-            dispatches: device
-                .client
-                .memory_dedicated_allocation(144, |_| device.empty(36)),
+            dispatches: Self::dispatch_buffer(device),
         }
+    }
+
+    pub(in crate::simulation) fn dispatch_buffer(
+        device: &crate::simulation::Device,
+    ) -> burn_wgpu::CubeTensor {
+        device
+            .client
+            .memory_dedicated_allocation(144, |_| device.empty(36))
     }
 }
 
@@ -85,7 +92,7 @@ pub(in crate::simulation) fn dispatch(
     match control.device {
         cubecl::Device::Metal(_) => Dispatch::Bounded {
             counts: control.buffer_arg(),
-            offset,
+            offset: u32::try_from(offset).expect("dispatch offset exceeds GPU indexing capacity"),
             max_groups: u32::try_from(max_groups).expect("dispatch exceeds GPU indexing capacity"),
         },
         _ => {
@@ -249,11 +256,15 @@ fn prepare_counts(
         preparation_workgroup,
     );
     for index in 0..12usize {
-        let count = counts[index];
-        dispatches[index * 3] = min(count, 65535);
-        dispatches[index * 3 + 1] = ceildiv(max(count, 1), 65535);
-        dispatches[index * 3 + 2] = 1;
+        store_dispatch(dispatches, index * 3, counts[index]);
     }
+}
+
+#[cube]
+pub(in crate::simulation) fn store_dispatch(dispatches: &mut [u32], offset: usize, groups: u32) {
+    dispatches[offset] = min(groups, 65535);
+    dispatches[offset + 1] = ceildiv(max(groups, 1), 65535);
+    dispatches[offset + 2] = 1;
 }
 
 pub(in crate::simulation) fn scratch_words(actors: usize) -> usize {

@@ -196,7 +196,7 @@ mod tests {
                         let buffer = device.tensor(&words);
                         let control = device.tensor(&control);
                         let dispatches =
-                            crate::simulation::markets::SearchBuffers::new(&device, 1).dispatches;
+                            crate::simulation::markets::SearchBuffers::dispatch_buffer(&device);
                         crate::simulation::markets::prepare_dispatch(
                             &device,
                             &control,
@@ -475,12 +475,12 @@ fn add_active_offsets(
         divisor,
     );
     let block = CUBE_POS as u32;
-    let start = block * CUBE_DIM * items + UNIT_POS * items;
+    let start = block * CUBE_DIM * items + UNIT_POS;
     if start < count && block > 0 && crate::simulation::markets::faults_clear(control) {
         let preceding = buffer[(offset + bound + block - 1) as usize];
         #[unroll]
         for item in 0..items {
-            let id = start + item;
+            let id = start + item * CUBE_DIM;
             if id < count {
                 buffer[(offset + id) as usize] += preceding;
             }
@@ -515,19 +515,23 @@ pub(super) fn scan_prefix(value: u32, #[comptime] mode: ScanMode) -> PrefixSum<u
         ScanMode::Shared => prefix_sum::<u32>(value),
         ScanMode::Plane => {
             let inclusive = plane_inclusive_sum(value);
-            let mut planes = Shared::<[u32]>::new_slice(256usize);
-            let plane = UNIT_POS / PLANE_DIM;
-            if UNIT_POS_PLANE == min(PLANE_DIM, CUBE_DIM - plane * PLANE_DIM) - 1 {
-                planes[plane as usize] = inclusive;
-            }
-            sync_cube();
             let mut preceding = 0u32;
             let mut total = 0u32;
-            for index in 0..ceildiv(CUBE_DIM, PLANE_DIM) {
-                let count = planes[index as usize];
-                total += count;
-                if index < plane {
-                    preceding += count;
+            if CUBE_DIM <= PLANE_DIM {
+                total = plane_sum(value);
+            } else {
+                let mut planes = workgroup::WorkgroupTree::planes::<u32>();
+                let plane = UNIT_POS / PLANE_DIM;
+                if UNIT_POS_PLANE == min(PLANE_DIM, CUBE_DIM - plane * PLANE_DIM) - 1 {
+                    planes[plane as usize] = inclusive;
+                }
+                sync_cube();
+                for index in 0..ceildiv(CUBE_DIM, PLANE_DIM) {
+                    let count = planes[index as usize];
+                    total += count;
+                    if index < plane {
+                        preceding += count;
+                    }
                 }
             }
             PrefixSum {
