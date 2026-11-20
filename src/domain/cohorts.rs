@@ -1,7 +1,5 @@
 use super::{
-    Scenario, State,
-    demography::{DAYS_PER_YEAR, Person, PersonSeed, Sex},
-    employment::InitialSettlement,
+    Field, Scenario, State, demography::DAYS_PER_YEAR, employment::InitialSettlement,
     enterprise::HouseholdProduction,
 };
 use anyhow::{Context, Result, anyhow};
@@ -39,13 +37,20 @@ enum Role {
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub(super) struct Cohort {
-    pub members: Vec<u32>,
+    first: u32,
+    pub count: u32,
+    pub farmers: u32,
+    pub cash: u64,
+    ages: [u32; 5],
+    female: [u32; 5],
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub(super) struct CohortLayout {
     pub rows: Vec<Cohort>,
     assignments: Vec<u32>,
+    grants: BTreeMap<u32, usize>,
+    population: u32,
     pub rental_sites: BTreeMap<usize, Vec<usize>>,
 }
 
@@ -53,9 +58,9 @@ impl CohortLayout {
     pub fn new(scenario: &Scenario) -> Result<Self> {
         let config = scenario.config();
         let sizes = config.cohort_sizes;
-        match sizes.workers.get().max(sizes.farmers.get()) <= 1024 {
+        match sizes.workers.get().max(sizes.farmers.get()) <= 16_384 {
             true => (),
-            false => Err(anyhow!("cohort sizes must be in 1..=1024"))?,
+            false => Err(anyhow!("cohort sizes must be in 1..=16384"))?,
         }
         let count = config.population_size();
         let mut individuals = BTreeSet::new();
@@ -107,12 +112,36 @@ impl CohortLayout {
                 .collect::<BTreeSet<_>>()
         });
         let settlement = InitialSettlement::new(config);
+        let indexed = config.population.is_some() || !config.demography.people.is_empty();
+        let grant_ids: BTreeSet<_> = config
+            .land_access
+            .iter()
+            .flat_map(|land| land.allocations.iter().map(|grant| grant.household))
+            .collect();
+        let mut grant_rows = BTreeMap::new();
+        let mut boundaries = individuals.clone();
+        boundaries.extend(&grant_ids);
         let mut rows: Vec<Cohort> = Vec::new();
-        let mut assignments = Vec::with_capacity(count as usize);
+        let mut assignments = Vec::new();
         let mut open = BTreeMap::new();
         let mut rental_sites = BTreeMap::<usize, Vec<usize>>::new();
         let mut tenants = BTreeMap::<usize, usize>::new();
-        for source in 0..count {
+        let stride = (super::BASE_FIELDS + scenario.ring() * super::Good::COUNT) * 2;
+        let farmers = match (config.household_production, &grants) {
+            (_, Some(grants)) => grants.len() as u32,
+            (HouseholdProduction::Unavailable, _) => 0,
+            _ if config.population.is_some() => 0,
+            _ => settlement.farmers(count),
+        };
+        let minimum_rows = u64::from(farmers.div_ceil(sizes.farmers.get()))
+            + u64::from((count - farmers.min(count)).div_ceil(sizes.workers.get()))
+            + u64::from(config.firms);
+        if minimum_rows * stride as u64 > u64::from(u32::MAX) {
+            Err(anyhow!(
+                "population exceeds GPU address space at these cohort sizes; increase worker and farmer cohort sizes"
+            ))?;
+        }
+        let mut insert = |source: u32, weight: u32| -> Result<()> {
             let actor = scenario.source_actor(source as usize);
             let farmer = match &grants {
                 Some(grants) => grants.contains(&actor.identity),
@@ -127,7 +156,7 @@ impl CohortLayout {
                 Role::Farmer => sizes.farmers,
                 Role::Worker => sizes.workers,
             }
-            .get() as usize;
+            .get();
             let region = config
                 .property
                 .as_ref()
@@ -145,119 +174,224 @@ impl CohortLayout {
             );
             let employer = scenario.initial_employment.employer(source as usize);
             let key = (role, region, cell, employer);
-            let row = match rental_site || individuals.contains(&actor.identity) {
+            let row = match rental_site || individuals.contains(&actor.identity) || weight > 1 {
                 true => rows.len(),
                 false => *open.entry(key).or_insert(rows.len()),
             };
             if row == rows.len() {
                 rows.push(Cohort {
-                    members: Vec::new(),
+                    first: source,
+                    count: 0,
+                    farmers: 0,
+                    cash: 0,
+                    ages: [0; 5],
+                    female: [0; 5],
                 });
             }
-            rows[row].members.push(source);
-            if open.get(&key) == Some(&row) && rows[row].members.len() == limit {
+            rows[row].count += weight;
+            let band = config
+                .demography
+                .cohort_band((20 + source % 25) * DAYS_PER_YEAR);
+            rows[row].ages[band] += weight;
+            rows[row].female[band] += weight / 2 + (weight % 2) * u32::from(source % 2 == 0);
+            rows[row].farmers += weight * u32::from(settlement.worker(source as usize).is_none());
+            if config.population.is_none() {
+                let cash = scenario.initial_employment.cash(config, source as usize)?;
+                rows[row].cash = crate::arithmetic::add(
+                    rows[row].cash,
+                    cash.checked_mul(u64::from(weight))
+                        .context("cohort opening cash overflow")?,
+                )?;
+            }
+            if open.get(&key) == Some(&row) && rows[row].count == limit {
                 open.remove(&key);
             }
             if rental_site {
                 rental_sites.entry(region).or_default().push(row);
             }
-            assignments.push(row as u32);
+            if grant_ids.contains(&actor.identity) {
+                grant_rows.insert(source, row);
+            }
+            if indexed {
+                assignments.push(row as u32);
+            }
+            Ok(())
+        };
+        match (count, indexed) {
+            (0..=1_000_000, _) | (_, true) => {
+                (0..count).try_for_each(|source| insert(source, 1))?
+            }
+            _ => {
+                let mut start = 0;
+                for end in boundaries
+                    .iter()
+                    .filter_map(|id| u32::try_from(*id).ok())
+                    .filter(|&id| (1..=count).contains(&id))
+                    .chain(std::iter::once(count + 1))
+                {
+                    let stop = end - 1;
+                    generated_groups(scenario, start, stop, &mut insert)?;
+                    if stop < count {
+                        insert(stop, 1)?;
+                    }
+                    start = end;
+                }
+            }
         }
         Ok(Self {
             rows,
             assignments,
+            grants: grant_rows,
+            population: count,
             rental_sites,
         })
     }
 
     pub fn source(&self, row: usize) -> usize {
         match self.rows.get(row) {
-            Some(cohort) => cohort.members[0] as usize,
-            None => self.assignments.len() + (row - self.rows.len()),
+            Some(cohort) => cohort.first as usize,
+            None => self.population as usize + (row - self.rows.len()),
         }
     }
 
-    pub fn row(&self, source: usize) -> usize {
-        match self.assignments.get(source) {
-            Some(&row) => row as usize,
-            None => self.rows.len() + (source - self.assignments.len()),
+    pub fn row(&self, source: usize) -> Option<usize> {
+        match source.checked_sub(self.population as usize) {
+            Some(firm) => Some(self.rows.len() + firm),
+            None => self
+                .assignments
+                .get(source)
+                .map(|&row| row as usize)
+                .or_else(|| self.grants.get(&(source as u32)).copied())
+                .or_else(|| {
+                    self.rows
+                        .binary_search_by_key(&(source as u32), |row| row.first)
+                        .ok()
+                }),
         }
     }
 
-    pub fn people(&self, scenario: &Scenario, state: &State) -> Result<Vec<Person>> {
+    pub fn initialize(&self, scenario: &Scenario, state: &mut State) -> Result<()> {
         let policy = &scenario.config().demography;
-        let seeds = match policy.people.is_empty() {
-            true => self
-                .rows
-                .iter()
-                .enumerate()
-                .flat_map(|(row, cohort)| {
-                    let household = state.actors.at(row).identity;
-                    cohort.members.iter().map(move |&source| {
-                        Ok(PersonSeed {
-                            identity: state
-                                .next_identity
-                                .checked_add(u64::from(source))
-                                .context("person identity capacity exhausted")?,
-                            household,
-                            age_days: (20 + source % 25) * DAYS_PER_YEAR,
-                            sex: if source % 2 == 0 {
-                                Sex::Female
-                            } else {
-                                Sex::Male
-                            },
-                        })
-                    })
-                })
-                .collect::<Result<Vec<_>>>()?,
-            false => {
-                let origins = policy
-                    .people
-                    .iter()
-                    .map(|seed| seed.household)
-                    .collect::<BTreeSet<_>>();
-                match origins.len() == self.assignments.len()
-                    && origins.len() == policy.people.len()
-                {
-                    true => (),
-                    false => Err(anyhow!(
-                        "a person-based population requires one demographic seed per starting person"
-                    ))?,
+        let fields = super::demography::AGE_FIELDS;
+        let female = super::demography::FEMALE_FIELDS;
+        match policy.people.is_empty() {
+            true => {
+                for (row, cohort) in self.rows.iter().enumerate() {
+                    for (field, count) in fields
+                        .into_iter()
+                        .zip(cohort.ages)
+                        .chain(female.into_iter().zip(cohort.female))
+                    {
+                        state.set(field, row, u64::from(count));
+                    }
                 }
-                policy
-                    .people
-                    .iter()
-                    .map(|seed| {
-                        let row = scenario
-                            .member_row(seed.household)
-                            .filter(|&row| row < self.rows.len())
-                            .context("unknown cohort member")?;
-                        Ok(PersonSeed {
-                            household: state.actors.at(row).identity,
-                            ..seed.clone()
-                        })
-                    })
-                    .collect::<Result<Vec<_>>>()?
             }
-        };
-        let mut people = policy.from_seeds(state, seeds)?;
-        if let Some(population) = &scenario.config().population {
-            let sources = policy
-                .people
-                .iter()
-                .map(|seed| (seed.identity, seed.household))
-                .collect::<BTreeMap<_, _>>();
-            for person in &mut people {
-                let source = match sources.get(&person.identity) {
-                    Some(identity) => population
-                        .index_of(*identity)
-                        .context("unknown demographic source")?,
-                    None => (person.identity - state.next_identity) as usize,
-                };
-                person.fatigue = population.households[source].fatigue;
+            false => {
+                let mut identities = state
+                    .actors
+                    .identities()
+                    .iter()
+                    .copied()
+                    .collect::<BTreeSet<_>>();
+                let mut households = BTreeSet::new();
+                for seed in &policy.people {
+                    let row = scenario
+                        .member_row(seed.household)
+                        .filter(|&row| row < self.rows.len())
+                        .context("unknown cohort member")?;
+                    let valid = (1..u64::MAX).contains(&seed.identity)
+                        && identities.insert(seed.identity)
+                        && households.insert(seed.household)
+                        && seed.age_days <= 150 * DAYS_PER_YEAR;
+                    if !valid {
+                        Err(anyhow!(
+                            "invalid demographic age, identity, or duplicate cohort member"
+                        ))?;
+                    }
+                    let band = policy.cohort_band(seed.age_days);
+                    let field = fields[band];
+                    if seed.sex == super::demography::Sex::Female {
+                        state.set(female[band], row, state.get(female[band], row) + 1);
+                    }
+                    state.set(field, row, state.get(field, row) + 1);
+                }
+                if households.len() != self.population as usize {
+                    Err(anyhow!(
+                        "a person-based population requires one demographic seed per starting person"
+                    ))?;
+                }
             }
         }
-        people.sort_by_key(|person| (person.household, person.identity));
-        Ok(people)
+        for (row, cohort) in self.rows.iter().enumerate() {
+            let workers = state.get(Field::YoungAdults, row) + state.get(Field::OlderAdults, row);
+            state.set(Field::EligibleWorkers, row, workers);
+            state.set(Field::LivingMembers, row, u64::from(cohort.count));
+            state.set(
+                Field::Worker,
+                row,
+                if workers > 0 {
+                    row as u64
+                } else {
+                    u64::from(u32::MAX)
+                },
+            );
+        }
+        state.initial_population = u64::from(self.population);
+        Ok(())
     }
+}
+
+fn generated_groups(
+    scenario: &Scenario,
+    start: u32,
+    end: u32,
+    insert: &mut impl FnMut(u32, u32) -> Result<()>,
+) -> Result<()> {
+    let config = scenario.config();
+    let sizes = config.cohort_sizes;
+    let spacing = InitialSettlement::new(config).spacing() as u32;
+    let mut groups = Vec::new();
+    match config.household_production {
+        HouseholdProduction::Unavailable => {
+            for first in (start..end).step_by(sizes.workers.get() as usize) {
+                groups.push((first, (end - first).min(sizes.workers.get())));
+            }
+        }
+        HouseholdProduction::Available { .. } => {
+            let farmer_start = start - start / spacing;
+            let farmer_end = end - end / spacing;
+            let size = match config.land_access {
+                Some(_) => sizes.workers.get(),
+                None => sizes.farmers.get(),
+            };
+            for ordinal in (farmer_start..farmer_end).step_by(size as usize) {
+                let first = ordinal + ordinal / (spacing - 1);
+                groups.push((first, (farmer_end - ordinal).min(size)));
+            }
+            let mut ordinal = start / spacing;
+            while ordinal < end / spacing {
+                let source = |offset: u32| (ordinal + offset + 1) * spacing - 1;
+                let employer = scenario.initial_employment.employer(source(0) as usize);
+                let mut low = 1;
+                let mut high = (end / spacing - ordinal).min(sizes.workers.get());
+                while low < high {
+                    let middle = (low + high).div_ceil(2);
+                    match scenario
+                        .initial_employment
+                        .employer(source(middle - 1) as usize)
+                        == employer
+                    {
+                        true => low = middle,
+                        false => high = middle - 1,
+                    }
+                }
+                groups.push((source(0), low));
+                ordinal += low;
+            }
+            groups.sort_unstable_by_key(|&(first, _)| first);
+        }
+    }
+    groups
+        .into_iter()
+        .try_for_each(|(first, count)| insert(first, count))
 }

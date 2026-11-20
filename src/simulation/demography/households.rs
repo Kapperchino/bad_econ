@@ -21,6 +21,22 @@ impl DemographyRuntime {
         formations: &[HouseholdFormation],
         actors: usize,
     ) -> Result<Self> {
+        match self.count {
+            0 => {
+                let mut grown = self.clone();
+                grown.extend_firms(device, actors);
+                Ok(grown)
+            }
+            _ => self.form_individual_households(device, formations, actors),
+        }
+    }
+
+    fn form_individual_households(
+        &self,
+        device: &Device,
+        formations: &[HouseholdFormation],
+        actors: usize,
+    ) -> Result<Self> {
         let required =
             (self.count.max(1) * PersonLayout::WORDS * 2 + actors * 3) as u64 * WORD_BYTES as u64;
         match device

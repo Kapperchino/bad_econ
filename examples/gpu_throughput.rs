@@ -18,10 +18,10 @@ static GLOBAL: MiMalloc = MiMalloc;
 struct Arguments {
     #[arg(long, value_delimiter = ',', default_value = "10000,100000,1000000")]
     sizes: Vec<u32>,
-    #[arg(long, default_value = "10")]
-    worker_cohort_size: NonZeroU32,
-    #[arg(long, default_value = "10")]
-    farmer_cohort_size: NonZeroU32,
+    #[arg(long)]
+    worker_cohort_size: Option<NonZeroU32>,
+    #[arg(long)]
+    farmer_cohort_size: Option<NonZeroU32>,
     #[arg(long, default_value_t = 42)]
     seed: u64,
     #[arg(long, default_value_t = 64)]
@@ -64,9 +64,10 @@ fn main() -> Result<()> {
         .context("benchmark day count exhausted")?;
     let mut reports = Vec::new();
     for people in args.sizes {
+        let defaults = CohortSizes::default();
         let sizes = CohortSizes {
-            workers: args.worker_cohort_size,
-            farmers: args.farmer_cohort_size,
+            workers: args.worker_cohort_size.unwrap_or(defaults.workers),
+            farmers: args.farmer_cohort_size.unwrap_or(defaults.farmers),
         };
         let scenario = Scenario::for_people(
             people,

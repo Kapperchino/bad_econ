@@ -1,6 +1,6 @@
 use super::{
-    DemographyPolicy, OBSERVATION_METRICS, OBSERVATION_SHARDS, PersonLayout as P, Stage,
-    WorkerRemapping,
+    DemographyPolicy, OBSERVATION_METRICS, OBSERVATION_SHARDS, PersonLayout as P, PopulationModel,
+    Stage, WorkerRemapping,
 };
 use crate::simulation::configuration::{EconomyConfig, Feature};
 use crate::{
@@ -13,12 +13,12 @@ use crate::{
 use cubecl::prelude::*;
 
 #[cube]
-fn get(state: &mut [u32], config: &EconomyConfig, field: u32, actor: u32) -> u32 {
+pub(super) fn get(state: &mut [u32], config: &EconomyConfig, field: u32, actor: u32) -> u32 {
     load(state, field * config.state_stride + actor).extract(0usize)
 }
 
 #[cube]
-fn put(state: &mut [u32], config: &EconomyConfig, field: u32, actor: u32, value: u32) {
+pub(super) fn put(state: &mut [u32], config: &EconomyConfig, field: u32, actor: u32, value: u32) {
     store(state, field * config.state_stride + actor, ticks(value, 0));
 }
 
@@ -49,7 +49,7 @@ fn probability_draw(high: f32, low: f32) -> Ticks {
 }
 
 #[cube]
-fn rate(annual_ppm: u32) -> Ticks {
+pub(super) fn rate(annual_ppm: u32) -> Ticks {
     let daily = u64::cast_from(annual_ppm) * 1_000_000u64 / comptime!(DAYS_PER_YEAR as u64);
     ticks(u32::cast_from(daily), u32::cast_from(daily >> 32))
 }
@@ -63,7 +63,12 @@ enum FamilySupport {
 }
 
 #[cube]
-fn family_support(state: &mut [u32], config: &EconomyConfig, household: u32, food: u32) -> u32 {
+pub(super) fn family_support(
+    state: &mut [u32],
+    config: &EconomyConfig,
+    household: u32,
+    food: u32,
+) -> u32 {
     let mut support = u32::new(comptime!(FamilySupport::Secure as i64));
     if comptime!(config.economy == crate::domain::Economy::Industrial) {
         let plots = get(state, config, comptime!(Field::LandPlots as u32), household);
@@ -159,7 +164,7 @@ fn family_support(state: &mut [u32], config: &EconomyConfig, household: u32, foo
 }
 
 #[cube]
-fn occupation(
+pub(super) fn occupation(
     rate_ppm: u32,
     minutes: u32,
     reference: u32,
@@ -182,13 +187,13 @@ fn occupation(
 }
 
 #[cube]
-fn famine_exposure(prior: u32, deficit: u32, recovery: u32) -> u32 {
+pub(super) fn famine_exposure(prior: u32, deficit: u32, recovery: u32) -> u32 {
     let reduction = recovery * (1000 - deficit) / 1000;
     min(max(prior + deficit, reduction) - reduction, 365_000)
 }
 
 #[cube]
-fn famine_risk(exposure: u32, daily_ppm: u32, vulnerability: u32) -> Ticks {
+pub(super) fn famine_risk(exposure: u32, daily_ppm: u32, vulnerability: u32) -> Ticks {
     let severity = min(exposure, 90_000);
     let base = ratio(times32(daily_ppm, 1_000_000), severity, 30_000).value;
     let duration = ratio(base, severity, 30_000).value;
@@ -196,7 +201,7 @@ fn famine_risk(exposure: u32, daily_ppm: u32, vulnerability: u32) -> Ticks {
 }
 
 #[cube]
-fn cold_exposure(prior: u32, deficit: u32, recovery: u32) -> u32 {
+pub(super) fn cold_exposure(prior: u32, deficit: u32, recovery: u32) -> u32 {
     select(
         deficit > 0,
         min(prior + deficit, 365_000),
@@ -205,7 +210,7 @@ fn cold_exposure(prior: u32, deficit: u32, recovery: u32) -> u32 {
 }
 
 #[cube]
-fn cold_risk(exposure: u32, daily_ppm: u32, vulnerability: u32) -> Ticks {
+pub(super) fn cold_risk(exposure: u32, daily_ppm: u32, vulnerability: u32) -> Ticks {
     let mut risk = zero();
     if exposure > 0 {
         let severity = min(exposure, 28_000);
@@ -269,13 +274,14 @@ pub fn step(
     samples: &[f32],
     day: u32,
     #[comptime] stage: Stage,
+    #[comptime] model: PopulationModel,
 ) {
     let household = ABSOLUTE_POS as u32;
     if household < config.actors {
         let start = ranges[household as usize * 2];
         let count = ranges[household as usize * 2 + 1];
         let mut living = 0;
-        let mut demand = 0;
+        let mut demand = 0u64;
         let mut worker = u32::new(comptime!(i64::from(u32::MAX)));
         let mut available = 0;
         let mut workers = 0u32;
@@ -291,6 +297,43 @@ pub fn step(
                 0,
             );
         }
+        if comptime!(model == PopulationModel::Cohorts) {
+            living = get(
+                state,
+                config,
+                comptime!(Field::LivingMembers as u32),
+                household,
+            );
+            for band in 0..5u32 {
+                demand += u64::cast_from(get(
+                    state,
+                    config,
+                    comptime!(Field::Infants as u32) + band,
+                    household,
+                )) * u64::cast_from(policy.food[band as usize]);
+            }
+            demand *= u64::cast_from(config.household_need);
+            workers = get(
+                state,
+                config,
+                comptime!(Field::YoungAdults as u32),
+                household,
+            ) + get(
+                state,
+                config,
+                comptime!(Field::OlderAdults as u32),
+                household,
+            );
+            shortest_day = min(
+                config.work_cap
+                    * (1000 - get(state, config, comptime!(Field::Fatigue as u32), household))
+                    / 1000,
+                1440 - config.reserved_minutes,
+            );
+            household_time = workers * shortest_day;
+            worker = select(workers > 0, household, u32::MAX);
+            workers = select(shortest_day > 0, workers, 0);
+        }
         for offset in 0..count {
             let index = start + (offset + day % max(count, 1)) % max(count, 1);
             let base = index as usize * P::WORDS;
@@ -301,7 +344,7 @@ pub fn step(
             if people[base + P::CAUSE] == 0 {
                 let age = people[base + P::AGE];
                 living += 1;
-                demand += policy.food[band(age) as usize] * config.household_need;
+                demand += u64::cast_from(policy.food[band(age) as usize] * config.household_need);
                 let eligible =
                     age >= policy.parameters.minimum_age && age < policy.parameters.retirement_age;
                 let capacity = min(
@@ -413,7 +456,7 @@ pub fn step(
                         state,
                         comptime!(Field::IncomeForecast as u32) * config.state_stride + household,
                     ),
-                    minimum: (demand + 999) / 1000,
+                    minimum: ((demand + 999u64) / 1000u64) as u32,
                     members: living,
                     price: get(state, config, comptime!(Field::FoodPrice as u32), household),
                 },
@@ -433,7 +476,7 @@ pub fn step(
                 select(
                     config.food_medium_salary > 0,
                     living * config.household_need,
-                    (demand + 999) / 1000,
+                    ((demand + 999u64) / 1000u64) as u32,
                 ),
             );
         }
@@ -480,18 +523,18 @@ pub fn step(
                     comptime!(Field::HomeMinutes as u32),
                     household,
                 );
-            let additional = (u64::cast_from(work)
+            let additional = u64::cast_from(work)
                 * u64::cast_from(policy.parameters.work_food)
                 * u64::cast_from(config.household_need)
-                / 480u64) as u32;
+                / 480u64;
             let total = demand
                 + additional
-                + get(
+                + u64::cast_from(get(
                     state,
                     config,
                     comptime!(Field::FoodFraction as u32),
                     household,
-                );
+                ));
             let gross = load(
                 state,
                 comptime!(Field::GrossIncome as u32) * config.state_stride + household,
@@ -513,7 +556,7 @@ pub fn step(
                         state,
                         comptime!(Field::IncomeForecast as u32) * config.state_stride + household,
                     ),
-                    minimum: total / 1000,
+                    minimum: (total / 1000u64) as u32,
                     members: living,
                     price: get(state, config, comptime!(Field::FoodPrice as u32), household),
                 },
@@ -533,7 +576,7 @@ pub fn step(
                 select(
                     config.food_medium_salary > 0,
                     living * config.household_need,
-                    total / 1000,
+                    (total / 1000u64) as u32,
                 ),
             );
             put(
@@ -541,10 +584,15 @@ pub fn step(
                 config,
                 comptime!(Field::FoodFraction as u32),
                 household,
-                total % 1000,
+                (total % 1000u64) as u32,
             );
         }
-        if comptime!(stage == Stage::Mortality) {
+        if comptime!(stage == Stage::Mortality && model == PopulationModel::Cohorts) {
+            crate::simulation::demography::cohorts::advance(
+                state, actors, config, policy, samples, household,
+            );
+        }
+        if comptime!(stage == Stage::Mortality && model == PopulationModel::Individuals) {
             let target = get(state, config, comptime!(Field::FoodNeed as u32), household);
             let consumed =
                 target - get(state, config, comptime!(Field::Shortage as u32), household);

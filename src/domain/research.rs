@@ -5,7 +5,7 @@ use std::collections::{BTreeMap, BTreeSet};
 
 pub const RESEARCH_SCALE: u32 = 1000;
 pub const RESEARCH_PROFILE: &str = "ResearchCubekV4";
-pub const MAX_RESEARCH_RECORDS: usize = 100_000;
+pub const MAX_RESEARCH_RECORDS: usize = 200_000;
 
 #[derive(Clone, Copy, Debug, Default, Serialize, Deserialize, PartialEq, Eq)]
 pub enum AdoptionPolicy {

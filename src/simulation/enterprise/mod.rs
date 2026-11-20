@@ -943,6 +943,37 @@ pub(in crate::simulation) fn form_households(
                 state.actors.at(parent).identity,
             );
             state.set(Field::LivingMembers, household, 1);
+            if let Some(band) = [Field::YoungAdults, Field::OlderAdults]
+                .into_iter()
+                .find(|&field| state.get(field, parent) > 0)
+            {
+                let women = match band {
+                    Field::YoungAdults => Field::FemaleYoungAdults,
+                    _ => Field::FemaleOlderAdults,
+                };
+                let female = u64::from(state.get(women, parent) * 2 >= state.get(band, parent));
+                let retained = state.get(women, parent) - female;
+                let mother = u64::from(
+                    band == Field::YoungAdults
+                        && state.get(Field::RecoveringMothers, parent) > retained,
+                );
+                for (field, amount) in [
+                    (band, 1),
+                    (women, female),
+                    (Field::RecoveringMothers, mother),
+                ] {
+                    state.set(field, parent, state.get(field, parent) - amount);
+                    state.set(field, household, amount);
+                }
+                state.set(Field::EligibleWorkers, household, 1);
+                for field in [
+                    Field::CohortFamineExposure,
+                    Field::CohortColdExposure,
+                    Field::Fatigue,
+                ] {
+                    state.set(field, household, state.get(field, parent));
+                }
+            }
             if requests[parent] == SEPARATE_OWNER {
                 state.set(
                     Field::InvestmentGood,
@@ -988,17 +1019,20 @@ pub(super) fn transitions(
 ) -> anyhow::Result<()> {
     use crate::domain::{Position, demography::LivingState};
     use anyhow::{Context, anyhow};
-    for formation in form_households(state, scenario, requests)? {
-        let person = state
-            .people
-            .iter_mut()
-            .find(|person| person.identity == formation.person)
-            .context("unknown household formation person")?;
-        match person.state {
-            LivingState::Living => (),
-            _ => Err(anyhow!("deceased person cannot form a household"))?,
+    let formations = form_households(state, scenario, requests)?;
+    if !state.people.is_empty() {
+        for formation in formations {
+            let person = state
+                .people
+                .iter_mut()
+                .find(|person| person.identity == formation.person)
+                .context("unknown household formation person")?;
+            match person.state {
+                LivingState::Living => (),
+                _ => Err(anyhow!("deceased person cannot form a household"))?,
+            }
+            person.household = state.actors.at(formation.household).identity;
         }
-        person.household = state.actors.at(formation.household).identity;
     }
     let mut heirs = std::collections::HashMap::new();
     for actor in 0..state.actors.len() {

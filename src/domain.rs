@@ -40,9 +40,9 @@ pub use resources::{ProductionSite, ResourceMap, ResourceRegion};
 pub(crate) use supply::SupplierCacheLayout;
 
 pub const SCENARIO_VERSION: u32 = 2;
-const CHECKPOINT_VERSION: u32 = 25;
-pub const STATE_HASH_VERSION: &str = "bad-econ/state/CubekV2/v28";
-pub const USED_FIELDS: usize = Field::CohortDelegate as usize + 1;
+const CHECKPOINT_VERSION: u32 = 26;
+pub const STATE_HASH_VERSION: &str = "bad-econ/state/CubekV2/v29";
+pub const USED_FIELDS: usize = Field::RecoveringMothers as usize + 1;
 pub const TRANSIT_FIELDS: usize = USED_FIELDS + Good::COUNT;
 pub const CONSUMPTION_FIELDS: usize = TRANSIT_FIELDS + Good::COUNT;
 pub const PRODUCTION_FIELDS: usize = CONSUMPTION_FIELDS + Good::COUNT;
@@ -193,6 +193,24 @@ pub enum Field {
     JobDaysRemaining,
     EligibleWorkers,
     CohortDelegate,
+    Infants,
+    Children,
+    YoungAdults,
+    OlderAdults,
+    Seniors,
+    CohortBirths,
+    BackgroundDeaths,
+    OccupationalDeaths,
+    FamineDeaths,
+    ColdDeaths,
+    CohortFamineExposure,
+    CohortColdExposure,
+    FemaleInfants,
+    FemaleChildren,
+    FemaleYoungAdults,
+    FemaleOlderAdults,
+    FemaleSeniors,
+    RecoveringMothers,
 }
 impl Field {
     pub fn inventory(good: Good) -> Self {
@@ -481,11 +499,11 @@ impl ScenarioConfig {
     const HOUSEHOLDS: std::ops::RangeInclusive<u32> = 1..=1_000_000;
 
     fn baseline(households: u32, seed: u64, experiment: Experiment) -> Result<Self> {
-        match Self::HOUSEHOLDS.contains(&households) {
+        match (1..=1_000_000_000).contains(&households) {
             true => (),
             false => Err(anyhow!("scenario parameter outside DeterministicV1 bounds"))?,
         }
-        let firms = (households / 100).max(3);
+        let firms = (households / 100).clamp(3, 20_000);
         let map_size = match households {
             0..=10_000 => 1000,
             10_001..=100_000 => 3000,
@@ -551,7 +569,7 @@ impl ScenarioConfig {
             .production(Good::Bread)
             .div_ceil(u64::from(config.firms / 3) * u64::from(config.packet_output))
             as u32)
-            .max(config.capacity);
+            .clamp(config.capacity, 10_000);
         match experiment {
             Experiment::Shortage => config.buffer_days = 0,
             Experiment::Transport => config.shipment_speed = 100,
@@ -607,6 +625,9 @@ impl Scenario {
         experiment: Experiment,
         cohorts: Option<CohortSizes>,
     ) -> Result<Self> {
+        if cohorts.is_none() && !ScenarioConfig::HOUSEHOLDS.contains(&households) {
+            Err(anyhow!("legacy household count must be in 1..=1000000"))?;
+        }
         let mut config = ScenarioConfig::baseline(households, seed, experiment)?;
         config.people = cohorts.map(|_| households);
         config.cohort_sizes = cohorts.unwrap_or_default();
@@ -622,7 +643,7 @@ impl Scenario {
         config.demography.initial_household_members = if cohorts.is_some() { 1 } else { 3 };
         config.household_production = enterprise::HouseholdProduction::industrial();
         config.firms = config.firms.max(3 * Good::COUNT as u32);
-        config.capacity = 1000;
+        config.capacity = 1000u32.max(households.div_ceil(100_000)).min(10_000);
         config.firm_cash = 1_000_000;
         config.reserve = config.firm_cash;
         config.coverage = 6;
@@ -829,7 +850,10 @@ impl Scenario {
             .transpose()?;
         let bounds = [
             config.version == SCENARIO_VERSION,
-            ScenarioConfig::HOUSEHOLDS.contains(&config.population_size()),
+            match config.people {
+                Some(people) => (1..=1_000_000_000).contains(&people),
+                None => ScenarioConfig::HOUSEHOLDS.contains(&config.households),
+            },
             (3..=20_000).contains(&config.firms),
             (1..=100_000).contains(&config.map_size),
             (1..=config.map_size).contains(&config.search_radius),
@@ -935,7 +959,12 @@ impl Scenario {
                 let totals = match &config.population {
                     Some(population) => population.totals()?,
                     None => {
-                        let household_cash = (1..=u64::from(config.population_size())).try_fold(
+                        let cash_sources = if config.people.is_some() {
+                            0
+                        } else {
+                            config.population_size()
+                        };
+                        let household_cash = (1..=u64::from(cash_sources)).try_fold(
                             0u128,
                             |total, household| -> Result<u128> {
                                 Ok(total
@@ -1024,6 +1053,12 @@ impl Scenario {
                     .people
                     .map(|_| cohorts::CohortLayout::new(&scenario).map(std::sync::Arc::new))
                     .transpose()?;
+                if let (Some(layout), None) = (&scenario.cohorts, &scenario.config.population) {
+                    scenario.totals.cash = layout
+                        .rows
+                        .iter()
+                        .try_fold(scenario.totals.cash, |total, row| add(total, row.cash))?;
+                }
                 scenario.initial_actors = std::sync::Arc::new(
                     (0..scenario.actors())
                         .map(|index| scenario.generate_actor(index))
@@ -1120,6 +1155,9 @@ impl Scenario {
             },
         }
     }
+    pub(crate) fn aggregate_demography(&self) -> bool {
+        self.config.people.is_some()
+    }
     pub fn population_rows(&self) -> usize {
         self.cohorts
             .as_ref()
@@ -1170,11 +1208,15 @@ impl Scenario {
                 .map_or(0, research::ResearchConfig::memory_estimate)
             + actors * 128
             + (actors.div_ceil(128) + 1) * 4
-            + self.config.demography.people.len().max(
-                self.config.population_size() as usize
-                    * self.config.demography.initial_household_members as usize,
-            ) as u64
-                * 164
+            + if self.aggregate_demography() {
+                actors * (16 * 8 + 4)
+            } else {
+                self.config.demography.people.len().max(
+                    self.config.population_size() as usize
+                        * self.config.demography.initial_household_members as usize,
+                ) as u64
+                    * 164
+            }
             + actors * 80
             + actors * SupplierCacheLayout::new(&self.initial_actors).extra_words as u64 * 4
             + actors * 4
@@ -1221,10 +1263,13 @@ impl Scenario {
     }
     fn member_row(&self, identity: u64) -> Option<usize> {
         match &self.config.population {
-            Some(population) => population.index_of(identity).map(|source| self.row(source)),
+            Some(population) => population
+                .index_of(identity)
+                .and_then(|source| self.member_source(source)),
             None => (1..=u64::from(self.config.population_size() + self.config.firms))
                 .contains(&identity)
-                .then(|| self.row((identity - 1) as usize)),
+                .then(|| self.member_source((identity - 1) as usize))
+                .flatten(),
         }
     }
     pub fn identity(&self, index: usize) -> Option<u64> {
@@ -1244,9 +1289,12 @@ impl Scenario {
         }
     }
     fn row(&self, source: usize) -> usize {
+        self.member_source(source).expect("registered source")
+    }
+    fn member_source(&self, source: usize) -> Option<usize> {
         match &self.cohorts {
             Some(layout) => layout.row(source),
-            None => source,
+            None => Some(source),
         }
     }
     pub fn technique(&self, index: usize) -> Technique {
@@ -1427,38 +1475,13 @@ impl Scenario {
                 );
             }
         }
-        state.people = match &self.cohorts {
-            Some(layout) => layout.people(self, &state)?,
-            None => self.config.demography.initial(&state)?,
-        };
-        if self.cohorts.is_some() {
-            let registry = state.actors.identities()[..self.population_rows()]
-                .iter()
-                .enumerate()
-                .map(|(row, &id)| (id, row))
-                .collect::<std::collections::BTreeMap<_, _>>();
-            let mut eligible = vec![0u32; self.population_rows()];
-            let mut living = vec![0u32; self.population_rows()];
-            let mut first = vec![u32::MAX; self.population_rows()];
-            for (member, person) in state.people.iter().enumerate() {
-                let row = registry[&person.household];
-                living[row] += 1;
-                let age = person.age_days / calendar::DAYS_PER_YEAR;
-                if (self.config.demography.minimum_work_age_years
-                    ..self.config.demography.retirement_age_years)
-                    .contains(&age)
-                {
-                    eligible[row] += 1;
-                    first[row] = first[row].min(member as u32);
-                }
-            }
-            for row in 0..self.population_rows() {
-                state.set(Field::EligibleWorkers, row, eligible[row].into());
-                state.set(Field::LivingMembers, row, living[row].into());
-                state.set(Field::Worker, row, first[row].into());
+        match &self.cohorts {
+            Some(layout) => layout.initialize(self, &mut state)?,
+            None => {
+                state.people = self.config.demography.initial(&state)?;
+                state.initial_population = state.people.len() as u64;
             }
         }
-        state.initial_population = state.people.len() as u64;
         for actor in 0..state.actors.len() {
             state.set(Field::EquipmentCondition, actor, 1000);
             if let Some(firm) = self
@@ -1540,7 +1563,7 @@ impl Scenario {
             .as_ref()
             .and_then(|layout| layout.rows.get(row))
         {
-            actor.capacity = cohort.members.len() as u32;
+            actor.capacity = cohort.count;
         }
         actor
     }
@@ -1648,14 +1671,7 @@ impl Scenario {
             let retailer = self.retailers.get(&state.actors.at(actor).identity);
             let cash = match kind {
                 0 => match &self.cohorts {
-                    Some(layout) => {
-                        layout.rows[actor]
-                            .members
-                            .iter()
-                            .try_fold(0, |sum, &source| {
-                                add(sum, self.initial_employment.cash(config, source as usize)?)
-                            })?
-                    }
+                    Some(layout) => layout.rows[actor].cash,
                     None => self.initial_employment.cash(config, actor)?,
                 },
                 _ => config.firm_cash,
@@ -1664,11 +1680,7 @@ impl Scenario {
             let settlement = employment::InitialSettlement::new(config);
             let farm_members = match (kind, config.household_production, &self.cohorts) {
                 (0, enterprise::HouseholdProduction::Available { .. }, Some(layout)) => {
-                    layout.rows[actor]
-                        .members
-                        .iter()
-                        .filter(|&&source| settlement.worker(source as usize).is_none())
-                        .count() as u64
+                    u64::from(layout.rows[actor].farmers)
                 }
                 (0, enterprise::HouseholdProduction::Available { .. }, None) => {
                     u64::from(settlement.worker(actor).is_none())
@@ -2768,7 +2780,6 @@ pub(crate) struct AuditedState<'a> {
 impl<'a> AuditedState<'a> {
     pub(crate) fn new(scenario: &Scenario, state: &'a State) -> Result<Self> {
         let c = scenario.config();
-        let _ = demography::PersonRegistry::new(state)?;
         let _ = enterprise::OwnershipRegistry::new(state)?;
         let _ = company::CompanyRegistry::new(state)?;
         let shape = state.actors.len() >= scenario.actors()
@@ -2781,6 +2792,14 @@ impl<'a> AuditedState<'a> {
             true => Ok(()),
             false => Err(anyhow!("state shape does not match scenario")),
         }?;
+        match scenario.aggregate_demography() {
+            true => {
+                demography::CohortPopulation::new(state)?;
+            }
+            _ => {
+                demography::PersonRegistry::new(state)?;
+            }
+        }
         c.railway.audit(state)?;
         scenario.rail_geography.audit(scenario, state)?;
         property::PropertySnapshot::from_state(scenario, state)?;
@@ -3386,7 +3405,7 @@ impl TryFrom<CheckpointDocument> for Checkpoint {
             .get("version")
             .and_then(serde_json::Value::as_u64)
         {
-            Some(23 | 24) => (),
+            Some(23..=25) => (),
             Some(version) if version == u64::from(CHECKPOINT_VERSION) => (),
             _ => Err(anyhow!(
                 "unsupported checkpoint format: expected 23 through {CHECKPOINT_VERSION}"
@@ -3406,12 +3425,13 @@ impl TryFrom<CheckpointDocument> for Checkpoint {
         let first_missing = match current.version {
             23 => Some(Field::JobDaysRemaining),
             24 => Some(Field::EligibleWorkers),
+            25 => Some(Field::Infants),
             _ => None,
         };
         if let Some(field) = first_missing {
             let count = current.state.actors.len();
             let offset = field as usize * count;
-            match current.scenario.people.is_none()
+            match (current.version == 25 || current.scenario.people.is_none())
                 && offset <= current.state.values.len()
                 && current.checksum == Self::checksum(&current.scenario, &current.state)?
             {
@@ -3423,6 +3443,12 @@ impl TryFrom<CheckpointDocument> for Checkpoint {
                 .state
                 .values
                 .splice(offset..offset, std::iter::repeat_n(0, missing));
+            if current.scenario.people.is_some() {
+                demography::CohortPopulation::from_individuals(
+                    &current.scenario,
+                    &mut current.state,
+                )?;
+            }
             current.version = CHECKPOINT_VERSION;
             current.checksum = Self::checksum(&current.scenario, &current.state)?;
         }

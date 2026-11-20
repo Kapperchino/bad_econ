@@ -1,4 +1,4 @@
-use super::{DemographyPolicy, Stage, WorkerRemapping, kernels};
+use super::{DemographyPolicy, PopulationModel, Stage, WorkerRemapping, kernels};
 use crate::simulation::{
     configuration::EconomyConfig,
     pass::GpuPass,
@@ -19,6 +19,8 @@ pub(super) struct DemographyInput {
     pub day: u32,
     #[cube(comptime)]
     pub stage: Stage,
+    #[cube(comptime)]
+    pub model: PopulationModel,
 }
 
 pub(super) struct HouseholdDemography;
@@ -45,6 +47,7 @@ impl GpuPass<DemographyInput> for AdvanceHouseholds {
             &input.samples,
             input.day,
             comptime!(input.stage),
+            comptime!(input.model),
         );
     }
 }

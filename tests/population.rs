@@ -243,27 +243,14 @@ fn worker_shifts(bargaining: Option<bargaining::BargainingPolicy>) -> Result<()>
             .enumerate()
             .any(|(row, _)| state.get(Field::Employed, row) > 1)
     );
+    assert!(state.people.is_empty());
     for row in 0..scenario.population_rows() {
-        let members = state
-            .people
-            .iter()
-            .filter(|person| person.household == state.actors.at(row).identity);
-        let paid = members
-            .clone()
-            .filter(|person| person.employer.is_some())
-            .count() as u64;
-        assert_eq!(paid, state.get(Field::Employed, row));
+        assert!(state.get(Field::Employed, row) <= state.get(Field::EligibleWorkers, row));
         let gross = state.get(Field::GrossIncome, row);
         let allowance = 100 * u64::from(state.actors.at(row).capacity);
         assert_eq!(
             state.get(Field::TaxTreasury, row),
             gross.saturating_sub(allowance) / 2
-        );
-        assert_eq!(
-            members
-                .map(|person| u64::from(person.work_minutes))
-                .sum::<u64>(),
-            state.get(Field::Hours, row)
         );
         assert_eq!(
             state.get(Field::GrossIncome, row),
@@ -415,14 +402,9 @@ fn a_funded_founder_leaves_an_explicit_cohort_on_gpu() -> Result<()> {
     assert_eq!(scenario.population_rows(), 2);
     assert_eq!(initial.actors.at(0).capacity, 10);
     assert_eq!(initial.get(Field::Cash, 0), 10_000_000);
-    assert_eq!(
-        initial
-            .people
-            .iter()
-            .map(|person| person.fatigue)
-            .collect::<Vec<_>>(),
-        (1..=11).collect::<Vec<_>>()
-    );
+    assert!(initial.people.is_empty());
+    assert_eq!(initial.get(Field::YoungAdults, 0), 10);
+    assert_eq!(initial.get(Field::Fatigue, 0), 5);
     initial.set(Field::InvestmentGood, 0, 1);
     let mut sim =
         Simulation::from_checkpoint(Checkpoint::new(&scenario, &initial)?, support::device(64)?)?;
@@ -462,7 +444,11 @@ fn legacy_checkpoints_migrate_and_resume_on_gpu() -> Result<()> {
     simulation.advance()?;
     let state = simulation.download()?;
     let checkpoint = serde_json::to_value(simulation.checkpoint()?)?;
-    for (version, first_missing) in [(23, Field::JobDaysRemaining), (24, Field::EligibleWorkers)] {
+    for (version, first_missing) in [
+        (23, Field::JobDaysRemaining),
+        (24, Field::EligibleWorkers),
+        (25, Field::Infants),
+    ] {
         let rows = state.actors.len();
         let mut old_state = state.clone();
         old_state
@@ -486,5 +472,85 @@ fn legacy_checkpoints_migrate_and_resume_on_gpu() -> Result<()> {
             ObservationSnapshot::from_state(&scenario, &migrated)?
         );
     }
+    Ok(())
+}
+
+#[test]
+fn individual_checkpoint_members_resume_as_cohort_counts_on_gpu() -> Result<()> {
+    use bad_econ::{domain::demography::*, simulation::Simulation};
+    use sha2::{Digest, Sha256};
+    let start = Scenario::for_people(
+        29,
+        CohortSizes::default(),
+        Economy::Agrarian,
+        42,
+        Experiment::Concentrated,
+    )?;
+    let mut config = start.config().clone();
+    config.demography.people = (1..=29)
+        .map(|id| PersonSeed {
+            identity: id + 1000,
+            household: id,
+            age_days: match id {
+                1..=5 => 0,
+                6..=12 => 70 * DAYS_PER_YEAR,
+                _ => 24 * DAYS_PER_YEAR,
+            },
+            sex: Sex::Male,
+        })
+        .collect();
+    let scenario = Scenario::new(config)?;
+    let initial = scenario.initial()?;
+    let mut legacy = initial.clone();
+    let rows = legacy.actors.len();
+    legacy
+        .values
+        .drain(Field::Infants as usize * rows..USED_FIELDS * rows);
+    legacy.next_identity = 1030;
+    legacy.people = scenario
+        .config()
+        .demography
+        .people
+        .iter()
+        .map(|seed| {
+            let household = match seed.household {
+                1..=3 => seed.household,
+                id => 4 + ((id - 4) / 10) * 10,
+            };
+            Person {
+                identity: seed.identity,
+                household,
+                age_days: seed.age_days,
+                sex: seed.sex,
+                state: LivingState::Living,
+                employer: None,
+                work_minutes: 0,
+                fatigue: 0,
+                famine_exposure: 0,
+                cold_exposure: 0,
+                birth_cooldown: 0,
+            }
+        })
+        .collect();
+    let checksum = bad_econ::arithmetic::hex(&Sha256::digest(serde_json::to_vec(&(
+        scenario.config(),
+        &legacy,
+    ))?));
+    let mut document = serde_json::to_value(Checkpoint::new(&scenario, &initial)?)?;
+    document["state"] = serde_json::to_value(legacy)?;
+    document["version"] = 25.into();
+    document["checksum"] = checksum.into();
+    let mut sim =
+        Simulation::from_checkpoint(serde_json::from_value(document)?, support::device(64)?)?;
+    assert_eq!(sim.snapshot.population.living, 29);
+    assert_eq!(sim.snapshot.population.dependents, 12);
+    assert!(sim.download()?.people.is_empty());
+    sim.advance()?;
+    assert_eq!(sim.snapshot.population.births, 0);
+    let state = sim.download()?;
+    assert_eq!(
+        sim.snapshot,
+        ObservationSnapshot::from_state(&scenario, &state)?
+    );
     Ok(())
 }

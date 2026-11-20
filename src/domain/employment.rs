@@ -32,7 +32,7 @@ impl InitialSettlement {
         }
     }
 
-    fn spacing(self) -> usize {
+    pub(super) fn spacing(self) -> usize {
         match self {
             Self::Mixed => 2,
             Self::Rural => 10,

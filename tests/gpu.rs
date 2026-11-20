@@ -233,3 +233,37 @@ fn scarce_work_is_accessible_beyond_the_first_identity_block() -> Result<()> {
     simulation.checkpoint()?.restore()?;
     Ok(())
 }
+
+#[test]
+#[ignore = "runs the full billion-person industrial economy on the GPU"]
+fn billion_people_advance_as_cohorts() -> Result<()> {
+    let people = 1_000_000_000;
+    let size = std::num::NonZeroU32::new(10_000).unwrap();
+    let scenario = Scenario::for_people(
+        people,
+        CohortSizes {
+            workers: size,
+            farmers: size,
+        },
+        Economy::Industrial,
+        42,
+        Experiment::Baseline,
+    )?;
+    assert!(scenario.population_rows() < 200_000);
+    let mut sim = Simulation::new(scenario, support::device(64)?)?;
+    assert_eq!(sim.snapshot.population.living, u64::from(people));
+    sim.advance()?;
+    let population = &sim.snapshot.population;
+    assert_eq!(
+        population.living + population.deaths.iter().sum::<u64>(),
+        u64::from(people) + population.births
+    );
+    assert!(population.work_minutes > u64::from(u32::MAX));
+    let state = sim.download()?;
+    assert!(state.people.is_empty());
+    assert_eq!(
+        sim.snapshot,
+        ObservationSnapshot::from_state(&sim.scenario, &state)?
+    );
+    Ok(())
+}

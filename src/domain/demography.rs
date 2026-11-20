@@ -192,6 +192,16 @@ impl DemographicPolicy {
             )),
         }
     }
+    pub(super) fn cohort_band(&self, age_days: u32) -> usize {
+        let years = age_days / DAYS_PER_YEAR;
+        match years {
+            0 => 0,
+            age if age < self.minimum_work_age_years => 1,
+            age if age >= self.retirement_age_years => 4,
+            0..45 => 2,
+            _ => 3,
+        }
+    }
     pub fn initial(&self, state: &State) -> Result<Vec<Person>> {
         let seeds = match self.people.is_empty() {
             true => state
@@ -364,6 +374,17 @@ impl PopulationObservation {
         policy: &DemographicPolicy,
         is_cohort: impl Fn(usize) -> bool,
     ) -> Self {
+        match state.people.is_empty() {
+            true => CohortPopulation::observation(state),
+            false => Self::individual_observation(state, policy, is_cohort),
+        }
+    }
+
+    fn individual_observation(
+        state: &State,
+        policy: &DemographicPolicy,
+        is_cohort: impl Fn(usize) -> bool,
+    ) -> Self {
         let households = state
             .actors
             .iter()
@@ -468,5 +489,214 @@ impl<'a> PersonRegistry<'a> {
                 "invalid person registry identity, membership, mortality, or time budget"
             )),
         }
+    }
+}
+
+pub(super) const AGE_FIELDS: [super::Field; 5] = {
+    use super::Field::*;
+    [Infants, Children, YoungAdults, OlderAdults, Seniors]
+};
+
+pub(super) const FEMALE_FIELDS: [super::Field; 5] = {
+    use super::Field::*;
+    [
+        FemaleInfants,
+        FemaleChildren,
+        FemaleYoungAdults,
+        FemaleOlderAdults,
+        FemaleSeniors,
+    ]
+};
+
+pub(super) struct CohortPopulation;
+
+impl CohortPopulation {
+    pub fn from_individuals(config: &super::ScenarioConfig, state: &mut State) -> Result<Self> {
+        use super::Field::*;
+        PersonRegistry::new(state)?;
+        let households = state
+            .actors
+            .identities()
+            .iter()
+            .enumerate()
+            .map(|(row, &id)| (id, row))
+            .collect::<std::collections::HashMap<_, _>>();
+        let seeds = config
+            .demography
+            .people
+            .iter()
+            .map(|seed| seed.identity)
+            .collect::<BTreeSet<_>>();
+        let first = config.population.as_ref().map_or_else(
+            || u64::from(config.population_size() + config.firms) + 1,
+            super::Population::next_identity,
+        );
+        let end = first
+            .checked_add(state.initial_population)
+            .ok_or_else(|| anyhow!("initial identity range overflow"))?;
+        for person in std::mem::take(&mut state.people) {
+            let row = households[&person.household];
+            let born = match seeds.is_empty() {
+                true => !(first..end).contains(&person.identity),
+                false => !seeds.contains(&person.identity),
+            };
+            state.set(
+                CohortBirths,
+                row,
+                state.get(CohortBirths, row) + u64::from(born),
+            );
+            match person.state {
+                LivingState::Living => {
+                    let band = config.demography.cohort_band(person.age_days);
+                    let field = AGE_FIELDS[band];
+                    state.set(field, row, state.get(field, row) + 1);
+                    if person.sex == Sex::Female {
+                        let field = FEMALE_FIELDS[band];
+                        state.set(field, row, state.get(field, row) + 1);
+                        if band == 2 && person.birth_cooldown > 0 {
+                            state.set(
+                                RecoveringMothers,
+                                row,
+                                state.get(RecoveringMothers, row) + 1,
+                            );
+                        }
+                    }
+                    for (field, value) in [
+                        (CohortFamineExposure, person.famine_exposure),
+                        (CohortColdExposure, person.cold_exposure),
+                    ] {
+                        state.set(field, row, state.get(field, row) + u64::from(value));
+                    }
+                }
+                LivingState::Deceased { cause, .. } => {
+                    let field = [
+                        BackgroundDeaths,
+                        OccupationalDeaths,
+                        FamineDeaths,
+                        ColdDeaths,
+                    ][cause as usize - 1];
+                    state.set(field, row, state.get(field, row) + 1);
+                }
+            }
+        }
+        for row in 0..state.actors.len() {
+            let living = AGE_FIELDS
+                .iter()
+                .map(|&field| state.get(field, row))
+                .sum::<u64>();
+            state.set(LivingMembers, row, living);
+            for field in [CohortFamineExposure, CohortColdExposure] {
+                state.set(field, row, state.get(field, row) / living.max(1));
+            }
+        }
+        Self::new(state)
+    }
+
+    pub fn new(state: &State) -> Result<Self> {
+        use super::Field::*;
+        let mut registry = 0u128;
+        let mut births = 0u128;
+        for (row, actor) in state.actors.iter().enumerate() {
+            let living = [Infants, Children, YoungAdults, OlderAdults, Seniors]
+                .into_iter()
+                .map(|field| u128::from(state.get(field, row)))
+                .sum::<u128>();
+            let deaths = [
+                BackgroundDeaths,
+                OccupationalDeaths,
+                FamineDeaths,
+                ColdDeaths,
+            ]
+            .into_iter()
+            .map(|field| u128::from(state.get(field, row)))
+            .sum::<u128>();
+            let born = u128::from(state.get(CohortBirths, row));
+            let valid = state.people.is_empty()
+                && living == u128::from(state.get(LivingMembers, row))
+                && AGE_FIELDS
+                    .into_iter()
+                    .zip(FEMALE_FIELDS)
+                    .all(|(age, female)| state.get(female, row) <= state.get(age, row))
+                && state.get(RecoveringMothers, row) <= state.get(FemaleYoungAdults, row)
+                && (actor.kind == 0 || living + deaths + born == 0)
+                && state.get(CohortColdExposure, row) <= 365_000
+                && state.get(CohortFamineExposure, row) <= 365_000;
+            if !valid {
+                Err(anyhow!(
+                    "invalid demographic counts in cohort {}",
+                    actor.identity
+                ))?;
+            }
+            registry += living + deaths;
+            births += born;
+        }
+        let identities = state
+            .actors
+            .identities()
+            .iter()
+            .collect::<std::collections::HashSet<_>>();
+        match registry == u128::from(state.initial_population) + births
+            && identities.len() == state.actors.len()
+        {
+            true => Ok(Self),
+            false => Err(anyhow!(
+                "cohort births, deaths and living population do not balance"
+            )),
+        }
+    }
+
+    fn observation(state: &State) -> PopulationObservation {
+        use super::Field::*;
+        let mut total = PopulationObservation::default();
+        for (row, _) in state
+            .actors
+            .iter()
+            .enumerate()
+            .filter(|(_, actor)| actor.kind == 0)
+        {
+            let value = |field| state.get(field, row);
+            let living = value(LivingMembers);
+            let adults = value(YoungAdults) + value(OlderAdults);
+            let dependents = living - adults;
+            let owner = u64::from(
+                adults > 0
+                    && value(InvestmentFirm).checked_sub(1).is_some_and(|firm| {
+                        state.get(EnterpriseStatus, firm as usize)
+                            < super::enterprise::EnterpriseState::Closed as u64
+                    }),
+            );
+            let farmers = if value(LandPlots) > 0 {
+                adults - owner
+            } else {
+                0
+            };
+            let paid = value(Employed).min(adults - owner - farmers);
+            let counts = [
+                farmers,
+                paid,
+                owner,
+                adults - owner - farmers - paid,
+                dependents,
+                0,
+            ];
+            for (sum, count) in total.occupations.iter_mut().zip(counts) {
+                *sum += count;
+            }
+            total.living += living;
+            total.dependents += dependents;
+            total.births += value(CohortBirths);
+            for (sum, field) in total.deaths.iter_mut().zip([
+                BackgroundDeaths,
+                OccupationalDeaths,
+                FamineDeaths,
+                ColdDeaths,
+            ]) {
+                *sum += value(field);
+            }
+            total.work_minutes += value(Hours) + value(HomeMinutes);
+            total.famine_exposure += living * value(CohortFamineExposure);
+            total.cold_exposure += living * value(CohortColdExposure);
+        }
+        total
     }
 }

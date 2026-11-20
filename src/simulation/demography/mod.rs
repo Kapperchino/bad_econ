@@ -1,3 +1,4 @@
+mod cohorts;
 mod households;
 mod kernels;
 #[cfg(test)]
@@ -127,6 +128,12 @@ impl Policy {
             cold_vulnerability: self.cold_vulnerability.buffer_arg(),
         }
     }
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+enum PopulationModel {
+    Cohorts,
+    Individuals,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
@@ -336,14 +343,22 @@ impl DemographyRuntime {
         day: u64,
         stage: Stage,
     ) -> Result<()> {
-        let count = self.births.meta.shape()[0];
+        let count = self.range_counts.len();
+        let model = if self.count == 0 {
+            PopulationModel::Cohorts
+        } else {
+            PopulationModel::Individuals
+        };
         let samples = match stage {
             Stage::Mortality => super::random::samples(
                 device,
                 self.seed,
                 day,
                 super::random::Stream::Demography,
-                [self.count, 5],
+                match model {
+                    PopulationModel::Individuals => [self.count, 5],
+                    PopulationModel::Cohorts => [count, 1],
+                },
             )?,
             _ => super::tensor::empty(device, [0]),
         };
@@ -362,6 +377,7 @@ impl DemographyRuntime {
                 samples: samples.buffer_arg(),
                 day: u32::try_from(day)?,
                 stage,
+                model,
             },
         );
         Ok(())
@@ -456,6 +472,17 @@ impl DemographyRuntime {
             .collect()
     }
     pub fn observation(
+        &self,
+        device: &Device,
+        state: &CubeTensor,
+        config: &super::configuration::Configuration,
+    ) -> Result<PopulationObservation> {
+        match self.count {
+            0 => cohorts::observation(device, state, config, self.initial_population),
+            _ => self.individual_observation(device, state, config),
+        }
+    }
+    fn individual_observation(
         &self,
         device: &Device,
         state: &CubeTensor,
