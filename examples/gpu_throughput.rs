@@ -1,6 +1,6 @@
 use anyhow::{Context, Result, anyhow};
 use bad_econ::{
-    domain::{Checkpoint, Experiment, STATE_HASH_VERSION, Scenario},
+    domain::{Checkpoint, CohortSizes, Economy, Experiment, STATE_HASH_VERSION, Scenario},
     simulation::{Device, Simulation},
 };
 use clap::Parser;
@@ -18,6 +18,10 @@ static GLOBAL: MiMalloc = MiMalloc;
 struct Arguments {
     #[arg(long, value_delimiter = ',', default_value = "10000,100000,1000000")]
     sizes: Vec<u32>,
+    #[arg(long, default_value = "10")]
+    worker_cohort_size: NonZeroU32,
+    #[arg(long, default_value = "10")]
+    farmer_cohort_size: NonZeroU32,
     #[arg(long, default_value_t = 42)]
     seed: u64,
     #[arg(long, default_value_t = 64)]
@@ -59,8 +63,18 @@ fn main() -> Result<()> {
         .checked_add(days)
         .context("benchmark day count exhausted")?;
     let mut reports = Vec::new();
-    for households in args.sizes {
-        let scenario = Scenario::industrial(households, args.seed, Experiment::Baseline)?;
+    for people in args.sizes {
+        let sizes = CohortSizes {
+            workers: args.worker_cohort_size,
+            farmers: args.farmer_cohort_size,
+        };
+        let scenario = Scenario::for_people(
+            people,
+            sizes,
+            Economy::Industrial,
+            args.seed,
+            Experiment::Baseline,
+        )?;
         let device = Device::headless(args.workgroup)?;
         let preflight_start = Instant::now();
         let mut preflight = starting_simulation(scenario.clone(), device.clone(), args.start_day)?;
@@ -90,7 +104,7 @@ fn main() -> Result<()> {
             durations.push(elapsed);
             let memory = simulation.memory_usage();
             eprintln!(
-                "{households} households day {}: {:.3}s, reserved={} bytes",
+                "{people} people day {}: {:.3}s, reserved={} bytes",
                 simulation.snapshot.day,
                 elapsed.as_secs_f64(),
                 memory.bytes_reserved
@@ -113,7 +127,10 @@ fn main() -> Result<()> {
             false => Err(anyhow!("preflight and measured state hashes differ"))?,
         }
         reports.push(serde_json::json!({
-            "households": households,
+            "people": people,
+            "seed": args.seed,
+            "population_rows": simulation.scenario.population_rows(),
+            "cohort_sizes": sizes,
             "device": simulation.device.name,
             "workgroup": args.workgroup,
             "days": days,
@@ -146,7 +163,7 @@ fn main() -> Result<()> {
                 limit.filter(|limit| duration >= Duration::from_millis(u64::from(limit.get())))
             {
                 Err(anyhow!(
-                    "{households} households: {metric} day was {:.3} ms, exceeding the strict {} ms budget; report saved to {}",
+                    "{people} people: {metric} day was {:.3} ms, exceeding the strict {} ms budget; report saved to {}",
                     duration.as_secs_f64() * 1000.0,
                     limit,
                     args.output.display(),

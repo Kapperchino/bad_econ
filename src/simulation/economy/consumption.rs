@@ -44,6 +44,14 @@ pub(super) fn scaled_luxury(config: &EconomyConfig, good: u32) -> bool {
 }
 
 #[cube]
+pub(super) fn consumers(state: &mut [u32], config: &EconomyConfig, actor: u32) -> u32 {
+    match comptime!(config.cohorts) {
+        Feature::Enabled => number(state, config, comptime!(Field::LivingMembers as u32), actor),
+        Feature::Disabled => u32::new(1),
+    }
+}
+
+#[cube]
 pub(super) fn durable_target(
     state: &mut [u32],
     actors: &[u32],
@@ -55,6 +63,7 @@ pub(super) fn durable_target(
     good: u32,
     budget: Ticks,
 ) -> Ticks {
+    let members = consumers(state, config, household);
     if scaled_luxury(config, good) {
         let quote = pricing::replacement_quote(
             state, actors, config, spatial, control, parameters, household, good,
@@ -66,21 +75,27 @@ pub(super) fn durable_target(
             divide(budget, 180),
             interval + config.coverage + config.ring,
         );
-        maximum(divide(allowance, max(price, 1)), ticks(1, 0))
+        maximum(divide(allowance, max(price, 1)), ticks(members, 0))
     } else {
-        ticks(1, 0)
+        ticks(members, 0)
     }
 }
 
 #[cube]
-pub(super) fn durable_use(config: &EconomyConfig, stock: Ticks, good: u32, day: u32) -> Ticks {
+pub(super) fn durable_use(
+    config: &EconomyConfig,
+    members: u32,
+    stock: Ticks,
+    good: u32,
+    day: u32,
+) -> Ticks {
     if scaled_luxury(config, good) {
         let interval = max(config.consumption_intervals[good as usize - 1], 1);
         let whole = divide(stock, interval);
         let remainder = minus(stock, times(whole, interval).value).extract(LOW_WORD);
         plus(whole, ticks(u32::cast_from(day % interval < remainder), 0)).value
     } else {
-        minimum(stock, ticks(1, 0))
+        minimum(stock, ticks(members, 0))
     }
 }
 
@@ -172,7 +187,7 @@ pub(super) fn budget(
                 number(state, config, comptime!(Field::FoodNeed as u32), household),
                 number(state, config, comptime!(Field::FoodPrice as u32), household),
             ),
-            ticks(config.household_rent, 0),
+            times32(config.household_rent, consumers(state, config, household)),
         );
         let reserve = multiply(
             control,
@@ -182,7 +197,11 @@ pub(super) fn budget(
                 config.coverage + config.ring,
             ),
         );
-        select(equal(stock, zero()), zero(), positive(cash, reserve))
+        select(
+            lt(stock, ticks(consumers(state, config, household), 0)),
+            zero(),
+            positive(cash, reserve),
+        )
     } else {
         cash
     }

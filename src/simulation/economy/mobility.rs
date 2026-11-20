@@ -135,6 +135,10 @@ pub(super) fn work_target(
         ),
         POLICY_SCALE,
     );
+    let rent = times32(
+        config.household_rent,
+        consumption::consumers(state, config, household),
+    );
     let minimum_daily = plus(
         times32(
             number(
@@ -145,7 +149,7 @@ pub(super) fn work_target(
             ),
             config.minimum_price + config.delivery_penalty,
         ),
-        ticks(config.household_rent, 0),
+        rent,
     )
     .value;
     let nearby =
@@ -183,9 +187,20 @@ pub(super) fn work_target(
             spatial[(segment + cells + 1 + (offset + day + household) % length) as usize],
         );
         let good = kind(actors, firm).output();
+        let shifts = match comptime!(config.cohorts) {
+            Feature::Enabled => select(
+                employer > 0,
+                number(state, config, comptime!(Field::Employed as u32), household),
+                min(
+                    employment::team(state, config, household),
+                    number(state, config, comptime!(Field::Slots as u32), firm),
+                ),
+            ),
+            Feature::Disabled => u32::new(1),
+        };
         let paid = times32(
             number(state, config, comptime!(Field::Wage as u32), firm),
-            number(state, config, comptime!(Field::LaborMinutes as u32), firm),
+            number(state, config, comptime!(Field::LaborMinutes as u32), firm) * shifts,
         );
         let trip = distance(actors, household, firm);
         let hiring = select(
@@ -248,7 +263,7 @@ pub(super) fn work_target(
             times32(ceildiv(heat, 2), needs.coal),
             times32(heat, needs.wood),
         );
-        let daily = plus(plus(food, fuel).value, ticks(config.household_rent, 0)).value;
+        let daily = plus(plus(food, fuel).value, rent).value;
         let travel = select(
             nearest > config.commute_speed,
             max(ceildiv(nearest, config.shipment_speed), 1),

@@ -83,7 +83,9 @@ impl UiAction {
             Self::Step => "N: advance one day and pause".into(),
             Self::Reset => "R: discard this run and restore the launch scenario".into(),
             Self::Speed(speed) => format!("Simulation speed: {}", speed.label()),
-            Self::Inspect(ActorSelection::Household) => "H: inspect the first household".into(),
+            Self::Inspect(ActorSelection::Household) => {
+                "Inspect the first population account (H)".into()
+            }
             Self::Inspect(ActorSelection::Firm) => "F: inspect the first firm".into(),
             Self::Inspect(ActorSelection::Next) => "Tab: inspect the next actor".into(),
             Self::Inspect(ActorSelection::Previous) => {
@@ -593,7 +595,7 @@ fn inspector(parent: &mut ChildSpawnerCommands) {
                     button(
                         controls,
                         UiAction::Inspect(ActorSelection::Household),
-                        "Household",
+                        "Account",
                     );
                     button(controls, UiAction::Inspect(ActorSelection::Firm), "Firm");
                     controls.spawn(Node { width: percent(100), ..row(6.0) }).with_children(|navigation| {
@@ -616,7 +618,7 @@ fn inspector(parent: &mut ChildSpawnerCommands) {
                 ))
                 .with_children(|details| label(details, Label::Inspection, 13.0, PAPER));
             panel.spawn(text(
-                "H  Household    F  Firm\nTab / Shift+Tab  Next / previous\nScroll to read all details",
+                "H  Account    F  Firm\nTab / Shift+Tab  Next / previous\nScroll to read all details",
                 11.0,
                 MUTED,
             ));

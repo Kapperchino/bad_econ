@@ -227,6 +227,7 @@ impl LaborBalances {
 pub(in crate::simulation) struct LaborInput {
     pub state: Box<[u32]>,
     pub config: EconomyConfig,
+    pub proposals: Box<[u32]>,
     pub scratch: Box<[u32]>,
     pub control: Box<[Atomic<u32>]>,
     pub parameters: EconomyParameters,
@@ -249,6 +250,7 @@ impl GpuPass<LaborInput> for SettleLabor {
         settle_labor(
             &mut input.state,
             &input.config,
+            &mut input.proposals,
             &mut input.scratch,
             &input.control,
             &input.parameters,
@@ -260,6 +262,7 @@ impl GpuPass<LaborInput> for SettleLabor {
 fn settle_labor(
     state: &mut [u32],
     config: &EconomyConfig,
+    proposals: &mut [u32],
     scratch: &mut [u32],
     control: &[Atomic<u32>],
     parameters: &EconomyParameters,
@@ -273,7 +276,11 @@ fn settle_labor(
         let end = start + length;
         let peer = scratch[(parameters.sort_source + start) as usize];
         let balances = LaborBalances::new(state, config, peer);
-        let capacity = balances.capacity(length);
+        let limit = match comptime!(config.cohorts) {
+            Feature::Disabled => length,
+            Feature::Enabled => number(state, config, comptime!(Field::Slots as u32), peer) + 1,
+        };
+        let capacity = balances.capacity(limit);
         let mut accepted = 0u32;
         let mut cursor = start;
         let mut faulted = 0u32;
@@ -285,10 +292,20 @@ fn settle_labor(
                 actor = scratch[(parameters.sort_source + count + index) as usize];
                 prior.replace(KernelEventStatus::load(scratch, 4 * count + actor));
             }
-            let eligible = u32::cast_from(prior.contains(comptime!(EventStatus::Accepted)));
+            let word = (actor + parameters.offset) as usize * ProposalLayout::WORDS
+                + ProposalLayout::QUANTITY_HIGH;
+            let mut shifts = 1u32;
+            if comptime!(config.cohorts == Feature::Enabled) && index < end {
+                shifts = max(proposals[word], 1);
+            }
+            let eligible = select(prior.contains(comptime!(EventStatus::Accepted)), shifts, 0);
             let prefix = parallel::scan_prefix(eligible, comptime!(parameters.scan));
             if index < end {
-                let decision = capacity.decision(prior, accepted + prefix.inclusive - eligible);
+                let before = accepted + prefix.inclusive - eligible;
+                let decision = capacity.decision(prior, before);
+                if comptime!(config.cohorts == Feature::Enabled) {
+                    proposals[word] = min(eligible, max(capacity.limit(), before) - before);
+                }
                 faulted |= u32::cast_from(decision.overflow);
                 decision.status.store(scratch, 4 * count + actor);
             }
@@ -489,6 +506,7 @@ mod tests {
                     CubeCount::Static(1, 1, 1),
                     CubeDim::new_1d(workgroup),
                     LaborInputLaunch {
+                        proposals: actual.proposals.buffer_arg(),
                         state: actual.state.buffer_arg(),
                         config: actual.config.launch(),
                         scratch: actual.scratch.buffer_arg(),

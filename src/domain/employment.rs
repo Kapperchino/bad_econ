@@ -101,7 +101,7 @@ impl InitialEmployment {
                     .map(|firm| {
                         let good = super::generated_good(config, firm);
                         let index = good as usize - 1;
-                        let actor = config.households as usize + firm;
+                        let actor = config.population_size() as usize + firm;
                         let (output, capacity) = match retailers.get(&(actor as u64 + 1)) {
                             Some(store) => (store.units_per_shift, config.capacity),
                             None => (
@@ -119,7 +119,7 @@ impl InitialEmployment {
                 let settlement = InitialSettlement::new(config);
                 Self {
                     employers,
-                    workers: (config.households as usize / settlement.spacing()).min(slots),
+                    workers: (config.population_size() as usize / settlement.spacing()).min(slots),
                     slots,
                     seasonal_days,
                     household_daily: StartingPrices::configured(config).household_daily(config),
@@ -153,7 +153,7 @@ impl InitialEmployment {
         )?;
         let days = match self
             .employer(household)
-            .map(|firm| super::generated_good(config, firm - config.households as usize))
+            .map(|firm| super::generated_good(config, firm - config.population_size() as usize))
         {
             Some(Good::Grain | Good::Flax | Good::Cotton | Good::Dye) => self.seasonal_days,
             _ => 0,

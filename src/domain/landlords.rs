@@ -559,7 +559,18 @@ pub fn initialize(scenario: &Scenario, state: &mut State) -> Result<()> {
             actor.kind == Good::Housing as u32 && region(scenario, &actor) == region_index
         });
         if !existing {
-            for group in members.chunks(HOUSEHOLDS_PER_BUILDING) {
+            let sites: Vec<_> = match &scenario.cohorts {
+                Some(layout) => layout
+                    .rental_sites
+                    .get(&region_index)
+                    .cloned()
+                    .unwrap_or_default(),
+                None => members
+                    .chunks(HOUSEHOLDS_PER_BUILDING)
+                    .map(|group| group[0])
+                    .collect(),
+            };
+            for site in sites {
                 let owner = match &scenario.config().property {
                     Some(property) => state
                         .actors
@@ -568,11 +579,11 @@ pub fn initialize(scenario: &Scenario, state: &mut State) -> Result<()> {
                             actor.identity == property.regions[region_index].landowner
                         })
                         .context("missing landowner")?,
-                    None => group[0],
+                    None => site,
                 };
                 additions.push(Actor {
                     identity: state.next_identity,
-                    position: state.actors.at(group[0]).position,
+                    position: state.actors.at(site).position,
                     kind: Good::Housing as u32,
                     owner: owner as u32,
                     capacity: 0,
@@ -635,6 +646,15 @@ pub fn initialize(scenario: &Scenario, state: &mut State) -> Result<()> {
             index,
             Good::Construction.initial_price().into(),
         );
+        if scenario.config().people.is_some()
+            && state.get(Field::InvestmentFirm, actor.owner as usize) == 0
+        {
+            state.set(
+                Field::InvestmentFirm,
+                actor.owner as usize,
+                index as u64 + 1,
+            );
+        }
         state.ownership.push(Ownership {
             firm: actor.identity,
             shares: vec![OwnershipShare {
@@ -665,7 +685,7 @@ pub fn initialize(scenario: &Scenario, state: &mut State) -> Result<()> {
                 (true, 0, 0) => {
                     plots += match scenario.config().property {
                         Some(_) => state.get(Field::OccupiedPlots, tenant),
-                        None => 1,
+                        None => u64::from(state.actors.at(tenant).capacity),
                     };
                     state.set(Field::OccupiedPlots, tenant, 0);
                 }

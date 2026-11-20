@@ -536,6 +536,8 @@ impl Simulation {
             scan: parallel::ScanMode::new(&self.device),
             empty_orders: parameters::EmptyOrderMode::Settle,
             day,
+            employment_term_days: crate::domain::calendar::CalendarDate::on_day(self.day)
+                .days_until_next_month(),
             matching_round: match self.provisioning {
                 Provisioning::Standard => self.matching_round as u32,
                 Provisioning::Minimum => 0,
@@ -745,11 +747,13 @@ impl Simulation {
         }
         match phase {
             Phase::Commitment => {
-                (0..MATCHING_ROUNDS).try_for_each(|round| {
-                    self.matching_round = round;
-                    self.market(Market::Labor, phase, trace, &mut evidence)
-                        .map(|_| ())
-                })?;
+                std::iter::once(policy::RETAINED_LABOR_ROUND)
+                    .chain(0..MATCHING_ROUNDS)
+                    .try_for_each(|round| {
+                        self.matching_round = round;
+                        self.market(Market::Labor, phase, trace, &mut evidence)
+                            .map(|_| ())
+                    })?;
                 self.market_result(&mut evidence)
             }
             Phase::WorkPayment => {
@@ -2219,7 +2223,7 @@ impl Simulation {
         launch(EconomyStage::MarketBoundary, 1, &parameters);
         let sorting_window = device_profile.start(&self.device);
         let sort_keys =
-            economy::sorting::SortKeys::for_market(market, self.scenario.config().households);
+            economy::sorting::SortKeys::for_market(market, self.scenario.population_rows() as u32);
         parameters.sort_source = match (parameters.clock, device_profile) {
             (parameters::MarketClock::Device, _) | (_, profiling::MarketProfile::Enabled(_)) => {
                 economy::sorting::MarketSort::encode_keys(
@@ -2290,6 +2294,7 @@ impl Simulation {
                     ),
                     cubecl::CubeDim::new_1d(self.device.workgroup),
                     economy::batch::labor::LaborInputLaunch {
+                        proposals: self.proposals.buffer_arg(),
                         state: self.state.buffer_arg(),
                         config: self.config.launch(),
                         scratch: self.scratch.buffer_arg(),
@@ -2298,22 +2303,32 @@ impl Simulation {
                     },
                 )
             }
-            Market::Consumer(
-                Good::Wood | Good::Coal | Good::LuxuryClothes | Good::LuxuryFurniture,
-            ) => economy::batch::quantity::QuantitySettlement::launch(
-                &self.device,
-                markets::job_dispatch(&self.searches.dispatches, markets::QUEUE_DISPATCH, count),
-                cubecl::CubeDim::new_1d(self.device.workgroup),
-                economy::batch::quantity::QuantityInputLaunch {
-                    state: self.state.buffer_arg(),
-                    actors: self.actors.buffer_arg(),
-                    config: self.config.launch(),
-                    proposals: self.proposals.buffer_arg(),
-                    scratch: self.scratch.buffer_arg(),
-                    control: self.control.buffer_arg(),
-                    parameters: parameters.launch(),
-                },
-            ),
+            Market::Consumer(good)
+                if self.scenario.config().people.is_some()
+                    || matches!(
+                        good,
+                        Good::Wood | Good::Coal | Good::LuxuryClothes | Good::LuxuryFurniture
+                    ) =>
+            {
+                economy::batch::quantity::QuantitySettlement::launch(
+                    &self.device,
+                    markets::job_dispatch(
+                        &self.searches.dispatches,
+                        markets::QUEUE_DISPATCH,
+                        count,
+                    ),
+                    cubecl::CubeDim::new_1d(self.device.workgroup),
+                    economy::batch::quantity::QuantityInputLaunch {
+                        state: self.state.buffer_arg(),
+                        actors: self.actors.buffer_arg(),
+                        config: self.config.launch(),
+                        proposals: self.proposals.buffer_arg(),
+                        scratch: self.scratch.buffer_arg(),
+                        control: self.control.buffer_arg(),
+                        parameters: parameters.launch(),
+                    },
+                )
+            }
             Market::Consumer(_) => economy::batch::settle_consumers(
                 &self.device,
                 &self.state,

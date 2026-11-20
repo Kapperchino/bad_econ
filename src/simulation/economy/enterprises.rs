@@ -83,8 +83,8 @@ pub(super) fn construct_home(
                 accrued,
             );
             if comptime!(config.payroll == Feature::Enabled) {
-                let before = PayrollAccrual::new(gross, config, control);
-                let after = PayrollAccrual::new(accrued, config, control);
+                let before = PayrollAccrual::new(gross, 1, config, control);
+                let after = PayrollAccrual::new(accrued, 1, config, control);
                 net = minus(after.net, before.net);
                 set(
                     state,

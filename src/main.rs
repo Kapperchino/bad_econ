@@ -14,8 +14,14 @@ static GLOBAL: MiMalloc = MiMalloc;
 struct Cli {
     #[arg(value_enum, default_value_t = Mode::Run)]
     mode: Mode,
-    #[arg(long, default_value_t = 10_000)]
-    households: u32,
+    #[arg(long, default_value_t = 10_000, conflicts_with = "households")]
+    people: u32,
+    #[arg(long, help = "Generate a legacy household-based population", conflicts_with_all = ["worker_cohort_size", "farmer_cohort_size"])]
+    households: Option<u32>,
+    #[arg(long, help = "Maximum workers per starting cohort (default 10)")]
+    worker_cohort_size: Option<std::num::NonZeroU32>,
+    #[arg(long, help = "Maximum farmers per starting cohort (default 10)")]
+    farmer_cohort_size: Option<std::num::NonZeroU32>,
     #[arg(long, default_value_t = 42)]
     seed: u64,
     #[arg(long, value_enum, default_value_t = Experiment::Baseline)]
@@ -92,10 +98,27 @@ impl Cli {
     }
 }
 impl Cli {
-    fn generated_scenario(&self, households: u32) -> Result<Scenario> {
-        match self.economy {
-            Economy::Industrial => Scenario::industrial(households, self.seed, self.experiment),
-            Economy::Agrarian => Scenario::baseline(households, self.seed, self.experiment),
+    fn cohort_sizes(&self) -> CohortSizes {
+        let defaults = CohortSizes::default();
+        CohortSizes {
+            workers: self.worker_cohort_size.unwrap_or(defaults.workers),
+            farmers: self.farmer_cohort_size.unwrap_or(defaults.farmers),
+        }
+    }
+
+    fn generated_scenario(&self, size: u32) -> Result<Scenario> {
+        match (self.households, self.economy) {
+            (None, economy) => Scenario::for_people(
+                size,
+                self.cohort_sizes(),
+                economy,
+                self.seed,
+                self.experiment,
+            ),
+            (Some(_), Economy::Industrial) => {
+                Scenario::industrial(size, self.seed, self.experiment)
+            }
+            (Some(_), Economy::Agrarian) => Scenario::baseline(size, self.seed, self.experiment),
         }
     }
 }
@@ -124,8 +147,22 @@ fn main() -> Result<()> {
 }
 fn scenario(args: &Cli) -> Result<Scenario> {
     match &args.scenario {
-        Some(path) => Scenario::new(serde_json::from_slice(&std::fs::read(path)?)?),
-        None => args.generated_scenario(args.households),
+        Some(path) => {
+            let mut config: ScenarioConfig = serde_json::from_slice(&std::fs::read(path)?)?;
+            if config.people.is_none()
+                && (args.worker_cohort_size.is_some() || args.farmer_cohort_size.is_some())
+            {
+                config.people = Some(config.households);
+            }
+            config.cohort_sizes.workers = args
+                .worker_cohort_size
+                .unwrap_or(config.cohort_sizes.workers);
+            config.cohort_sizes.farmers = args
+                .farmer_cohort_size
+                .unwrap_or(config.cohort_sizes.farmers);
+            Scenario::new(config)
+        }
+        None => args.generated_scenario(args.households.unwrap_or(args.people)),
     }
 }
 #[cfg(feature = "compute")]
@@ -234,7 +271,7 @@ fn benchmark(scenario: Scenario, args: &Cli) -> Result<()> {
         (None, None) => args
             .sizes
             .iter()
-            .map(|&households| args.generated_scenario(households))
+            .map(|&size| args.generated_scenario(size))
             .collect::<Result<Vec<_>>>()?,
     };
     let mut reports = Vec::new();
@@ -243,7 +280,8 @@ fn benchmark(scenario: Scenario, args: &Cli) -> Result<()> {
         let mut simulation = args.simulation(scenario)?;
         simulation.device.sync()?;
         let startup_seconds = startup.elapsed().as_secs_f64();
-        let households = simulation.scenario.config().households;
+        let population_rows = simulation.scenario.population_rows();
+        let people = simulation.snapshot.population.living;
         let estimate = simulation.scenario.memory_estimate();
         let fingerprint = simulation.scenario.fingerprint()?;
         let mut first_day_seconds = None;
@@ -267,7 +305,7 @@ fn benchmark(scenario: Scenario, args: &Cli) -> Result<()> {
             first_day_seconds.get_or_insert(day_seconds);
             let memory = simulation.memory_usage();
             eprintln!(
-                "{households} households day {}: {:.3}s, reserved={} bytes",
+                "{people} people in {population_rows} population accounts day {}: {:.3}s, reserved={} bytes",
                 simulation.snapshot.day, day_seconds, memory.bytes_reserved
             );
             daily.push(serde_json::json!({"day":simulation.snapshot.day,"seconds":day_seconds,"phases":simulation.timings,"memory":memory}));
@@ -275,7 +313,7 @@ fn benchmark(scenario: Scenario, args: &Cli) -> Result<()> {
         let seconds = start.elapsed().as_secs_f64();
         let readback_bytes = simulation.readback_bytes - readback_before;
         let state_hash = simulation.download()?.digest();
-        reports.push(serde_json::json!({"households":households,"firms":simulation.scenario.config().firms,"scenario":simulation.scenario.config(),"scenario_hash":fingerprint,"device":simulation.device.name,"workgroup":args.workgroup,"days":args.days,"starting_day":starting_day,"warmup_days":args.warmup,"startup_seconds":startup_seconds,"first_day_seconds":first_day_seconds,"seconds":seconds,"days_per_second":f64::from(args.days)/seconds,"readback_bytes":readback_bytes,"final_state_hash":state_hash,"state_hash_version":STATE_HASH_VERSION,"profile":bad_econ::arithmetic::PROFILE,"policy_table_hash":bad_econ::arithmetic::table_hash(),"estimated_bytes":estimate,"memory_budget_bytes":simulation.device.memory_budget.bytes(),"memory_budget":simulation.device.memory_budget,"daily":daily,"snapshot":simulation.snapshot}));
+        reports.push(serde_json::json!({"population_rows":population_rows,"people":people,"firms":simulation.scenario.config().firms,"scenario":simulation.scenario.config(),"scenario_hash":fingerprint,"device":simulation.device.name,"workgroup":args.workgroup,"days":args.days,"starting_day":starting_day,"warmup_days":args.warmup,"startup_seconds":startup_seconds,"first_day_seconds":first_day_seconds,"seconds":seconds,"days_per_second":f64::from(args.days)/seconds,"readback_bytes":readback_bytes,"final_state_hash":state_hash,"state_hash_version":STATE_HASH_VERSION,"profile":bad_econ::arithmetic::PROFILE,"policy_table_hash":bad_econ::arithmetic::table_hash(),"estimated_bytes":estimate,"memory_budget_bytes":simulation.device.memory_budget.bytes(),"memory_budget":simulation.device.memory_budget,"daily":daily,"snapshot":simulation.snapshot}));
         output(&args.output, &reports)?;
     }
     Ok(())

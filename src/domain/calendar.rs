@@ -126,6 +126,11 @@ impl CalendarDate {
         self.day
     }
 
+    pub fn days_until_next_month(self) -> u32 {
+        let next = Self::on_day(u64::from(self.month.first_day() + self.month.days()));
+        self.month.days() - self.day.saturating_sub(next.month.days())
+    }
+
     pub fn day_of_year(self) -> u32 {
         self.month.first_day() + self.day - 1
     }

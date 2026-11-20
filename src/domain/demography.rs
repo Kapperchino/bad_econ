@@ -193,23 +193,16 @@ impl DemographicPolicy {
         }
     }
     pub fn initial(&self, state: &State) -> Result<Vec<Person>> {
-        let households = state
-            .actors
-            .iter()
-            .enumerate()
-            .filter(|(_, actor)| actor.kind == 0)
-            .map(|(index, actor)| {
-                (
-                    actor.identity,
-                    state.get(super::Field::Fatigue, index) as u32,
-                )
-            })
-            .collect::<std::collections::BTreeMap<_, _>>();
         let seeds = match self.people.is_empty() {
-            true => households
-                .keys()
+            true => state
+                .actors
+                .iter()
+                .filter(|actor| actor.kind == 0)
+                .map(|actor| actor.identity)
+                .collect::<BTreeSet<_>>()
+                .into_iter()
                 .enumerate()
-                .flat_map(|(index, &household)| {
+                .flat_map(|(index, household)| {
                     (0..self.initial_household_members).map(move |member| PersonSeed {
                         identity: state.next_identity
                             + index as u64 * u64::from(self.initial_household_members)
@@ -228,6 +221,21 @@ impl DemographicPolicy {
                 .collect(),
             false => self.people.clone(),
         };
+        self.from_seeds(state, seeds)
+    }
+    pub(super) fn from_seeds(&self, state: &State, seeds: Vec<PersonSeed>) -> Result<Vec<Person>> {
+        let households = state
+            .actors
+            .iter()
+            .enumerate()
+            .filter(|(_, actor)| actor.kind == 0)
+            .map(|(index, actor)| {
+                (
+                    actor.identity,
+                    state.get(super::Field::Fatigue, index) as u32,
+                )
+            })
+            .collect::<std::collections::BTreeMap<_, _>>();
         let identities = seeds
             .iter()
             .map(|person| person.identity)
@@ -340,6 +348,22 @@ impl PopulationObservation {
     }
 
     pub fn from_state(state: &State, policy: &DemographicPolicy) -> Self {
+        Self::observe(state, policy, |row| {
+            state.actors.at(row).capacity > 1 || state.get(super::Field::EligibleWorkers, row) > 0
+        })
+    }
+
+    pub(super) fn for_scenario(state: &State, scenario: &super::Scenario) -> Self {
+        Self::observe(state, &scenario.config().demography, |_| {
+            scenario.config().people.is_some()
+        })
+    }
+
+    fn observe(
+        state: &State,
+        policy: &DemographicPolicy,
+        is_cohort: impl Fn(usize) -> bool,
+    ) -> Self {
         let households = state
             .actors
             .iter()
@@ -357,6 +381,7 @@ impl PopulationObservation {
                         observation.living += 1;
                         let household = households[&person.household];
                         let selected = state.get(super::Field::Worker, household) == index as u64;
+                        let participant = selected || is_cohort(household);
                         let owner = state
                             .get(super::Field::InvestmentFirm, household)
                             .checked_sub(1)
@@ -374,11 +399,13 @@ impl PopulationObservation {
                                 Occupation::Dependent
                             }
                             _ if selected && owner => Occupation::Owner,
-                            _ if selected && state.get(super::Field::LandPlots, household) > 0 => {
+                            _ if participant
+                                && state.get(super::Field::LandPlots, household) > 0 =>
+                            {
                                 Occupation::Farmer
                             }
                             _ if person.employer.is_some() => Occupation::WageWorker,
-                            _ if selected => Occupation::Unemployed,
+                            _ if participant => Occupation::Unemployed,
                             _ => Occupation::OtherAdult,
                         };
                         observation.occupations[category as usize] += 1;

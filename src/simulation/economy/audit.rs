@@ -617,6 +617,28 @@ fn summarize_metrics(input: &mut SummaryInput) {
                                     > 0;
                         let category = select(working, select(subsistence, 1u32, 0u32), 2u32);
                         amount = u64::cast_from(category == field);
+                        if comptime!(config.cohorts == Feature::Enabled) {
+                            let living = number(
+                                state,
+                                config,
+                                comptime!(Field::LivingMembers as u32),
+                                actor,
+                            );
+                            let workers = min(
+                                living,
+                                number(
+                                    state,
+                                    config,
+                                    comptime!(Field::EligibleWorkers as u32),
+                                    actor,
+                                ),
+                            );
+                            amount = u64::cast_from(select(
+                                field == 2,
+                                living - workers,
+                                select(category == field, workers, 0),
+                            ));
+                        }
                     }
                     17 => {
                         amount *= u64::cast_from(
@@ -865,7 +887,7 @@ fn validate_ring(
 #[cube]
 fn validate_actor(
     state: &[Ticks],
-    _actors: &[u32],
+    actors: &[u32],
     config: &EconomyConfig,
     control: &[Atomic<u32>],
     actor: u32,
@@ -887,6 +909,7 @@ fn validate_actor(
         if comptime!(config.payroll == Feature::Enabled) {
             let accrued = PayrollAccrual::new(
                 value(state, config, comptime!(Field::GrossIncome as u32), actor),
+                employment::payroll_members(actors, config, actor),
                 config,
                 control,
             );
@@ -945,12 +968,20 @@ fn household_histograms(
     }
     sync_cube();
     if actor < config.actors && kind(actors, actor).is(comptime!(ActorKind::Household)) {
-        let cash = value(state, config, comptime!(Field::Cash as u32), actor);
+        let members = select(
+            comptime!(config.cohorts == Feature::Enabled),
+            number(state, config, comptime!(Field::LivingMembers as u32), actor),
+            1,
+        );
+        let cash = divide(
+            value(state, config, comptime!(Field::Cash as u32), actor),
+            max(members, 1),
+        );
         let mut bin = WORD_BITS - cash.extract(LOW_WORD).leading_zeros();
         if cash.extract(HIGH_WORD) > 0u32 {
             bin = TICK_BITS - cash.extract(HIGH_WORD).leading_zeros();
         }
-        histograms[min(bin, SummaryLayout::WEALTH_BINS as u32 - 1) as usize].fetch_add(1);
+        histograms[min(bin, SummaryLayout::WEALTH_BINS as u32 - 1) as usize].fetch_add(members);
         let shortage = number(state, config, comptime!(Field::Shortage as u32), actor);
         if shortage > 0 {
             let x = actors[ActorLayout::X * (actors.len() / ActorLayout::WORDS) + actor as usize]

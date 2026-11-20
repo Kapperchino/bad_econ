@@ -208,6 +208,7 @@ impl PropertyConfig {
                 state.get(Field::LandPlots, index),
             ) {
                 (0, true, 0) => 0,
+                (0, _, _) => u64::from(actor.capacity),
                 _ => 1,
             };
             state.set(Field::OccupiedPlots, index, plots);

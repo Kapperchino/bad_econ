@@ -82,7 +82,7 @@ fn draw(
         let chart = dashboard.chart;
         labels.iter_mut().for_each(|(kind, mut label)| {
             let value = match kind {
-                Label::Resources => format!("Population {}     Paid households {}     Cash {}     Firms {}", number(s.population.living), number(s.employed), s.cash, number(s.firms)),
+                Label::Resources => format!("Population {}     Paid workers {}     Cash {}     Firms {}", number(s.population.living), number(s.employed), s.cash, number(s.firms)),
                 Label::Date => format!("{} | {} | {}°C\nDAY {:04} | {} | {}", s.weather.date, s.weather.season, s.weather.temperature_celsius, s.day, display.status.label(), display.speed.label()),
                 Label::Title => chart.menu().label().into(),
                 Label::Subtitle => chart.menu().description().into(),
@@ -95,7 +95,7 @@ fn draw(
                 },
                 Label::Comparison => comparison_text(&display),
                 Label::Inspection => inspection_text(&display),
-                Label::MapSummary => format!("{} households / {} people\n{} paid / {} unmet bread ticks\n{} firms opened / {} closed\n{} distributors / {} discoveries", number(s.households), number(s.population.living), number(s.employed), number(s.shortages), number(s.firm_entries), number(s.firm_closures), number(s.distributors), number(s.research.discoveries)),
+                Label::MapSummary => format!("{} accounts / {} people\n{} paid / {} unmet bread ticks\n{} firms opened / {} closed\n{} distributors / {} discoveries", number(s.households), number(s.population.living), number(s.employed), number(s.shortages), number(s.firm_entries), number(s.firm_closures), number(s.distributors), number(s.research.discoveries)),
                 Label::Error => display.error.clone().unwrap_or_else(|| match &display.status {
                     super::model::DisplayState::Unavailable(message) => message.clone(),
                     _ => String::new(),
@@ -348,7 +348,7 @@ fn number(value: impl Into<u128>) -> String {
 fn summary(menu: Menu, s: &ObservationSnapshot) -> String {
     match menu {
         Menu::Overview => format!(
-            "Paid households    {}\nUnmet bread    {} ticks\nTotal cash    {}\nIn transit    {} goods ticks",
+            "Paid workers    {}\nUnmet bread    {} ticks\nTotal cash    {}\nIn transit    {} goods ticks",
             number(s.employed),
             number(s.shortages),
             s.cash,
@@ -383,7 +383,7 @@ fn summary(menu: Menu, s: &ObservationSnapshot) -> String {
             number(s.research.striking)
         ),
         Menu::Population => format!(
-            "Population / dependents    {} / {}\nBirths    {}\nDeaths: background / work / famine / cold    {:?}\nCold exposure    {:.1} person-days\nHomeless households    {}",
+            "Population / dependents    {} / {}\nBirths    {}\nDeaths: background / work / famine / cold    {:?}\nCold exposure    {:.1} person-days\nAccounts short of housing    {}",
             number(s.population.living),
             number(s.population.dependents),
             number(s.population.births),
@@ -409,7 +409,7 @@ fn comparison_text(display: &Display) -> String {
     match &display.comparison {
         Some(reference) => match reference.at_day(display.snapshot.day) {
             Some(prior) => format!(
-                "Solid: seed {}  /  faint: seed {}\nSame-day change: paid households {:+}, unmet bread {:+}",
+                "Solid: seed {}  /  faint: seed {}\nSame-day change: paid workers {:+}, unmet bread {:+}",
                 display.seed,
                 reference.seed,
                 i128::from(display.snapshot.employed) - i128::from(prior.employed),
@@ -556,7 +556,7 @@ fn inspection_text(display: &Display) -> String {
                         railway
                     )
                 })
-                .unwrap_or_else(|| "Select a household or firm to inspect its accounts, property and production.".into())
+                .unwrap_or_else(|| "Select a population account or firm to inspect its accounts, property and production.".into())
 }
 
 fn exact_value(value: f64, format: ValueFormat) -> String {

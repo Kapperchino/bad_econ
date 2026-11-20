@@ -50,7 +50,18 @@ pub(super) fn collect(
                 ActorKind::HOUSEHOLD_BITS => select(
                     number(state, config, comptime!(Field::LivingMembers as u32), actor) > 0
                         && number(state, config, comptime!(Field::LandPlots as u32), actor) == 0,
-                    config.household_rent,
+                    config.household_rent
+                        * select(
+                            config.rental_businesses > 0
+                                && comptime!(config.cohorts == Feature::Enabled),
+                            number(
+                                state,
+                                config,
+                                comptime!(Field::HousingAvailable as u32),
+                                actor,
+                            ),
+                            consumption::consumers(state, config, actor),
+                        ),
                     0,
                 ),
                 _ => select(
@@ -121,7 +132,16 @@ pub(super) fn collect(
             let remaining = minus(due, paid);
             match tenants {
                 Tenants::Households => {
-                    let evicted = daily > 0 && !equal(remaining, zero());
+                    let partial = comptime!(config.cohorts == Feature::Enabled)
+                        && daily > 0
+                        && config.rental_businesses > 0
+                        && number(
+                            state,
+                            config,
+                            comptime!(Field::HousingAvailable as u32),
+                            actor,
+                        ) < consumption::consumers(state, config, actor);
+                    let evicted = partial || (daily > 0 && !equal(remaining, zero()));
                     set32(
                         state,
                         config,

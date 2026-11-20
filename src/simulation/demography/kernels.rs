@@ -2,7 +2,7 @@ use super::{
     DemographyPolicy, OBSERVATION_METRICS, OBSERVATION_SHARDS, PersonLayout as P, Stage,
     WorkerRemapping,
 };
-use crate::simulation::configuration::EconomyConfig;
+use crate::simulation::configuration::{EconomyConfig, Feature};
 use crate::{
     domain::{
         Field,
@@ -102,7 +102,19 @@ fn family_support(state: &mut [u32], config: &EconomyConfig, household: u32, foo
         .value;
         let cost = plus(
             food_cost,
-            ticks(select(plots > 0, 0, config.household_rent), 0),
+            times32(
+                select(plots > 0, 0, config.household_rent),
+                select(
+                    comptime!(config.cohorts == Feature::Enabled),
+                    get(
+                        state,
+                        config,
+                        comptime!(Field::LivingMembers as u32),
+                        household,
+                    ),
+                    1,
+                ),
+            ),
         )
         .value;
         let income = divide(
@@ -266,6 +278,8 @@ pub fn step(
         let mut demand = 0;
         let mut worker = u32::new(comptime!(i64::from(u32::MAX)));
         let mut available = 0;
+        let mut workers = 0u32;
+        let mut shortest_day = config.work_cap;
         let mut household_time = 0;
         if comptime!(stage == Stage::Observation) {
             births[household as usize] = 0;
@@ -295,6 +309,10 @@ pub fn step(
                     1440 - config.reserved_minutes,
                 );
                 household_time += select(eligible, capacity, 0);
+                if eligible && capacity > 0 {
+                    workers += 1;
+                    shortest_day = min(shortest_day, capacity);
+                }
                 if eligible && worker == u32::MAX {
                     worker = index;
                     available = min(
@@ -337,6 +355,16 @@ pub fn step(
                 household,
                 worker,
             );
+            if comptime!(config.cohorts == Feature::Enabled) {
+                available = shortest_day * workers;
+                put(
+                    state,
+                    config,
+                    comptime!(Field::EligibleWorkers as u32),
+                    household,
+                    workers,
+                );
+            }
             let moving = get(state, config, comptime!(Field::MoveDue as u32), household) > 0;
             put(
                 state,
@@ -452,7 +480,10 @@ pub fn step(
                     comptime!(Field::HomeMinutes as u32),
                     household,
                 );
-            let additional = work * policy.parameters.work_food * config.household_need / 480;
+            let additional = (u64::cast_from(work)
+                * u64::cast_from(policy.parameters.work_food)
+                * u64::cast_from(config.household_need)
+                / 480u64) as u32;
             let total = demand
                 + additional
                 + get(
@@ -568,6 +599,9 @@ pub fn step(
                 household,
             );
             let mut home_remaining = home;
+            let mut paid_workers = get(state, config, comptime!(Field::Employed as u32), household);
+            let shift = minutes / max(paid_workers, 1);
+            let mut delegate = zero();
             for offset in 0..count {
                 let first = select(selected == u32::MAX, start, selected + 1);
                 let index = start + (first - start + offset) % max(count, 1);
@@ -575,13 +609,18 @@ pub fn step(
                 if people[base + P::CAUSE] == 0 {
                     let age = people[base + P::AGE];
                     let group = band(age);
-                    let work = select(index == selected, minutes, 0);
+                    let mut work = select(index == selected, minutes, 0);
                     let eligible = age >= policy.parameters.minimum_age
                         && age < policy.parameters.retirement_age;
                     let capacity = min(
                         config.work_cap * (1000 - people[base + P::FATIGUE]) / 1000,
                         1440 - config.reserved_minutes,
                     );
+                    if comptime!(config.cohorts == Feature::Enabled) {
+                        let hired = paid_workers > 0 && shift > 0 && eligible && capacity >= shift;
+                        work = select(hired, shift, 0);
+                        paid_workers -= u32::cast_from(hired);
+                    }
                     let home_work =
                         select(eligible, min(home_remaining, max(capacity, work) - work), 0);
                     home_remaining -= home_work;
@@ -652,6 +691,10 @@ pub fn step(
                     let cause = death_cause(draw, background, occupational, famine, cold);
                     people[base + P::CAUSE] = cause;
                     living -= u32::cast_from(cause > 0);
+                    if comptime!(config.cohorts == Feature::Enabled) && eligible && cause == 0 {
+                        delegate =
+                            ticks(people[base + P::IDENTITY], people[base + P::IDENTITY + 1]);
+                    }
                     let independent = age >= 18 * DAYS_PER_YEAR
                         && age < 19 * DAYS_PER_YEAR
                         && index != selected
@@ -694,6 +737,13 @@ pub fn step(
                         people[base + P::COOLDOWN] = policy.parameters.spacing;
                     }
                 }
+            }
+            if comptime!(config.cohorts == Feature::Enabled) {
+                store(
+                    state,
+                    comptime!(Field::CohortDelegate as u32) * config.state_stride + household,
+                    delegate,
+                );
             }
             put(
                 state,
@@ -742,9 +792,10 @@ pub fn observe(
             let farmer = get(state, config, comptime!(Field::LandPlots as u32), household) > 0;
             let dependent =
                 age < policy.parameters.minimum_age || age >= policy.parameters.retirement_age;
-            let mut category = select(selected, 3u32, 5u32);
+            let participant = selected || comptime!(config.cohorts == Feature::Enabled);
+            let mut category = select(participant, 3u32, 5u32);
             category = select(people[base + P::EMPLOYER] > 0, 1u32, category);
-            category = select(selected && farmer, 0u32, category);
+            category = select(participant && farmer, 0u32, category);
             category = select(selected && owner, 2u32, category);
             category = select(dependent, 4u32, category);
             output[shard + 8 + category as usize].fetch_add(1);

@@ -80,7 +80,7 @@ pub(super) struct StartingDemand {
 
 impl StartingDemand {
     pub fn new(config: &ScenarioConfig) -> Self {
-        let households = u64::from(config.households);
+        let households = u64::from(config.population_size());
         let members = config.demography.initial_household_members;
         let adults = members.min(2);
         let dependents = members - adults;
@@ -106,7 +106,7 @@ impl StartingDemand {
                     None => {
                         u64::from(
                             super::employment::InitialSettlement::new(config)
-                                .farmers(config.households),
+                                .farmers(config.population_size()),
                         ) * u64::from(members.div_ceil(2))
                     }
                 };
@@ -118,7 +118,7 @@ impl StartingDemand {
                         .count() as u64,
                     None => u64::from(
                         super::employment::InitialSettlement::new(config)
-                            .farmers(config.households),
+                            .farmers(config.population_size()),
                     ),
                 };
                 let grain = plots * u64::from(annual_yield_per_plot);

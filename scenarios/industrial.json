@@ -14,7 +14,7 @@
   "forecast_weight": 250,
   "household_cash": 5000,
   "household_need": 1,
-  "households": 64,
+  "people": 64,
   "map_size": 1000,
   "maximum_price": 10000,
   "minimum_price": 1,

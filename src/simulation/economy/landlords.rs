@@ -245,15 +245,16 @@ fn open(state: &mut [u32], config: &EconomyConfig, control: &[Atomic<u32>], grou
 }
 
 #[cube]
-fn renter(state: &mut [u32], actors: &[u32], config: &EconomyConfig, tenant: u32) -> bool {
-    kind(actors, tenant).is(comptime!(ActorKind::Household))
+fn rental_units(state: &mut [u32], actors: &[u32], config: &EconomyConfig, tenant: u32) -> u32 {
+    let renter = kind(actors, tenant).is(comptime!(ActorKind::Household))
         && number(state, config, comptime!(Field::LandPlots as u32), tenant) == 0
         && number(
             state,
             config,
             comptime!(Field::LivingMembers as u32),
             tenant,
-        ) > 0
+        ) > 0;
+    select(renter, consumption::consumers(state, config, tenant), 0)
 }
 
 #[cube]
@@ -274,20 +275,22 @@ fn allocate(
     while offset < end {
         let entry = offset + UNIT_POS;
         let mut tenant = 0u32;
-        let mut eligible = false;
+        let mut units = 0u32;
         if entry < end {
             tenant = config.rental_accounts[entry as usize];
-            eligible = renter(state, actors, config, tenant);
+            units = rental_units(state, actors, config, tenant);
         }
-        let prefix = parallel::scan_prefix(u32::cast_from(eligible), scan);
-        let housed = eligible && !lt(supply, ticks(households + prefix.inclusive, 0));
+        let prefix = parallel::scan_prefix(units, scan);
+        let preceding = households + prefix.inclusive - units;
+        let housed =
+            minimum(ticks(units, 0), positive(supply, ticks(preceding, 0))).extract(LOW_WORD);
         if entry < end {
             set32(
                 state,
                 config,
                 comptime!(Field::HousingAvailable as u32),
                 tenant,
-                u32::cast_from(housed),
+                housed,
             );
             set32(
                 state,
@@ -349,7 +352,7 @@ fn receipts(
             tenant,
             0,
         );
-        households += u32::cast_from(renter(state, actors, config, tenant));
+        households += rental_units(state, actors, config, tenant);
         served += number(
             state,
             config,

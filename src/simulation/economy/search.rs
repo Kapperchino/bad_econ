@@ -88,6 +88,7 @@ fn prepare(
         let k = kind(actors, id);
         let mut chosen = u32::new(comptime!(i64::from(NO_ACTOR)));
         let mut quantity = ticks(0u32, 0u32);
+        let mut trip = 0u32;
         let mut search = false;
         let mut good = 0u32;
         let mut wanted = ticks(0u32, 0u32);
@@ -137,12 +138,13 @@ fn prepare(
                 }
                 match market {
                     MarketFlag::Labor => {
-                        search = k.is(comptime!(ActorKind::Household))
-                            && number(state, config, comptime!(Field::Employed as u32), id) == 0u32
-                            && (comptime!(config.economy == crate::domain::Economy::Agrarian)
-                                || number(state, config, comptime!(Field::LandPlots as u32), id)
-                                    == 0
-                                || parameters.matching_round + 1 == MATCHING_ROUNDS as u32);
+                        let labor = employment::LaborSearch::new(
+                            state, actors, config, control, parameters, id,
+                        );
+                        chosen = labor.peer;
+                        quantity = labor.quantity;
+                        trip = labor.trip;
+                        search = labor.vacancies;
                     }
                     MarketFlag::Input(_) => {
                         good = parameters.traded_good();
@@ -237,7 +239,7 @@ fn prepare(
                                     consumption::budget(state, config, control, id, good);
                             }
                             search = search && !equal(purchasing_power, zero());
-                            wanted = ticks(1, 0);
+                            wanted = ticks(consumption::consumers(state, config, id), 0);
                             if comptime!(matches!(
                                 market,
                                 MarketFlag::Consumer(Good::LuxuryClothes | Good::LuxuryFurniture)
@@ -400,7 +402,7 @@ fn prepare(
                 quantity.extract(LOW_WORD);
             proposals[id as usize * ProposalLayout::WORDS + ProposalLayout::QUANTITY_HIGH] =
                 quantity.extract(HIGH_WORD);
-            proposals[id as usize * ProposalLayout::WORDS + ProposalLayout::DISTANCE] = 0;
+            proposals[id as usize * ProposalLayout::WORDS + ProposalLayout::DISTANCE] = trip;
         }
     }
     let mut packed = u32::cast_from(searching);
@@ -665,15 +667,17 @@ fn candidate_supply(
             amount = ticks(1u32, 0u32);
             if comptime!(market == MarketFlag::Labor) {
                 if comptime!(config.bargaining.enabled == Feature::Enabled) {
+                    let members = employment::payroll_members(actors, config, id);
                     let negotiation = negotiate(
                         NegotiationRequest {
-                            prior_gross: value(
-                                state,
-                                config,
-                                comptime!(Field::GrossIncome as u32),
-                                id,
+                            prior_gross: divide(
+                                value(state, config, comptime!(Field::GrossIncome as u32), id),
+                                members,
                             ),
-                            household_cash: value(state, config, comptime!(Field::Cash as u32), id),
+                            household_cash: divide(
+                                value(state, config, comptime!(Field::Cash as u32), id),
+                                members,
+                            ),
                             funded_per_packet: divide(
                                 value(state, config, comptime!(Field::Cash as u32), firm),
                                 max(
@@ -697,11 +701,17 @@ fn candidate_supply(
                     wage = negotiation.wage.extract(LOW_WORD);
                     amount = negotiation.wage;
                 }
+                let team = employment::team(state, config, id);
+                let slots = number(state, config, comptime!(Field::Slots as u32), firm);
+                let shifts = min(slots, team);
+                if comptime!(config.cohorts == Feature::Enabled) {
+                    amount = ticks(amount.extract(LOW_WORD), shifts);
+                }
                 let duration = number(state, config, comptime!(Field::LaborMinutes as u32), firm)
                     + ceildiv(dist, config.commute_speed) * COMMUTE_LEGS;
                 eligible = eligible
-                    && number(state, config, comptime!(Field::Slots as u32), firm) > 0u32
-                    && number(state, config, comptime!(Field::Time as u32), id) >= duration;
+                    && slots > 0
+                    && number(state, config, comptime!(Field::Time as u32), id) / team >= duration;
                 score = divide(
                     times32(
                         wage * number(state, config, comptime!(Field::LaborMinutes as u32), firm),
@@ -730,7 +740,8 @@ fn candidate_supply(
                     let preparation = food::household_work(state, config, control, id, missing);
                     let minutes = preparation.minutes;
                     let time = number(state, config, comptime!(Field::Time as u32), id);
-                    let remaining = max(time, duration) - duration
+                    let committed = duration * shifts;
+                    let remaining = max(time, committed) - committed
                         + number(state, config, comptime!(Field::HomeTime as u32), id);
                     let self_provision = missing > 0
                         && !lt(
@@ -739,7 +750,7 @@ fn candidate_supply(
                         );
                     let paid = times32(
                         wage,
-                        number(state, config, comptime!(Field::LaborMinutes as u32), firm),
+                        number(state, config, comptime!(Field::LaborMinutes as u32), firm) * shifts,
                     );
                     let food_cost = times32(
                         missing,

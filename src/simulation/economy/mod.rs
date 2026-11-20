@@ -36,6 +36,7 @@ pub(super) mod audit;
 pub(super) mod batch;
 mod clearing;
 mod consumption;
+mod employment;
 pub(super) mod enterprises;
 mod farming;
 pub(in crate::simulation) mod food;
@@ -142,12 +143,6 @@ fn local(
         let phase = comptime!(parameters.phase);
         match phase {
             Phase::Opening => {
-                let employer = value(state, config, comptime!(Field::Employer as u32), id);
-                if comptime!(config.economy == crate::domain::Economy::Industrial)
-                    && !equal(employer, zero())
-                {
-                    set(state, config, comptime!(Field::Job as u32), id, employer);
-                }
                 for good in 1u32..Good::COUNT as u32 + 1 {
                     let slot = BASE_FIELDS as u32
                         + (good - 1) * config.ring
@@ -336,6 +331,9 @@ fn local(
                 }
             }
             Phase::WorkPayment => {
+                if k.is(comptime!(ActorKind::Household)) {
+                    employment::finish_day(state, config, parameters, id);
+                }
                 if number(state, config, comptime!(Field::EnterpriseModel as u32), id) == 1 {
                     let services = value(state, config, comptime!(Field::Pipeline as u32), id);
                     let services = property::scaled_output(state, config, control, id, services);
@@ -446,8 +444,10 @@ fn local(
                             {
                                 let good = offset as u32 + 1;
                                 let stock = value(state, config, good, id);
+                                let members = consumption::consumers(state, config, id);
                                 let used = consumption::durable_use(
                                     config,
+                                    members,
                                     stock,
                                     good,
                                     parameters.day + id,
@@ -476,7 +476,7 @@ fn local(
                     let previous_fatigue =
                         number(state, config, comptime!(Field::Fatigue as u32), id);
                     let mut fatigue = min(previous_fatigue + config.work_fatigue, POLICY_SCALE);
-                    if number(state, config, comptime!(Field::Employed as u32), id) == 0u32 {
+                    if number(state, config, comptime!(Field::Hours as u32), id) == 0u32 {
                         fatigue =
                             max(previous_fatigue, config.rest_recovery) - config.rest_recovery;
                     }
@@ -866,11 +866,12 @@ fn propose(
         }
         match market {
             MarketFlag::Labor => {
-                search = k.is(comptime!(ActorKind::Household))
-                    && number(state, config, comptime!(Field::Employed as u32), id) == 0u32
-                    && (comptime!(config.economy == crate::domain::Economy::Agrarian)
-                        || number(state, config, comptime!(Field::LandPlots as u32), id) == 0
-                        || parameters.matching_round + 1 == MATCHING_ROUNDS as u32);
+                let labor =
+                    employment::LaborSearch::new(state, actors, config, control, parameters, id);
+                chosen = labor.peer;
+                quantity = labor.quantity;
+                trip = labor.trip;
+                search = labor.vacancies;
             }
             MarketFlag::Input(_) => {
                 good = parameters.traded_good();
@@ -1010,24 +1011,6 @@ fn propose(
         if good > 0 {
             search = search && !equal(wanted, zero()) && !equal(purchasing_power, zero());
         }
-        let job = number(state, config, comptime!(Field::Job as u32), id);
-        if comptime!(market == MarketFlag::Labor) && search && job > 0 {
-            let offer = search::candidate(
-                state,
-                actors,
-                config,
-                control,
-                parameters,
-                id,
-                job - 1,
-                wanted,
-                purchasing_power,
-            );
-            chosen = select(offer.eligible, job - 1, chosen);
-            quantity = select(offer.eligible, offer.quantity, quantity);
-            trip = select(offer.eligible, offer.trip, trip);
-            search = !offer.eligible;
-        }
         if search {
             let px = actors[ActorLayout::X * (actors.len() / ActorLayout::WORDS) + id as usize];
             let py = actors[ActorLayout::Y * (actors.len() / ActorLayout::WORDS) + id as usize];
@@ -1089,8 +1072,6 @@ fn propose(
                             let firm = spatial[(side * side + 1u32 + rotated) as usize];
                             let dist = distance(actors, id, firm);
                             if dist <= config.search_radius {
-                                let mut wage =
-                                    number(state, config, comptime!(Field::Wage as u32), firm);
                                 let route = match comptime!(market) {
                                     MarketFlag::Labor => {
                                         railway::animal_route(actors, config, id, firm)
@@ -1115,168 +1096,21 @@ fn propose(
 
                                     let mut score =
                                         ticks(quote + route.days * config.delivery_penalty, 0u32);
-                                    let mut amount = ticks(1u32, 0u32);
-                                    if comptime!(market == MarketFlag::Labor) {
-                                        if comptime!(config.bargaining.enabled == Feature::Enabled)
-                                        {
-                                            let negotiation = negotiate(
-                                                NegotiationRequest {
-                                                    prior_gross: value(
-                                                        state,
-                                                        config,
-                                                        comptime!(Field::GrossIncome as u32),
-                                                        id,
-                                                    ),
-                                                    household_cash: value(
-                                                        state,
-                                                        config,
-                                                        comptime!(Field::Cash as u32),
-                                                        id,
-                                                    ),
-                                                    funded_per_packet: divide(
-                                                        value(
-                                                            state,
-                                                            config,
-                                                            comptime!(Field::Cash as u32),
-                                                            firm,
-                                                        ),
-                                                        max(
-                                                            number(
-                                                                state,
-                                                                config,
-                                                                comptime!(Field::Slots as u32),
-                                                                firm,
-                                                            ),
-                                                            1,
-                                                        ),
-                                                    ),
-                                                    candidate_wage: wage,
-                                                    payable_minutes: number(
-                                                        state,
-                                                        config,
-                                                        comptime!(Field::LaborMinutes as u32),
-                                                        firm,
-                                                    ),
-                                                },
-                                                config,
-                                                control,
-                                            );
-                                            eligible = eligible
-                                                && negotiation.status
-                                                    == comptime!(NegotiationStatus::Agreed as u32);
-                                            wage = negotiation.wage.extract(LOW_WORD);
-                                            amount = negotiation.wage;
-                                        }
-                                        let duration = number(
+                                    let amount = if comptime!(market == MarketFlag::Labor) {
+                                        let offer = search::candidate(
                                             state,
+                                            actors,
                                             config,
-                                            comptime!(Field::LaborMinutes as u32),
+                                            control,
+                                            parameters,
+                                            id,
                                             firm,
-                                        ) + ceildiv(dist, config.commute_speed)
-                                            * COMMUTE_LEGS;
-                                        eligible = eligible
-                                            && number(
-                                                state,
-                                                config,
-                                                comptime!(Field::Slots as u32),
-                                                firm,
-                                            ) > 0u32
-                                            && number(
-                                                state,
-                                                config,
-                                                comptime!(Field::Time as u32),
-                                                id,
-                                            ) >= duration;
-                                        score = divide(
-                                            times32(
-                                                wage * number(
-                                                    state,
-                                                    config,
-                                                    comptime!(Field::LaborMinutes as u32),
-                                                    firm,
-                                                ),
-                                                POLICY_SCALE,
-                                            ),
-                                            duration,
+                                            zero(),
+                                            zero(),
                                         );
-                                        if comptime!(config.home_mode == Feature::Enabled) {
-                                            let conditions = 500
-                                                + number(
-                                                    state,
-                                                    config,
-                                                    comptime!(Field::EquipmentCondition as u32),
-                                                    firm,
-                                                ) / 2
-                                                + number(
-                                                    state,
-                                                    config,
-                                                    comptime!(Field::SafetyProvision as u32),
-                                                    firm,
-                                                ) / 4;
-                                            score = scaled(control, score, conditions, 1000);
-                                            let need = number(
-                                                state,
-                                                config,
-                                                comptime!(Field::FoodNeed as u32),
-                                                id,
-                                            );
-                                            let bread = number(
-                                                state,
-                                                config,
-                                                comptime!(Field::Bread as u32),
-                                                id,
-                                            );
-                                            let missing = max(need, bread) - bread;
-                                            let preparation = food::household_work(
-                                                state, config, control, id, missing,
-                                            );
-                                            let minutes = preparation.minutes;
-                                            let time = number(
-                                                state,
-                                                config,
-                                                comptime!(Field::Time as u32),
-                                                id,
-                                            );
-                                            let remaining = max(time, duration) - duration
-                                                + number(
-                                                    state,
-                                                    config,
-                                                    comptime!(Field::HomeTime as u32),
-                                                    id,
-                                                );
-                                            let self_provision = missing > 0
-                                                && !lt(
-                                                    value(
-                                                        state,
-                                                        config,
-                                                        comptime!(Field::Grain as u32),
-                                                        id,
-                                                    ),
-                                                    preparation.grain,
-                                                );
-                                            let paid = times32(
-                                                wage,
-                                                number(
-                                                    state,
-                                                    config,
-                                                    comptime!(Field::LaborMinutes as u32),
-                                                    firm,
-                                                ),
-                                            );
-                                            let food_cost = times32(
-                                                missing,
-                                                number(
-                                                    state,
-                                                    config,
-                                                    comptime!(Field::FoodPrice as u32),
-                                                    id,
-                                                ),
-                                            );
-                                            eligible = eligible
-                                                && !(self_provision
-                                                    && remaining < minutes
-                                                    && lt(paid, food_cost));
-                                        }
+                                        eligible = offer.eligible;
+                                        score = offer.score;
+                                        offer.quantity
                                     } else {
                                         let affordable = minimum(
                                             wanted,
@@ -1302,7 +1136,7 @@ fn propose(
                                             empty_trip = dist;
                                             empty_score = score;
                                         }
-                                        amount = minimum(
+                                        let amount = minimum(
                                             minimum(
                                                 wanted,
                                                 positive(
@@ -1325,7 +1159,8 @@ fn propose(
                                             state, actors, config, parameters, id, wanted, amount,
                                             score,
                                         );
-                                    }
+                                        amount
+                                    };
                                     let mut improves = lt(score, best);
                                     if comptime!(market == MarketFlag::Labor) {
                                         improves = lt(best, score);
@@ -1522,15 +1357,14 @@ fn construct_route(
             }
             match comptime!(parameters.market) {
                 MarketFlag::Labor => {
+                    let shifts = employment::shifts(config, quantity);
+                    let labor = number(state, config, comptime!(Field::LaborMinutes as u32), other);
                     let mut offered_wage =
                         number(state, config, comptime!(Field::Wage as u32), other);
                     if comptime!(config.bargaining.enabled == Feature::Enabled) {
                         offered_wage = quantity.extract(LOW_WORD);
                     }
-                    let wage = times32(
-                        offered_wage,
-                        number(state, config, comptime!(Field::LaborMinutes as u32), other),
-                    );
+                    let wage = times32(offered_wage, labor * shifts);
                     event.transfer(
                         config,
                         bundles,
@@ -1552,7 +1386,7 @@ fn construct_route(
                         bundles,
                         comptime!(Field::Slots as u32),
                         other,
-                        ticks(1u32, 0u32),
+                        ticks(shifts, 0u32),
                         zero,
                     );
                     event.transfer(
@@ -1561,8 +1395,7 @@ fn construct_route(
                         comptime!(Field::Time as u32),
                         actor,
                         ticks(
-                            number(state, config, comptime!(Field::LaborMinutes as u32), other)
-                                + ceildiv(trip, config.commute_speed) * COMMUTE_LEGS,
+                            (labor + ceildiv(trip, config.commute_speed) * COMMUTE_LEGS) * shifts,
                             0u32,
                         ),
                         zero,
@@ -1590,7 +1423,7 @@ fn construct_route(
                             field: comptime!(Field::Employed as u32),
                             actor,
                             debit: zero,
-                            credit: ticks(1u32, 0u32),
+                            credit: ticks(shifts, 0u32),
                             authorization: KernelAuthorization::new(comptime!(
                                 AuthorizationFlags::EQUAL
                             )),
@@ -1603,10 +1436,7 @@ fn construct_route(
                         comptime!(Field::Hours as u32),
                         actor,
                         zero,
-                        ticks(
-                            number(state, config, comptime!(Field::LaborMinutes as u32), other),
-                            0u32,
-                        ),
+                        ticks(labor * shifts, 0u32),
                     );
                     event.transfer(
                         config,
@@ -1615,7 +1445,8 @@ fn construct_route(
                         other,
                         zero,
                         ticks(
-                            number(state, config, comptime!(Field::OutputTicks as u32), other),
+                            number(state, config, comptime!(Field::OutputTicks as u32), other)
+                                * shifts,
                             0u32,
                         ),
                     );
@@ -1642,8 +1473,11 @@ fn construct_route(
                             other,
                         );
                         if good > 0 {
-                            let amount =
-                                value(state, config, comptime!(Field::InputTicks as u32), other);
+                            let amount = multiply(
+                                control,
+                                value(state, config, comptime!(Field::InputTicks as u32), other),
+                                shifts,
+                            );
                             event.transfer(config, bundles, good, other, amount, zero);
                             event.transfer(
                                 config,
@@ -1684,8 +1518,9 @@ fn construct_route(
                     );
                     if comptime!(config.payroll == Feature::Enabled) {
                         let accrued = add_checked(control, prior, quantity);
-                        let before = PayrollAccrual::new(prior, config, control);
-                        let after = PayrollAccrual::new(accrued, config, control);
+                        let members = employment::payroll_members(actors, config, actor);
+                        let before = PayrollAccrual::new(prior, members, config, control);
+                        let after = PayrollAccrual::new(accrued, members, config, control);
                         net = minus(after.net, before.net);
                         event.leg(
                             config,
@@ -2005,6 +1840,7 @@ fn summarize(
             if comptime!(config.payroll == Feature::Enabled) {
                 let accrued = PayrollAccrual::new(
                     value(state, config, comptime!(Field::GrossIncome as u32), actor),
+                    employment::payroll_members(actors, config, actor),
                     config,
                     control,
                 );
@@ -2073,7 +1909,11 @@ fn summarize(
                         totals[SummaryLayout::CONSUMED as usize],
                         value(state, config, comptime!(Field::Consumed as u32), actor),
                     );
-                    let cash = value(state, config, comptime!(Field::Cash as u32), actor);
+                    let members = consumption::consumers(state, config, actor);
+                    let cash = divide(
+                        value(state, config, comptime!(Field::Cash as u32), actor),
+                        max(members, 1),
+                    );
                     let mut bin = WORD_BITS - cash.extract(LOW_WORD).leading_zeros();
                     if cash.extract(HIGH_WORD) > 0u32 {
                         bin = TICK_BITS - cash.extract(HIGH_WORD).leading_zeros();
@@ -2081,7 +1921,7 @@ fn summarize(
                     control[(SummaryLayout::WEALTH_START as u32
                         + min(bin, SummaryLayout::WEALTH_BINS as u32 - 1))
                         as usize]
-                        .fetch_add(1u32);
+                        .fetch_add(members);
                     let x = actors
                         [ActorLayout::X * (actors.len() / ActorLayout::WORDS) + actor as usize]
                         * SummaryLayout::REGION_SIDE as u32
@@ -2238,7 +2078,25 @@ fn summarize(
                             && number(state, config, comptime!(Field::LandPlots as u32), actor) > 0;
                     let category = select(working, select(subsistence, 1u32, 0u32), 2u32);
                     let metric = (SummaryLayout::WORKFORCE + category) as usize;
-                    totals[metric] = add_checked(control, totals[metric], ticks(1, 0));
+                    if comptime!(config.cohorts == Feature::Enabled) {
+                        let living =
+                            number(state, config, comptime!(Field::LivingMembers as u32), actor);
+                        let workers = min(
+                            living,
+                            number(
+                                state,
+                                config,
+                                comptime!(Field::EligibleWorkers as u32),
+                                actor,
+                            ),
+                        );
+                        let inactive = comptime!(SummaryLayout::INACTIVE as usize);
+                        totals[inactive] =
+                            add_checked(control, totals[inactive], ticks(living - workers, 0));
+                        totals[metric] = add_checked(control, totals[metric], ticks(workers, 0));
+                    } else {
+                        totals[metric] = add_checked(control, totals[metric], ticks(1, 0));
+                    }
                     totals[SummaryLayout::RURAL_EMPLOYED as usize] = add_checked(
                         control,
                         totals[SummaryLayout::RURAL_EMPLOYED as usize],

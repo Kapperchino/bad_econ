@@ -21,6 +21,9 @@ use crate::simulation::configuration::{Configuration, EconomyConfig, Feature};
 use burn_wgpu::CubeTensor;
 use cubecl::{CubeDim, prelude::*};
 
+const FORM_HOUSEHOLD: u32 = 0x0100_0001;
+const SEPARATE_OWNER: u32 = 0x0100_0002;
+
 #[derive(CubeType, CubeLaunch)]
 struct ProposalInput {
     state: Box<[u32]>,
@@ -140,10 +143,6 @@ fn requests(
             state,
             comptime!(Field::RentArrears as u32) * config.state_stride + actor,
         );
-        let funded = !lt(cash, ticks(10_000, 0))
-            && (comptime!(config.property_mode == Feature::Enabled)
-                || (!lt(tools, ticks(2, 0)) && !lt(wood, ticks(5, 0))))
-            && equal(arrears, zero());
         let household =
             actors[ActorLayout::KIND * (actors.len() / ActorLayout::WORDS) + actor as usize] == 0;
         let invested = load(
@@ -154,15 +153,29 @@ fn requests(
             state,
             comptime!(Field::LivingMembers as u32) * config.state_stride + actor,
         );
-        let eligible = comptime!(config.home_mode == Feature::Enabled)
+        let pooled = comptime!(config.cohorts == Feature::Enabled)
+            && actors[ActorLayout::CAPACITY * (actors.len() / ActorLayout::WORDS) + actor as usize]
+                > 1;
+        let people = select(pooled, max(living.extract(0usize), 1), 1);
+        let capital = divide(cash, people);
+        let funded = !lt(capital, ticks(10_000, 0))
+            && (comptime!(config.property_mode == Feature::Enabled)
+                || (!lt(tools, times32(people, 2)) && !lt(wood, times32(people, 5))))
+            && equal(arrears, zero());
+        let pending_investment =
+            comptime!(config.cohorts == Feature::Enabled) && target.extract(0usize) >> 24 == 7;
+        let eligible = !pending_investment
+            && comptime!(config.home_mode == Feature::Enabled)
             && household
-            && actors[ActorLayout::ENTREPRENEURIAL_INTEREST * (actors.len() / ActorLayout::WORDS)
+            && (actors[ActorLayout::ENTREPRENEURIAL_INTEREST
+                * (actors.len() / ActorLayout::WORDS)
                 + actor as usize]
                 == comptime!(EntrepreneurialInterest::Interested as u32)
+                || (comptime!(config.cohorts == Feature::Enabled) && !equal(target, zero())))
             && !equal(living, zero())
             && equal(invested, zero())
             && equal(arrears, zero())
-            && !lt(cash, ticks(10_000, 0));
+            && !lt(capital, ticks(10_000, 0));
         let mut proposal = 0;
         let review = !equal(target, zero()) || (day + actor) % 30 == 0;
         if eligible && review {
@@ -185,7 +198,7 @@ fn requests(
             comptime!(Field::SplitPerson as u32) * config.state_stride + actor,
         );
         if !equal(split, zero()) && !lt(cash, ticks(5000, 0)) {
-            action = 0x01000001u32;
+            action = FORM_HOUSEHOLD;
         }
         let moving = load(
             state,
@@ -273,11 +286,16 @@ fn requests(
             && kind == 0
             && living > 0
             && equal(invested, zero())
-            && !lt(cash, ticks(20_000, 0))
-            && day % 30 == 0
+            && !lt(capital, ticks(20_000, 0))
+            && (day % 30 == 0 || pending_investment)
         {
-            for sample in 0..16u32 {
-                let candidate = (actor + day * 17 + sample * 31) % config.actors;
+            let samples = select(pending_investment, 1u32, 16u32);
+            for sample in 0..samples {
+                let candidate = select(
+                    pending_investment,
+                    (target.extract(0usize) & 0x00ff_ffff) - 1,
+                    actor + day * 17 + sample * 31,
+                ) % config.actors;
                 let candidate_kind = actors
                     [ActorLayout::KIND * (actors.len() / ActorLayout::WORDS) + candidate as usize];
                 let status = load(
@@ -363,6 +381,25 @@ fn requests(
                     action = 0x07000000u32 + candidate + 1;
                 }
             }
+        }
+        let ownership_change = (action > 0 && action <= Good::COUNT as u32)
+            || (action >> 24 >= 7 && action >> 24 <= 9);
+        if pooled && people > 1 && ownership_change {
+            store(
+                state,
+                comptime!(Field::InvestmentGood as u32) * config.state_stride + actor,
+                ticks(action, 0),
+            );
+            let person = load(
+                state,
+                comptime!(Field::CohortDelegate as u32) * config.state_stride + actor,
+            );
+            store(
+                state,
+                comptime!(Field::SplitPerson as u32) * config.state_stride + actor,
+                person,
+            );
+            action = select(equal(person, zero()), 0, SEPARATE_OWNER);
         }
         output[actor as usize] = action;
     }
@@ -906,6 +943,14 @@ pub(in crate::simulation) fn form_households(
                 state.actors.at(parent).identity,
             );
             state.set(Field::LivingMembers, household, 1);
+            if requests[parent] == SEPARATE_OWNER {
+                state.set(
+                    Field::InvestmentGood,
+                    household,
+                    state.get(Field::InvestmentGood, parent),
+                );
+                state.set(Field::InvestmentGood, parent, 0);
+            }
             state.set(
                 Field::LivingMembers,
                 parent,

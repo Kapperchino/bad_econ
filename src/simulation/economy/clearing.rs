@@ -215,19 +215,25 @@ pub(super) fn buyer_settlement(
 }
 
 #[cube]
-fn empty_seller_bulk(parameters: &EconomyParameters) -> bool {
+fn empty_seller_bulk(config: &EconomyConfig, parameters: &EconomyParameters) -> bool {
     let good = parameters.traded_good();
-    good == comptime!(Good::Coal as u32)
+    comptime!(config.cohorts == Feature::Enabled)
+        || good == comptime!(Good::Coal as u32)
         || good == comptime!(Good::Wood as u32)
         || good == comptime!(Good::LuxuryClothes as u32)
         || good == comptime!(Good::LuxuryFurniture as u32)
 }
 
 #[cube]
-fn empty_seller_quantity(proposals: &[u32], parameters: &EconomyParameters, actor: u32) -> Ticks {
+fn empty_seller_quantity(
+    config: &EconomyConfig,
+    proposals: &[u32],
+    parameters: &EconomyParameters,
+    actor: u32,
+) -> Ticks {
     let base = actor as usize * ProposalLayout::WORDS;
     select(
-        empty_seller_bulk(parameters),
+        empty_seller_bulk(config, parameters),
         ticks(
             proposals[base + ProposalLayout::QUANTITY_LOW],
             proposals[base + ProposalLayout::QUANTITY_HIGH],
@@ -244,7 +250,7 @@ pub(super) fn empty_seller_safe(
     peer: u32,
 ) -> bool {
     let quantity = select(
-        empty_seller_bulk(parameters),
+        empty_seller_bulk(config, parameters),
         ticks(u32::MAX, 0),
         ticks(1, 0),
     );
@@ -276,7 +282,7 @@ pub(super) fn empty_seller_settlement(
     peer: u32,
     prior: &KernelEventStatus,
 ) -> KernelEventStatus {
-    let quantity = empty_seller_quantity(proposals, parameters, actor);
+    let quantity = empty_seller_quantity(config, proposals, parameters, actor);
     let quote = number(state, config, comptime!(Field::Price as u32), peer);
     let cost = multiply(control, quantity, quote);
     let cash = plus(
@@ -410,29 +416,49 @@ impl PeerBalances {
         let mut next_sales = self.sales;
         match comptime!(parameters.market) {
             MarketFlag::Labor => {
+                let mut shifts = employment::shifts(config, quantity);
                 let mut rate = self.quote;
                 if comptime!(config.bargaining.enabled == Feature::Enabled) {
                     rate = quantity.extract(LOW_WORD);
                 }
-                let wage = times32(
-                    rate,
-                    number(state, config, comptime!(Field::LaborMinutes as u32), peer),
-                );
-                let output = ticks(
+                let labor = number(state, config, comptime!(Field::LaborMinutes as u32), peer);
+                let first = number(state, config, comptime!(Field::FirstInput as u32), peer);
+                let second = number(state, config, comptime!(Field::SecondInput as u32), peer);
+                let unit_input = value(state, config, comptime!(Field::InputTicks as u32), peer);
+                if comptime!(config.cohorts == Feature::Enabled) {
+                    shifts = minimum(ticks(shifts, 0), self.slots).extract(LOW_WORD);
+                    shifts = batch::bounded_capacity(self.cash, times32(rate, labor), shifts);
+                    shifts = batch::bounded_capacity(
+                        self.stock,
+                        select(first > 0, unit_input, zero()),
+                        shifts,
+                    );
+                    shifts = batch::bounded_capacity(
+                        self.second_stock,
+                        select(second > 0, unit_input, zero()),
+                        shifts,
+                    );
+                    proposals
+                        [actor as usize * ProposalLayout::WORDS + ProposalLayout::QUANTITY_HIGH] =
+                        shifts;
+                    valid = valid && shifts > 0;
+                }
+                let wage = times32(rate, labor * shifts);
+                let output = times32(
                     number(state, config, comptime!(Field::OutputTicks as u32), peer),
-                    0,
+                    shifts,
                 );
                 let escrow = plus(self.escrow, wage);
                 let pipeline = plus(self.pipeline, output);
                 faults.insert(escrow.faults.union(pipeline.faults));
-                valid = valid && !lt(self.cash, wage) && !lt(self.slots, ticks(1, 0));
+                valid = valid && !lt(self.cash, wage) && !lt(self.slots, ticks(shifts, 0));
                 next_cash = minus(self.cash, wage);
                 next_escrow = escrow.value;
-                next_slots = minus(self.slots, ticks(1, 0));
+                next_slots = minus(self.slots, ticks(shifts, 0));
                 next_pipeline = pipeline.value;
-                let input = value(state, config, comptime!(Field::InputTicks as u32), peer);
-                let first = number(state, config, comptime!(Field::FirstInput as u32), peer);
-                let second = number(state, config, comptime!(Field::SecondInput as u32), peer);
+                let scaled_input = times(unit_input, shifts);
+                faults.insert(scaled_input.faults);
+                let input = scaled_input.value;
                 let mut total_input = zero();
                 if first > 0 {
                     let used = plus(self.first_used, input);

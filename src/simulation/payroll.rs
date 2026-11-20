@@ -46,7 +46,12 @@ pub struct PayrollAccrual {
 
 #[cube]
 impl PayrollAccrual {
-    pub fn new(gross: Ticks, config: &EconomyConfig, control: &[Atomic<u32>]) -> Self {
+    pub fn new(
+        gross: Ticks,
+        members: u32,
+        config: &EconomyConfig,
+        control: &[Atomic<u32>],
+    ) -> Self {
         let mut tax = ScaledAmount {
             whole: zero(),
             remainder: 0,
@@ -56,7 +61,12 @@ impl PayrollAccrual {
         #[unroll]
         for bracket in 0..config.tax_brackets.len() {
             let bracket = config.tax_brackets.index(bracket);
-            let upper = ticks(bracket.low, bracket.high);
+            let threshold = times(ticks(bracket.low, bracket.high), members);
+            let upper = select(
+                threshold.faults.is_empty(),
+                threshold.value,
+                ticks(u32::MAX, u32::MAX),
+            );
             let taxable = positive(minimum(gross, upper), lower);
             tax.add(ScaledAmount::new(taxable, rate, control), control);
             lower = upper;
@@ -108,7 +118,7 @@ mod tests {
             store(
                 output,
                 id as u32,
-                PayrollAccrual::new(income, config, control).net,
+                PayrollAccrual::new(income, 1, config, control).net,
             );
         }
         if id == 0 {

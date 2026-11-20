@@ -1,6 +1,6 @@
 use anyhow::Result;
 use bad_econ::{
-    domain::{Experiment, Scenario},
+    domain::{CohortSizes, Economy, Experiment, Scenario},
     simulation::{Device, Simulation},
 };
 use clap::Parser;
@@ -23,9 +23,15 @@ struct Arguments {
 fn main() -> Result<()> {
     let args = Arguments::parse();
     let mut reports = Vec::new();
-    for households in args.sizes {
+    for people in args.sizes {
         let start = Instant::now();
-        let scenario = Scenario::industrial(households, args.seed, Experiment::Baseline)?;
+        let scenario = Scenario::for_people(
+            people,
+            CohortSizes::default(),
+            Economy::Industrial,
+            args.seed,
+            Experiment::Baseline,
+        )?;
         let scenario_seconds = start.elapsed().as_secs_f64();
         let start = Instant::now();
         let device = Device::headless(args.workgroup)?;
@@ -36,7 +42,7 @@ fn main() -> Result<()> {
         let simulation_seconds = start.elapsed().as_secs_f64();
         let startup_seconds = scenario_seconds + device_seconds + simulation_seconds;
         eprintln!(
-            "{households} households: {startup_seconds:.3}s (scenario {scenario_seconds:.3}s, device {device_seconds:.3}s, simulation {simulation_seconds:.3}s)"
+            "{people} people: {startup_seconds:.3}s (scenario {scenario_seconds:.3}s, device {device_seconds:.3}s, simulation {simulation_seconds:.3}s)"
         );
         let mut daily = Vec::new();
         for _ in 0..args.days {
@@ -45,7 +51,7 @@ fn main() -> Result<()> {
             simulation.device.sync()?;
             let seconds = start.elapsed().as_secs_f64();
             eprintln!(
-                "{households} households day {}: {seconds:.3}s",
+                "{people} people day {}: {seconds:.3}s",
                 simulation.snapshot.day
             );
             daily.push(serde_json::json!({
@@ -55,7 +61,8 @@ fn main() -> Result<()> {
             }));
         }
         reports.push(serde_json::json!({
-            "households": households,
+            "people": people,
+            "population_rows": simulation.scenario.population_rows(),
             "device": simulation.device.name,
             "scenario_seconds": scenario_seconds,
             "device_seconds": device_seconds,

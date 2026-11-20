@@ -173,7 +173,7 @@ impl Population {
                 && input
         });
         let bounds = [
-            population.households.len() == config.households as usize,
+            population.households.len() == config.population_size() as usize,
             population.firms.len() == config.firms as usize,
             identities.len() == population.households.len() + population.firms.len(),
             identities.iter().all(|id| (1..u64::MAX).contains(id)),
@@ -247,7 +247,7 @@ impl Population {
         let mut state = State {
             day: 0,
             next_identity: self.next_identity(),
-            actors: (0..count).map(|index| self.actor(index)).collect(),
+            actors: scenario.initial_actors.as_ref().clone(),
             values: vec![0; scenario.fields() * count],
             initial_cash: 0,
             initial_goods: [0; Good::COUNT],
@@ -257,20 +257,31 @@ impl Population {
             ownership: Vec::new(),
             companies: Vec::new(),
         };
-        self.households
-            .iter()
-            .enumerate()
-            .for_each(|(index, seed)| {
-                state.set(Field::Cash, index, seed.cash);
-                state.set(Field::Fatigue, index, seed.fatigue.into());
+        for (source, seed) in self.households.iter().enumerate() {
+            let row = scenario.row(source);
+            for (field, value) in [
+                (Field::Cash, seed.cash),
+                (Field::Fatigue, u64::from(seed.fatigue)),
+            ]
+            .into_iter()
+            .chain(
                 Good::ALL
                     .map(Field::inventory)
                     .into_iter()
-                    .zip(seed.inventories)
-                    .for_each(|(field, value)| state.set(field, index, value));
-            });
+                    .zip(seed.inventories),
+            ) {
+                state.set(field, row, add(state.get(field, row), value)?);
+            }
+        }
+        for row in 0..scenario.population_rows() {
+            state.set(
+                Field::Fatigue,
+                row,
+                state.get(Field::Fatigue, row) / u64::from(state.actors.at(row).capacity),
+            );
+        }
         self.firms.iter().enumerate().for_each(|(offset, seed)| {
-            let index = offset + self.households.len();
+            let index = offset + scenario.population_rows();
             state.set(Field::Cash, index, seed.cash);
             state.set(Field::Wage, index, seed.wage.into());
             state.set(Field::Price, index, seed.price.into());

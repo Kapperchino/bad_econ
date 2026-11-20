@@ -51,10 +51,21 @@ impl EconomyObservation {
                             true => state.get(Field::Employed, index),
                             false => 0,
                         };
+                        let participants = match scenario.config().people {
+                            Some(_) => state
+                                .get(Field::EligibleWorkers, index)
+                                .min(state.get(Field::LivingMembers, index)),
+                            None => u64::from(working),
+                        };
+                        let population = match scenario.config().people {
+                            Some(_) => state.get(Field::LivingMembers, index),
+                            None => 1,
+                        };
+                        result.inactive += population - participants;
                         match (working, subsistence) {
-                            (true, false) => result.workforce += 1,
-                            (true, true) => result.subsistence += 1,
-                            (false, _) => result.inactive += 1,
+                            (true, false) => result.workforce += participants,
+                            (true, true) => result.subsistence += participants,
+                            (false, _) => (),
                         }
                     }
                     kind => {

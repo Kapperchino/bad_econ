@@ -215,11 +215,17 @@ pub(in crate::simulation) fn bread_target(config: &EconomyConfig, request: Bread
     );
     let salary =
         (u64::cast_from(gross.extract(HIGH_WORD)) << 32) | u64::cast_from(gross.extract(LOW_WORD));
+    let per_capita = salary
+        / u64::cast_from(select(
+            comptime!(config.cohorts == Feature::Enabled),
+            max(request.members, 1),
+            1,
+        ));
     let tier = select(
-        salary >= u64::cast_from(config.food_rich_salary),
+        per_capita >= u64::cast_from(config.food_rich_salary),
         comptime!(BreadTier::Rich as u32),
         select(
-            salary >= u64::cast_from(config.food_medium_salary),
+            per_capita >= u64::cast_from(config.food_medium_salary),
             comptime!(BreadTier::Medium as u32),
             comptime!(BreadTier::Low as u32),
         ),

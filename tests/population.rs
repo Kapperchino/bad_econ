@@ -163,3 +163,328 @@ fn actor_rows_round_trip_on_gpu_and_reject_mismatched_lengths() -> Result<()> {
     }
     Ok(())
 }
+
+#[test]
+fn worker_cohorts_settle_multiple_shifts_and_replay_on_gpu() -> Result<()> {
+    worker_shifts(None)
+}
+
+#[test]
+fn negotiated_cohort_shifts_pay_each_hire_on_gpu() -> Result<()> {
+    worker_shifts(Some(bargaining::BargainingPolicy {
+        legal_minimum: 1,
+        quantum: 1,
+        daily_cash_cost: 0,
+        funded_other: 0,
+        participating_adults: 1,
+        normal_day_minutes: 480,
+        work_cost_per_minute: 0,
+        desired_wage: 1,
+        mandate: 0,
+        withdrawal: 0,
+        alternatives: 0,
+        concentration: 0,
+        replacements: 0,
+    }))
+}
+
+fn worker_shifts(bargaining: Option<bargaining::BargainingPolicy>) -> Result<()> {
+    use bad_econ::simulation::Simulation;
+    let scenario = Scenario::for_people(
+        29,
+        CohortSizes::default(),
+        Economy::Agrarian,
+        42,
+        Experiment::Concentrated,
+    )?;
+    let mut config = scenario.config().clone();
+    config.buffer_days = 1;
+    config.bargaining = bargaining;
+    config.payroll = Some(PayrollPolicy {
+        base_rate: 0,
+        employee_charge: 0,
+        brackets: vec![TaxBracket {
+            threshold: 100,
+            marginal_rate: 500,
+        }],
+    });
+    let scenario = Scenario::new(config)?;
+    let initial = scenario.initial()?;
+    assert_eq!(initial.initial_population, 29);
+    assert_eq!(scenario.population_rows(), 6);
+    assert_eq!(
+        initial
+            .actors
+            .iter()
+            .take(6)
+            .map(|actor| actor.capacity)
+            .collect::<Vec<_>>(),
+        [1, 1, 1, 10, 10, 6]
+    );
+    for firm in initial.actors.iter().filter(|actor| actor.kind > 0) {
+        assert_eq!(initial.actors.at(firm.owner as usize).capacity, 1);
+        assert_eq!(
+            scenario.index_of(firm.identity),
+            Some(firm.identity as usize - 30 + 6)
+        );
+    }
+    let encoded = serde_json::to_value(scenario.config())?;
+    assert_eq!(encoded["people"], 29);
+    assert!(encoded.get("households").is_none());
+    assert_eq!(Scenario::new(serde_json::from_value(encoded)?)?, scenario);
+    let device = support::device(64)?;
+    let mut simulation = Simulation::new(scenario.clone(), device.clone())?;
+    simulation.advance()?;
+    let state = simulation.download()?;
+    assert!(
+        state
+            .actors
+            .iter()
+            .enumerate()
+            .any(|(row, _)| state.get(Field::Employed, row) > 1)
+    );
+    for row in 0..scenario.population_rows() {
+        let members = state
+            .people
+            .iter()
+            .filter(|person| person.household == state.actors.at(row).identity);
+        let paid = members
+            .clone()
+            .filter(|person| person.employer.is_some())
+            .count() as u64;
+        assert_eq!(paid, state.get(Field::Employed, row));
+        let gross = state.get(Field::GrossIncome, row);
+        let allowance = 100 * u64::from(state.actors.at(row).capacity);
+        assert_eq!(
+            state.get(Field::TaxTreasury, row),
+            gross.saturating_sub(allowance) / 2
+        );
+        assert_eq!(
+            members
+                .map(|person| u64::from(person.work_minutes))
+                .sum::<u64>(),
+            state.get(Field::Hours, row)
+        );
+        assert_eq!(
+            state.get(Field::GrossIncome, row),
+            state.get(Field::Hours, row) * u64::from(scenario.config().wage)
+        );
+    }
+    assert_eq!(
+        simulation.snapshot,
+        ObservationSnapshot::from_state(&scenario, &state)?
+    );
+    let mut restored = Simulation::from_checkpoint(simulation.checkpoint()?, device)?;
+    restored.advance()?;
+    simulation.advance()?;
+    assert_eq!(
+        restored.download()?.digest(),
+        simulation.download()?.digest()
+    );
+    Ok(())
+}
+
+#[test]
+fn farmer_and_worker_sizes_preserve_people_and_opening_resources_on_gpu() -> Result<()> {
+    use bad_econ::simulation::Simulation;
+    use std::num::NonZeroU32;
+    let make = |workers, farmers| {
+        Scenario::for_people(
+            1001,
+            CohortSizes {
+                workers: NonZeroU32::new(workers).unwrap(),
+                farmers: NonZeroU32::new(farmers).unwrap(),
+            },
+            Economy::Industrial,
+            42,
+            Experiment::Concentrated,
+        )
+    };
+    let individual = make(1, 1)?;
+    let grouped = make(4, 7)?;
+    let original = individual.initial()?;
+    let initial = grouped.initial()?;
+    assert_eq!(original.initial_cash, initial.initial_cash);
+    assert_eq!(original.initial_goods, initial.initial_goods);
+    assert_eq!(initial.initial_population, 1001);
+    assert_eq!(original.ownership, initial.ownership);
+    let jobs = |state: &State| {
+        let mut counts = std::collections::BTreeMap::new();
+        for (row, actor) in state
+            .actors
+            .iter()
+            .enumerate()
+            .filter(|(_, actor)| actor.kind == 0)
+        {
+            if let Some(firm) = state.get(Field::Job, row).checked_sub(1) {
+                *counts
+                    .entry(state.actors.at(firm as usize).identity)
+                    .or_insert(0u32) += actor.capacity;
+            }
+        }
+        counts
+    };
+    assert_eq!(jobs(&original), jobs(&initial));
+    for row in 0..grouped.population_rows() {
+        let actor = initial.actors.at(row);
+        let bound = if initial.get(Field::LandPlots, row) > 0 {
+            7
+        } else {
+            4
+        };
+        assert!((1..=bound).contains(&actor.capacity));
+    }
+    assert!(
+        initial
+            .actors
+            .iter()
+            .any(|actor| actor.kind == 0 && actor.capacity == 7)
+    );
+    assert!(
+        initial
+            .actors
+            .iter()
+            .any(|actor| actor.kind == 0 && actor.capacity == 4)
+    );
+    let mut sim = Simulation::new(grouped.clone(), support::device(64)?)?;
+    sim.advance()?;
+    let audited = sim.download()?;
+    assert_eq!(
+        sim.snapshot,
+        ObservationSnapshot::from_state(&grouped, &audited)?
+    );
+    sim.checkpoint()?;
+    Ok(())
+}
+
+#[test]
+fn a_funded_founder_leaves_an_explicit_cohort_on_gpu() -> Result<()> {
+    use bad_econ::simulation::Simulation;
+    let mut config = Scenario::for_people(
+        11,
+        CohortSizes::default(),
+        Economy::Agrarian,
+        42,
+        Experiment::Concentrated,
+    )?
+    .config()
+    .clone();
+    config.household_production = enterprise::HouseholdProduction::industrial();
+    config.entrepreneurship.interested_per_mille = 1000;
+    config.demography.annual_births_per_million_fertile_women = 0;
+    config.demography.mortality.background_annual_ppm = [0; 5];
+    let position = Position { x: 500, y: 500 };
+    let seeds = (1..=11)
+        .map(|identity| {
+            let mut inventories = Good::food([0, 0, 1000]);
+            inventories[Good::Tools as usize - 1] = 8;
+            inventories[Good::Wood as usize - 1] = 100;
+            HouseholdSeed {
+                identity,
+                position,
+                cash: 1_000_000,
+                inventories,
+                fatigue: identity as u32,
+            }
+        })
+        .collect();
+    let firms = [Good::Grain, Good::Flour, Good::Bread]
+        .into_iter()
+        .enumerate()
+        .map(|(index, good)| {
+            Ok(FirmSeed {
+                identity: 100 + index as u64,
+                owner: 11,
+                position,
+                good,
+                cash: 100_000,
+                capacity: 4,
+                inventories: Good::food([1000, 1000, 1000]),
+                technique: Technique::new(30, u32::from(good != Good::Grain), 10)?,
+                wage: 1,
+                price: if good == Good::Bread { 500 } else { 10 },
+            })
+        })
+        .collect::<Result<Vec<_>>>()?;
+    config.population = Some(Population {
+        households: seeds,
+        firms,
+    });
+    let scenario = Scenario::new(config)?;
+    let mut initial = scenario.initial()?;
+    assert_eq!(scenario.population_rows(), 2);
+    assert_eq!(initial.actors.at(0).capacity, 10);
+    assert_eq!(initial.get(Field::Cash, 0), 10_000_000);
+    assert_eq!(
+        initial
+            .people
+            .iter()
+            .map(|person| person.fatigue)
+            .collect::<Vec<_>>(),
+        (1..=11).collect::<Vec<_>>()
+    );
+    initial.set(Field::InvestmentGood, 0, 1);
+    let mut sim =
+        Simulation::from_checkpoint(Checkpoint::new(&scenario, &initial)?, support::device(64)?)?;
+    sim.advance()?;
+    let separated = sim.download()?;
+    let founder = separated
+        .actors
+        .iter()
+        .enumerate()
+        .find(|(row, actor)| actor.kind == 0 && separated.get(Field::ParentHousehold, *row) == 1)
+        .expect("founder separated from the cohort")
+        .0;
+    assert_eq!(separated.get(Field::LivingMembers, founder), 1);
+    assert_eq!(separated.get(Field::LivingMembers, 0), 9);
+    sim.advance()?;
+    let state = sim.download()?;
+    assert!(
+        state
+            .actors
+            .iter()
+            .any(|firm| firm.kind > 0 && firm.owner as usize == founder)
+    );
+    assert_eq!(state.get(Field::InvestmentFirm, 0), 0);
+    assert_eq!(state.people.len(), initial.people.len());
+    sim.checkpoint()?.restore()?;
+    Ok(())
+}
+
+#[test]
+fn legacy_checkpoints_migrate_and_resume_on_gpu() -> Result<()> {
+    use bad_econ::simulation::Simulation;
+    use sha2::{Digest, Sha256};
+
+    let device = support::device(64)?;
+    let scenario = scenario()?;
+    let mut simulation = Simulation::new(scenario.clone(), device.clone())?;
+    simulation.advance()?;
+    let state = simulation.download()?;
+    let checkpoint = serde_json::to_value(simulation.checkpoint()?)?;
+    for (version, first_missing) in [(23, Field::JobDaysRemaining), (24, Field::EligibleWorkers)] {
+        let rows = state.actors.len();
+        let mut old_state = state.clone();
+        old_state
+            .values
+            .drain(first_missing as usize * rows..USED_FIELDS * rows);
+        let checksum = bad_econ::arithmetic::hex(&Sha256::digest(serde_json::to_vec(&(
+            scenario.config(),
+            &old_state,
+        ))?));
+        let mut legacy = checkpoint.clone();
+        legacy["state"] = serde_json::to_value(old_state)?;
+        legacy["version"] = version.into();
+        assert!(serde_json::from_value::<Checkpoint>(legacy.clone()).is_err());
+        legacy["checksum"] = checksum.into();
+        let mut restored =
+            Simulation::from_checkpoint(serde_json::from_value(legacy)?, device.clone())?;
+        restored.advance()?;
+        let migrated = restored.download()?;
+        assert_eq!(
+            restored.snapshot,
+            ObservationSnapshot::from_state(&scenario, &migrated)?
+        );
+    }
+    Ok(())
+}

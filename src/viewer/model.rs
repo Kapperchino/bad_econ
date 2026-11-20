@@ -299,9 +299,9 @@ impl Chart {
     }
     pub fn label(self) -> &'static str {
         match self {
-            Self::Employment => "Household labor status",
+            Self::Employment => "Labor status",
             Self::Unemployment => "Unemployment rate",
-            Self::Cash => "Households by cash bracket",
+            Self::Cash => "Liquid cash distribution",
             Self::Money => "Spendable cash by sector",
             Self::Prices => "Mean asking prices, rounded to whole units",
             Self::Production => "Goods produced per day",
@@ -321,7 +321,7 @@ impl Chart {
             Self::Population => "Living population",
             Self::Demography => "Daily demographic change",
             Self::Deaths => "Deaths by cause",
-            Self::Housing => "Households without housing",
+            Self::Housing => "Accounts with insufficient housing",
             Self::Credit => "Active and overdue loans",
             Self::Debt => "Outstanding credit obligations",
             Self::Rent => "Daily rent payments",
@@ -332,7 +332,8 @@ impl Chart {
     }
     pub fn unit(self) -> &'static str {
         match self {
-            Self::Employment | Self::Cash | Self::Housing => "households",
+            Self::Employment | Self::Cash => "count",
+            Self::Housing => "accounts",
             Self::Unemployment | Self::Occupations => "%",
             Self::Money | Self::Debt | Self::Arrears => "cash",
             Self::Prices => "cash / tick",
@@ -352,13 +353,13 @@ impl Chart {
     pub fn description(self) -> &'static str {
         match self {
             Self::Employment => {
-                "One labor representative per household. Farming households stay in subsistence while taking supplementary paid work. Wage employment and unemployment cover households that have left farming; inactive households have no eligible worker."
+                "Paid work counts individual hires, including farmers who take supplementary shifts. Subsistence counts farmers with land. Inactive includes people unavailable for work."
             }
             Self::Unemployment => {
-                "Unemployed labor representatives divided by wage workers plus unemployed representatives. Excludes owners, subsistence farmers, dependents and other adults. Available after the first simulated day."
+                "Share of unemployed people among wage workers and unemployed people. Available after the first simulated day."
             }
             Self::Cash => {
-                "Households in each liquid-cash bracket over time. Brackets exclude property and business ownership. Every household belongs to one bracket."
+                "Cohort runs count people by their share of pooled cash. Legacy household runs count accounts by their cash balance."
             }
             Self::Money => {
                 "Closing spendable cash. Escrow, payroll reserves and tax treasuries are shown separately from spendable balances."
@@ -404,7 +405,7 @@ impl Chart {
                 "Mean posted wage per working minute. Negotiated or realized worker pay can differ."
             }
             Self::Occupations => {
-                "Shares of all living people after the first day, totaling 100%. Dependents first; then the selected adult in each owner household, then subsistence farmers, paid workers, unemployed selected adults, and other adults. Owners include landlord managers; wage workers include farm employees. One representative per owner or farming household; roles never overlap."
+                "Each living person counts once. Working-age managing owners include landlords. Subsistence farmers retain that occupation when they take paid shifts. Wage workers include commercial farm employees."
             }
             Self::Population => {
                 "Living people and age-based dependents. Working age is living population minus dependents, not the number of employed people."
@@ -415,9 +416,7 @@ impl Chart {
             Self::Deaths => {
                 "Cumulative deaths since the run began, separated into background mortality, occupational hazards, starvation, and cold exposure."
             }
-            Self::Housing => {
-                "Living households without available housing. Compare with housing output and rent arrears."
-            }
+            Self::Housing => "Population accounts with fewer housing units than they need.",
             Self::Credit => "Current loan counts; overdue loans are a subset of active loans.",
             Self::Debt => {
                 "Unpaid principal and currently due interest. These are balances, not daily lending flows."
@@ -492,7 +491,7 @@ impl Chart {
             ]
             .map(String::from)
             .into(),
-            Self::Money => ["Households", "Businesses", "Financial institutions"]
+            Self::Money => ["Population", "Businesses", "Financial institutions"]
                 .map(String::from)
                 .into(),
             Self::Shortages => ["Unmet bread"].map(String::from).into(),
@@ -525,7 +524,7 @@ impl Chart {
             Self::Deaths => ["Background", "Occupational", "Starvation", "Cold"]
                 .map(String::from)
                 .into(),
-            Self::Housing => ["Homeless households"].map(String::from).into(),
+            Self::Housing => ["Insufficient housing"].map(String::from).into(),
             Self::Credit => ["Active loans", "Overdue loans"].map(String::from).into(),
             Self::Debt => ["Principal", "Interest due"].map(String::from).into(),
             Self::Rent => ["Rent paid"].map(String::from).into(),

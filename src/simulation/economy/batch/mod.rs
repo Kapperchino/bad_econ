@@ -11,7 +11,7 @@ struct UniformCapacity {
 }
 
 #[cube]
-fn bounded_capacity(balance: Ticks, amount: Ticks, limit: u32) -> u32 {
+pub(super) fn bounded_capacity(balance: Ticks, amount: Ticks, limit: u32) -> u32 {
     let product = times(amount, limit);
     if !product.faults.is_empty() || lt(balance, product.value) {
         let mut low = 0;

@@ -263,7 +263,15 @@ pub(in crate::simulation) fn discover(
         state,
         comptime!(Field::Cash as u32) * config.state_stride + owner,
     );
-    let investment = divide(cash, 2);
+    let members = select(
+        comptime!(config.cohorts == crate::simulation::configuration::Feature::Enabled),
+        max(
+            number(state, config, owner, comptime!(Field::LivingMembers as u32)),
+            1,
+        ),
+        1,
+    );
+    let investment = divide(divide(cash, members), 2);
     let wage = config.starting_wage;
     let mut selected = 0;
     let mut best = zero();
