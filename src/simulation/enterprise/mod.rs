@@ -1,3 +1,4 @@
+pub(super) mod acquisitions;
 pub(super) mod management;
 mod opportunities;
 pub(super) mod ownership;
@@ -400,6 +401,35 @@ fn requests(
                     action = 0x07000000u32 + candidate + 1;
                 }
             }
+        }
+        if action == 0
+            && day % 30 == 0
+            && kind > 0
+            && status == comptime!(EnterpriseState::Operating as u32)
+        {
+            let reserve = load(
+                state,
+                comptime!(Field::OperatingReserve as u32) * config.state_stride + actor,
+            );
+            action = opportunities::purchase(
+                state,
+                actors,
+                config,
+                spatial,
+                actor,
+                day,
+                positive(
+                    cash,
+                    maximum(
+                        reserve,
+                        select(
+                            kind == comptime!(Good::Housing as u32),
+                            zero(),
+                            ticks(config.reserve_low, config.reserve_high),
+                        ),
+                    ),
+                ),
+            );
         }
         let ownership_change = (action > 0 && action <= Good::COUNT as u32)
             || (action >> 24 >= 7 && action >> 24 <= 9);
@@ -1058,6 +1088,15 @@ pub(super) fn transitions(
     scenario: &crate::domain::Scenario,
     requests: &[u32],
 ) -> anyhow::Result<()> {
+    transitions_in_rows(state, scenario, requests, |row| row)
+}
+
+pub(super) fn transitions_in_rows(
+    state: &mut crate::domain::State,
+    scenario: &crate::domain::Scenario,
+    requests: &[u32],
+    global_row: impl Fn(usize) -> usize,
+) -> anyhow::Result<()> {
     use crate::domain::{Position, demography::LivingState};
     use anyhow::{Context, anyhow};
     let formations = form_households(state, scenario, requests)?;
@@ -1240,7 +1279,7 @@ pub(super) fn transitions(
             _ => (),
         }
     }
-    Ok(())
+    acquisitions::settle(state, scenario, requests, global_row)
 }
 
 fn transfer_estate(

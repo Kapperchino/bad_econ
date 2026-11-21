@@ -252,6 +252,7 @@ fn publish(
                 display.map_revision = display.map_revision.wrapping_add(1);
             }
             display.identities = observation.identities;
+            display.companies = observation.companies;
             display.observation_revision = display.observation_revision.wrapping_add(1);
         }
         let snapshot = crate::domain::ObservationSnapshot {
@@ -274,13 +275,15 @@ fn publish(
 }
 
 struct ObservationUpdate {
+    companies: Vec<crate::simulation::company_report::Business>,
     firms: Vec<Actor>,
     identities: Vec<u64>,
 }
 
 impl ObservationUpdate {
     fn new(simulation: &mut Simulation) -> Result<Self> {
-        let firms = simulation.open_firms()?;
+        let report = simulation.company_report()?;
+        let firms = report.firms;
         let mut open = firms.iter().peekable();
         let identities = simulation
             .actors()
@@ -293,6 +296,10 @@ impl ObservationUpdate {
             })
             .map(|actor| actor.identity)
             .collect();
-        Ok(Self { firms, identities })
+        Ok(Self {
+            firms,
+            identities,
+            companies: report.companies,
+        })
     }
 }

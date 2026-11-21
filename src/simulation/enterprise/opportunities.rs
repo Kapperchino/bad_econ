@@ -1,3 +1,4 @@
+use super::acquisitions::PURCHASE;
 use crate::domain::{Field, Good, enterprise::EnterpriseState};
 use crate::simulation::configuration::EconomyConfig;
 use crate::simulation::{layout::ActorLayout as A, words::*};
@@ -168,6 +169,63 @@ fn firm_at(spatial: &[u32], config: &EconomyConfig, offset: u32) -> u32 {
     let cells = config.spatial_side * config.spatial_side;
     spatial[(2 * (cells + 1 + config.actors) + cells + 1 + offset % max(firms(spatial, config), 1))
         as usize]
+}
+
+#[cube]
+pub(super) fn purchase(
+    state: &mut [u32],
+    actors: &[u32],
+    config: &EconomyConfig,
+    spatial: &[u32],
+    buyer: u32,
+    day: u32,
+    available: Ticks,
+) -> u32 {
+    let stride = actors.len() / A::WORDS;
+    let owner = actors[A::OWNER * stride + buyer as usize];
+    let draw = actors[A::EXPANSION_DRAW * stride + buyer as usize];
+    let product = actors[A::KIND * stride + buyer as usize];
+    let model = number(
+        state,
+        config,
+        buyer,
+        comptime!(Field::EnterpriseModel as u32),
+    );
+    let mut related = 0u32;
+    let mut fallback = 0u32;
+    let start = buyer + draw + (day / 30) * 17;
+    for sample in 0..min(32u32, firms(spatial, config)) {
+        let site = firm_at(spatial, config, start + sample);
+        let status = number(
+            state,
+            config,
+            site,
+            comptime!(Field::EnterpriseStatus as u32),
+        );
+        let cash = load(
+            state,
+            comptime!(Field::Cash as u32) * config.state_stride + site,
+        );
+        if related == 0
+            && site < 0x00ff_ffff
+            && actors[A::OWNER * stride + site as usize] != owner
+            && (status == comptime!(EnterpriseState::Operating as u32)
+                || status == comptime!(EnterpriseState::Dormant as u32))
+            && !lt(available, maximum(ticks(1, 0), divide(cash, 2)))
+        {
+            let request = comptime!(PURCHASE << 24) + site + 1;
+            let similar = actors[A::KIND * stride + site as usize] == product
+                && number(
+                    state,
+                    config,
+                    site,
+                    comptime!(Field::EnterpriseModel as u32),
+                ) == model;
+            related = select(similar, request, related);
+            fallback = select(fallback == 0, request, fallback);
+        }
+    }
+    select(related > 0, related, fallback)
 }
 
 #[cube]

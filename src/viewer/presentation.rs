@@ -132,21 +132,23 @@ fn plot_changed(
     plots: Query<&ComputedNode, With<Plot>>,
     mut previous: Local<Option<PresentationVersion>>,
 ) -> bool {
-    let current = dashboard.and_then(|dashboard| {
-        plots.single().ok().map(|node| PresentationVersion {
-            revision: dashboard
-                .data
-                .lock()
-                .expect("dashboard lock")
-                .observation_revision,
-            chart: dashboard.chart,
-            period: dashboard.period,
-            selection: dashboard.series,
-            plot_size: node.size() * node.inverse_scale_factor(),
-            scale: node.inverse_scale_factor(),
-        })
-    });
-    let changed = current != *previous;
+    let current = dashboard
+        .filter(|dashboard| dashboard.company_page.is_none())
+        .and_then(|dashboard| {
+            plots.single().ok().map(|node| PresentationVersion {
+                revision: dashboard
+                    .data
+                    .lock()
+                    .expect("dashboard lock")
+                    .observation_revision,
+                chart: dashboard.chart,
+                period: dashboard.period,
+                selection: dashboard.series,
+                plot_size: node.size() * node.inverse_scale_factor(),
+                scale: node.inverse_scale_factor(),
+            })
+        });
+    let changed = current.is_some() && current != *previous;
     *previous = current;
     changed
 }
@@ -508,13 +510,14 @@ fn inspection_text(display: &Display) -> String {
                             i.heating_served, i.heating_need, i.heating_need.saturating_sub(i.heating_served)
                         ),
                         _ => format!(
-                            "{} {:?} | {}\nBuilding {} {}\nCondition {} | safety {}\nRent overdue {} days\nCompany {} ({} sites) | owner {}\nWage {} | price {}\nCapacity {} (+{}) | planned {} | open {}\nMethod {:?} | {} output / {} min",
+                            "{} {:?} | {}\nBuilding {} {}\nCondition {} | safety {}\nRent overdue {} days\nCompany {} ({} sites) | owner {}\nOwner stubbornness {}/1000\nWage {} | price {}\nCapacity {} (+{}) | planned {} | open {}\nMethod {:?} | {} output / {} min",
                             i.enterprise_state.map(|state| format!("{state:?}")).unwrap_or_default(),
                             i.enterprise_model, i.business_scale.map(|scale| format!("{scale:?}")).unwrap_or_default(), i.construction_minutes_remaining,
                             match i.property_region { 0 => "min", _ => "work" },
                             i.equipment_condition, i.safety_provision,
                             i.rent_overdue_days,
                             i.company_identity, i.company_sites.len(), i.owner_identity,
+                            crate::domain::company::OwnerStubbornness::from_seed(display.seed, i.owner_identity).per_mille(),
                             i.wage,
                             i.price,
                             i.actor.capacity,
@@ -576,7 +579,7 @@ fn draw_readout(
     plots: Query<(&bevy::ui::RelativeCursorPosition, &ComputedNode), With<Plot>>,
     mut labels: Query<&mut Text, With<ui::ChartReadout>>,
 ) {
-    if let Some(dashboard) = dashboard {
+    if let Some(dashboard) = dashboard.filter(|dashboard| dashboard.company_page.is_none()) {
         let display = dashboard.data.lock().expect("dashboard lock");
         let chart = dashboard.chart;
         let first_day = display
