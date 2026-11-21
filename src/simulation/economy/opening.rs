@@ -95,6 +95,7 @@ fn opening(
                     Field::Employed as u32,
                     Field::Employer as u32,
                     Field::Sales as u32,
+                    Field::GrainSales as u32,
                     Field::Unfilled as u32,
                     Field::Shortage as u32,
                     Field::Purchased as u32,

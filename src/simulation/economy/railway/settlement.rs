@@ -289,7 +289,9 @@ impl GpuPass<DispatchInput> for PrepareDispatch {
     fn execute(mut input: DispatchInput) {
         let active = input.control[CONSTRUCTED_EVENTS_WORD].load();
         let mut resources = input.resources;
-        if input.good == comptime!(Good::Bread as u32) {
+        if input.good == comptime!(Good::Bread as u32)
+            || input.good == comptime!(Good::Grain as u32)
+        {
             resources += active;
         }
         markets::store_dispatch(
@@ -495,7 +497,9 @@ fn settlement_dispatch(
     let buffers = &config.railway.freight;
     let active_groups = parameters.count.div_ceil(device.workgroup) as usize;
     let seller_bound = match parameters.good {
-        good if good == Good::Bread as u32 => parameters.count as usize,
+        good if good == Good::Bread as u32 || good == Good::Grain as u32 => {
+            parameters.count as usize
+        }
         _ => 0,
     };
     let resource_groups =
@@ -537,7 +541,8 @@ fn resource(input: &Input, index: u32) -> u32 {
     let base = 2 * (cells + 1 + input.config.actors);
     let firms = input.spatial[(base + cells) as usize];
     let mut sellers = 0u32;
-    if input.parameters.traded_good() == comptime!(Good::Bread as u32) {
+    let good = input.parameters.traded_good();
+    if good == comptime!(Good::Bread as u32) || good == comptime!(Good::Grain as u32) {
         sellers = markets::active(&input.control, &input.parameters);
     }
     let mut resource = u32::new(comptime!(i64::from(u32::MAX)));

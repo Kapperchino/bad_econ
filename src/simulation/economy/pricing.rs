@@ -237,8 +237,32 @@ pub(super) fn adjust(
 }
 
 #[cube]
+pub(super) fn distributor_stock_target(
+    state: &mut [u32],
+    actors: &[u32],
+    config: &EconomyConfig,
+    control: &[Atomic<u32>],
+    actor: u32,
+    demand: Ticks,
+) -> Ticks {
+    let mut daily = demand;
+    if kind(actors, actor).output() == comptime!(Good::Grain as u32) {
+        let shifts =
+            actors[ActorLayout::CAPACITY * (actors.len() / ActorLayout::WORDS) + actor as usize];
+        let units = number(state, config, comptime!(Field::OutputTicks as u32), actor);
+        daily = minimum(demand, times32(shifts, units));
+    }
+    multiply(
+        control,
+        daily,
+        number(state, config, comptime!(Field::StockCoverage as u32), actor) + config.ring,
+    )
+}
+
+#[cube]
 pub(super) fn inventory_target(
     state: &mut [u32],
+    actors: &[u32],
     config: &EconomyConfig,
     control: &[Atomic<u32>],
     firm: u32,
@@ -274,11 +298,7 @@ pub(super) fn inventory_target(
                 ticks(max(batch, 1) - 1, 0),
             )
         }
-        1 => multiply(
-            control,
-            demand,
-            number(state, config, comptime!(Field::StockCoverage as u32), firm) + config.ring,
-        ),
+        1 => distributor_stock_target(state, actors, config, control, firm, demand),
         _ => farming::inventory_target(config, control, demand, day),
     }
 }
@@ -374,7 +394,16 @@ pub(super) fn replacement_quote(
 ) -> u32 {
     let side = config.spatial_side;
     let cells = side * side;
-    let segment = 2 * (cells + 1 + config.actors);
+    let grain = good == comptime!(Good::Grain as u32);
+    let household_grain = comptime!(config.home_mode == Feature::Enabled)
+        && grain
+        && number(
+            state,
+            config,
+            comptime!(Field::EnterpriseModel as u32),
+            buyer,
+        ) == comptime!(EnterpriseModel::Distributor as u32);
+    let first_segment = select(household_grain, 1u32, 2u32);
     let x = actors[ActorLayout::X * config.actors as usize + buyer as usize];
     let y = actors[ActorLayout::Y * config.actors as usize + buyer as usize];
     let cx = x / config.search_radius;
@@ -386,43 +415,61 @@ pub(super) fn replacement_quote(
         let mut column = max(cx, 1) - 1;
         while column <= min(cx + 1, side - 1) {
             let cell = row * side + column;
-            let begin = spatial[(segment + cell) as usize];
-            let length = spatial[(segment + cell + 1) as usize] - begin;
-            let samples = min(length, HOUSEHOLD_SEARCH_SAMPLES);
-            for sample in 0..samples {
-                let offset = sample * (length / samples) + sample * (length % samples) / samples;
-                let rotated = (offset + parameters.day + buyer) % length;
-                let seller = spatial[(segment + cells + 1 + begin + rotated) as usize];
-                let relevant = seller != buyer && kind(actors, seller).output() == good;
-                if relevant {
-                    let status = number(
-                        state,
-                        config,
-                        comptime!(Field::EnterpriseStatus as u32),
-                        seller,
-                    );
-                    let trip = distance(actors, buyer, seller);
-                    let price = number(state, config, comptime!(Field::Price as u32), seller);
-                    let available = status < comptime!(EnterpriseState::Liquidating as u32)
-                        && number(
+            for group in first_segment..3u32 {
+                let segment = group * (cells + 1 + config.actors);
+                let begin = spatial[(segment + cell) as usize];
+                let length = spatial[(segment + cell + 1) as usize] - begin;
+                let samples = min(length, HOUSEHOLD_SEARCH_SAMPLES);
+                for sample in 0..samples {
+                    let offset =
+                        sample * (length / samples) + sample * (length % samples) / samples;
+                    let rotated = (offset + parameters.day + buyer) % length;
+                    let seller = spatial[(segment + cells + 1 + begin + rotated) as usize];
+                    let k = kind(actors, seller);
+                    let relevant = seller != buyer
+                        && select(
+                            group == 1,
+                            k.is(comptime!(ActorKind::Household)),
+                            k.output() == good,
+                        );
+                    if relevant {
+                        let status = number(
                             state,
                             config,
-                            comptime!(Field::EnterpriseModel as u32),
+                            comptime!(Field::EnterpriseStatus as u32),
                             seller,
-                        ) == comptime!(EnterpriseModel::Producer as u32)
-                        && !equal(value(state, config, good, seller), zero())
-                        && trip <= config.search_radius
-                        && price > 0;
-                    if available {
-                        let days = max(ceildiv(trip, config.shipment_speed), 1);
-                        let score = add_checked(
-                            control,
-                            ticks(price, 0),
-                            times32(days, config.delivery_penalty),
                         );
-                        if lt(score, best) {
-                            quote = price;
-                            best = score;
+                        let trip = distance(actors, buyer, seller);
+                        let terms = household_production::TradeFields::new(actors, seller, good);
+                        let price = number(state, config, terms.price, seller);
+                        let supplier = if grain {
+                            household_production::grain_counterparty(
+                                state, actors, config, buyer, seller,
+                            )
+                        } else {
+                            number(
+                                state,
+                                config,
+                                comptime!(Field::EnterpriseModel as u32),
+                                seller,
+                            ) == comptime!(EnterpriseModel::Producer as u32)
+                        };
+                        let available = status < comptime!(EnterpriseState::Liquidating as u32)
+                            && supplier
+                            && household_production::offers(state, actors, config, seller, good)
+                            && trip <= config.search_radius
+                            && price > 0;
+                        if available {
+                            let days = max(ceildiv(trip, config.shipment_speed), 1);
+                            let score = add_checked(
+                                control,
+                                ticks(price, 0),
+                                times32(days, config.delivery_penalty),
+                            );
+                            if lt(score, best) {
+                                quote = price;
+                                best = score;
+                            }
                         }
                     }
                 }

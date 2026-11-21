@@ -465,6 +465,7 @@ fn legacy_checkpoints_migrate_and_resume_on_gpu() -> Result<()> {
         (23, Field::JobDaysRemaining),
         (24, Field::EligibleWorkers),
         (25, Field::Infants),
+        (26, Field::GrainReserve),
     ] {
         let rows = state.actors.len();
         let mut old_state = state.clone();

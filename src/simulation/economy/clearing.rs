@@ -101,7 +101,8 @@ pub(super) fn buyer_settlement(
         proposals[actor as usize * ProposalLayout::WORDS + ProposalLayout::QUANTITY_LOW],
         proposals[actor as usize * ProposalLayout::WORDS + ProposalLayout::QUANTITY_HIGH],
     );
-    let price = value(state, config, comptime!(Field::Price as u32), other);
+    let terms = household_production::TradeFields::new(actors, other, good);
+    let price = value(state, config, terms.price, other);
     let cost = multiply(control, quantity, price.extract(LOW_WORD));
     let retained = household_production::reserve(state, actors, config, other, good);
     let _ = add_checked(control, retained, quantity);
@@ -273,7 +274,7 @@ pub(super) fn empty_seller_safe(
 #[cube]
 pub(super) fn empty_seller_settlement(
     state: &mut [u32],
-    _actors: &[u32],
+    actors: &[u32],
     config: &EconomyConfig,
     proposals: &[u32],
     control: &[Atomic<u32>],
@@ -283,16 +284,14 @@ pub(super) fn empty_seller_settlement(
     prior: &KernelEventStatus,
 ) -> KernelEventStatus {
     let quantity = empty_seller_quantity(config, proposals, parameters, actor);
-    let quote = number(state, config, comptime!(Field::Price as u32), peer);
+    let terms = household_production::TradeFields::new(actors, peer, parameters.traded_good());
+    let quote = number(state, config, terms.price, peer);
     let cost = multiply(control, quantity, quote);
     let cash = plus(
         value(state, config, comptime!(Field::Cash as u32), peer),
         cost,
     );
-    let sales = plus(
-        value(state, config, comptime!(Field::Sales as u32), peer),
-        quantity,
-    );
+    let sales = plus(value(state, config, terms.sales, peer), quantity);
     let faults = cash.faults.union(sales.faults);
     let mut status = KernelEventStatus::new(comptime!(EventStatus::Rejected));
     if !faults.is_empty() || prior.contains(comptime!(EventStatus::Faulted)) {
@@ -379,8 +378,9 @@ impl PeerBalances {
                 balances.cash = value(state, config, comptime!(Field::Cash as u32), peer);
                 balances.stock = value(state, config, good, peer);
                 balances.reserve = household_production::reserve(state, actors, config, peer, good);
-                balances.sales = value(state, config, comptime!(Field::Sales as u32), peer);
-                balances.quote = number(state, config, comptime!(Field::Price as u32), peer);
+                let terms = household_production::TradeFields::new(actors, peer, good);
+                balances.sales = value(state, config, terms.sales, peer);
+                balances.quote = number(state, config, terms.price, peer);
             }
         }
         balances
@@ -518,7 +518,7 @@ impl PeerBalances {
     pub fn store(
         &self,
         state: &mut [u32],
-        _actors: &[u32],
+        actors: &[u32],
         config: &EconomyConfig,
         parameters: &EconomyParameters,
         peer: u32,
@@ -597,7 +597,7 @@ impl PeerBalances {
                 set(
                     state,
                     config,
-                    comptime!(Field::Sales as u32),
+                    household_production::TradeFields::new(actors, peer, good).sales,
                     peer,
                     self.sales,
                 );

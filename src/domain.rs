@@ -41,9 +41,9 @@ pub use resources::{ProductionSite, ResourceMap, ResourceRegion};
 pub(crate) use supply::SupplierCacheLayout;
 
 pub const SCENARIO_VERSION: u32 = 2;
-const CHECKPOINT_VERSION: u32 = 26;
-pub const STATE_HASH_VERSION: &str = "bad-econ/state/CubekV2/v29";
-pub const USED_FIELDS: usize = Field::RecoveringMothers as usize + 1;
+const CHECKPOINT_VERSION: u32 = 27;
+pub const STATE_HASH_VERSION: &str = "bad-econ/state/CubekV2/v30";
+pub const USED_FIELDS: usize = Field::ExpectedGrainSales as usize + 1;
 pub const TRANSIT_FIELDS: usize = USED_FIELDS + Good::COUNT;
 pub const CONSUMPTION_FIELDS: usize = TRANSIT_FIELDS + Good::COUNT;
 pub const PRODUCTION_FIELDS: usize = CONSUMPTION_FIELDS + Good::COUNT;
@@ -212,6 +212,10 @@ pub enum Field {
     FemaleOlderAdults,
     FemaleSeniors,
     RecoveringMothers,
+    GrainReserve,
+    GrainQuote,
+    GrainSales,
+    ExpectedGrainSales,
 }
 impl Field {
     pub fn inventory(good: Good) -> Self {
@@ -678,10 +682,15 @@ impl Scenario {
         config.behavior.wage_increment = 0;
         config.behavior.price_response = 1000;
         config.distributors = (0..config.firms)
-            .filter(|&firm| generated_good(&config, firm as usize) == Good::Bread && firm % 3 == 0)
-            .map(|firm| enterprise::Distributor {
+            .map(|firm| (firm, generated_good(&config, firm as usize)))
+            .filter(|&(firm, good)| match good {
+                Good::Bread => firm % 3 == 0,
+                Good::Grain => firm % 3 == 1,
+                _ => false,
+            })
+            .map(|(firm, good)| enterprise::Distributor {
                 firm: u64::from(households + firm + 1),
-                good: Good::Bread,
+                good,
                 handling_minutes: 5,
                 units_per_shift: 24,
                 reserve_days: 3,
@@ -1161,6 +1170,13 @@ impl Scenario {
                     actor.capacity
                 }
             },
+        }
+    }
+    fn operating_capacity(&self, state: &State, index: usize) -> u32 {
+        let actor = state.actors.at(index);
+        match state.get(Field::EnterpriseModel, index) {
+            model if model == enterprise::EnterpriseModel::Distributor as u64 => actor.capacity,
+            _ => self.geographic_capacity(&actor),
         }
     }
     pub(crate) fn aggregate_demography(&self) -> bool {
@@ -3007,8 +3023,7 @@ impl<'a> AuditedState<'a> {
                     if workers > 0 && (1..=state.actors.len() as u64).contains(&employer) =>
                 {
                     let employer = (employer - 1) as usize;
-                    let employer_capacity =
-                        scenario.geographic_capacity(&state.actors.at(employer));
+                    let employer_capacity = scenario.operating_capacity(state, employer);
                     let labor_minutes = state.get(Field::LaborMinutes, employer);
                     let commute = actor
                         .position
@@ -3037,7 +3052,7 @@ impl<'a> AuditedState<'a> {
                 }
                 _ => false,
             };
-            let capacity = scenario.geographic_capacity(actor);
+            let capacity = scenario.operating_capacity(state, i);
             let planning = state.get(Field::Slots, i) <= state.get(Field::Plan, i)
                 && state.get(Field::Plan, i) <= u64::from(capacity);
             let production = match (actor.kind, capacity) {
@@ -3062,7 +3077,7 @@ impl<'a> AuditedState<'a> {
                     == 0
             });
             let quotes = match actor.kind {
-                0 => true,
+                0 => state.get(Field::GrainQuote, i) <= u64::from(c.maximum_price),
                 _ => {
                     (1..=10_000).contains(&state.get(Field::Wage, i))
                         && (u64::from(c.minimum_price)..=u64::from(c.maximum_price))
@@ -3423,7 +3438,7 @@ impl TryFrom<CheckpointDocument> for Checkpoint {
             .get("version")
             .and_then(serde_json::Value::as_u64)
         {
-            Some(23..=25) => (),
+            Some(23..=26) => (),
             Some(version) if version == u64::from(CHECKPOINT_VERSION) => (),
             _ => Err(anyhow!(
                 "unsupported checkpoint format: expected 23 through {CHECKPOINT_VERSION}"
@@ -3444,12 +3459,13 @@ impl TryFrom<CheckpointDocument> for Checkpoint {
             23 => Some(Field::JobDaysRemaining),
             24 => Some(Field::EligibleWorkers),
             25 => Some(Field::Infants),
+            26 => Some(Field::GrainReserve),
             _ => None,
         };
         if let Some(field) = first_missing {
             let count = current.state.actors.len();
             let offset = field as usize * count;
-            match (current.version == 25 || current.scenario.people.is_none())
+            match (current.version >= 25 || current.scenario.people.is_none())
                 && offset <= current.state.values.len()
                 && current.checksum == Self::checksum(&current.scenario, &current.state)?
             {
@@ -3461,7 +3477,7 @@ impl TryFrom<CheckpointDocument> for Checkpoint {
                 .state
                 .values
                 .splice(offset..offset, std::iter::repeat_n(0, missing));
-            if current.scenario.people.is_some() {
+            if current.version == 25 && current.scenario.people.is_some() {
                 demography::CohortPopulation::from_individuals(
                     &current.scenario,
                     &mut current.state,

@@ -644,7 +644,12 @@ fn candidate_supply(
     let empty_score = ticks(u32::MAX, u32::MAX);
     let mut score = zero();
     let mut amount = zero();
-    if dist <= config.search_radius {
+    let mut accessible = dist <= config.search_radius;
+    if comptime!(market == MarketFlag::Input(InputMarket::Grain)) {
+        accessible =
+            accessible && household_production::grain_counterparty(state, actors, config, id, firm);
+    }
+    if accessible {
         let mut wage = number(state, config, comptime!(Field::Wage as u32), firm);
         let quote = supply.quote;
         let mut inspect = true;

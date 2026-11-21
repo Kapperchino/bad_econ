@@ -59,10 +59,19 @@ impl Radix {
 }
 
 impl SortKeys {
-    pub fn for_market(market: crate::domain::Market, households: u32) -> Self {
+    pub fn for_market(
+        market: crate::domain::Market,
+        households: u32,
+        home_mode: crate::simulation::configuration::Feature,
+    ) -> Self {
         use crate::domain::{Good, Market};
         match market {
             Market::Labor => Self::Firms { households },
+            Market::Input(Good::Grain) | Market::Consumer(Good::Grain)
+                if home_mode == crate::simulation::configuration::Feature::Enabled =>
+            {
+                Self::Actors
+            }
             Market::Input(Good::Bread)
             | Market::Consumer(Good::Bread)
             | Market::Household

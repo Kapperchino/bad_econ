@@ -60,6 +60,7 @@ struct QuantityBalances {
     cash: Ticks,
     stock: Ticks,
     sales: Ticks,
+    sales_field: u32,
     reserve: Ticks,
     quote: u32,
 }
@@ -73,12 +74,14 @@ impl QuantityBalances {
         peer: u32,
         good: u32,
     ) -> Self {
+        let terms = household_production::TradeFields::new(actors, peer, good);
         QuantityBalances {
             cash: value(state, config, comptime!(Field::Cash as u32), peer),
             stock: value(state, config, good, peer),
-            sales: value(state, config, comptime!(Field::Sales as u32), peer),
+            sales: value(state, config, terms.sales, peer),
+            sales_field: terms.sales,
             reserve: household_production::reserve(state, actors, config, peer, good),
-            quote: number(state, config, comptime!(Field::Price as u32), peer),
+            quote: number(state, config, terms.price, peer),
         }
     }
 
@@ -146,13 +149,7 @@ impl QuantityBalances {
             self.cash,
         );
         set(state, config, good, peer, self.stock);
-        set(
-            state,
-            config,
-            comptime!(Field::Sales as u32),
-            peer,
-            self.sales,
-        );
+        set(state, config, self.sales_field, peer, self.sales);
     }
 }
 

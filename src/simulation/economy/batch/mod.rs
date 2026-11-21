@@ -54,6 +54,7 @@ struct UnitBalances {
     cash: Ticks,
     stock: Ticks,
     sales: Ticks,
+    sales_field: u32,
     quote: u32,
     available: Ticks,
     cash_capacity: Ticks,
@@ -91,8 +92,9 @@ impl UnitBalances {
     ) -> Self {
         let cash = value(state, config, comptime!(Field::Cash as u32), peer);
         let stock = value(state, config, good, peer);
-        let sales = value(state, config, comptime!(Field::Sales as u32), peer);
-        let quote = number(state, config, comptime!(Field::Price as u32), peer);
+        let terms = household_production::TradeFields::new(actors, peer, good);
+        let sales = value(state, config, terms.sales, peer);
+        let quote = number(state, config, terms.price, peer);
         let cash_capacity = bounded_capacity(
             ticks(!cash.extract(LOW_WORD), !cash.extract(HIGH_WORD)),
             ticks(quote, 0),
@@ -102,6 +104,7 @@ impl UnitBalances {
             cash,
             stock,
             sales,
+            sales_field: terms.sales,
             quote,
             available: positive(
                 stock,
@@ -153,13 +156,7 @@ impl UnitBalances {
             self.cash,
         );
         set(state, config, good, peer, self.stock);
-        set(
-            state,
-            config,
-            comptime!(Field::Sales as u32),
-            peer,
-            self.sales,
-        );
+        set(state, config, self.sales_field, peer, self.sales);
     }
 }
 
@@ -244,6 +241,7 @@ impl GpuPass<SettlementInput> for SettleTail {
         input.parameters.refresh(&mut input.config);
         settle_tail(
             &mut input.state,
+            &input.actors,
             &input.config,
             &mut input.scratch,
             &input.control,
@@ -382,6 +380,7 @@ fn settle_units(
 #[cube]
 fn settle_tail(
     state: &mut [u32],
+    actors: &[u32],
     config: &EconomyConfig,
     scratch: &mut [u32],
     control: &[Atomic<u32>],
@@ -395,17 +394,13 @@ fn settle_tail(
         if index >= cursor {
             let actor = scratch[(parameters.sort_source + count + index) as usize];
             let prior = KernelEventStatus::load(scratch, 4 * count + actor);
+            let terms =
+                household_production::TradeFields::new(actors, peer, parameters.traded_good());
             let cash = plus(
                 value(state, config, comptime!(Field::Cash as u32), peer),
-                ticks(
-                    number(state, config, comptime!(Field::Price as u32), peer),
-                    0,
-                ),
+                ticks(number(state, config, terms.price, peer), 0),
             );
-            let sales = plus(
-                value(state, config, comptime!(Field::Sales as u32), peer),
-                ticks(1, 0),
-            );
+            let sales = plus(value(state, config, terms.sales, peer), ticks(1, 0));
             let overflow = !cash.faults.is_empty() || !sales.faults.is_empty();
             let mut status = KernelEventStatus::new(comptime!(EventStatus::Rejected));
             if overflow || prior.contains(comptime!(EventStatus::Faulted)) {

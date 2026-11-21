@@ -1898,6 +1898,11 @@ impl Simulation {
         let count = self.metadata.actors.len();
         let members = match market {
             Market::Household | Market::Input(Good::Bread) | Market::Consumer(Good::Bread) => count,
+            Market::Input(Good::Grain) | Market::Consumer(Good::Grain)
+                if self.config.home_mode == configuration::Feature::Enabled =>
+            {
+                count
+            }
             _ => self.metadata.actors.firms(),
         };
         let regional_transport = !self.scenario.config().railway.companies.is_empty()
@@ -2228,8 +2233,11 @@ impl Simulation {
         }
         launch(EconomyStage::MarketBoundary, 1, &parameters);
         let sorting_window = device_profile.start(&self.device);
-        let sort_keys =
-            economy::sorting::SortKeys::for_market(market, self.scenario.population_rows() as u32);
+        let sort_keys = economy::sorting::SortKeys::for_market(
+            market,
+            self.scenario.population_rows() as u32,
+            self.config.home_mode,
+        );
         parameters.sort_source = match (parameters.clock, device_profile) {
             (parameters::MarketClock::Device, _) | (_, profiling::MarketProfile::Enabled(_)) => {
                 economy::sorting::MarketSort::encode_keys(

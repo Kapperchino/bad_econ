@@ -45,9 +45,10 @@ pub struct HomeProduction {
     pub harvest_start: u32,
     pub harvest_days: u32,
     pub annual_yield_per_plot: u32,
+    pub grain_price: u32,
 }
 impl HomeProduction {
-    fn new(value: crate::domain::enterprise::HouseholdProduction) -> Self {
+    fn new(value: crate::domain::enterprise::HouseholdProduction, grain_price: u32) -> Self {
         match value {
             crate::domain::enterprise::HouseholdProduction::Unavailable => Self {
                 harvest_start: crate::domain::calendar::HARVEST_START,
@@ -68,6 +69,7 @@ impl HomeProduction {
                 harvest_start,
                 harvest_days,
                 annual_yield_per_plot,
+                grain_price,
             },
         }
     }
@@ -79,6 +81,7 @@ impl HomeProduction {
             harvest_start: self.harvest_start,
             harvest_days: self.harvest_days,
             annual_yield_per_plot: self.annual_yield_per_plot,
+            grain_price: self.grain_price,
         }
     }
 }
@@ -358,7 +361,7 @@ impl Configuration {
                 .unwrap_or_default(),
             economy: config.economy,
             cohorts: Feature::from(config.people.as_ref()),
-            home: HomeProduction::new(config.household_production),
+            home: HomeProduction::new(config.household_production, config.prices[0]),
             property_mode: Feature::from(config.property.as_ref()),
             grain_farms: device.tensor(
                 &state

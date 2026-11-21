@@ -4,8 +4,8 @@ pub(super) mod scheduler;
 use super::{
     flags::{
         ActorKind, COMPLETED_WORD, CONSTRUCTED_EVENTS_WORD, CONTROL_WORDS, EventStatus, FaultFlags,
-        KernelActorKind, KernelAuthorization, KernelEventStatus, KernelFaults, MarketFlag,
-        PROGRESS_WORD,
+        InputMarket, KernelActorKind, KernelAuthorization, KernelEventStatus, KernelFaults,
+        MarketFlag, PROGRESS_WORD,
     },
     households::{KernelFatigue, KernelObservation, ObservationKind, next_fatigue, observed_blend},
     layout::*,
@@ -168,6 +168,7 @@ fn local(
                 set32(state, config, comptime!(Field::Employed as u32), id, 0u32);
                 set32(state, config, comptime!(Field::Employer as u32), id, 0u32);
                 set32(state, config, comptime!(Field::Sales as u32), id, 0u32);
+                set32(state, config, comptime!(Field::GrainSales as u32), id, 0u32);
                 set32(state, config, comptime!(Field::Unfilled as u32), id, 0u32);
                 set32(state, config, comptime!(Field::Shortage as u32), id, 0u32);
                 set32(state, config, comptime!(Field::Purchased as u32), id, 0u32);
@@ -351,9 +352,11 @@ fn local(
                         value(state, config, comptime!(Field::Cash as u32), id),
                         ration,
                     );
+                    household_production::open_grain_quote(state, config, id);
                     if rural || unfunded {
                         household_production::produce(state, config, control, id, parameters.day);
                     }
+                    household_production::reserve_grain(state, config, control, id, parameters.day);
                 }
             }
             Phase::PhysicalClose => match k.bits() {
@@ -553,6 +556,13 @@ fn local(
                     && comptime!(config.home_mode == Feature::Enabled)
                 {
                     enterprises::household_quote(state, config, control, id);
+                    household_production::close_grain_sales(
+                        state,
+                        config,
+                        control,
+                        id,
+                        parameters.day,
+                    );
                 }
                 if !k.is(comptime!(ActorKind::Household))
                     && k.bits() != comptime!(Good::Housing as u32)
@@ -588,6 +598,7 @@ fn local(
                     );
                     let target = pricing::inventory_target(
                         state,
+                        actors,
                         config,
                         control,
                         id,
@@ -690,11 +701,8 @@ impl InputDemand {
                 value(state, config, comptime!(Field::Demand as u32), id),
                 ticks(1, 0),
             );
-            wanted = multiply(
-                control,
-                forecast,
-                number(state, config, comptime!(Field::StockCoverage as u32), id) + config.ring,
-            );
+            wanted =
+                pricing::distributor_stock_target(state, actors, config, control, id, forecast);
         }
         if !k.is(comptime!(ActorKind::Household))
             && number(state, config, comptime!(Field::EnterpriseModel as u32), id) == 0
@@ -744,11 +752,13 @@ impl InputDemand {
             && number(state, config, comptime!(Field::LivingMembers as u32), id) > 0
         {
             search = true;
-            wanted = ticks(
-                number(state, config, comptime!(Field::FoodNeed as u32), id)
-                    * (config.coverage + config.ring),
-                0,
+            let near_term = times32(
+                number(state, config, comptime!(Field::FoodNeed as u32), id),
+                config.coverage + config.ring,
             );
+            let reserve = value(state, config, comptime!(Field::GrainReserve as u32), id);
+            let quoting = number(state, config, comptime!(Field::GrainQuote as u32), id) > 0;
+            wanted = select(quoting, minimum(near_term, reserve), near_term);
         }
         let investment = number(state, config, comptime!(Field::InvestmentGood as u32), id) > 0;
         if k.is(comptime!(ActorKind::Household))
@@ -1078,15 +1088,23 @@ fn propose(
                         if skipped == 0 {
                             let firm = spatial[(side * side + 1u32 + rotated) as usize];
                             let dist = distance(actors, id, firm);
-                            if dist <= config.search_radius {
+                            let mut accessible = dist <= config.search_radius;
+                            if comptime!(market == MarketFlag::Input(InputMarket::Grain)) {
+                                accessible = accessible
+                                    && household_production::grain_counterparty(
+                                        state, actors, config, id, firm,
+                                    );
+                            }
+                            if accessible {
                                 let route = match comptime!(market) {
                                     MarketFlag::Labor => {
                                         railway::animal_route(actors, config, id, firm)
                                     }
                                     _ => railway::route(actors, config, id, firm),
                                 };
-                                let quote =
-                                    number(state, config, comptime!(Field::Price as u32), firm);
+                                let terms =
+                                    household_production::TradeFields::new(actors, firm, good);
+                                let quote = number(state, config, terms.price, firm);
                                 let mut inspect = true;
                                 if comptime!(market != MarketFlag::Labor) {
                                     let cash = purchasing_power;
@@ -1619,11 +1637,9 @@ fn construct_route(
                 }
                 _ => {
                     let good = parameters.traded_good();
-                    let cost = multiply(
-                        control,
-                        quantity,
-                        number(state, config, comptime!(Field::Price as u32), other),
-                    );
+                    let terms = household_production::TradeFields::new(actors, other, good);
+                    let cost =
+                        multiply(control, quantity, number(state, config, terms.price, other));
                     let freight = multiply(control, quantity, route.fee);
                     let slot = BASE_FIELDS as u32
                         + (good - 1) * config.ring
@@ -1670,7 +1686,7 @@ fn construct_route(
                             comptime!(Field::FoodPrice as u32),
                             actor,
                             value(state, config, comptime!(Field::FoodPrice as u32), actor),
-                            value(state, config, comptime!(Field::Price as u32), other),
+                            value(state, config, terms.price, other),
                         );
                     }
                     for input in 0u32..2 {
@@ -1688,7 +1704,7 @@ fn construct_route(
                                 cost_field,
                                 actor,
                                 value(state, config, cost_field, actor),
-                                value(state, config, comptime!(Field::Price as u32), other),
+                                value(state, config, terms.price, other),
                             );
                         }
                     }
@@ -1710,7 +1726,7 @@ fn construct_route(
                                 comptime!(Field::ReplacementCost as u32),
                                 actor,
                             ),
-                            value(state, config, comptime!(Field::Price as u32), other),
+                            value(state, config, terms.price, other),
                         );
                     }
                     event.transfer(
@@ -1729,14 +1745,7 @@ fn construct_route(
                         zero,
                         quantity,
                     );
-                    event.transfer(
-                        config,
-                        bundles,
-                        comptime!(Field::Sales as u32),
-                        other,
-                        zero,
-                        quantity,
-                    );
+                    event.transfer(config, bundles, terms.sales, other, zero, quantity);
                     event.transfer(
                         config,
                         bundles,
@@ -1749,14 +1758,14 @@ fn construct_route(
                         config,
                         bundles,
                         KernelLeg {
-                            field: comptime!(Field::Price as u32),
+                            field: terms.price,
                             actor: other,
                             debit: zero,
                             credit: zero,
                             authorization: KernelAuthorization::new(comptime!(
                                 AuthorizationFlags::EQUAL
                             )),
-                            guard: value(state, config, comptime!(Field::Price as u32), other),
+                            guard: value(state, config, terms.price, other),
                         },
                     );
                 }
@@ -2555,7 +2564,7 @@ fn discoverable(
             let mut available =
                 producer || household_production::offers(state, actors, config, firm, good);
             if comptime!(matches!(market, MarketFlag::Input(_))) {
-                available = available && !distributor;
+                available = available && (!distributor || good == comptime!(Good::Grain as u32));
             }
             available
         }
@@ -2842,7 +2851,10 @@ fn index_count(
 #[cube]
 fn index_segment(config: &EconomyConfig, parameters: &EconomyParameters) -> u32 {
     let cells = config.spatial_side * config.spatial_side;
-    (cells + 1 + config.actors) * select(parameters.traded_good() == Good::Bread as u32, 1u32, 2u32)
+    let good = parameters.traded_good();
+    let households = good == Good::Bread as u32
+        || (comptime!(config.home_mode == Feature::Enabled) && good == Good::Grain as u32);
+    (cells + 1 + config.actors) * select(households, 1u32, 2u32)
 }
 
 #[cube]

@@ -346,12 +346,13 @@ pub(in crate::simulation) fn discover(
                 }
             }
             let stock = load(state, kind * config.state_stride + source);
-            let consumer = kind == comptime!(Good::Bread as u32)
+            let traded = kind == comptime!(Good::Grain as u32)
+                || kind == comptime!(Good::Bread as u32)
                 || kind == comptime!(Good::Wood as u32)
                 || kind == comptime!(Good::Coal as u32)
                 || (comptime!(config.economy == crate::domain::Economy::Industrial)
                     && config.consumption_intervals[kind as usize - 1] > 1);
-            if consumer && !lt(stock, ticks(24, 0)) {
+            if traded && !lt(stock, ticks(24, 0)) {
                 let quote = price * 1250 / 1000 + ceildiv(60 * wage + config.firm_rent, 24);
                 let revenue = times32(24, quote);
                 let cost = plus(

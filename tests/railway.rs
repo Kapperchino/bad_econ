@@ -321,3 +321,54 @@ fn concurrent_shared_freight_preserves_capacity_payments_and_checkpoints_on_gpu(
     }
     Ok(())
 }
+
+#[test]
+fn a_household_can_ship_its_grain_surplus_to_a_distributor_by_rail_on_gpu() -> Result<()> {
+    let mut config = network()?;
+    config.household_production = enterprise::HouseholdProduction::industrial();
+    let population = config.population.as_mut().unwrap();
+    for household in &mut population.households {
+        household.inventories[Good::Bread as usize - 1] = 1000;
+    }
+    let farmer = &mut population.households[0];
+    farmer.position = Position { x: 0, y: 0 };
+    farmer.inventories[Good::Grain as usize - 1] = 93;
+    let dealer = &mut population.firms[0];
+    dealer.good = Good::Grain;
+    dealer.technique = Technique::new(5, 0, 24)?;
+    dealer.wage = 1;
+    dealer.position = Position { x: 900, y: 0 };
+    config.distributors.push(enterprise::Distributor {
+        firm: dealer.identity,
+        good: Good::Grain,
+        handling_minutes: 5,
+        units_per_shift: 24,
+        reserve_days: 3,
+        margin_per_mille: 250,
+    });
+    let scenario = Scenario::new(config)?;
+    let mut state = scenario.initial()?;
+    let dealer = scenario.index_of(10).unwrap();
+    state.set(Field::LandPlots, 0, 1);
+    state.set(Field::Demand, dealer, 100);
+    let mut simulation =
+        Simulation::from_checkpoint(Checkpoint::new(&scenario, &state)?, support::device(64)?)?;
+    simulation.advance()?;
+    let delivered = simulation.download()?;
+    assert_eq!(delivered.get(Field::GrainSales, 0), 1);
+    assert_eq!(delivered.get(Field::Grain, 0), 92);
+    assert_eq!(
+        delivered.values[delivered
+            .shipment_coordinate(Good::Grain, 1, scenario.ring(), dealer)
+            .0 as usize],
+        1
+    );
+    assert_eq!(
+        delivered.get(Field::Cash, 0),
+        1000 + u64::from(scenario.config().prices[0]) - 7
+    );
+    assert_eq!(delivered.get(Field::RailRevenue, 5), 2);
+    assert_eq!(delivered.get(Field::RailRevenue, 6), 5);
+    simulation.checkpoint()?.restore()?;
+    Ok(())
+}

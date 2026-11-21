@@ -1,4 +1,5 @@
 use super::*;
+use crate::domain::enterprise::EnterpriseModel;
 use crate::simulation::configuration::EconomyConfig;
 
 #[cube]
@@ -19,6 +20,11 @@ pub(super) fn reserve(
             0,
         );
     }
+    if kind(actors, actor).is(comptime!(ActorKind::Household))
+        && good == comptime!(Good::Grain as u32)
+    {
+        held = value(state, config, comptime!(Field::GrainReserve as u32), actor);
+    }
     if number(
         state,
         config,
@@ -34,6 +40,49 @@ pub(super) fn reserve(
     held
 }
 
+#[derive(CubeType)]
+pub(super) struct TradeFields {
+    pub price: u32,
+    pub sales: u32,
+}
+
+#[cube]
+impl TradeFields {
+    pub fn new(actors: &[u32], seller: u32, good: u32) -> Self {
+        let grain = good == comptime!(Good::Grain as u32)
+            && kind(actors, seller).is(comptime!(ActorKind::Household));
+        TradeFields {
+            price: select(
+                grain,
+                comptime!(Field::GrainQuote as u32),
+                comptime!(Field::Price as u32),
+            ),
+            sales: select(
+                grain,
+                comptime!(Field::GrainSales as u32),
+                comptime!(Field::Sales as u32),
+            ),
+        }
+    }
+}
+
+#[cube]
+pub(super) fn supplier(
+    state: &mut [u32],
+    actors: &[u32],
+    config: &EconomyConfig,
+    actor: u32,
+    good: u32,
+) -> bool {
+    let k = kind(actors, actor);
+    let household_good = good == comptime!(Good::Bread as u32)
+        || (comptime!(config.home_mode == Feature::Enabled)
+            && good == comptime!(Good::Grain as u32)
+            && number(state, config, comptime!(Field::LivingMembers as u32), actor) > 0
+            && number(state, config, comptime!(Field::GrainQuote as u32), actor) > 0);
+    k.output() == good || (k.is(comptime!(ActorKind::Household)) && household_good)
+}
+
 #[cube]
 pub(super) fn offers(
     state: &mut [u32],
@@ -42,14 +91,39 @@ pub(super) fn offers(
     actor: u32,
     good: u32,
 ) -> bool {
-    let k = kind(actors, actor);
-    let producer = k.output() == good
-        || (k.is(comptime!(ActorKind::Household)) && good == comptime!(Good::Bread as u32));
-    producer
+    supplier(state, actors, config, actor, good)
         && lt(
             reserve(state, actors, config, actor, good),
             value(state, config, good, actor),
         )
+}
+
+#[cube]
+pub(super) fn grain_counterparty(
+    state: &mut [u32],
+    actors: &[u32],
+    config: &EconomyConfig,
+    buyer: u32,
+    seller: u32,
+) -> bool {
+    let buyer_is_dealer = kind(actors, buyer).output() == comptime!(Good::Grain as u32)
+        && number(
+            state,
+            config,
+            comptime!(Field::EnterpriseModel as u32),
+            buyer,
+        ) == comptime!(EnterpriseModel::Distributor as u32);
+    let seller_is_dealer = number(
+        state,
+        config,
+        comptime!(Field::EnterpriseModel as u32),
+        seller,
+    ) == comptime!(EnterpriseModel::Distributor as u32);
+    select(
+        kind(actors, seller).is(comptime!(ActorKind::Household)),
+        buyer_is_dealer,
+        !(seller_is_dealer && buyer_is_dealer),
+    )
 }
 
 #[cube]
@@ -72,6 +146,278 @@ fn output(
     );
 }
 
+const SEED_RETURN: u32 = crate::domain::food::WheatHusbandry::GROSS_PARTS;
+const SALES_WINDOW: u32 = 30;
+
+#[cube]
+fn days_to_harvest(config: &EconomyConfig, day: u32) -> u32 {
+    365 - (day % 365 + 365 - config.home.harvest_start) % 365
+}
+
+#[cube]
+fn grain_for_food(
+    state: &mut [u32],
+    config: &EconomyConfig,
+    control: &[Atomic<u32>],
+    actor: u32,
+    days: u32,
+) -> Ticks {
+    let bread = positive(
+        times32(food::reserve_daily(state, config, actor), days),
+        value(state, config, comptime!(Field::Bread as u32), actor),
+    );
+    let flour = food::Conversion::baking(config).required(
+        control,
+        bread,
+        number(
+            state,
+            config,
+            comptime!(Field::BakingRemainder as u32),
+            actor,
+        ),
+    );
+    food::Conversion::milling(config).required(
+        control,
+        positive(
+            flour,
+            value(state, config, comptime!(Field::Flour as u32), actor),
+        ),
+        number(
+            state,
+            config,
+            comptime!(Field::MillingRemainder as u32),
+            actor,
+        ),
+    )
+}
+
+#[cube]
+fn seed_required(control: &[Atomic<u32>], work: Ticks, minutes: u32) -> Ticks {
+    let batch = minutes * comptime!(SEED_RETURN);
+    divide(add_checked(control, work, ticks(batch - 1, 0)), batch)
+}
+
+#[cube]
+fn unplanted_seed(
+    state: &mut [u32],
+    config: &EconomyConfig,
+    control: &[Atomic<u32>],
+    actor: u32,
+    plots: u32,
+) -> Ticks {
+    let minutes = config.home.cultivation_minutes;
+    let annual = times32(plots, config.home.annual_yield_per_plot * minutes);
+    let sown = value(state, config, comptime!(Field::CropWork as u32), actor);
+    positive(
+        seed_required(control, annual, minutes),
+        seed_required(control, sown, minutes),
+    )
+}
+
+#[cube]
+pub(super) fn open_grain_quote(state: &mut [u32], config: &EconomyConfig, actor: u32) {
+    let quote = number(state, config, comptime!(Field::GrainQuote as u32), actor);
+    if quote == 0 {
+        set32(
+            state,
+            config,
+            comptime!(Field::GrainQuote as u32),
+            actor,
+            config.home.grain_price,
+        );
+    }
+}
+
+#[cube]
+pub(super) fn reserve_grain(
+    state: &mut [u32],
+    config: &EconomyConfig,
+    control: &[Atomic<u32>],
+    actor: u32,
+    day: u32,
+) {
+    let plots = number(state, config, comptime!(Field::LandPlots as u32), actor);
+    let seed = unplanted_seed(state, config, control, actor, plots);
+    let days = select(
+        plots > 0,
+        days_to_harvest(config, day),
+        config.coverage + config.ring,
+    );
+    let food = grain_for_food(state, config, control, actor, days);
+    set(
+        state,
+        config,
+        comptime!(Field::GrainReserve as u32),
+        actor,
+        add_checked(control, seed, food),
+    );
+}
+
+#[cube]
+pub(super) fn close_grain_sales(
+    state: &mut [u32],
+    config: &EconomyConfig,
+    control: &[Atomic<u32>],
+    actor: u32,
+    day: u32,
+) {
+    let sales = value(state, config, comptime!(Field::GrainSales as u32), actor);
+    let previous = value(
+        state,
+        config,
+        comptime!(Field::ExpectedGrainSales as u32),
+        actor,
+    );
+    let forecast = add_checked(
+        control,
+        scaled(
+            control,
+            previous,
+            comptime!(SALES_WINDOW - 1),
+            comptime!(SALES_WINDOW),
+        ),
+        scaled(control, sales, 365, comptime!(SALES_WINDOW)),
+    );
+    set(
+        state,
+        config,
+        comptime!(Field::ExpectedGrainSales as u32),
+        actor,
+        forecast,
+    );
+    let stock = value(state, config, comptime!(Field::Grain as u32), actor);
+    let reserve = value(state, config, comptime!(Field::GrainReserve as u32), actor);
+    let surplus = positive(stock, reserve);
+    let expected = scaled(control, forecast, days_to_harvest(config, day), 365);
+    let quote = number(state, config, comptime!(Field::GrainQuote as u32), actor);
+    if day % comptime!(SALES_WINDOW) == comptime!(SALES_WINDOW - 1)
+        && config.price_response > 0
+        && quote > 0
+    {
+        let step = max(ceildiv(quote * config.price_response, 20 * POLICY_SCALE), 1);
+        let cheaper = max(quote, step + config.minimum_price) - step;
+        let dearer = min(quote + step, config.maximum_price);
+        let next = select(
+            lt(expected, surplus),
+            cheaper,
+            select(lt(surplus, expected), dearer, quote),
+        );
+        set32(
+            state,
+            config,
+            comptime!(Field::GrainQuote as u32),
+            actor,
+            next,
+        );
+    }
+}
+
+#[cube]
+fn cultivate(
+    state: &mut [u32],
+    config: &EconomyConfig,
+    control: &[Atomic<u32>],
+    actor: u32,
+    day: u32,
+    plots: u32,
+    time: u32,
+) -> u32 {
+    let minutes = config.home.cultivation_minutes;
+    let standing = value(state, config, comptime!(Field::CropWork as u32), actor);
+    let annual = times32(plots, config.home.annual_yield_per_plot);
+    let grain = value(state, config, comptime!(Field::Grain as u32), actor);
+    let paid_minutes = number(state, config, comptime!(Field::Hours as u32), actor)
+        + number(state, config, comptime!(Field::HomeMinutes as u32), actor);
+    let earnings = positive(
+        value(state, config, comptime!(Field::GrossIncome as u32), actor),
+        value(
+            state,
+            config,
+            comptime!(Field::OpeningGrossIncome as u32),
+            actor,
+        ),
+    );
+    let wage = divide(earnings, max(paid_minutes, 1));
+    let price = number(state, config, comptime!(Field::GrainQuote as u32), actor);
+    let profitable = paid_minutes == 0
+        || !lt(
+            times32(price, comptime!(SEED_RETURN - 1)),
+            multiply(control, wage, minutes * comptime!(SEED_RETURN)),
+        );
+    let sales = value(
+        state,
+        config,
+        comptime!(Field::ExpectedGrainSales as u32),
+        actor,
+    );
+    let horizon = days_to_harvest(config, day) + 365;
+    let demand = add_checked(
+        control,
+        grain_for_food(state, config, control, actor, horizon),
+        select(
+            profitable,
+            scaled(control, maximum(sales, ticks(plots, 0)), horizon, 365),
+            zero(),
+        ),
+    );
+    let seed = seed_required(control, multiply(control, annual, minutes), minutes);
+    let sown_seed = seed_required(control, standing, minutes);
+    let needed = positive(
+        add_checked(control, demand, seed),
+        add_checked(control, grain, sown_seed),
+    );
+    let target = minimum(
+        annual,
+        scaled(
+            control,
+            needed,
+            comptime!(SEED_RETURN),
+            comptime!(SEED_RETURN - 1),
+        ),
+    );
+    let seed_available = positive(grain, grain_for_food(state, config, control, actor, 1));
+    let seed_funded_work = multiply(
+        control,
+        add_checked(control, sown_seed, minimum(seed_available, seed)),
+        minutes * comptime!(SEED_RETURN),
+    );
+    let remaining = positive(
+        minimum(multiply(control, target, minutes), seed_funded_work),
+        standing,
+    );
+    let pace = ceildiv(
+        config.home.annual_yield_per_plot * minutes,
+        max(farming::growing_days(config), 1),
+    );
+    let work = minimum(minimum(ticks(time, 0), times32(plots, pace)), remaining);
+    let planted = add_checked(control, standing, work);
+    let spent = minus(seed_required(control, planted, minutes), sown_seed);
+    set(
+        state,
+        config,
+        comptime!(Field::CropWork as u32),
+        actor,
+        planted,
+    );
+    set(
+        state,
+        config,
+        comptime!(Field::Grain as u32),
+        actor,
+        minus(grain, spent),
+    );
+    increase(state, config, control, USED_FIELDS as u32, actor, spent);
+    increase(
+        state,
+        config,
+        control,
+        comptime!(Field::Used as u32),
+        actor,
+        spent,
+    );
+    work.extract(LOW_WORD)
+}
+
 #[cube]
 pub(super) fn produce(
     state: &mut [u32],
@@ -91,26 +437,9 @@ pub(super) fn produce(
         zero(),
     );
     if plots > 0 && tools {
-        let annual_work = config.home.annual_yield_per_plot * config.home.cultivation_minutes;
-        let daily_work = ceildiv(annual_work, max(farming::growing_days(config), 1));
-        let needed = positive(
-            times32(plots, annual_work),
-            value(state, config, comptime!(Field::CropWork as u32), actor),
-        );
-        let cultivated = select(
-            farming::cultivating(config, day),
-            minimum(minimum(ticks(time, 0), times32(plots, daily_work)), needed).extract(LOW_WORD),
-            0,
-        );
-        increase(
-            state,
-            config,
-            control,
-            comptime!(Field::CropWork as u32),
-            actor,
-            ticks(cultivated, 0),
-        );
-        time -= cultivated;
+        if farming::cultivating(config, day) {
+            time -= cultivate(state, config, control, actor, day, plots, time);
+        }
         if harvest && number(state, config, comptime!(Field::HarvestYear as u32), actor) != year {
             let crop = value(state, config, comptime!(Field::CropWork as u32), actor);
             let yield_ticks = minimum(
@@ -179,10 +508,15 @@ pub(super) fn produce(
         multiply(control, basic_flour, config.home.baking_minutes),
     )
     .extract(LOW_WORD);
+    let grain = value(state, config, comptime!(Field::Grain as u32), actor);
+    let seed = unplanted_seed(state, config, control, actor, plots);
+    let household_food =
+        grain_for_food(state, config, control, actor, config.coverage + config.ring);
+    let available_grain = minimum(grain, maximum(positive(grain, seed), household_food));
     let milled = minimum(
         minimum(
             milling.required(control, flour_needed, milling_remainder),
-            value(state, config, comptime!(Field::Grain as u32), actor),
+            available_grain,
         ),
         ticks(
             (time - baking_time) / max(config.home.milling_minutes, 1),
@@ -199,7 +533,6 @@ pub(super) fn produce(
     );
     let milled_minutes = milled.extract(LOW_WORD) * config.home.milling_minutes;
     time -= milled_minutes;
-    let grain = value(state, config, comptime!(Field::Grain as u32), actor);
     set(
         state,
         config,

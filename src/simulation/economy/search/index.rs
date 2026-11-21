@@ -76,14 +76,14 @@ impl Supply {
     ) -> Self {
         let kind = kind(actors, actor);
         let producer = !kind.is(comptime!(ActorKind::Household)) && kind.output() == good;
-        let supplier = kind.output() == good
-            || (kind.is(comptime!(ActorKind::Household)) && good == comptime!(Good::Bread as u32));
+        let supplier = household_production::supplier(state, actors, config, actor, good);
+        let terms = household_production::TradeFields::new(actors, actor, good);
         let available = positive(
             value(state, config, good, actor),
             household_production::reserve(state, actors, config, actor, good),
         );
         Supply {
-            quote: number(state, config, comptime!(Field::Price as u32), actor),
+            quote: number(state, config, terms.price, actor),
             available,
             offered: supplier && !equal(available, zero()),
             producer,

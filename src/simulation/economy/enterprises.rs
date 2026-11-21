@@ -415,6 +415,7 @@ pub(super) fn lifecycle(
     ) {
         1 => {
             status == comptime!(EnterpriseState::Forming as u32)
+                || (good == comptime!(Good::Grain as u32) && funded)
                 || retail_viable(state, config, control, firm)
         }
         _ => sales || funded || carrying,
