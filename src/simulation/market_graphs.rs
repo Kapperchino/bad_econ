@@ -82,15 +82,32 @@ impl From<crate::domain::Market> for MarketProgram {
 pub(super) enum Preparation {
     First,
     Repeat,
+    RetainedLabor,
+}
+
+impl Preparation {
+    pub(super) fn new(market: crate::domain::Market, round: usize) -> Self {
+        match (market, round) {
+            (crate::domain::Market::Labor, super::policy::RETAINED_LABOR_ROUND) => {
+                Self::RetainedLabor
+            }
+            (_, 0) => Self::First,
+            _ => Self::Repeat,
+        }
+    }
 }
 
 impl Bindings {
-    fn compatible(&self, device: &Device, buffers: &[CubeTensor]) -> bool {
+    fn compatible<'a>(
+        &self,
+        device: &Device,
+        buffers: impl Iterator<Item = &'a CubeTensor> + Clone,
+    ) -> bool {
         [
             self.workgroup == device.workgroup,
             self.thread == std::thread::current().id(),
             self.stream == StreamId::current(),
-            self.buffers.len() == buffers.len(),
+            self.buffers.len() == buffers.clone().count(),
             self.buffers
                 .first()
                 .is_some_and(|buffer| buffer.handle.service == device.client.service_id()),
@@ -117,17 +134,16 @@ impl MarketGraphs {
         }
     }
 
-    pub(super) fn run(
+    fn bind<'a>(
         &mut self,
         device: &Device,
-        key: MarketKey,
-        buffers: Vec<CubeTensor>,
-        mut encode: impl FnMut() -> Result<u32>,
-    ) -> Result<u32> {
+        market: MarketProgram,
+        buffers: impl Iterator<Item = &'a CubeTensor> + Clone,
+    ) {
         let compatible = self
             .bindings
             .as_ref()
-            .is_some_and(|bindings| bindings.compatible(device, &buffers));
+            .is_some_and(|bindings| bindings.compatible(device, buffers.clone()));
         if !compatible {
             if let Some(bindings) = self
                 .bindings
@@ -137,23 +153,42 @@ impl MarketGraphs {
                 let changed = bindings
                     .buffers
                     .iter()
-                    .zip(&buffers)
+                    .zip(buffers.clone())
                     .enumerate()
                     .filter_map(|(index, (recorded, current))| {
                         (!same_buffer(recorded, current)).then_some(index)
                     })
                     .collect::<Vec<_>>();
-                eprintln!("GRAPH_INVALID {:?} {changed:?}", key.market);
+                eprintln!("GRAPH_INVALID {market:?} {changed:?}");
             }
             self.invalidations += 1;
             self.entries.clear();
             self.bindings = Some(Bindings {
-                buffers,
+                buffers: buffers.cloned().collect(),
                 workgroup: device.workgroup,
                 thread: std::thread::current().id(),
                 stream: StreamId::current(),
             });
         }
+    }
+
+    pub(super) fn run(
+        &mut self,
+        simulation: &mut super::Simulation,
+        key: MarketKey,
+        mut encode: impl FnMut(&mut super::Simulation) -> Result<u32>,
+    ) -> Result<u32> {
+        let device = simulation.device.clone();
+        self.bind(&device, key.market, simulation.market_graph_buffers());
+        self.execute(&device, key, || encode(simulation))
+    }
+
+    fn execute(
+        &mut self,
+        device: &Device,
+        key: MarketKey,
+        mut encode: impl FnMut() -> Result<u32>,
+    ) -> Result<u32> {
         match self.entries.iter().position(|entry| entry.key == key) {
             Some(index) => match &self.entries[index].recording {
                 Recording::Unseen => {
@@ -277,8 +312,9 @@ mod tests {
                     routing: crate::simulation::economy::railway::RouteAvailability::Dormant,
                     freight: crate::simulation::FreightExecution::Synchronous,
                 };
+                graphs.bind(&device, key.market, std::iter::once(&counter));
                 assert_eq!(
-                    graphs.run(&device, key, vec![counter.clone()], || {
+                    graphs.execute(&device, key, || {
                         record_consumer_good::launch(
                             &device.client,
                             CubeCount::Static(1, 1, 1),
@@ -321,8 +357,9 @@ mod tests {
             routing: crate::simulation::economy::railway::RouteAvailability::Available,
             ..key
         };
-        let run = |graphs: &mut MarketGraphs, key, counter: &CubeTensor| {
-            graphs.run(&device, key, vec![counter.clone()], || {
+        let run = |graphs: &mut MarketGraphs, key: MarketKey, counter: &CubeTensor| {
+            graphs.bind(&device, key.market, std::iter::once(counter));
+            graphs.execute(&device, key, || {
                 increment::launch(
                     &device.client,
                     CubeCount::Static(1, 1, 1),

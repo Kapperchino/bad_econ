@@ -83,15 +83,18 @@ fn reused_freight_after_firm_entry_matches_rebuilt_markets_and_cash_on_gpu() -> 
         &entries.transitions,
     )?
     .expect("entry transition");
-    let buffers = reused.config.railway.freight.graph_buffers();
+    let buffers = reused
+        .config
+        .railway
+        .freight
+        .graph_buffers()
+        .map(Clone::clone);
     reused.commit_entries(&entries, plan, &pending.records, RegistryAudit::Full)?;
     for (before, after) in buffers
         .iter()
         .zip(reused.config.railway.freight.graph_buffers())
     {
-        assert!(crate::simulation::market_graphs::same_buffer(
-            before, &after
-        ));
+        assert!(crate::simulation::market_graphs::same_buffer(before, after));
     }
     reused.copy_audited(crate::simulation::CopyDirection::Save)?;
     let mut expected = rebuilt.download()?;
@@ -786,7 +789,7 @@ fn freight_execution(
         .meta
         .num_elements()
         / ACCOUNT_WORDS;
-    reserve_claims(&device, &mut simulation.config, (2 * capacity) as u64)?;
+    claim_work(&device, &mut simulation.config, (2 * capacity) as u64)?;
     let mut state = scenario.initial()?;
     state.set(Field::Cash, seller, load.budget());
     if let FreightLoad::Cascading = load {
@@ -1211,7 +1214,7 @@ fn buffered_claim_admission_preserves_zero_wide_counts_and_prior_faults_on_gpu()
     ))?)?;
     let device = crate::simulation::tests::device(64)?;
     let mut simulation = Simulation::new(scenario, device.clone())?;
-    reserve_claims(&device, &mut simulation.config, 17)?;
+    claim_work(&device, &mut simulation.config, 17)?;
     let buffers = &simulation.config.railway.freight;
     let capacity = buffers.claim_capacity as u64;
     let parameters = simulation.parameters(
@@ -1335,7 +1338,7 @@ fn disabled_buffered_freight_retry_preserves_all_settlement_buffers_on_gpu() -> 
     ))?)?;
     let device = crate::simulation::tests::device(64)?;
     let mut simulation = Simulation::new(scenario, device.clone())?;
-    reserve_claims(&device, &mut simulation.config, 17)?;
+    claim_work(&device, &mut simulation.config, 17)?;
     let buffers = &simulation.config.railway.freight;
     device.write(&buffers.dispatches, &vec![0; FREIGHT_DISPATCH_WORDS]);
     let parameters = simulation.parameters(
@@ -1576,12 +1579,11 @@ fn buffered_capacity_recovery(initial_capacity: usize, contention: ClaimContenti
     let mut buffered = Simulation::from_state(scenario.clone(), state.clone(), device.clone())?;
     let mut synchronous = Simulation::from_state(scenario, state, device.clone())?;
     let mut limited = device.clone();
-    let resources = (buffered.config.actors + buffered.config.railway.region_count) as usize;
-    let requested = ClaimAllocation::new(initial_capacity as u64, resources)?;
+    let requested = ClaimAllocation::new(initial_capacity as u64, &buffered.config)?;
     limited.memory_budget = crate::simulation::MemoryBudget::Dedicated {
         available_bytes: device.memory_usage().bytes_reserved + requested.bytes(),
     };
-    reserve_claims(&limited, &mut buffered.config, initial_capacity as u64)?;
+    reserve_claims_for_replay(&limited, &mut buffered.config, initial_capacity as u64)?;
     assert_eq!(
         buffered.config.railway.freight.claim_capacity,
         initial_capacity

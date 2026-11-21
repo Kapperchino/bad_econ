@@ -1,9 +1,51 @@
 use super::{
-    Economy, Good, ScenarioConfig,
-    calendar::{CalendarDate, HarvestSeason},
-    enterprise::{Distributor, HouseholdProduction},
+    Economy, Field, Good, ScenarioConfig, State,
+    calendar::{CalendarDate, DAYS_PER_YEAR, HarvestSeason},
+    enterprise::{Distributor, EnterpriseModel, HouseholdProduction},
     prices::StartingPrices,
 };
+
+#[repr(u32)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum HiringTerm {
+    Day = 1,
+    Fortnight = 14,
+    Month = 30,
+    Year = DAYS_PER_YEAR,
+}
+
+impl HiringTerm {
+    pub(super) fn at_firm(state: &State, firm: usize, worker_plots: u64) -> anyhow::Result<Self> {
+        let good = Good::from_index(state.actors.at(firm).kind)?;
+        let model = match state.get(Field::EnterpriseModel, firm) {
+            1 => EnterpriseModel::Distributor,
+            _ => EnterpriseModel::Producer,
+        };
+        Ok(match (model, good, worker_plots) {
+            (EnterpriseModel::Producer, Good::Grain | Good::Flax | Good::Cotton | Good::Dye, 0) => {
+                Self::Year
+            }
+            (EnterpriseModel::Producer, Good::Grain | Good::Flax | Good::Cotton | Good::Dye, _) => {
+                Self::Day
+            }
+            (EnterpriseModel::Producer, Good::Coal, _) => Self::Month,
+            _ => Self::Fortnight,
+        })
+    }
+
+    pub(super) fn opening_days(self, seed: u64, employer: u64) -> u64 {
+        let draw = crate::arithmetic::DrawKey {
+            seed,
+            day: 0,
+            phase: 0,
+            actor: employer,
+            purpose: 4,
+            index: 0,
+        }
+        .draw();
+        1 + draw % self as u64
+    }
+}
 
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub(super) enum InitialSettlement {

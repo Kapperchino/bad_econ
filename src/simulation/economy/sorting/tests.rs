@@ -241,7 +241,6 @@ impl SortCase {
             clock: crate::simulation::parameters::MarketClock::Scalars,
             scan: self.scan,
             empty_orders: crate::simulation::parameters::EmptyOrderMode::Settle,
-            employment_term_days: 31,
             day: self.active as u32,
             matching_round: 0,
             settlement_rotation: self.active as u32,

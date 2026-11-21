@@ -497,9 +497,9 @@ fn inspection_text(display: &Display) -> String {
                 .map(|i| {
                     let detail = match i.actor.kind {
                         0 => format!(
-                            "{} | members {} | fatigue {} | labor {} min\nEmployer {} | gross paid {}\nTax {} | charges {} | payroll reserve {}\nHeating fuel: wood {} | coal {}\nHeat supplied {} / {} | deficit {}",
+                            "{} | members {} | fatigue {} | labor {} min\nEmployer {} | days left in term {}\nGross paid {} | tax {} | charges {} | payroll reserve {}\nHeating fuel: wood {} | coal {}\nHeat supplied {} / {} | deficit {}",
                             i.housing_state.map(|state| format!("{state:?}")).unwrap_or_default(),
-                            i.living_members, i.fatigue, i.available_minutes, i.employer,
+                            i.living_members, i.fatigue, i.available_minutes, i.employer, i.job_days_remaining,
                             i.gross_income, i.income_tax, i.employee_charges, i.payroll_reserve,
                             i.inventory[Good::Wood as usize - 1], i.inventory[Good::Coal as usize - 1],
                             i.heating_served, i.heating_need, i.heating_need.saturating_sub(i.heating_served)

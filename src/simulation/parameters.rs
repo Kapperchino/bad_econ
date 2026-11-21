@@ -30,7 +30,6 @@ pub struct EconomyParameters {
     #[cube(comptime)]
     pub empty_orders: EmptyOrderMode,
     pub day: u32,
-    pub employment_term_days: u32,
     pub matching_round: u32,
     pub settlement_rotation: u32,
     #[cube(comptime)]
@@ -54,7 +53,6 @@ impl EconomyParameters {
             scan: self.scan,
             empty_orders: self.empty_orders,
             day: self.day,
-            employment_term_days: self.employment_term_days,
             matching_round: self.matching_round,
             settlement_rotation: self.settlement_rotation,
             phase: self.phase,

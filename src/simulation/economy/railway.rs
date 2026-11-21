@@ -214,19 +214,19 @@ impl Network {
         std::mem::replace(&mut self.availability, availability)
     }
 
-    pub(in crate::simulation) fn graph_buffers(&self) -> impl Iterator<Item = CubeTensor> {
+    pub(in crate::simulation) fn graph_buffers(&self) -> impl Iterator<Item = &CubeTensor> + Clone {
         [
-            self.stations.clone(),
-            self.access.clone(),
-            self.companies.clone(),
-            self.station_companies.clone(),
-            self.access_rights.clone(),
-            self.segments.clone(),
-            self.materials.clone(),
-            self.routes.clone(),
-            self.quotes.clone(),
-            self.regions.clone(),
-            self.segment_regions.clone(),
+            &self.stations,
+            &self.access,
+            &self.companies,
+            &self.station_companies,
+            &self.access_rights,
+            &self.segments,
+            &self.materials,
+            &self.routes,
+            &self.quotes,
+            &self.regions,
+            &self.segment_regions,
         ]
         .into_iter()
         .chain(self.freight.graph_buffers())

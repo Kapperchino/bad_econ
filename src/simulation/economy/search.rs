@@ -139,7 +139,13 @@ fn prepare(
                 match market {
                     MarketFlag::Labor => {
                         let labor = employment::LaborSearch::new(
-                            state, actors, config, control, parameters, id,
+                            state,
+                            actors,
+                            config,
+                            control,
+                            parameters,
+                            id,
+                            comptime!(employment::LaborRound::FromClock),
                         );
                         chosen = labor.peer;
                         quantity = labor.quantity;
@@ -759,6 +765,12 @@ fn candidate_supply(
                     eligible =
                         eligible && !(self_provision && remaining < minutes && lt(paid, food_cost));
                 }
+                let incumbent = number(state, config, comptime!(Field::Job as u32), id) == firm + 1;
+                let doubled = add_checked(control, score, score);
+                score = ticks(
+                    doubled.extract(LOW_WORD) | u32::cast_from(incumbent),
+                    doubled.extract(HIGH_WORD),
+                );
             } else {
                 let offered = supply.offered;
                 let stocked = minimum(wanted, supply.available);
