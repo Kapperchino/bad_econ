@@ -41,9 +41,9 @@ pub use resources::{ProductionSite, ResourceMap, ResourceRegion};
 pub(crate) use supply::SupplierCacheLayout;
 
 pub const SCENARIO_VERSION: u32 = 2;
-const CHECKPOINT_VERSION: u32 = 26;
-pub const STATE_HASH_VERSION: &str = "bad-econ/state/CubekV2/v29";
-pub const USED_FIELDS: usize = Field::RecoveringMothers as usize + 1;
+const CHECKPOINT_VERSION: u32 = 27;
+pub const STATE_HASH_VERSION: &str = "bad-econ/state/CubekV2/v30";
+pub const USED_FIELDS: usize = Field::CartageCapacity as usize + 1;
 pub const TRANSIT_FIELDS: usize = USED_FIELDS + Good::COUNT;
 pub const CONSUMPTION_FIELDS: usize = TRANSIT_FIELDS + Good::COUNT;
 pub const PRODUCTION_FIELDS: usize = CONSUMPTION_FIELDS + Good::COUNT;
@@ -212,6 +212,11 @@ pub enum Field {
     FemaleOlderAdults,
     FemaleSeniors,
     RecoveringMothers,
+    RoadFreight,
+    CartageMinutes,
+    CartageIncome,
+    CartagePayable,
+    CartageCapacity,
 }
 impl Field {
     pub fn inventory(good: Good) -> Self {
@@ -927,7 +932,8 @@ impl Scenario {
                 });
                 let capacities =
                     std::array::from_fn(|good| match (Good::ALL[good], config.economy) {
-                        (Good::Housing | Good::Railway, _) => 0,
+                        (Good::Housing, _) => 0,
+                        (Good::Railway, _) => railway::DEFAULT_CREW_CAPACITY,
                         (_, Economy::Agrarian) => config.capacity,
                         (_, Economy::Industrial) => (production[good].div_ceil(
                             food::technique(&config, Good::ALL[good])
@@ -1185,7 +1191,7 @@ impl Scenario {
     }
     pub fn fields(&self) -> usize {
         BASE_FIELDS
-            + self.ring() * Good::COUNT
+            + 2 * self.ring() * Good::COUNT
             + self.rail_geography.blocks(self.actors()) * railway::RailCapacityField::COUNT
     }
     pub fn rail_geography(&self) -> &railway::RailGeography {
@@ -1310,8 +1316,16 @@ impl Scenario {
             &self.config.population,
             index.checked_sub(self.population_rows()),
         ) {
-            (Some(population), Some(firm)) => population.firms[firm].technique,
-            _ if self.actor(index).kind == Good::Railway as u32 => Technique::railway(),
+            (Some(population), Some(firm))
+                if population.firms[firm].good != Good::Railway
+                    || population.firms[firm].technique.labor_minutes > 0 =>
+            {
+                population.firms[firm].technique
+            }
+            _ if self.actor(index).kind == Good::Railway as u32 => Technique {
+                labor_minutes: Technique::railway().labor_minutes.min(self.config.work_cap),
+                ..Technique::railway()
+            },
             _ if self.actor(index).kind == Good::Housing as u32 => {
                 Technique::housing(landlords::DEFAULT_HOUSING_UNITS).expect("housing recipe")
             }
@@ -2105,6 +2119,18 @@ impl State {
             ((BASE_FIELDS + (good as usize - 1) * ring + slot) * self.actors.len() + actor) as u32,
         )
     }
+    pub fn cartage_coordinate(
+        &self,
+        good: Good,
+        days: usize,
+        ring: usize,
+        actor: usize,
+    ) -> Coordinate {
+        Coordinate(
+            ((BASE_FIELDS + (Good::COUNT + good as usize - 1) * ring + days) * self.actors.len()
+                + actor) as u32,
+        )
+    }
     pub fn coordinate(&self, field: Field, actor: usize) -> Coordinate {
         Coordinate((field as usize * self.actors.len() + actor) as u32)
     }
@@ -2620,14 +2646,23 @@ impl ObservationSnapshot {
                     )?;
                     Ok(())
                 })?;
+                let mut freight_due = 0;
                 for good in 0..Good::COUNT {
                     let deliveries = (0..scenario.ring()).try_fold(0, |total, slot| {
-                        add(
-                            total,
-                            state.values[state
-                                .shipment_coordinate(Good::ALL[good], slot, scenario.ring(), i)
-                                .0 as usize],
-                        )
+                        let field = BASE_FIELDS + good * scenario.ring() + slot;
+                        let in_transit = state.values[field * state.actors.len() + i];
+                        let awaiting_carriage = state.values
+                            [(field + Good::COUNT * scenario.ring()) * state.actors.len() + i];
+                        let rate = slot as u64
+                            * u64::from(
+                                railway::CART_BILLABLE_MINUTES_PER_UNIT_DAY
+                                    * scenario.config().wage,
+                            );
+                        freight_due = add(
+                            freight_due,
+                            crate::arithmetic::mul(awaiting_carriage, rate)?,
+                        )?;
+                        add(total, add(in_transit, awaiting_carriage)?)
                     })?;
                     match deliveries
                         == state.values[(TRANSIT_FIELDS + good) * state.actors.len() + i]
@@ -2733,7 +2768,10 @@ impl ObservationSnapshot {
                         state.values[(BASE_FIELDS + slot) * state.actors.len() + i],
                     )
                 })?;
-                match in_ring == state.get(Field::Transit, i) {
+                match add(in_ring, state.get(Field::RoadFreight, i))?
+                    == state.get(Field::Transit, i)
+                    && freight_due == state.get(Field::CartagePayable, i)
+                {
                     true => Ok(()),
                     false => Err(anyhow!(
                         "transit ownership audit failed for {}",
@@ -2933,8 +2971,7 @@ impl<'a> AuditedState<'a> {
                         .is_ok()
                 }
                 (kind, _) if kind == Good::Railway as u32 => {
-                    actor.capacity == 0
-                        && state.get(Field::LaborMinutes, i) == 0
+                    (1..=1440).contains(&state.get(Field::LaborMinutes, i))
                         && state.get(Field::FirstInput, i) == 0
                         && state.get(Field::SecondInput, i) == 0
                         && state.get(Field::InputTicks, i) == 0
@@ -2999,6 +3036,7 @@ impl<'a> AuditedState<'a> {
                 (0, 0, 0) => {
                     state.get(Field::Hours, i) == 0
                         && u128::from(state.get(Field::Time, i))
+                            + u128::from(state.get(Field::CartageMinutes, i))
                             + u128::from(state.get(Field::HomeMinutes, i))
                             + u128::from(state.get(Field::ResearchMinutes, i))
                             <= daily_budget
@@ -3027,6 +3065,7 @@ impl<'a> AuditedState<'a> {
                                     == u128::from(labor_minutes) * u128::from(workers)))
                         && u128::from(hours)
                             + u128::from(state.get(Field::Time, i))
+                            + u128::from(state.get(Field::CartageMinutes, i))
                             + u128::from(state.get(Field::HomeMinutes, i))
                             + u128::from(state.get(Field::ResearchMinutes, i))
                             + u128::from(travel) * u128::from(workers)
@@ -3423,7 +3462,7 @@ impl TryFrom<CheckpointDocument> for Checkpoint {
             .get("version")
             .and_then(serde_json::Value::as_u64)
         {
-            Some(23..=25) => (),
+            Some(23..=26) => (),
             Some(version) if version == u64::from(CHECKPOINT_VERSION) => (),
             _ => Err(anyhow!(
                 "unsupported checkpoint format: expected 23 through {CHECKPOINT_VERSION}"
@@ -3444,12 +3483,13 @@ impl TryFrom<CheckpointDocument> for Checkpoint {
             23 => Some(Field::JobDaysRemaining),
             24 => Some(Field::EligibleWorkers),
             25 => Some(Field::Infants),
+            26 => Some(Field::RoadFreight),
             _ => None,
         };
         if let Some(field) = first_missing {
             let count = current.state.actors.len();
             let offset = field as usize * count;
-            match (current.version == 25 || current.scenario.people.is_none())
+            match (current.version >= 25 || current.scenario.people.is_none())
                 && offset <= current.state.values.len()
                 && current.checksum == Self::checksum(&current.scenario, &current.state)?
             {
@@ -3461,7 +3501,35 @@ impl TryFrom<CheckpointDocument> for Checkpoint {
                 .state
                 .values
                 .splice(offset..offset, std::iter::repeat_n(0, missing));
-            if current.scenario.people.is_some() {
+            let ring = current
+                .scenario
+                .search_radius
+                .div_ceil(current.scenario.shipment_speed.max(1))
+                .max(1) as usize
+                + 1;
+            let shipping = Good::COUNT * ring * count;
+            let offset = BASE_FIELDS * count + shipping;
+            match offset <= current.state.values.len() {
+                true => current
+                    .state
+                    .values
+                    .splice(offset..offset, std::iter::repeat_n(0, shipping))
+                    .for_each(drop),
+                false => Err(anyhow!("invalid legacy freight ledger"))?,
+            }
+            for row in 0..count {
+                if current.state.actors.at(row).kind == Good::Railway as u32 {
+                    current.state.actors.capacity[row] = railway::DEFAULT_CREW_CAPACITY;
+                    let minutes = Technique::railway()
+                        .labor_minutes
+                        .min(current.scenario.work_cap);
+                    current.state.set(Field::LaborMinutes, row, minutes.into());
+                    current
+                        .state
+                        .set(Field::BasicLaborMinutes, row, minutes.into());
+                }
+            }
+            if current.version == 25 && current.scenario.people.is_some() {
                 demography::CohortPopulation::from_individuals(
                     &current.scenario,
                     &mut current.state,

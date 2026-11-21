@@ -14,7 +14,7 @@ pub struct Technique {
 impl Technique {
     pub fn railway() -> Self {
         Self {
-            labor_minutes: 0,
+            labor_minutes: 60,
             input_ticks: 0,
             output_ticks: 1,
         }
@@ -35,12 +35,15 @@ impl Technique {
 
     pub fn for_good(self, good: Good) -> Result<Self> {
         match good {
-            Good::Railway => match self == Self::railway() {
-                true => Ok(self),
-                false => Err(anyhow!(
-                    "railways use infrastructure rather than production packets"
-                )),
-            },
+            Good::Railway => {
+                match self.input_ticks == 0 && self.output_ticks == 1 && self.labor_minutes <= 1440
+                {
+                    true => Ok(self),
+                    false => Err(anyhow!(
+                        "railways use infrastructure rather than production packets"
+                    )),
+                }
+            }
             Good::Housing => match self.labor_minutes == 0
                 && (1..=100).contains(&self.input_ticks)
                 && (1..=100).contains(&self.output_ticks)
@@ -163,7 +166,8 @@ impl Population {
                     .binary_search_by_key(&actor.owner, |owner| owner.identity)
                     .is_ok()
                 && match actor.good {
-                    Good::Housing | Good::Railway => actor.capacity == 0,
+                    Good::Housing => actor.capacity == 0,
+                    Good::Railway => actor.capacity <= 10_000,
                     _ => (1..=10_000).contains(&actor.capacity),
                 }
                 && (1..=10_000).contains(&actor.wage)
@@ -237,7 +241,10 @@ impl Population {
                         .households
                         .binary_search_by_key(&seed.owner, |actor| actor.identity)
                         .expect("validated household owner") as u32,
-                    capacity: seed.capacity,
+                    capacity: match (seed.good, seed.capacity) {
+                        (Good::Railway, 0) => super::railway::DEFAULT_CREW_CAPACITY,
+                        _ => seed.capacity,
+                    },
                 }
             }
         }

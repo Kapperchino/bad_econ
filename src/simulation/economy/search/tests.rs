@@ -1223,6 +1223,7 @@ impl GpuPass<DeliveryScoreFixtureInput> for ConfigureDeliveryScore {
                 let base = nodes as usize * crate::domain::railway::RAIL_ROUTE_WORDS;
                 input.config.railway.routes[base] = 50;
                 input.config.railway.routes[base + 2] = 0;
+                input.config.railway.routes[base + 3] = 0;
                 input.config.railway.quotes[(nodes * input.config.ring) as usize] = 0;
             }
         }
@@ -1274,7 +1275,7 @@ fn delivery_score_probe(good: Good, rotation: u32, case: DeliveryScoreCase) -> R
                 Field::Price,
                 first + 1,
                 match case {
-                    DeliveryScoreCase::QuoteWrap => u64::from(u32::MAX - 40),
+                    DeliveryScoreCase::QuoteWrap => u64::from(u32::MAX - 67),
                     _ => 5,
                 },
             );
@@ -2133,9 +2134,9 @@ fn station_access_floor_never_exceeds_selected_route_days_on_gpu() -> Result<()>
         Scenario::industrial(193, 42, Experiment::Transport)?,
         Scenario::new(rail)?,
     ] {
-        let simulation = Simulation::new(scenario, device.clone())?;
+        let mut simulation = Simulation::new(scenario, device.clone())?;
+        simulation.advance()?;
         for stage in [
-            railway::RailStage::Infrastructure,
             railway::RailStage::Access,
             railway::RailStage::Routes,
             railway::RailStage::Quotes,

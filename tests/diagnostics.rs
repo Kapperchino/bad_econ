@@ -54,6 +54,9 @@ fn business_accounts_measure_trading_cash_before_price_changes_and_payouts_on_gp
             closing.get(Field::RentalIncome, index) - opening.get(Field::RentalIncome, index);
         let revenue = match actor.kind {
             kind if kind == Good::Housing as u32 => rent_received,
+            kind if kind == Good::Railway as u32 => {
+                trading.get(Field::RailRevenue, index) + trading.get(Field::CartageIncome, index)
+            }
             _ => trading.get(Field::Sales, index) * trading.get(Field::Price, index),
         };
         assert_eq!(

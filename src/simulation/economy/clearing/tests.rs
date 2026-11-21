@@ -144,9 +144,18 @@ fn direct_goods_buyers_match_event_fields_rejections_and_faults_on_gpu() -> Resu
                     let seller = state.actors.at(peer).position;
                     let distance = buyer.x.abs_diff(seller.x) + buyer.y.abs_diff(seller.y);
                     let days = distance.div_ceil(simulation.config.shipment_speed).max(1);
-                    BASE_FIELDS
-                        + (good as usize - 1) * scenario.ring()
-                        + (parameters.day + days) as usize % scenario.ring()
+                    match distance {
+                        0 => {
+                            BASE_FIELDS
+                                + (good as usize - 1) * scenario.ring()
+                                + (parameters.day + days) as usize % scenario.ring()
+                        }
+                        _ => {
+                            BASE_FIELDS
+                                + (Good::COUNT + good as usize - 1) * scenario.ring()
+                                + days as usize
+                        }
+                    }
                 }
                 4 => TRANSIT_FIELDS + good as usize - 1,
                 5 => Field::Transit as usize,

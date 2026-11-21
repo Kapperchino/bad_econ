@@ -830,6 +830,15 @@ impl Simulation {
                 result?;
                 self.market_result(&mut evidence)?;
                 self.apply_feedback()?;
+                economy::cartage::dispatch(
+                    &self.device,
+                    &self.state,
+                    &self.actors,
+                    &self.config,
+                    &self.control,
+                    self.day as u32,
+                );
+                self.fault_check()?;
                 self.market_replay = MarketReplay::Reusable;
                 Ok(())
             }
@@ -1728,7 +1737,7 @@ impl Simulation {
                 &self.proposals,
             );
         }
-        if phase == Phase::Opening {
+        if phase == Phase::WorkPayment {
             self.railways(economy::railway::RailStage::Infrastructure);
         }
         economy::property::launch(
@@ -2927,6 +2936,10 @@ impl Simulation {
                 subsistence: totals.subsistence.into(),
                 inactive: totals.inactive.into(),
                 rural_employed: totals.rural_employed.into(),
+                transport_workers: totals.transport_workers.into(),
+                cartage_minutes: totals.cartage_minutes.into(),
+                cartage_receipts: totals.cartage_receipts.into(),
+                awaiting_pickup: totals.awaiting_pickup.into(),
                 household_cash: totals.household_cash.into(),
                 active_by_good: totals.active_by_good.map(u64::from),
                 business_types: totals.business_types.map(u64::from),

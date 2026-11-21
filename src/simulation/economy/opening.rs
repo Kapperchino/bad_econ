@@ -99,6 +99,7 @@ fn opening(
                     Field::Shortage as u32,
                     Field::Purchased as u32,
                     Field::Hours as u32,
+                    Field::CartageIncome as u32,
                     Field::HomeMinutes as u32,
                     Field::ResearchMinutes as u32,
                 ] {

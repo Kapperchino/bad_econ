@@ -25,6 +25,14 @@ pub struct EconomyObservation {
     pub inactive: u64,
     #[serde(default)]
     pub rural_employed: u64,
+    #[serde(default)]
+    pub transport_workers: u64,
+    #[serde(default)]
+    pub cartage_minutes: u64,
+    #[serde(default)]
+    pub cartage_receipts: u64,
+    #[serde(default)]
+    pub awaiting_pickup: u64,
     pub household_cash: u64,
     pub active_by_good: [u64; Good::COUNT],
     pub business_types: [u64; 3],
@@ -39,6 +47,25 @@ impl EconomyObservation {
             .iter()
             .enumerate()
             .try_fold(Self::default(), |mut result, (index, actor)| {
+                result.cartage_minutes = add(
+                    result.cartage_minutes,
+                    state.get(Field::CartageMinutes, index),
+                )?;
+                result.cartage_receipts = add(
+                    result.cartage_receipts,
+                    state.get(Field::CartageIncome, index),
+                )?;
+                result.awaiting_pickup =
+                    add(result.awaiting_pickup, state.get(Field::RoadFreight, index))?;
+                let employer = state.get(Field::Employer, index);
+                if employer
+                    .checked_sub(1)
+                    .and_then(|row| state.actors.get(row as usize))
+                    .is_some_and(|firm| firm.kind == Good::Railway as u32)
+                {
+                    result.transport_workers =
+                        add(result.transport_workers, state.get(Field::Employed, index))?;
+                }
                 match actor.kind {
                     0 => {
                         result.household_cash =

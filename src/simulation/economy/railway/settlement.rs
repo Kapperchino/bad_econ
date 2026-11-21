@@ -1289,7 +1289,38 @@ fn commit(input: &mut Input, invocation: u32) {
                 let good = input.parameters.traded_good();
                 let animal = animal_route(&input.actors, &input.config, buyer, seller);
                 let base = BASE_FIELDS as u32 + (good - 1) * input.config.ring;
-                let old_field = base + (input.parameters.day + animal.days) % input.config.ring;
+                let old_field = cartage::waiting_field(&input.config, good, animal.days);
+                let payable = value(
+                    &mut input.state,
+                    &input.config,
+                    comptime!(Field::CartagePayable as u32),
+                    buyer,
+                );
+                let waived = multiply(
+                    &input.control,
+                    amount,
+                    cartage::rate(&input.config, animal.days),
+                );
+                set(
+                    &mut input.state,
+                    &input.config,
+                    comptime!(Field::CartagePayable as u32),
+                    buyer,
+                    minus(payable, waived),
+                );
+                let waiting = value(
+                    &mut input.state,
+                    &input.config,
+                    comptime!(Field::RoadFreight as u32),
+                    buyer,
+                );
+                set(
+                    &mut input.state,
+                    &input.config,
+                    comptime!(Field::RoadFreight as u32),
+                    buyer,
+                    minus(waiting, amount),
+                );
                 let new_field = base + (input.parameters.day + path.days) % input.config.ring;
                 let old = value(&mut input.state, &input.config, old_field, buyer);
                 let new = add_checked(

@@ -119,6 +119,10 @@ impl Metric {
                 sum(Source::Labor, metric - S::WORKFORCE, 0)
             }
             S::RURAL_EMPLOYED => sum(Source::RuralEmployed, Field::Employed as u32, 0),
+            S::TRANSPORT_WORKERS => sum(Source::TransportEmployment, Field::Employed as u32, 0),
+            S::CARTAGE_MINUTES => field(Field::CartageMinutes, NO_ACTOR),
+            S::CARTAGE_RECEIPTS => field(Field::CartageIncome, NO_ACTOR),
+            S::AWAITING_PICKUP => field(Field::RoadFreight, NO_ACTOR),
             S::HOUSEHOLD_CASH => field(Field::Cash, 0),
             S::ACTIVE_BY_GOOD..S::BUSINESS_TYPES => {
                 sum(Source::ActiveFirm, 0, metric - S::ACTIVE_BY_GOOD + 1)
@@ -260,6 +264,7 @@ enum Source {
     PriceSquare,
     PricedFirm,
     RuralEmployed,
+    TransportEmployment,
 }
 
 pub(in crate::simulation) struct AuditBuffers {
@@ -640,6 +645,16 @@ fn summarize_metrics(input: &mut SummaryInput) {
                             ));
                         }
                     }
+                    18 => {
+                        let employer =
+                            number(state, config, comptime!(Field::Employer as u32), actor);
+                        amount *= u64::cast_from(
+                            employer > 0
+                                && employer <= config.actors
+                                && kind(actors, min(max(employer, 1), config.actors) - 1).bits()
+                                    == comptime!(Good::Railway as u32),
+                        );
+                    }
                     17 => {
                         amount *= u64::cast_from(
                             comptime!(config.economy == crate::domain::Economy::Industrial)
@@ -857,9 +872,16 @@ fn validate_ring(
     let mut in_ring = 0u64;
     for slot in 0u32..config.ring {
         let field = BASE_FIELDS as u32 + good * config.ring + slot;
+        let mut waiting = zero();
         let mut amount = zero();
         if comptime!(ring_tracking != RingTracking::ObservedPlane) || actor < config.actors {
             amount = value(state, config, field, actor);
+            waiting = value(
+                state,
+                config,
+                field + Good::COUNT as u32 * config.ring,
+                actor,
+            );
         }
         let block = (field * config.state_stride + actor) * 2
             / crate::simulation::tensor::SNAPSHOT_BLOCK_WORDS as u32;
@@ -877,7 +899,11 @@ fn validate_ring(
             }
             RingTracking::Untracked => (),
         }
-        in_ring = checked_sum(in_ring, native(amount), control);
+        in_ring = checked_sum(
+            checked_sum(in_ring, native(amount), control),
+            native(waiting),
+            control,
+        );
     }
     if in_ring != held {
         KernelFaults::new(comptime!(FaultFlags::TRANSIT_MISMATCH)).record(control);

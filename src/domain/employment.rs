@@ -144,9 +144,10 @@ impl InitialEmployment {
                         let good = super::generated_good(config, firm);
                         let index = good as usize - 1;
                         let actor = config.population_size() as usize + firm;
-                        let (output, capacity) = match retailers.get(&(actor as u64 + 1)) {
-                            Some(store) => (store.units_per_shift, config.capacity),
-                            None => (
+                        let (output, capacity) = match (retailers.get(&(actor as u64 + 1)), good) {
+                            (Some(store), _) => (store.units_per_shift, config.capacity),
+                            (None, Good::Railway) => (1, 0),
+                            (None, _) => (
                                 super::food::technique(config, good).output_ticks,
                                 capacities[index],
                             ),

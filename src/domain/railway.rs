@@ -3,6 +3,11 @@ use anyhow::{Result, anyhow};
 use serde::{Deserialize, Serialize};
 use std::collections::{BTreeMap, BTreeSet};
 
+pub(crate) const DEFAULT_CREW_CAPACITY: u32 = 32;
+pub(crate) const CART_MINUTES_PER_UNIT_DAY: u32 = 2;
+pub(crate) const CART_BILLABLE_MINUTES_PER_UNIT_DAY: u32 = 3;
+pub(crate) const SEGMENTS_PER_CREW: u32 = 4;
+
 pub(crate) const RAIL_ROUTE_WORDS: usize = 6;
 pub(crate) const FREIGHT_RESOURCE_WORDS: usize = 11;
 pub(crate) const FREIGHT_ACCOUNT_WORDS: usize = 9;
@@ -452,7 +457,7 @@ impl RailGeography {
         region: usize,
     ) -> usize {
         let stride = scenario.actors();
-        let base = super::BASE_FIELDS + scenario.ring() * Good::COUNT;
+        let base = super::BASE_FIELDS + 2 * scenario.ring() * Good::COUNT;
         (base + field as usize * self.blocks(stride) + region / stride) * state.actors.len()
             + region % stride
     }

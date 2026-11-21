@@ -34,6 +34,7 @@ use crate::{
 use cubecl::prelude::*;
 pub(super) mod audit;
 pub(super) mod batch;
+pub(super) mod cartage;
 mod clearing;
 mod consumption;
 mod employment;
@@ -172,6 +173,7 @@ fn local(
                 set32(state, config, comptime!(Field::Shortage as u32), id, 0u32);
                 set32(state, config, comptime!(Field::Purchased as u32), id, 0u32);
                 set32(state, config, comptime!(Field::Hours as u32), id, 0u32);
+                set32(state, config, comptime!(Field::CartageIncome as u32), id, 0);
                 set32(
                     state,
                     config,
@@ -206,6 +208,9 @@ fn local(
                         id,
                         rent,
                     );
+                }
+                if k.bits() == comptime!(Good::Railway as u32) {
+                    railway::offer_crew_jobs(state, actors, config, control, id);
                 }
                 if !k.is(comptime!(ActorKind::Household))
                     && k.bits() != comptime!(Good::Housing as u32)
@@ -318,6 +323,26 @@ fn local(
                 }
             }
             Phase::WorkPayment => {
+                set32(
+                    state,
+                    config,
+                    comptime!(Field::CartageMinutes as u32),
+                    id,
+                    0,
+                );
+                if k.bits() == comptime!(Good::Railway as u32) {
+                    let crew = number(state, config, comptime!(Field::Plan as u32), id)
+                        - number(state, config, comptime!(Field::Slots as u32), id);
+                    let shift = number(state, config, comptime!(Field::LaborMinutes as u32), id);
+                    set32(
+                        state,
+                        config,
+                        comptime!(Field::CartageCapacity as u32),
+                        id,
+                        crew * shift,
+                    );
+                    set32(state, config, comptime!(Field::Pipeline as u32), id, 0);
+                }
                 if k.is(comptime!(ActorKind::Household)) {
                     employment::finish_day(state, config, actors, control, id);
                 }
@@ -364,12 +389,26 @@ fn local(
                             kind: comptime!(ObservationKind::Observed as u32),
                             value: multiply(
                                 control,
-                                positive(
-                                    value(state, config, comptime!(Field::GrossIncome as u32), id),
+                                add_checked(
+                                    control,
+                                    positive(
+                                        value(
+                                            state,
+                                            config,
+                                            comptime!(Field::GrossIncome as u32),
+                                            id,
+                                        ),
+                                        value(
+                                            state,
+                                            config,
+                                            comptime!(Field::OpeningGrossIncome as u32),
+                                            id,
+                                        ),
+                                    ),
                                     value(
                                         state,
                                         config,
-                                        comptime!(Field::OpeningGrossIncome as u32),
+                                        comptime!(Field::CartageIncome as u32),
                                         id,
                                     ),
                                 ),
@@ -463,12 +502,14 @@ fn local(
                     let previous_fatigue =
                         number(state, config, comptime!(Field::Fatigue as u32), id);
                     let mut fatigue = min(previous_fatigue + config.work_fatigue, POLICY_SCALE);
-                    if number(state, config, comptime!(Field::Hours as u32), id) == 0u32 {
+                    let work = number(state, config, comptime!(Field::Hours as u32), id)
+                        + number(state, config, comptime!(Field::CartageMinutes as u32), id);
+                    if work == 0 {
                         fatigue =
                             max(previous_fatigue, config.rest_recovery) - config.rest_recovery;
                     }
                     if comptime!(config.household_policy == Feature::Enabled) {
-                        let exertion = number(state, config, comptime!(Field::Hours as u32), id)
+                        let exertion = work
                             + number(state, config, comptime!(Field::ResearchMinutes as u32), id);
                         fatigue = next_fatigue(KernelFatigue {
                             fatigue: previous_fatigue,
@@ -541,18 +582,31 @@ fn local(
                     );
                     let rail_revenue =
                         value(state, config, comptime!(Field::RailRevenue as u32), id);
+                    let cartage_revenue =
+                        value(state, config, comptime!(Field::CartageIncome as u32), id);
                     set(
                         state,
                         config,
                         comptime!(Field::BusinessRevenue as u32),
                         id,
-                        add_checked(control, revenue, rail_revenue),
+                        add_checked(
+                            control,
+                            add_checked(control, revenue, rail_revenue),
+                            cartage_revenue,
+                        ),
                     );
                 }
                 if k.is(comptime!(ActorKind::Household))
                     && comptime!(config.home_mode == Feature::Enabled)
                 {
                     enterprises::household_quote(state, config, control, id);
+                }
+                if k.bits() == comptime!(Good::Railway as u32) {
+                    enterprises::operating_plan(state, actors, config, control, id);
+                    employment::adjust_wage(state, config, id);
+                    if comptime!(config.home_mode == Feature::Enabled) {
+                        enterprises::lifecycle(state, actors, config, control, id, parameters.day);
+                    }
                 }
                 if !k.is(comptime!(ActorKind::Household))
                     && k.bits() != comptime!(Good::Housing as u32)
@@ -1015,6 +1069,15 @@ fn propose(
         search = search
             && number(state, config, comptime!(Field::Time as u32), id)
                 >= select(comptime!(market == MarketFlag::Labor), 1u32, 0);
+        if parameters.traded_good() > 0 {
+            purchasing_power = minimum(
+                purchasing_power,
+                positive(
+                    value(state, config, comptime!(Field::Cash as u32), id),
+                    value(state, config, comptime!(Field::CartagePayable as u32), id),
+                ),
+            );
+        }
         if good > 0 {
             search = search && !equal(wanted, zero()) && !equal(purchasing_power, zero());
         }
@@ -1087,6 +1150,10 @@ fn propose(
                                 };
                                 let quote =
                                     number(state, config, comptime!(Field::Price as u32), firm);
+                                let quote = match comptime!(market) {
+                                    MarketFlag::Labor => quote,
+                                    _ => cartage::delivered_price(config, quote, dist, route.days),
+                                };
                                 let mut inspect = true;
                                 if comptime!(market != MarketFlag::Labor) {
                                     let cash = purchasing_power;
@@ -1625,9 +1692,27 @@ fn construct_route(
                         number(state, config, comptime!(Field::Price as u32), other),
                     );
                     let freight = multiply(control, quantity, route.fee);
-                    let slot = BASE_FIELDS as u32
-                        + (good - 1) * config.ring
-                        + (parameters.day + route.days) % config.ring;
+                    let trip = distance(actors, actor, other);
+                    let slot =
+                        cartage::booking_field(config, good, parameters.day, route.days, trip);
+                    if trip > 0 {
+                        event.transfer(
+                            config,
+                            bundles,
+                            comptime!(Field::CartagePayable as u32),
+                            actor,
+                            zero,
+                            multiply(control, quantity, cartage::rate(config, route.days)),
+                        );
+                        event.transfer(
+                            config,
+                            bundles,
+                            comptime!(Field::RoadFreight as u32),
+                            actor,
+                            zero,
+                            quantity,
+                        );
+                    }
                     event.transfer(
                         config,
                         bundles,
@@ -1877,6 +1962,37 @@ fn summarize(
             ) {
                 KernelFaults::new(comptime!(FaultFlags::UNSETTLED_COMMITMENTS)).record(control);
             }
+            let employer = number(state, config, comptime!(Field::Employer as u32), actor);
+            if employer > 0
+                && employer <= config.actors
+                && kind(actors, max(employer, 1) - 1).bits() == comptime!(Good::Railway as u32)
+            {
+                totals[SummaryLayout::TRANSPORT_WORKERS as usize] = add_checked(
+                    control,
+                    totals[SummaryLayout::TRANSPORT_WORKERS as usize],
+                    value(state, config, comptime!(Field::Employed as u32), actor),
+                );
+            }
+            totals[SummaryLayout::CARTAGE_MINUTES as usize] = add_checked(
+                control,
+                totals[SummaryLayout::CARTAGE_MINUTES as usize],
+                value(
+                    state,
+                    config,
+                    comptime!(Field::CartageMinutes as u32),
+                    actor,
+                ),
+            );
+            totals[SummaryLayout::CARTAGE_RECEIPTS as usize] = add_checked(
+                control,
+                totals[SummaryLayout::CARTAGE_RECEIPTS as usize],
+                value(state, config, comptime!(Field::CartageIncome as u32), actor),
+            );
+            totals[SummaryLayout::AWAITING_PICKUP as usize] = add_checked(
+                control,
+                totals[SummaryLayout::AWAITING_PICKUP as usize],
+                value(state, config, comptime!(Field::RoadFreight as u32), actor),
+            );
             let k = kind(actors, actor);
             match k.bits() {
                 ActorKind::HOUSEHOLD_BITS => {
@@ -2222,6 +2338,16 @@ fn summarize(
                 );
                 let mut in_ring = zero();
                 for slot in 0u32..config.ring {
+                    in_ring = add_checked(
+                        control,
+                        in_ring,
+                        value(
+                            state,
+                            config,
+                            BASE_FIELDS as u32 + (Good::COUNT as u32 + good) * config.ring + slot,
+                            actor,
+                        ),
+                    );
                     in_ring = add_checked(
                         control,
                         in_ring,

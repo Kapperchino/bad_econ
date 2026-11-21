@@ -375,7 +375,7 @@ impl Network {
             ),
             segment_regions: device.tensor(&segment_regions),
             region_count: geography.regions.len() as u32,
-            region_base: (BASE_FIELDS + scenario.ring() * Good::COUNT) as u32,
+            region_base: (BASE_FIELDS + 2 * scenario.ring() * Good::COUNT) as u32,
             region_blocks: geography.blocks(scenario.actors()) as u32,
             initial_actors: scenario.actors() as u32,
             units_per_level: config.units_per_level,
@@ -627,6 +627,46 @@ fn consume(
 }
 
 #[cube]
+pub(super) fn offer_crew_jobs(
+    state: &mut [u32],
+    actors: &[u32],
+    config: &EconomyConfig,
+    control: &[Atomic<u32>],
+    firm: u32,
+) {
+    let built = number(state, config, comptime!(Field::RailBuilt as u32), firm);
+    let mut segments = 0;
+    for index in 0..config.railway.segment_count {
+        let company = config.railway.segments[index as usize * SEGMENT_WORDS + 2];
+        segments +=
+            u32::cast_from(config.railway.companies[company as usize * COMPANY_WORDS] == firm);
+    }
+    let minutes = number(state, config, comptime!(Field::LaborMinutes as u32), firm);
+    let cart_crews = 1 + ceildiv(
+        number(state, config, comptime!(Field::CartageMinutes as u32), firm),
+        max(minutes, 1),
+    );
+    let requested = cart_crews
+        + ceildiv(built, comptime!(crate::domain::railway::SEGMENTS_PER_CREW))
+        + u32::cast_from(segments > built);
+    let limit = actors[ActorLayout::CAPACITY * (actors.len() / ActorLayout::WORDS) + firm as usize];
+    let budget = employment::ShiftBudget::new(state, config, control, firm);
+    let funded = divide(budget.cash, max(budget.pay, 1));
+    let operating = number(
+        state,
+        config,
+        comptime!(Field::EnterpriseStatus as u32),
+        firm,
+    ) == comptime!(crate::domain::enterprise::EnterpriseState::Operating as u32);
+    let jobs = minimum(
+        funded,
+        ticks(select(operating, min(requested, limit), 0), 0),
+    );
+    set(state, config, comptime!(Field::Plan as u32), firm, jobs);
+    set(state, config, comptime!(Field::Slots as u32), firm, jobs);
+}
+
+#[cube]
 fn infrastructure(
     state: &mut [u32],
     actors: &[u32],
@@ -674,14 +714,30 @@ fn infrastructure(
                     comptime!(Field::EnterpriseStatus as u32),
                     firm,
                 ) == comptime!(crate::domain::enterprise::EnterpriseState::Operating as u32);
-            let maintained = active && supplied(state, config, firm, units, 3);
+            let crew = number(state, config, comptime!(Field::Plan as u32), firm)
+                - number(state, config, comptime!(Field::Slots as u32), firm);
+            let upkeep_crew = ceildiv(built, comptime!(crate::domain::railway::SEGMENTS_PER_CREW));
+            let maintained =
+                active && crew >= max(upkeep_crew, 1) && supplied(state, config, firm, units, 3);
             if maintained {
                 consume(state, config, control, firm, units, 3);
             }
-            let build = maintained && next > 0 && supplied(state, config, firm, next, 0);
+            let build = maintained
+                && crew > upkeep_crew
+                && next > 0
+                && supplied(state, config, firm, next, 0);
             if build {
                 consume(state, config, control, firm, next, 0);
             }
+            let rail_crews = select(maintained, upkeep_crew, 0) + u32::cast_from(build);
+            let shift = number(state, config, comptime!(Field::LaborMinutes as u32), firm);
+            set32(
+                state,
+                config,
+                comptime!(Field::CartageCapacity as u32),
+                firm,
+                (crew - rail_crews) * shift,
+            );
             *built_count = built + u32::cast_from(build);
             *service = u32::cast_from(maintained);
             let mut affordable = ticks(config.railway.region_count, 0);
@@ -1208,7 +1264,9 @@ impl FreightRequest {
                     ),
                     1,
                 );
-            let faster = carrier < config.railway.company_count && days < self.animal_days;
+            let faster = carrier < config.railway.company_count
+                && days < self.animal_days
+                && config.railway.routes[base + 3] < cartage::rate(config, self.animal_days);
             result.days = select(faster, days, self.animal_days);
             result.fee = select(faster, config.railway.routes[base + 3], 0);
             result.origin = self.origin;
@@ -1328,7 +1386,9 @@ pub(super) fn delivery_days(config: &EconomyConfig, request: DeliveryRequest) ->
                     1,
                 );
             days = select(
-                carrier < config.railway.company_count && candidate < days,
+                carrier < config.railway.company_count
+                    && candidate < days
+                    && config.railway.routes[base + 3] < cartage::rate(config, days),
                 candidate,
                 days,
             );

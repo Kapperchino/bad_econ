@@ -450,6 +450,17 @@ fn a_founder_buys_materials_and_leaves_an_explicit_cohort_on_gpu() -> Result<()>
     Ok(())
 }
 
+fn legacy_fields(state: &mut State, scenario: &Scenario, first_missing: Field) {
+    let rows = state.actors.len();
+    let shipments = Good::COUNT * scenario.ring();
+    state
+        .values
+        .drain((BASE_FIELDS + shipments) * rows..(BASE_FIELDS + 2 * shipments) * rows);
+    state
+        .values
+        .drain(first_missing as usize * rows..USED_FIELDS * rows);
+}
+
 #[test]
 fn legacy_checkpoints_migrate_and_resume_on_gpu() -> Result<()> {
     use bad_econ::simulation::Simulation;
@@ -465,12 +476,10 @@ fn legacy_checkpoints_migrate_and_resume_on_gpu() -> Result<()> {
         (23, Field::JobDaysRemaining),
         (24, Field::EligibleWorkers),
         (25, Field::Infants),
+        (26, Field::RoadFreight),
     ] {
-        let rows = state.actors.len();
         let mut old_state = state.clone();
-        old_state
-            .values
-            .drain(first_missing as usize * rows..USED_FIELDS * rows);
+        legacy_fields(&mut old_state, &scenario, first_missing);
         let checksum = bad_econ::arithmetic::hex(&Sha256::digest(serde_json::to_vec(&(
             scenario.config(),
             &old_state,
@@ -519,10 +528,7 @@ fn individual_checkpoint_members_resume_as_cohort_counts_on_gpu() -> Result<()> 
     let scenario = Scenario::new(config)?;
     let initial = scenario.initial()?;
     let mut legacy = initial.clone();
-    let rows = legacy.actors.len();
-    legacy
-        .values
-        .drain(Field::Infants as usize * rows..USED_FIELDS * rows);
+    legacy_fields(&mut legacy, &scenario, Field::Infants);
     legacy.next_identity = 1030;
     legacy.people = scenario
         .config()

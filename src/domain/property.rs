@@ -217,6 +217,7 @@ impl PropertyConfig {
                 index,
                 match actor.kind {
                     0 => 0,
+                    kind if kind == Good::Railway as u32 => 0,
                     _ => u64::from(actor.capacity),
                 },
             );
@@ -281,14 +282,14 @@ impl PropertyConfig {
             let mut actor = state.actors.at(site);
             let capacity = match actor.kind {
                 0 => u64::from(actor.capacity),
+                kind if kind == Good::Railway as u32 => u64::from(actor.capacity),
                 _ => {
                     state.get(Field::WorkersPerPlot, site)
                         * state.get(Field::OccupiedPlots, site).max(1)
                 }
             };
             match capacity <= 10_000
-                && (capacity > 0
-                    || matches!(actor.kind, kind if kind == Good::Housing as u32 || kind == Good::Railway as u32))
+                && (capacity > 0 || matches!(actor.kind, kind if kind == Good::Housing as u32))
             {
                 true => actor.capacity = capacity as u32,
                 false => Err(anyhow!("building plots exceed staffing capacity"))?,
@@ -399,8 +400,9 @@ impl PropertySnapshot {
             let capacity = u64::from(actor.capacity) + state.get(Field::PendingCapacity, index);
             let staffing = match actor.kind {
                 0 => workers == 0,
-                kind if kind == Good::Housing as u32 || kind == Good::Railway as u32 => {
-                    workers == 0 && capacity == 0
+                kind if kind == Good::Housing as u32 => workers == 0 && capacity == 0,
+                kind if kind == Good::Railway as u32 => {
+                    workers == 0 && (1..=10_000).contains(&capacity)
                 }
                 _ => workers > 0 && expected <= 10_000 && u128::from(capacity) == expected,
             };

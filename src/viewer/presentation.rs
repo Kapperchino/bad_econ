@@ -360,7 +360,7 @@ fn summary(menu: Menu, s: &ObservationSnapshot) -> String {
             )
         ),
         Menu::Market => format!(
-            "Available stocks    {} goods ticks\nGrain / flour / bread    {} / {} / {}\nHousehold food output    {:?}\nDistributors    {}",
+            "Available stocks    {} goods ticks\nGrain / flour / bread    {} / {} / {}\nHousehold food output    {:?}\nDistributors    {}\nTransport company workers    {}\nCartage receipts    {}\nFreight awaiting pickup    {}",
             number(
                 s.inventories
                     .iter()
@@ -371,7 +371,10 @@ fn summary(menu: Menu, s: &ObservationSnapshot) -> String {
             number(s.inventories[1]),
             number(s.inventories[2]),
             &s.household_production[..3],
-            number(s.distributors)
+            number(s.distributors),
+            number(s.economy.transport_workers),
+            number(s.economy.cartage_receipts),
+            number(s.economy.awaiting_pickup)
         ),
         Menu::Industry => format!(
             "Open business sites    {}\nEntries / closures to date    {} / {}\nResearch attempts / discoveries    {} / {}\nStriking    {}",

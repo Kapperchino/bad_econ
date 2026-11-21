@@ -520,6 +520,12 @@ pub fn step(
                 + get(
                     state,
                     config,
+                    comptime!(Field::CartageMinutes as u32),
+                    household,
+                )
+                + get(
+                    state,
+                    config,
                     comptime!(Field::HomeMinutes as u32),
                     household,
                 );
@@ -647,6 +653,12 @@ pub fn step(
                 household,
             );
             let mut home_remaining = home;
+            let mut cartage_remaining = get(
+                state,
+                config,
+                comptime!(Field::CartageMinutes as u32),
+                household,
+            );
             let mut paid_workers = get(state, config, comptime!(Field::Employed as u32), household);
             let shift = minutes / max(paid_workers, 1);
             let mut delegate = zero();
@@ -672,6 +684,12 @@ pub fn step(
                     let home_work =
                         select(eligible, min(home_remaining, max(capacity, work) - work), 0);
                     home_remaining -= home_work;
+                    let cartage = select(
+                        eligible,
+                        min(cartage_remaining, max(capacity, work) - work - home_work),
+                        0,
+                    );
+                    cartage_remaining -= cartage;
                     let prior = people[base + P::EXPOSURE];
                     let exposure = famine_exposure(prior, deficit, policy.parameters.recovery);
                     people[base + P::EXPOSURE] = exposure;
@@ -684,7 +702,7 @@ pub fn step(
                     );
                     people[base + P::SEX_AND_COLD_EXPOSURE] = sex | (cold_exposure << 1);
                     people[base + P::EMPLOYER] = select(work > 0, employer, 0);
-                    people[base + P::WORK] = work + home_work;
+                    people[base + P::WORK] = work + home_work + cartage;
                     let background = rate(policy.background[group as usize]);
                     let mut occupational = zero();
                     if employer > 0 && work > 0 {
@@ -721,6 +739,22 @@ pub fn step(
                             0,
                         );
                         occupational = plus(occupational, household_risk).value;
+                    }
+                    if cartage > 0 {
+                        occupational = plus(
+                            occupational,
+                            occupation(
+                                policy.occupational
+                                    [comptime!(crate::domain::Good::Railway as usize - 1)],
+                                cartage,
+                                policy.parameters.reference_minutes,
+                                1000,
+                                0,
+                                people[base + P::FATIGUE],
+                                0,
+                            ),
+                        )
+                        .value;
                     }
                     let famine = famine_risk(
                         exposure,

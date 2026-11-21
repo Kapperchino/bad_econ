@@ -595,8 +595,10 @@ fn visit(
                         buyer_access: buyer.access,
                     },
                 );
-                let score = supply.quote + days * config.delivery_penalty;
-                if comptime!(cache_mode == CacheMode::Capture) {
+                let delivered = cartage::delivered_price(config, supply.quote, distance, days);
+                let affordable = !lt(buyer.cash, ticks(delivered, 0));
+                let score = delivered + days * config.delivery_penalty;
+                if comptime!(cache_mode == CacheMode::Capture) && affordable {
                     if score < winner.score {
                         clear_cache(config, cache, buyer.actor, count);
                         winner.summary &= !CACHE_SUMMARY_MASK;
@@ -607,7 +609,7 @@ fn visit(
                         winner.summary = record_word(winner.summary, member / 32);
                     }
                 }
-                if score < winner.score || score == winner.score && preceding {
+                if affordable && (score < winner.score || score == winner.score && preceding) {
                     winner.actor = seller;
                     winner.trip = distance;
                     winner.score = score;
