@@ -124,6 +124,38 @@ pub(super) fn cultivating(config: &EconomyConfig, day: u32) -> bool {
 }
 
 #[cube]
+pub(super) fn funded_shifts(
+    state: &mut [u32],
+    config: &EconomyConfig,
+    control: &[Atomic<u32>],
+    firm: u32,
+    good: u32,
+    day: u32,
+    budget: &employment::ShiftBudget,
+) -> Ticks {
+    let mut funded = divide(budget.cash, budget.pay);
+    if rotated_wheat(config, good)
+        && config.home.harvest_days < 365
+        && cultivating(config, day)
+        && farm(state, config, firm, good)
+    {
+        let rent = times32(config.firm_rent, 365 - elapsed(config, day));
+        let shifts = divide(positive(budget.cash, rent), budget.pay);
+        let units = number(state, config, comptime!(Field::OutputTicks as u32), firm);
+        let standing = value(state, config, comptime!(Field::CropWork as u32), firm);
+        let pace = comptime!(WheatHusbandry::HARVEST_WORK_PER_PACKET);
+        let harvest_batch = units * pace;
+        let committed = divide(standing, harvest_batch);
+        let partial =
+            minus(standing, multiply(control, committed, harvest_batch)).extract(LOW_WORD);
+        let unreserved = minimum(positive(shifts, committed), ticks(u32::MAX, 0)).extract(LOW_WORD);
+        let remaining_work = positive(times32(unreserved, pace), ticks(ceildiv(partial, units), 0));
+        funded = divide(remaining_work, pace + 1);
+    }
+    funded
+}
+
+#[cube]
 pub(super) fn harvesting(config: &EconomyConfig, day: u32) -> bool {
     let phase = stage(config, day);
     phase == comptime!(CropStage::Harvesting as u32)

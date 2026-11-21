@@ -3266,6 +3266,10 @@ impl Simulation {
             self.scenario.fields() * TICK_WORDS,
         )?);
         self.readback_bytes += (values.len() * TICK_BYTES) as u64;
+        let contract_employer = self
+            .metadata
+            .actors
+            .assigned_identity(values[Field::Job as usize]);
         Ok(Inspection {
             railway_business: (self.metadata.actors.at(actor).kind == Good::Railway as u32).then(
                 || railway::RailwayBusiness {
@@ -3318,18 +3322,13 @@ impl Simulation {
             transit: values[Field::Transit as usize],
             fatigue: values[Field::Fatigue as usize],
             job_days_remaining: values[Field::JobDaysRemaining as usize],
-            employer: match values[Field::Employer as usize] {
-                0 => values[Field::Job as usize],
-                employer => employer,
-            }
-            .checked_sub(1)
-            .and_then(|index| {
-                self.metadata
-                    .actors
-                    .get(index as usize)
-                    .map(|actor| actor.identity)
-            })
-            .unwrap_or(0),
+            contract_employer,
+            employer: self
+                .metadata
+                .actors
+                .assigned_identity(values[Field::Employer as usize])
+                .or(contract_employer)
+                .unwrap_or(0),
             owner_identity: self
                 .metadata
                 .actors

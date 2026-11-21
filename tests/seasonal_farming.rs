@@ -29,6 +29,30 @@ fn generated_industrial_wheat_budget_matches_its_land_and_opening_prices_on_gpu(
     Ok(())
 }
 
+#[test]
+fn industrial_workshop_batches_preserve_unit_inputs_and_saved_scenarios_on_gpu() -> Result<()> {
+    let scenario = Scenario::industrial(100, 42, Experiment::Baseline)?;
+    let mut legacy = serde_json::to_value(scenario.config())?;
+    legacy
+        .as_object_mut()
+        .unwrap()
+        .remove("durable_packet_output");
+    let legacy = Scenario::new(serde_json::from_value(legacy)?)?;
+    let device = support::device(64)?;
+    for (scenario, units) in [(scenario, 1), (legacy, 20)] {
+        let state = Simulation::new(scenario, device.clone())?.download()?;
+        let workshop = state
+            .actors
+            .firm_indices()
+            .find(|&firm| state.actors.at(firm).kind == Good::Furniture as u32)
+            .unwrap();
+        assert_eq!(state.get(Field::BasicOutputTicks, workshop), units);
+        assert_eq!(state.get(Field::BasicInputTicks, workshop), units);
+        assert_eq!(state.get(Field::BasicLaborMinutes, workshop), 20);
+    }
+    Ok(())
+}
+
 fn farming_scenario(home: HouseholdProduction) -> Result<Scenario> {
     let mut config = Scenario::baseline(12, 42, Experiment::Concentrated)?
         .config()
@@ -94,6 +118,49 @@ fn farming_scenario(home: HouseholdProduction) -> Result<Scenario> {
             .collect(),
     });
     Scenario::new(config)
+}
+
+#[test]
+fn a_farm_servant_can_work_elsewhere_until_planting_resumes_on_gpu() -> Result<()> {
+    let mut config = farming_scenario(HouseholdProduction::Unavailable)?
+        .config()
+        .clone();
+    config.search_radius = 50;
+    config.behavior.wage_increment = 0;
+    let population = config.population.as_mut().unwrap();
+    for household in &mut population.households[1..] {
+        household.position.x = 100;
+    }
+    let scenario = Scenario::new(config)?;
+    let mut initial = scenario.initial()?;
+    initial.day = 58;
+    let farm = scenario.index_of(13).unwrap();
+    let timber = scenario.index_of(17).unwrap();
+    initial.set(Field::Job, 0, farm as u64 + 1);
+    initial.set(Field::JobDaysRemaining, 0, 180);
+    initial.set(Field::Demand, farm, 100);
+    initial.set(Field::Demand, timber, 100);
+    let device = support::device(64)?;
+    let mut simulation =
+        Simulation::from_checkpoint(Checkpoint::new(&scenario, &initial)?, device.clone())?;
+    simulation.advance()?;
+    let idle = simulation.download()?;
+    assert_eq!(idle.get(Field::Plan, farm), 0);
+    assert_eq!(idle.get(Field::Employer, 0), timber as u64 + 1);
+    assert!(idle.get(Field::GrossIncome, 0) > 0);
+    assert_eq!(idle.get(Field::Job, 0), farm as u64 + 1);
+    assert_eq!(idle.get(Field::JobDaysRemaining, 0), 179);
+    let request = InspectionRequest::new(1, &scenario)?;
+    let worker = simulation.inspect(request.clone())?;
+    assert_eq!(worker, Inspection::from_state(&scenario, &idle, &request)?);
+    assert_eq!(worker.employer, 17);
+    assert_eq!(worker.contract_employer, Some(13));
+    let mut restored = Simulation::from_checkpoint(simulation.checkpoint()?, device)?;
+    restored.advance()?;
+    let planting = restored.download()?;
+    assert_eq!(planting.get(Field::Employer, 0), farm as u64 + 1);
+    assert_eq!(planting.get(Field::JobDaysRemaining, 0), 178);
+    Ok(())
 }
 
 #[test]
@@ -170,6 +237,41 @@ fn wrapped_household_harvest_runs_once_across_new_year_on_gpu() -> Result<()> {
     let following = simulation.download()?;
     assert_eq!(following.get(Field::Grain, 0), 20);
     assert_eq!(following.get(Field::CropWork, 0), 0);
+    Ok(())
+}
+
+#[test]
+fn wheat_farms_keep_enough_payroll_to_reap_what_they_plant_on_gpu() -> Result<()> {
+    let mut config = farming_scenario(HouseholdProduction::Unavailable)?
+        .config()
+        .clone();
+    config.food = Some(FoodPolicy::industrial());
+    config.behavior.wage_increment = 0;
+    let firms = &mut config.population.as_mut().unwrap().firms;
+    firms[0].cash = 60;
+    firms[1].good = Good::Grain;
+    firms[1].cash = 120;
+    let scenario = Scenario::new(config)?;
+    let mut initial = scenario.initial()?;
+    initial.day = 269;
+    for farm in [12, 13] {
+        initial.set(Field::CropWork, farm, 20);
+        initial.set(Field::Demand, farm, 100);
+    }
+    let mut simulation =
+        Simulation::from_checkpoint(Checkpoint::new(&scenario, &initial)?, support::device(64)?)?;
+    simulation.advance()?;
+    let growing = simulation.download()?;
+    assert_eq!(growing.get(Field::Plan, 12), 0);
+    assert_eq!(growing.get(Field::CropWork, 12), 20);
+    assert_eq!(growing.get(Field::CropWork, 13), 30);
+    simulation.advance()?;
+    let harvest = simulation.download()?;
+    for (farm, planted) in [(12, 20), (13, 30)] {
+        assert_eq!(harvest.get(Field::Produced, farm), planted * 365 / 211);
+        assert_eq!(harvest.get(Field::CropWork, farm), 0);
+    }
+    simulation.checkpoint()?.restore()?;
     Ok(())
 }
 

@@ -441,6 +441,8 @@ pub struct ScenarioConfig {
     pub food: Option<food::FoodPolicy>,
     pub capacity: u32,
     pub packet_output: u32,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub durable_packet_output: Option<u32>,
     pub packet_minutes: u32,
     pub work_cap: u32,
     pub reserved_minutes: u32,
@@ -535,6 +537,7 @@ impl ScenarioConfig {
             food: None,
             capacity: 100,
             packet_output: 3,
+            durable_packet_output: None,
             packet_minutes: 360,
             work_cap: 480,
             reserved_minutes: 960,
@@ -655,6 +658,7 @@ impl Scenario {
         };
         config.packet_minutes = 20;
         config.packet_output = 20;
+        config.durable_packet_output = Some(1);
         config.wage = 12;
         config.household_cash = 7
             * (u64::from(config.household_need)
@@ -864,6 +868,9 @@ impl Scenario {
             config.household_need <= 100,
             (1..=10_000).contains(&config.capacity),
             (1..=100).contains(&config.packet_output),
+            config
+                .durable_packet_output
+                .is_none_or(|output| (1..=100).contains(&output)),
             (1..=1440).contains(&config.packet_minutes),
             config.packet_minutes <= config.work_cap,
             config.work_cap <= 1440,
@@ -1833,6 +1840,10 @@ impl ActorRows {
     pub(crate) fn identities(&self) -> &[u64] {
         &self.identity
     }
+    pub(crate) fn assigned_identity(&self, assignment: u64) -> Option<u64> {
+        let index = usize::try_from(assignment.checked_sub(1)?).ok()?;
+        self.identity.get(index).copied()
+    }
     #[cfg(feature = "compute")]
     pub(crate) fn clone_for_growth(&self, additions: usize) -> Self {
         fn column<T: Copy>(values: &[T], capacity: usize) -> Vec<T> {
@@ -2316,6 +2327,7 @@ pub struct Inspection {
     pub transit: u64,
     pub fatigue: u64,
     pub employer: u64,
+    pub contract_employer: Option<u64>,
     #[serde(default)]
     pub job_days_remaining: u64,
     pub owner_identity: u64,
@@ -2358,6 +2370,7 @@ impl Inspection {
             .iter()
             .position(|actor| actor.identity == request.identity)
             .context("unknown actor identity")?;
+        let contract_employer = state.actors.assigned_identity(state.get(Field::Job, index));
         Ok(Self {
             actor: state.actors.at(index),
             railway_business: (state.actors.at(index).kind == Good::Railway as u32).then(|| {
@@ -2411,14 +2424,12 @@ impl Inspection {
             transit: state.get(Field::Transit, index),
             fatigue: state.get(Field::Fatigue, index),
             job_days_remaining: state.get(Field::JobDaysRemaining, index),
-            employer: match state.get(Field::Employer, index) {
-                0 => state.get(Field::Job, index),
-                employer => employer,
-            }
-            .checked_sub(1)
-            .and_then(|employer| state.actors.get(employer as usize))
-            .map(|actor| actor.identity)
-            .unwrap_or(0),
+            contract_employer,
+            employer: state
+                .actors
+                .assigned_identity(state.get(Field::Employer, index))
+                .or(contract_employer)
+                .unwrap_or(0),
             owner_identity: state
                 .actors
                 .at(state.actors.at(index).owner as usize)
@@ -3261,6 +3272,7 @@ impl TryFrom<ScenarioDocument> for ScenarioConfig {
             food: current.food,
             capacity: current.capacity,
             packet_output: current.packet_output,
+            durable_packet_output: current.durable_packet_output,
             packet_minutes: current.packet_minutes,
             work_cap: current.work_cap,
             reserved_minutes: current.reserved_minutes,
@@ -3332,6 +3344,8 @@ struct CurrentScenario {
     pub food: Option<food::FoodPolicy>,
     pub capacity: u32,
     pub packet_output: u32,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub durable_packet_output: Option<u32>,
     pub packet_minutes: u32,
     pub work_cap: u32,
     pub reserved_minutes: u32,

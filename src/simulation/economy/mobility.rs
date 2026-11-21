@@ -39,7 +39,7 @@ impl LocalNeeds {
         let samples = min(length, HOUSEHOLD_SEARCH_SAMPLES);
         let mut needs = LocalNeeds {
             bread: config.maximum_price + 1,
-            coal: config.maximum_price + 1,
+            coal: 2 * config.maximum_price + 1,
             wood: config.maximum_price + 1,
         };
         for sample in 0..samples {
@@ -62,21 +62,19 @@ impl LocalNeeds {
                 ) && trip <= config.search_radius
                     && household_production::offers(state, actors, config, seller, good);
                 let price = number(state, config, comptime!(Field::Price as u32), seller);
-                let days = max(ceildiv(trip, config.shipment_speed), 1);
-                let delivered = price + days * config.delivery_penalty;
                 needs.bread = select(
                     available && price > 0 && good == comptime!(Good::Bread as u32),
-                    min(needs.bread, delivered),
+                    min(needs.bread, price),
                     needs.bread,
                 );
                 needs.coal = select(
                     available && price > 0 && good == comptime!(Good::Coal as u32),
-                    min(needs.coal, delivered),
+                    min(needs.coal, price),
                     needs.coal,
                 );
                 needs.wood = select(
                     available && price > 0 && good == comptime!(Good::Wood as u32),
-                    min(needs.wood, delivered),
+                    min(needs.wood, price),
                     needs.wood,
                 );
             }
@@ -139,6 +137,11 @@ pub(super) fn work_target(
         config.household_rent,
         consumption::consumers(state, config, household),
     );
+    let bread_budget = select(
+        rural,
+        number(state, config, comptime!(Field::FoodPrice as u32), household),
+        config.minimum_price,
+    );
     let minimum_daily = plus(
         times32(
             number(
@@ -147,7 +150,7 @@ pub(super) fn work_target(
                 comptime!(Field::NutritionNeed as u32),
                 household,
             ),
-            config.minimum_price + config.delivery_penalty,
+            bread_budget,
         ),
         rent,
     )
@@ -155,8 +158,8 @@ pub(super) fn work_target(
     let nearby =
         employer > 0 && distance(actors, household, max(employer, 1) - 1) <= config.commute_speed;
     let scheduled = (day + household) % 30 == 0;
-    let needed = !nearby || (rural && scheduled);
-    let sustainable = !rural || lt(minimum_daily, expected);
+    let needed = select(rural, scheduled, !nearby);
+    let sustainable = !rural || (employer > 0 && lt(minimum_daily, expected));
     let fee = select(nearby, 0u32, 100u32);
     let funded = !lt(
         value(state, config, comptime!(Field::Cash as u32), household),
@@ -257,7 +260,7 @@ pub(super) fn work_target(
                 comptime!(Field::NutritionNeed as u32),
                 household,
             ),
-            needs.bread,
+            max(bread_budget, needs.bread),
         );
         let fuel = minimum(
             times32(ceildiv(heat, 2), needs.coal),

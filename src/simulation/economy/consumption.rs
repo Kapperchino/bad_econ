@@ -184,7 +184,7 @@ pub(super) fn budget(
         let daily = add_checked(
             control,
             times32(
-                number(state, config, comptime!(Field::FoodNeed as u32), household),
+                food::reserve_daily(state, config, household),
                 number(state, config, comptime!(Field::FoodPrice as u32), household),
             ),
             times32(config.household_rent, consumers(state, config, household)),

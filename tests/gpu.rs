@@ -166,6 +166,15 @@ fn scarce_work_is_accessible_beyond_the_first_identity_block() -> Result<()> {
         .config()
         .clone();
     config.firms = 3;
+    config.land_access = Some(enterprise::LandAccess {
+        total_plots: 1000,
+        allocations: (1..=1000)
+            .map(|household| enterprise::LandGrant {
+                household,
+                plots: 1,
+            })
+            .collect(),
+    });
     config.distribution_rate = 0;
     config.forecast_weight = 0;
     config.demography.annual_births_per_million_fertile_women = 0;

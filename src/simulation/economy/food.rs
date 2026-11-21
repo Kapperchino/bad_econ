@@ -51,6 +51,16 @@ pub(super) fn minimum_daily(state: &mut [u32], config: &EconomyConfig, household
 }
 
 #[cube]
+pub(super) fn reserve_daily(state: &mut [u32], config: &EconomyConfig, household: u32) -> u32 {
+    match comptime!(config.food_income) {
+        crate::domain::food::FoodIncome::PurchasingPower => minimum_daily(state, config, household),
+        crate::domain::food::FoodIncome::Nominal => {
+            number(state, config, comptime!(Field::FoodNeed as u32), household)
+        }
+    }
+}
+
+#[cube]
 pub(super) fn purchase_daily(
     state: &mut [u32],
     config: &EconomyConfig,

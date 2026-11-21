@@ -42,6 +42,13 @@ struct StandingJob {
     active: bool,
 }
 
+#[repr(u32)]
+enum OutsideWork {
+    NewContract,
+    Unavailable,
+    Temporary,
+}
+
 #[cube]
 impl StandingJob {
     fn load(state: &mut [u32], config: &EconomyConfig, worker: u32) -> Self {
@@ -65,6 +72,29 @@ impl StandingJob {
                 && days > 0
                 && status < comptime!(EnterpriseState::Liquidating as u32),
         }
+    }
+
+    fn outside_work(
+        &self,
+        state: &mut [u32],
+        actors: &[u32],
+        config: &EconomyConfig,
+        control: &[Atomic<u32>],
+    ) -> u32 {
+        let firm = max(self.employer, 1) - 1;
+        let mut work = u32::new(comptime!(OutsideWork::NewContract as i64));
+        if self.active && number(state, config, comptime!(Field::Plan as u32), firm) == 0 {
+            let budget = ShiftBudget::new(state, config, control, firm);
+            let seasonal = config.home.harvest_days < 365
+                && farming::farm(state, config, firm, kind(actors, firm).output());
+            let funded = select(
+                seasonal,
+                comptime!(OutsideWork::Temporary as u32),
+                comptime!(OutsideWork::Unavailable as u32),
+            );
+            work = select(lt(budget.cash, ticks(budget.pay, 0)), work, funded);
+        }
+        work
     }
 }
 
@@ -109,12 +139,9 @@ impl LaborSearch {
             && !retained
             && (!industrial || !rural || parameters.matching_round + 1 == MATCHING_ROUNDS as u32);
         let firm = max(job.employer, 1) - 1;
-        let short_time = if open
-            && job.active
-            && number(state, config, comptime!(Field::Plan as u32), firm) == 0
-        {
-            let budget = ShiftBudget::new(state, config, control, firm);
-            !lt(budget.cash, ticks(budget.pay, 0))
+        let vacancies = if open {
+            job.outside_work(state, actors, config, control)
+                != comptime!(OutsideWork::Unavailable as u32)
         } else {
             false
         };
@@ -122,7 +149,7 @@ impl LaborSearch {
             peer: u32::new(comptime!(i64::from(NO_ACTOR))),
             quantity: zero(),
             trip: 0,
-            vacancies: open && !short_time,
+            vacancies,
         };
         if retained
             && available
@@ -149,11 +176,21 @@ impl LaborSearch {
 }
 
 #[cube]
-pub(super) fn finish_day(state: &mut [u32], config: &EconomyConfig, actors: &[u32], actor: u32) {
+pub(super) fn finish_day(
+    state: &mut [u32],
+    config: &EconomyConfig,
+    actors: &[u32],
+    control: &[Atomic<u32>],
+    actor: u32,
+) {
     let employer = number(state, config, comptime!(Field::Employer as u32), actor);
     let job = StandingJob::load(state, config, actor);
     let living = number(state, config, comptime!(Field::LivingMembers as u32), actor) > 0;
-    let continuing = job.active && (employer == 0 || employer == job.employer);
+    let continuing = job.active
+        && (employer == 0
+            || employer == job.employer
+            || job.outside_work(state, actors, config, control)
+                == comptime!(OutsideWork::Temporary as u32));
     let mut days = select(continuing, job.days, 0);
     if employer > 0 && !continuing {
         let firm = employer - 1;
@@ -182,7 +219,7 @@ pub(super) fn finish_day(state: &mut [u32], config: &EconomyConfig, actors: &[u3
     }
     let remaining = select(living, max(days, 1) - 1, 0);
     let renewal = living && continuing;
-    let current = select(employer > 0, employer, job.employer);
+    let current = select(continuing, job.employer, employer);
     set32(
         state,
         config,
@@ -231,5 +268,42 @@ pub(super) fn payroll_members(actors: &[u32], config: &EconomyConfig, actor: u32
             1,
         ),
         Feature::Disabled => u32::new(1),
+    }
+}
+
+#[cube]
+pub(super) fn adjust_wage(state: &mut [u32], config: &EconomyConfig, firm: u32) {
+    let increment = config.wage_increment;
+    if increment > 0 {
+        let cap = divide(
+            divide(
+                value(state, config, comptime!(Field::Cash as u32), firm),
+                number(state, config, comptime!(Field::LaborMinutes as u32), firm),
+            ),
+            max(
+                number(state, config, comptime!(Field::Plan as u32), firm),
+                1u32,
+            ),
+        );
+        let wage = number(state, config, comptime!(Field::Wage as u32), firm);
+        let unstaffed = number(state, config, comptime!(Field::Slots as u32), firm) > 0;
+        let offered = select(
+            unstaffed,
+            wage + increment,
+            max(wage, increment + MINIMUM_WAGE) - increment,
+        );
+        set32(
+            state,
+            config,
+            comptime!(Field::Wage as u32),
+            firm,
+            min(
+                max(
+                    minimum(ticks(offered, 0u32), cap).extract(LOW_WORD),
+                    MINIMUM_WAGE,
+                ),
+                MAXIMUM_WAGE,
+            ),
+        );
     }
 }

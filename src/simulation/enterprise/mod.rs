@@ -15,7 +15,7 @@ use super::{
 };
 use crate::domain::{
     Field, Good,
-    enterprise::{EnterpriseState, EntrepreneurialInterest},
+    enterprise::{EnterpriseState, EntrepreneurialInterest, EstateStatus},
 };
 use crate::simulation::configuration::{Configuration, EconomyConfig, Feature};
 use burn_wgpu::CubeTensor;
@@ -23,6 +23,23 @@ use cubecl::{CubeDim, prelude::*};
 
 const FORM_HOUSEHOLD: u32 = 0x0100_0001;
 const SEPARATE_OWNER: u32 = 0x0100_0002;
+
+#[cube]
+pub(in crate::simulation) fn founder_shares(
+    state: &mut [u32],
+    actors: &[u32],
+    config: &EconomyConfig,
+    household: u32,
+) -> u32 {
+    let pooled = comptime!(config.cohorts == Feature::Enabled)
+        && actors[ActorLayout::CAPACITY * (actors.len() / ActorLayout::WORDS) + household as usize]
+            > 1;
+    let living = load(
+        state,
+        comptime!(Field::LivingMembers as u32) * config.state_stride + household,
+    );
+    select(pooled, max(living.extract(0usize), 1), 1)
+}
 
 #[derive(CubeType, CubeLaunch)]
 struct ProposalInput {
@@ -153,10 +170,7 @@ fn requests(
             state,
             comptime!(Field::LivingMembers as u32) * config.state_stride + actor,
         );
-        let pooled = comptime!(config.cohorts == Feature::Enabled)
-            && actors[ActorLayout::CAPACITY * (actors.len() / ActorLayout::WORDS) + actor as usize]
-                > 1;
-        let people = select(pooled, max(living.extract(0usize), 1), 1);
+        let people = founder_shares(state, actors, config, actor);
         let capital = divide(cash, people);
         let funded = !lt(capital, ticks(10_000, 0))
             && (comptime!(config.property_mode == Feature::Enabled)
@@ -258,7 +272,12 @@ fn requests(
         if kind > 0 && status == comptime!(EnterpriseState::Liquidating as u32) {
             action = 0x04000000u32;
         }
-        if kind == 0 && living == 0 && (estate == 0 || (estate == 3 && (day + actor) % 30 == 0)) {
+        if kind == 0
+            && living == 0
+            && (estate == comptime!(EstateStatus::Open as u32)
+                || (estate == comptime!(EstateStatus::AwaitingSettlement as u32)
+                    && (day + actor) % 30 == 0))
+        {
             action = 0x05000000u32;
         }
         let pending = load(
@@ -384,7 +403,7 @@ fn requests(
         }
         let ownership_change = (action > 0 && action <= Good::COUNT as u32)
             || (action >> 24 >= 7 && action >> 24 <= 9);
-        if pooled && people > 1 && ownership_change {
+        if people > 1 && ownership_change {
             store(
                 state,
                 comptime!(Field::InvestmentGood as u32) * config.state_stride + actor,
@@ -494,6 +513,7 @@ mod tests {
             .clone();
         config.entrepreneurship.interested_per_mille = 0;
         config.commute_speed = 1;
+        config.delivery_penalty = 10_000;
         config.household_liquidity = HouseholdLiquidity::Uniform;
         config.household_cash = 1_000_000;
         let scenario = Scenario::new(config)?;
@@ -519,10 +539,22 @@ mod tests {
                         .copied()
                         .max_by_key(|&firm| position.distance(initial.actors.at(firm).position))
                         .expect("urban employer");
-                    initial.set(Field::Employer, owner, employer as u64 + 1);
-                    initial.set(Field::Employed, owner, 1);
+                    let rural = owner >= 64;
+                    let employed = !(128..192).contains(&owner);
+                    initial.set(
+                        Field::Employer,
+                        owner,
+                        if employed { employer as u64 + 1 } else { 0 },
+                    );
+                    initial.set(Field::Employed, owner, u64::from(employed));
                     initial.set(Field::LivingMembers, owner, 1);
-                    initial.set(Field::LandPlots, owner, 0);
+                    initial.set(Field::LandPlots, owner, u64::from(rural));
+                    initial.set(Field::IncomeForecast, owner, 4_800_000);
+                    initial.set(
+                        Field::FoodPrice,
+                        owner,
+                        if owner >= 192 { 9_000 } else { 100 },
+                    );
                     initial.set(Field::NutritionNeed, owner, 1);
                     initial.set(Field::HeatingNeed, owner, 2);
                     initial.set(Field::MoveDue, owner, 0);
@@ -595,16 +627,23 @@ mod tests {
                     "day {day}, {supplies:?}"
                 );
                 let values = decode(&values);
-                let movers = (0..scenario.config().households as usize)
-                    .filter(|&owner| {
-                        values[Field::MoveTarget as usize * actual.config.state_stride as usize
-                            + owner]
-                            > 0
-                    })
-                    .count();
+                let start = Field::MoveTarget as usize * actual.config.state_stride as usize;
+                let targets = &values[start..start + scenario.config().households as usize];
+                assert!(targets[128..].iter().all(|&target| target == 0));
+                let farm_moves = (64..128)
+                    .filter(|&owner| targets[owner] > 0)
+                    .collect::<Vec<_>>();
+                assert!(
+                    farm_moves
+                        .iter()
+                        .all(|&owner| (day as usize + owner).is_multiple_of(30))
+                );
                 match supplies {
-                    Supplies::Available => assert!(movers > 0, "day {day}: no viable migration"),
-                    _ => assert_eq!(movers, 0, "day {day}, {supplies:?}"),
+                    Supplies::Available => {
+                        assert!(targets[..64].iter().any(|&target| target > 0));
+                        assert!(!farm_moves.is_empty(), "day {day}");
+                    }
+                    _ => assert!(targets.iter().all(|&target| target == 0)),
                 }
                 let pending = |simulation: &Simulation| {
                     crate::simulation::registry::records::PendingRecords::read(
@@ -982,10 +1021,12 @@ pub(in crate::simulation) fn form_households(
                 );
                 state.set(Field::InvestmentGood, parent, 0);
             }
+            let remaining = state.get(Field::LivingMembers, parent) - 1;
+            state.set(Field::LivingMembers, parent, remaining);
             state.set(
-                Field::LivingMembers,
+                Field::HousingAvailable,
                 parent,
-                state.get(Field::LivingMembers, parent) - 1,
+                state.get(Field::HousingAvailable, parent).min(remaining),
             );
             state.set(Field::Price, household, state.get(Field::Price, parent));
             state.set(
@@ -1121,8 +1162,8 @@ pub(super) fn transitions(
                         Field::EstateSettled,
                         actor,
                         match receiver {
-                            Some(_) => 3,
-                            None => 2,
+                            Some(_) => EstateStatus::AwaitingSettlement as u64,
+                            None => EstateStatus::Unclaimed as u64,
                         },
                     );
                 }
@@ -1155,7 +1196,11 @@ pub(super) fn transitions(
                             EnterpriseState::Closed as u64,
                         ),
                         _ => {
-                            state.set(Field::EstateSettled, actor, 1);
+                            state.set(
+                                Field::EstateSettled,
+                                actor,
+                                EstateStatus::Transferred as u64,
+                            );
                             state.set(Field::InvestmentFirm, actor, 0);
                             let previous = state.actors.at(actor).identity;
                             let successor = state.actors.at(receiver).identity;

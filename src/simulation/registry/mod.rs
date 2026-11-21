@@ -339,7 +339,10 @@ fn transition(
                 store(
                     state,
                     comptime!(Field::EstateSettled as u32) * config.state_stride + actor,
-                    ticks(2, 0),
+                    ticks(
+                        comptime!(crate::domain::enterprise::EstateStatus::Unclaimed as u32),
+                        0,
+                    ),
                 );
             }
         }

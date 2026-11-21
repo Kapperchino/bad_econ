@@ -109,5 +109,77 @@ fn input_quotes_ignore_empty_and_distant_suppliers_on_gpu() -> Result<()> {
     simulation.advance()?;
     let state = simulation.download()?;
     assert_eq!(state.get(Field::FirstInputCost, 2), 100);
+    assert_eq!(state.get(Field::Plan, 2), 0);
+    assert_eq!(state.get(Field::Wage, 2), 1000);
+    Ok(())
+}
+
+#[test]
+fn an_empty_bakery_reprices_and_restarts_from_zero_demand_on_gpu() -> Result<()> {
+    let mut config = pricing_config()?;
+    config.economy = Economy::Industrial;
+    config.behavior.price_response = 1000;
+    config.shipment_speed = config.map_size;
+    let population = config.population.as_mut().unwrap();
+    population.households[0].cash = 400;
+    population.households[0].inventories = Good::food([0, 0, 2]);
+    for firm in &mut population.firms {
+        firm.cash = 1000;
+        firm.wage = 2;
+        firm.price = 2;
+    }
+    population.firms[2].inventories = [0; Good::COUNT];
+    population.firms[2].price = 9000;
+    let scenario = Scenario::new(config)?;
+    let bakery = scenario.index_of(4).unwrap();
+    let mut initial = scenario.initial()?;
+    initial.set(Field::Demand, bakery, 0);
+    let mut simulation =
+        Simulation::from_checkpoint(Checkpoint::new(&scenario, &initial)?, support::device(64)?)?;
+    simulation.advance()?;
+    let opening = simulation.download()?;
+    assert_eq!(opening.get(Field::Demand, bakery), 0);
+    assert!(opening.get(Field::Price, bakery) < 400);
+    assert_eq!(opening.get(Field::Transit, bakery), 25);
+    let mut receipts = 0;
+    for _ in 0..6 {
+        simulation.advance()?;
+        receipts += simulation.snapshot.economy.accounts[Good::Bread as usize - 1].revenue;
+    }
+    let state = simulation.download()?;
+    assert!(state.get(Field::Produced, bakery) >= 64);
+    assert!(receipts > 0);
+    assert_eq!(simulation.snapshot.cash, initial.initial_cash);
+    simulation.checkpoint()?.restore()?;
+    Ok(())
+}
+
+#[test]
+fn a_mill_with_surplus_flour_preserves_working_capital_on_gpu() -> Result<()> {
+    let mut config = pricing_config()?;
+    config.economy = Economy::Industrial;
+    config.behavior.price_response = 1000;
+    let population = config.population.as_mut().unwrap();
+    population.firms[0].price = 31;
+    population.firms[1].cash = 100_000;
+    population.firms[1].wage = 2;
+    population.firms[1].price = 12;
+    population.firms[1].inventories[Good::Grain as usize - 1] = 25;
+    let scenario = Scenario::new(config)?;
+    let mill = scenario.index_of(3).unwrap();
+    let bakery = scenario.index_of(4).unwrap();
+    let mut initial = scenario.initial()?;
+    initial.set(Field::Demand, mill, 20);
+    initial.set(Field::FirstInputCost, mill, 80);
+    initial.set(Field::Demand, bakery, 0);
+    let mut simulation =
+        Simulation::from_checkpoint(Checkpoint::new(&scenario, &initial)?, support::device(64)?)?;
+    simulation.advance()?;
+    let state = simulation.download()?;
+    assert_eq!(state.get(Field::Price, mill), 12);
+    assert_eq!(state.get(Field::Grain, mill), 25);
+    assert_eq!(state.get(Field::FirstInputCost, mill), 80);
+    assert_eq!(state.get(Field::Transit, mill), 0);
+    assert_eq!(state.get(Field::Cash, mill), 100_000);
     Ok(())
 }

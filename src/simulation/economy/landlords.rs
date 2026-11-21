@@ -352,12 +352,21 @@ fn receipts(
             tenant,
             0,
         );
-        households += rental_units(state, actors, config, tenant);
-        served += number(
+        let occupants = rental_units(state, actors, config, tenant);
+        let allocated = number(
             state,
             config,
             comptime!(Field::HousingAvailable as u32),
             tenant,
+        );
+        households += occupants;
+        served += allocated;
+        set32(
+            state,
+            config,
+            comptime!(Field::HousingAvailable as u32),
+            tenant,
+            min(occupants, allocated),
         );
         entry += CUBE_DIM;
     }
@@ -655,10 +664,27 @@ mod tests {
             initial.set(Field::OutputTicks, firm, u64::from(capacity));
             let state = device.tensor(bytemuck::cast_slice(&encode(&initial.values)));
             let control = device.tensor(&[0; CONTROL_WORDS]);
-            for phase in [Phase::Observation, Phase::AccountsDecisions] {
-                launch(&device, &state, &actors, &config, &control, phase);
-            }
             let mut actual = initial.clone();
+            launch(
+                &device,
+                &state,
+                &actors,
+                &config,
+                &control,
+                Phase::Observation,
+            );
+            actual.values = decode(&device.read(&state)?);
+            let departed = eligible[0];
+            actual.set(Field::LivingMembers, departed, 0);
+            device.write(&state, bytemuck::cast_slice(&encode(&actual.values)));
+            launch(
+                &device,
+                &state,
+                &actors,
+                &config,
+                &control,
+                Phase::AccountsDecisions,
+            );
             actual.values = decode(&device.read(&state)?);
             FaultFlags::read(&device.read(&control)?)?.into_result()?;
             let housed = eligible
@@ -669,7 +695,7 @@ mod tests {
             for &tenant in &account.tenants {
                 assert_eq!(
                     actual.get(Field::HousingAvailable, tenant),
-                    u64::from(housed.contains(&tenant))
+                    u64::from(housed.contains(&tenant) && tenant != departed)
                 );
                 assert_eq!(actual.get(Field::Landlord, tenant), firm as u64 + 1);
                 assert_eq!(actual.get(Field::RentPending, tenant), 0);
@@ -690,11 +716,11 @@ mod tests {
                 actual.get(Field::RentalIncome, firm),
                 initial.get(Field::RentalIncome, firm) + payments
             );
-            assert_eq!(actual.get(Field::Demand, firm), eligible.len() as u64);
+            assert_eq!(actual.get(Field::Demand, firm), eligible.len() as u64 - 1);
             assert_eq!(actual.get(Field::Sales, firm), housed.len() as u64);
             assert_eq!(
                 actual.get(Field::Unfilled, firm),
-                (eligible.len() - housed.len()) as u64
+                (eligible.len() - 1).saturating_sub(housed.len()) as u64
             );
         }
         let mut overflow = initial.clone();

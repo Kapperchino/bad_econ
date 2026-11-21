@@ -353,7 +353,7 @@ fn farmer_and_worker_sizes_preserve_people_and_opening_resources_on_gpu() -> Res
 }
 
 #[test]
-fn a_funded_founder_leaves_an_explicit_cohort_on_gpu() -> Result<()> {
+fn a_founder_buys_materials_and_leaves_an_explicit_cohort_on_gpu() -> Result<()> {
     use bad_econ::simulation::Simulation;
     let mut config = Scenario::for_people(
         11,
@@ -372,7 +372,6 @@ fn a_funded_founder_leaves_an_explicit_cohort_on_gpu() -> Result<()> {
     let seeds = (1..=11)
         .map(|identity| {
             let mut inventories = Good::food([0, 0, 1000]);
-            inventories[Good::Tools as usize - 1] = 8;
             inventories[Good::Wood as usize - 1] = 100;
             HouseholdSeed {
                 identity,
@@ -383,10 +382,12 @@ fn a_funded_founder_leaves_an_explicit_cohort_on_gpu() -> Result<()> {
             }
         })
         .collect();
-    let firms = [Good::Grain, Good::Flour, Good::Bread]
+    let firms = [Good::Grain, Good::Flour, Good::Bread, Good::Tools]
         .into_iter()
         .enumerate()
         .map(|(index, good)| {
+            let mut stock = Good::food([1000, 1000, 1000]);
+            stock[good as usize - 1] = 1000;
             Ok(FirmSeed {
                 identity: 100 + index as u64,
                 owner: 11,
@@ -394,13 +395,14 @@ fn a_funded_founder_leaves_an_explicit_cohort_on_gpu() -> Result<()> {
                 good,
                 cash: 100_000,
                 capacity: 4,
-                inventories: Good::food([1000, 1000, 1000]),
+                inventories: stock,
                 technique: Technique::new(30, u32::from(good != Good::Grain), 10)?,
                 wage: 1,
                 price: if good == Good::Bread { 500 } else { 10 },
             })
         })
         .collect::<Result<Vec<_>>>()?;
+    config.firms = firms.len() as u32;
     config.population = Some(Population {
         households: seeds,
         firms,
@@ -416,6 +418,13 @@ fn a_funded_founder_leaves_an_explicit_cohort_on_gpu() -> Result<()> {
     initial.set(Field::InvestmentGood, 0, 1);
     let mut sim =
         Simulation::from_checkpoint(Checkpoint::new(&scenario, &initial)?, support::device(64)?)?;
+    sim.advance()?;
+    let ordered = sim.download()?;
+    assert_eq!(ordered.get(Field::Tools, 0), 0);
+    assert_eq!(
+        ordered.values[(TRANSIT_FIELDS + Good::Tools as usize - 1) * ordered.actors.len()],
+        20
+    );
     sim.advance()?;
     let separated = sim.download()?;
     let founder = separated

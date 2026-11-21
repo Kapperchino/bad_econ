@@ -3,6 +3,15 @@ use anyhow::{Result, anyhow};
 use serde::{Deserialize, Serialize};
 
 #[repr(u32)]
+#[derive(Clone, Copy)]
+pub(crate) enum EstateStatus {
+    Open,
+    Transferred,
+    Unclaimed,
+    AwaitingSettlement,
+}
+
+#[repr(u32)]
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum EntrepreneurialInterest {
     Uninterested,

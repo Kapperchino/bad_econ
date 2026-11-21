@@ -244,7 +244,7 @@ fn local(
                         number(state, config, comptime!(Field::OutputTicks as u32), id),
                     );
                     let mut planned = minimum(
-                        quotient,
+                        maximum(quotient, trial_packet(state, config, id, k.output())),
                         ticks(
                             actors[ActorLayout::GEOGRAPHIC_CAPACITY
                                 * (actors.len() / ActorLayout::WORDS)
@@ -270,7 +270,15 @@ fn local(
                         }
                     }
                     let budget = employment::ShiftBudget::new(state, config, control, id);
-                    let funded = divide(budget.cash, budget.pay);
+                    let funded = farming::funded_shifts(
+                        state,
+                        config,
+                        control,
+                        id,
+                        k.output(),
+                        parameters.day,
+                        &budget,
+                    );
                     planned = minimum(planned, funded);
                     let distributor =
                         number(state, config, comptime!(Field::EnterpriseModel as u32), id) == 1;
@@ -311,7 +319,7 @@ fn local(
             }
             Phase::WorkPayment => {
                 if k.is(comptime!(ActorKind::Household)) {
-                    employment::finish_day(state, config, actors, id);
+                    employment::finish_day(state, config, actors, control, id);
                 }
                 if number(state, config, comptime!(Field::EnterpriseModel as u32), id) == 1 {
                     let services = value(state, config, comptime!(Field::Pipeline as u32), id);
@@ -616,37 +624,7 @@ fn local(
                     set(state, config, comptime!(Field::Demand as u32), id, demand);
                     enterprises::operating_plan(state, actors, config, control, id);
 
-                    let cap = divide(
-                        divide(
-                            value(state, config, comptime!(Field::Cash as u32), id),
-                            number(state, config, comptime!(Field::LaborMinutes as u32), id),
-                        ),
-                        max(
-                            number(state, config, comptime!(Field::Plan as u32), id),
-                            1u32,
-                        ),
-                    );
-                    let wage = number(state, config, comptime!(Field::Wage as u32), id);
-                    let unstaffed = number(state, config, comptime!(Field::Slots as u32), id) > 0;
-                    let increment = config.wage_increment;
-                    let offered = select(
-                        unstaffed,
-                        wage + increment,
-                        max(wage, increment + MINIMUM_WAGE) - increment,
-                    );
-                    set32(
-                        state,
-                        config,
-                        comptime!(Field::Wage as u32),
-                        id,
-                        min(
-                            max(
-                                minimum(ticks(offered, 0u32), cap).extract(LOW_WORD),
-                                MINIMUM_WAGE,
-                            ),
-                            MAXIMUM_WAGE,
-                        ),
-                    );
+                    employment::adjust_wage(state, config, id);
                 }
             }
             _ => {}
@@ -658,6 +636,32 @@ fn local(
 struct InputDemand {
     search: bool,
     wanted: Ticks,
+}
+
+#[cube]
+fn trial_packet(state: &mut [u32], config: &EconomyConfig, firm: u32, good: u32) -> Ticks {
+    let empty = comptime!(
+        config.economy == crate::domain::Economy::Industrial
+            && config.home_mode == Feature::Enabled
+    ) && number(
+        state,
+        config,
+        comptime!(Field::EnterpriseModel as u32),
+        firm,
+    ) == 0
+        && number(
+            state,
+            config,
+            comptime!(Field::EnterpriseStatus as u32),
+            firm,
+        ) == comptime!(crate::domain::enterprise::EnterpriseState::Operating as u32)
+        && !farming::farm(state, config, firm, good)
+        && equal(value(state, config, good, firm), zero())
+        && equal(
+            value(state, config, comptime!(Field::Pipeline as u32), firm),
+            zero(),
+        );
+    ticks(u32::cast_from(empty), 0)
 }
 
 #[cube]
@@ -717,9 +721,18 @@ impl InputDemand {
             );
             let capacity =
                 actors[ActorLayout::CAPACITY * (actors.len() / ActorLayout::WORDS) + id as usize];
+            let profitable = comptime!(config.economy != crate::domain::Economy::Industrial)
+                || config.price_response == 0
+                || pricing::covers_batch(state, config, control, id, k.output());
             wanted = multiply(
                 control,
-                minimum(packets, times32(capacity, horizon)),
+                minimum(
+                    maximum(
+                        select(profitable, packets, zero()),
+                        trial_packet(state, config, id, k.output()),
+                    ),
+                    times32(capacity, horizon),
+                ),
                 number(state, config, comptime!(Field::InputTicks as u32), id),
             );
         }
@@ -746,7 +759,11 @@ impl InputDemand {
             && (good == comptime!(Good::Tools as u32) || good == comptime!(Good::Wood as u32))
         {
             search = true;
-            wanted = ticks(select(good == comptime!(Good::Tools as u32), 2u32, 5u32), 0);
+            let members = crate::simulation::enterprise::founder_shares(state, actors, config, id);
+            wanted = times32(
+                members,
+                select(good == comptime!(Good::Tools as u32), 2u32, 5u32),
+            );
         }
         if !k.is(comptime!(ActorKind::Household))
             && comptime!(
@@ -896,7 +913,7 @@ fn propose(
                         && (until_due <= config.coverage + config.ring
                             || consumption::scaled_luxury(config, good));
                     let reserve = ticks(
-                        number(state, config, comptime!(Field::FoodNeed as u32), id)
+                        food::reserve_daily(state, config, id)
                             * (config.coverage + config.ring - 1),
                         0,
                     );
@@ -972,9 +989,15 @@ fn propose(
                         config.distribution_rate,
                         POLICY_SCALE,
                     );
-                    if !equal(quantity, ticks(0u32, 0u32)) {
-                        chosen = actors[ActorLayout::OWNER * (actors.len() / ActorLayout::WORDS)
-                            + id as usize];
+                    let owner = actors
+                        [ActorLayout::OWNER * (actors.len() / ActorLayout::WORDS) + id as usize];
+                    let estate =
+                        number(state, config, comptime!(Field::EstateSettled as u32), owner);
+                    if !equal(quantity, zero())
+                        && estate
+                            != comptime!(crate::domain::enterprise::EstateStatus::Unclaimed as u32)
+                    {
+                        chosen = owner;
                     }
                 }
             }

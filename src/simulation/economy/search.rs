@@ -212,7 +212,7 @@ fn prepare(
                                             == crate::domain::food::FoodIncome::PurchasingPower
                                     ));
                             let reserve = ticks(
-                                number(state, config, comptime!(Field::FoodNeed as u32), id)
+                                food::reserve_daily(state, config, id)
                                     * (config.coverage + config.ring - 1),
                                 0,
                             );

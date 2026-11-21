@@ -163,13 +163,17 @@ impl FarmLand {
 }
 
 pub(super) fn technique(config: &ScenarioConfig, good: Good) -> Technique {
+    let output_ticks = match good.consumption_interval() {
+        2.. => config.durable_packet_output.unwrap_or(config.packet_output),
+        _ => config.packet_output,
+    };
     let base = Technique {
         labor_minutes: config.packet_minutes,
         input_ticks: match good.inputs()[0] {
             None => 0,
-            Some(_) => config.packet_output,
+            Some(_) => output_ticks,
         },
-        output_ticks: config.packet_output,
+        output_ticks,
     };
     match (config.food, good) {
         (Some(food), Good::Grain) if food.commercial_wheat == WheatHusbandry::NorfolkFourCourse => {

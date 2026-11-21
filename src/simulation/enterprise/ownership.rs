@@ -1,4 +1,4 @@
-use crate::domain::{Field, Good, State};
+use crate::domain::{Field, Good, State, enterprise::EstateStatus};
 use crate::simulation::configuration::{Configuration, EconomyConfig};
 use crate::simulation::layout::ActorLayout;
 use crate::simulation::{
@@ -55,6 +55,7 @@ struct DistributionShare {
 
 pub(in crate::simulation) struct OwnershipRuntime {
     shares: CubeTensor,
+    beneficiaries: CubeTensor,
     offsets: CubeTensor,
     entries: CubeTensor,
     payments: CubeTensor,
@@ -114,6 +115,12 @@ impl OwnershipRuntime {
         Ok(Self {
             payments: device.empty(shares.len().max(1) * 2),
             shares: device.tensor(bytemuck::cast_slice(&shares)),
+            beneficiaries: device.tensor(
+                &accounts
+                    .iter()
+                    .map(|account| account.household as u32)
+                    .collect::<Vec<_>>(),
+            ),
             offsets: device.tensor(&offsets),
             entries: device.tensor(&entries),
             control: device.tensor(&[0; 4]),
@@ -135,6 +142,7 @@ impl OwnershipRuntime {
                 actors: actors.buffer_arg(),
                 config: config.launch(),
                 shares: self.shares.buffer_arg(),
+                beneficiaries: self.beneficiaries.buffer_arg(),
                 payments: self.payments.buffer_arg(),
                 control: self.control.buffer_arg(),
             },
@@ -162,6 +170,7 @@ struct PaymentInput {
     actors: Box<[u32]>,
     config: EconomyConfig,
     shares: Box<[Vector<u32, Const<2>>]>,
+    beneficiaries: Box<[u32]>,
     payments: Box<[Ticks]>,
     control: Box<[Atomic<u32>]>,
 }
@@ -202,6 +211,7 @@ impl GpuPass<PaymentInput> for CalculatePayments {
             &input.actors,
             &input.config,
             &input.shares,
+            &input.beneficiaries,
             &mut input.payments,
             &input.control,
         );
@@ -231,6 +241,7 @@ fn payments(
     actor_rows: &[u32],
     config: &EconomyConfig,
     shares: &[Vector<u32, Const<2>>],
+    beneficiaries: &[u32],
     payments: &mut [Ticks],
     control: &[Atomic<u32>],
 ) {
@@ -255,7 +266,14 @@ fn payments(
         amount.faults.record(control);
         let payment = ratio(amount.value, units, 1_000_000);
         payment.faults.record(control);
-        payments[index] = payment.value;
+        let beneficiary = beneficiaries[index];
+        let estate = state
+            [(comptime!(Field::EstateSettled as u32) * config.state_stride + beneficiary) as usize];
+        payments[index] = select(
+            estate.extract(0usize) == comptime!(EstateStatus::Unclaimed as u32),
+            zero(),
+            payment.value,
+        );
     }
 }
 
@@ -346,7 +364,12 @@ fn original_distribute(
                 let owner = shares[cursor];
                 let units = shares[cursor + 1];
                 cursor += 2;
-                let payment = ratio(amount.value, units, 1_000_000);
+                let estate = load(
+                    state,
+                    comptime!(Field::EstateSettled as u32) * config.state_stride + owner,
+                );
+                let eligible = estate.extract(0usize) != comptime!(EstateStatus::Unclaimed as u32);
+                let payment = ratio(select(eligible, amount.value, zero()), units, 1_000_000);
                 payment.faults.record(control);
                 let prior = load(
                     state,
@@ -432,6 +455,8 @@ mod tests {
             initial.set(Field::Cash, actor, (1 << 40) + actor as u64 * 101);
             initial.set(Field::OperatingReserve, actor, (actor as u64 % 3) << 40);
         }
+        initial.set(Field::EstateSettled, 2, EstateStatus::Unclaimed as u64);
+        initial.set(Field::LivingMembers, 2, 0);
         let workgroup = 64;
         let mut initial = initial.clone();
         if workgroup >= 128 {

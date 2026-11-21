@@ -86,7 +86,7 @@ pub(super) fn collect(
             let mut available = cash;
             if comptime!(tenants == Tenants::Households) {
                 let reserve = times32(
-                    number(state, config, comptime!(Field::FoodNeed as u32), actor),
+                    food::reserve_daily(state, config, actor),
                     config.coverage + config.ring - 1,
                 );
                 let food = add_checked(
@@ -378,6 +378,7 @@ mod tests {
             .config()
             .clone();
         config.firms = 4;
+        config.food = Some(crate::domain::food::FoodPolicy::industrial());
         config.rent = Some(RentPolicy {
             household_daily: 60,
             firm_daily: 60,
@@ -387,13 +388,14 @@ mod tests {
         for case in &cases {
             initial.set(Field::HousingAvailable, case.actor, 1);
             initial.set(Field::LivingMembers, case.actor, case.living);
-            initial.set(Field::FoodNeed, case.actor, case.living);
+            initial.set(Field::NutritionNeed, case.actor, case.living);
+            initial.set(Field::FoodNeed, case.actor, case.living * 10);
             initial.set(Field::LandPlots, case.actor, case.land);
             initial.set(Field::EnterpriseStatus, case.actor, case.status as u64);
             initial.set(Field::Cash, case.actor, case.cash);
             initial.set(Field::RentArrears, case.actor, case.arrears);
             initial.set(Field::RentTreasury, case.actor, 1 << 32);
-            let food = initial.get(Field::FoodNeed, case.actor)
+            let food = initial.get(Field::NutritionNeed, case.actor)
                 * (u64::from(scenario.config().coverage) + scenario.ring() as u64 - 1);
             let stock = match case.actor {
                 1 => food - 1,

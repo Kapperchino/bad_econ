@@ -8,6 +8,14 @@ enum InventoryPolicy {
     Seasonal,
 }
 
+#[repr(u32)]
+enum QuoteRule {
+    Inventory,
+    DiscountToCost,
+    CostPlusMargin,
+    Scarcity,
+}
+
 #[derive(CubeType)]
 struct PacketCost {
     cost: Ticks,
@@ -83,6 +91,55 @@ impl PacketCost {
 }
 
 #[cube]
+pub(super) fn covers_batch(
+    state: &mut [u32],
+    config: &EconomyConfig,
+    control: &[Atomic<u32>],
+    firm: u32,
+    good: u32,
+) -> bool {
+    let revenue = times32(
+        number(state, config, comptime!(Field::Price as u32), firm),
+        number(state, config, comptime!(Field::OutputTicks as u32), firm),
+    );
+    !lt(
+        revenue,
+        PacketCost::new(state, config, control, firm, good).cost,
+    )
+}
+
+#[cube]
+fn quote_rule(state: &mut [u32], config: &EconomyConfig, firm: u32, excess: Ticks) -> u32 {
+    if equal(excess, zero()) {
+        let no_orders = equal(
+            value(state, config, comptime!(Field::Sales as u32), firm),
+            zero(),
+        ) && equal(
+            value(state, config, comptime!(Field::Unfilled as u32), firm),
+            zero(),
+        );
+        select(
+            no_orders,
+            comptime!(QuoteRule::CostPlusMargin as u32),
+            comptime!(QuoteRule::Scarcity as u32),
+        )
+    } else {
+        let manufacturer = number(state, config, comptime!(Field::FirstInput as u32), firm) > 0
+            && number(
+                state,
+                config,
+                comptime!(Field::EnterpriseStatus as u32),
+                firm,
+            ) == comptime!(EnterpriseState::Operating as u32);
+        select(
+            manufacturer,
+            comptime!(QuoteRule::DiscountToCost as u32),
+            comptime!(QuoteRule::Inventory as u32),
+        )
+    }
+}
+
+#[cube]
 pub(super) fn response(
     state: &mut [u32],
     config: &EconomyConfig,
@@ -93,13 +150,18 @@ pub(super) fn response(
     inventory_response: u32,
 ) -> u32 {
     let mut response = inventory_response;
+    let repricing = quote_rule(state, config, firm, excess);
     if comptime!(config.economy == crate::domain::Economy::Industrial)
         && comptime!(config.home_mode == Feature::Enabled)
-        && equal(excess, zero())
         && config.price_response > 0
+        && repricing != comptime!(QuoteRule::Inventory as u32)
     {
-        let margin = PacketCost::new(state, config, control, firm, good);
-        let target = divide(multiply(control, margin.cost, 5), 4);
+        let cost = PacketCost::new(state, config, control, firm, good).cost;
+        let target = select(
+            repricing == comptime!(QuoteRule::DiscountToCost as u32),
+            cost,
+            divide(multiply(control, cost, 5), 4),
+        );
         let output = max(
             number(state, config, comptime!(Field::OutputTicks as u32), firm),
             1,
@@ -114,22 +176,19 @@ pub(super) fn response(
         );
         let next = add_checked(
             control,
-            ticks(price, 0),
-            divide(
-                multiply(
-                    control,
-                    positive(quote, ticks(price, 0)),
-                    config.price_response,
-                ),
-                POLICY_SCALE,
-            ),
+            times32(price, POLICY_SCALE - config.price_response),
+            multiply(control, quote, config.price_response),
         );
         let correction = minimum(
-            divide(multiply(control, next, PRICE_SCALE), price),
+            divide(multiply(control, next, PRICE_SCALE / POLICY_SCALE), price),
             ticks(u32::MAX, 0),
         )
         .extract(LOW_WORD);
-        response = max(response, correction);
+        response = match repricing {
+            1 => max(inventory_response, min(correction, PRICE_SCALE)),
+            2 => correction,
+            _ => max(inventory_response, correction),
+        };
     }
     response
 }
@@ -273,11 +332,28 @@ pub(super) fn refresh(
                     }
                 };
                 if good > 0 {
-                    let current = replacement_quote(
-                        state, actors, config, &*spatial, control, parameters, buyer, good,
+                    let stock = add_checked(
+                        control,
+                        value(state, config, good, buyer),
+                        value(state, config, TRANSIT_FIELDS as u32 + good - 1, buyer),
                     );
-                    if current > 0 {
-                        set32(state, config, field, buyer, current);
+                    let raw_material = input < 2
+                        && comptime!(config.economy == crate::domain::Economy::Industrial)
+                        && !lt(
+                            stock,
+                            ticks(
+                                number(state, config, comptime!(Field::InputTicks as u32), buyer),
+                                0,
+                            ),
+                        )
+                        && number(state, config, field, buyer) > 0;
+                    if !raw_material {
+                        let current = replacement_quote(
+                            state, actors, config, &*spatial, control, parameters, buyer, good,
+                        );
+                        if current > 0 {
+                            set32(state, config, field, buyer, current);
+                        }
                     }
                 }
             }
