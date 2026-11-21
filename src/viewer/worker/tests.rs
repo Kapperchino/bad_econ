@@ -9,7 +9,6 @@ use crate::{
     },
 };
 use bevy::prelude::{App, Assets, ColorMaterial, Image, Mesh, MinimalPlugins};
-use std::collections::VecDeque;
 
 #[test]
 fn closed_firms_leave_the_map_navigation_and_inspector_on_gpu() -> Result<()> {
@@ -57,23 +56,7 @@ fn closed_firms_leave_the_map_navigation_and_inspector_on_gpu() -> Result<()> {
     let mut simulation =
         Simulation::from_checkpoint(Checkpoint::new(&scenario, &state)?, Device::headless(64)?)?;
     let publisher = Publisher {
-        data: Arc::new(Mutex::new(Display {
-            snapshot: ObservationSnapshot::default(),
-            history: VecDeque::new(),
-            comparison: None,
-            inspection: None,
-            firms: Vec::new(),
-            identities: Vec::new(),
-            status: DisplayState::Initializing,
-            error: None,
-            seed: scenario.config().seed,
-            map_size: scenario.config().map_size,
-            speed: Speed::Normal,
-            revision: 0,
-            observation_revision: 0,
-            map_revision: 0,
-            cues: VecDeque::new(),
-        })),
+        data: Arc::new(Mutex::new(Display::new(&scenario))),
         wake: || (),
     };
     let mut app = App::new();
@@ -83,6 +66,7 @@ fn closed_firms_leave_the_map_navigation_and_inspector_on_gpu() -> Result<()> {
         data: publisher.data.clone(),
         selected: 4,
         chart: Chart::Businesses,
+        company_page: None,
         period: super::super::model::Period::default(),
         series: super::super::model::SeriesSelection::All,
     });
@@ -168,4 +152,106 @@ fn marker_identities(app: &mut App) -> Vec<u64> {
         .collect::<Vec<_>>();
     identities.sort_unstable();
     identities
+}
+
+#[test]
+fn company_dashboard_ranks_pages_and_opens_site_accounts_on_gpu() -> Result<()> {
+    use crate::viewer::{
+        Launch,
+        companies::{CompaniesPlugin, Direction, Ranking, panel},
+        controls,
+        model::{Menu, Period, SeriesSelection},
+        ui::{ActorSelection, UiAction},
+    };
+    use bevy::prelude::{ButtonInput, Commands, KeyCode, Node, Startup, Text, Update};
+
+    let mut config = Scenario::baseline(8, 2, Experiment::Concentrated)?
+        .config()
+        .clone();
+    config.firms = 8;
+    let scenario = Scenario::new(config)?;
+    let mut state = scenario.initial()?;
+    state.day = 1;
+    for site in state.actors.firm_indices().collect::<Vec<_>>() {
+        state.set(Field::BusinessOpeningCash, site, 11);
+        state.set(Field::BusinessClosingCash, site, site as u64);
+    }
+    let mut sim =
+        Simulation::from_checkpoint(Checkpoint::new(&scenario, &state)?, Device::headless(64)?)?;
+    let publisher = Publisher {
+        data: Arc::new(Mutex::new(Display::new(&scenario))),
+        wake: || (),
+    };
+    publish(&mut sim, &publisher, Publication::Restart, None)?;
+    let (sender, receiver) = crossbeam_channel::unbounded();
+    let mut app = App::new();
+    app.add_plugins((MinimalPlugins, CompaniesPlugin))
+        .add_message::<UiAction>()
+        .init_resource::<ButtonInput<KeyCode>>()
+        .insert_resource(Launch {
+            scenario,
+            workgroup: 64,
+        })
+        .insert_resource(Dashboard {
+            sender,
+            data: publisher.data.clone(),
+            selected: 1,
+            chart: Chart::Employment,
+            company_page: None,
+            period: Period::default(),
+            series: SeriesSelection::All,
+        })
+        .add_systems(Update, controls);
+    app.add_systems(Startup, |mut commands: Commands| {
+        commands.spawn(Node::default()).with_children(panel);
+    });
+    let show = |app: &mut App, action| {
+        app.world_mut().write_message(action);
+        app.update();
+        let world = app.world_mut();
+        world
+            .query::<&Text>()
+            .iter(world)
+            .map(|label| label.0.clone())
+            .collect::<Vec<_>>()
+    };
+    show(&mut app, UiAction::Companies);
+    let first = show(&mut app, UiAction::Rank(Ranking::Profit));
+    assert!(first.iter().any(|label| label.starts_with("Company #16 ")));
+    assert!(!first.iter().any(|label| label.starts_with("Company #9 ")));
+    let second = show(&mut app, UiAction::CompanyPage(Direction::Next));
+    assert!(
+        second
+            .iter()
+            .any(|label| label == "Day 1  ·  Companies 7–8 of 8")
+    );
+    assert!(second.iter().any(|label| label.starts_with("Company #9 ")));
+    let losses = show(&mut app, UiAction::Rank(Ranking::Loss));
+    assert!(losses.iter().any(|label| label == "Loss  -3"));
+    assert!(
+        losses
+            .iter()
+            .any(|label| label == "Day 1  ·  Companies 1–6 of 8")
+    );
+    show(&mut app, UiAction::Inspect(ActorSelection::Identity(9)));
+    let request = match receiver.try_recv()? {
+        Control::Inspect(request) => Ok(request),
+        _ => Err(anyhow::anyhow!("expected a site inspection")),
+    }?;
+    inspect(&mut sim, &publisher, request)?;
+    assert_eq!(
+        publisher
+            .data
+            .lock()
+            .unwrap()
+            .inspection
+            .as_ref()
+            .unwrap()
+            .actor
+            .identity,
+        9
+    );
+    show(&mut app, UiAction::Menu(Menu::Overview));
+    assert!(app.world().resource::<Dashboard>().company_page.is_none());
+    Ok(())
 }

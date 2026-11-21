@@ -1,5 +1,7 @@
 pub mod analytics;
 pub mod bargaining;
+#[cfg(feature = "viewer")]
+pub(crate) mod company_report;
 mod configuration;
 mod demography;
 mod economy;
@@ -294,25 +296,6 @@ pub struct Simulation {
 impl Simulation {
     pub fn actors(&self) -> &ActorRows {
         &self.metadata.actors
-    }
-    #[cfg(feature = "viewer")]
-    pub(crate) fn open_firms(&mut self) -> Result<Vec<Actor>> {
-        let actors = &self.metadata.actors;
-        let start = actors.firm_indices().next().unwrap_or(actors.len());
-        let statuses = decode(&self.device.read_range(
-            &self.state,
-            (Field::EnterpriseStatus as usize * self.config.state_stride as usize + start)
-                * TICK_WORDS,
-            (actors.len() - start) * TICK_WORDS,
-        )?);
-        self.readback_bytes += (statuses.len() * TICK_BYTES) as u64;
-        Ok(actors
-            .firm_indices()
-            .filter(|&index| {
-                statuses[index - start] != crate::domain::enterprise::EnterpriseState::Closed as u64
-            })
-            .map(|index| actors.at(index))
-            .collect())
     }
     pub fn memory_usage(&self) -> cubecl::MemoryUsage {
         self.device.memory_usage()
@@ -1140,6 +1123,9 @@ impl Simulation {
         }
         if let Some(batch) = &settlement {
             batch.update_owners(&mut metadata.actors);
+            if let Some(companies) = &batch.companies {
+                metadata.companies.clone_from(companies);
+            }
         }
         if let Some(ownership) = settlement
             .as_ref()
@@ -1389,7 +1375,7 @@ impl Simulation {
         audit: RegistryAudit,
     ) -> Result<()> {
         let mut checkpoint = profiling::audit_checkpoints(&self.device, self.day);
-        let settlement = registry::settlement::SettlementBatch::new(
+        let mut settlement = registry::settlement::SettlementBatch::new(
             &self.device,
             &self.scenario,
             &self.metadata,
@@ -1420,6 +1406,17 @@ impl Simulation {
                 ownership::OwnershipRuntime::new(&self.device, &metadata)
             })
             .transpose()?;
+        let railway = settlement
+            .as_ref()
+            .and_then(|batch| batch.companies.as_ref())
+            .filter(|_| !self.scenario.config().railway.companies.is_empty())
+            .map(|companies| {
+                let mut metadata = self.metadata.clone();
+                metadata.companies.clone_from(companies);
+                self.config
+                    .railway
+                    .updated(&self.device, &self.scenario, &metadata)
+            });
         checkpoint("RegistryOwnership");
         let newborns = births.iter().filter(|record| record.birth > 0).count();
         let next_identity = self
@@ -1614,6 +1611,15 @@ impl Simulation {
                 }
                 if let Some(management) = management {
                     self.management = management;
+                }
+                if let Some(companies) =
+                    settlement.as_mut().and_then(|batch| batch.companies.take())
+                {
+                    self.metadata.companies = companies;
+                }
+                if let Some(railway) = railway {
+                    self.config.railway = railway;
+                    self.market_graphs = market_graphs::MarketGraphs::default();
                 }
                 if let Some(ownership) = settlement.and_then(|batch| batch.ownership) {
                     self.metadata.ownership = ownership;

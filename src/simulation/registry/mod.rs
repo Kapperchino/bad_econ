@@ -6,7 +6,7 @@ pub(super) mod settlement;
 pub(super) mod spatial;
 mod systems;
 use super::{
-    Device,
+    Device, enterprise,
     layout::ActorLayout as A,
     pass::GpuPass,
     system::{AsBufferArg, System, gpu_passes},
@@ -116,7 +116,7 @@ impl RegistryPlan {
         let supported = requests.iter().all(|record| match record.request >> 24 {
             0 => record.request == 0,
             2 | 3 | 10 => true,
-            4 | 7 => scenario.config().finance.is_none(),
+            4 | 7 | enterprise::acquisitions::PURCHASE => scenario.config().finance.is_none(),
             5 => {
                 scenario.config().finance.is_none()
                     || !migrations

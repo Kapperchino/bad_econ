@@ -111,11 +111,7 @@ impl CompanyRecords {
             .firm_indices()
             .map(|index| (state.actors.at(index).identity, index as u32))
             .collect::<std::collections::BTreeMap<_, _>>();
-        let company_identities = state
-            .companies
-            .iter()
-            .flat_map(|company| company.sites.iter().map(|&site| (site, company.identity)))
-            .collect::<std::collections::BTreeMap<_, _>>();
+        let company_identities = state.company_founders();
         let identities = config
             .companies
             .iter()

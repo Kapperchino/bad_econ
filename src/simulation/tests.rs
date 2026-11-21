@@ -1387,3 +1387,244 @@ fn property_allocation_fault_restores_the_audited_gpu_state() -> Result<()> {
     assert_eq!(simulation.download()?, before);
     Ok(())
 }
+
+fn acquisition_config(seed: u64) -> Result<ScenarioConfig> {
+    let mut config = Scenario::baseline(4, seed, Experiment::Concentrated)?
+        .config()
+        .clone();
+    config.reserve = 0;
+    let position = Position { x: 1, y: 1 };
+    config.population = Some(Population {
+        households: (1..=4)
+            .map(|identity| HouseholdSeed {
+                identity,
+                position,
+                cash: 0,
+                inventories: Good::food([0, 0, 30]),
+                fatigue: 0,
+            })
+            .collect(),
+        firms: (5..=7)
+            .map(|identity| FirmSeed {
+                identity,
+                position,
+                owner: match identity {
+                    5 => 1,
+                    _ => 2,
+                },
+                good: Good::Bread,
+                cash: match identity {
+                    5 => 10_000,
+                    6 => 40,
+                    _ => 41,
+                },
+                inventories: [0; Good::COUNT],
+                capacity: 1,
+                technique: Technique {
+                    labor_minutes: 60,
+                    input_ticks: 1,
+                    output_ticks: 1,
+                },
+                wage: 1,
+                price: 10,
+            })
+            .collect(),
+    });
+    Ok(config)
+}
+
+fn monthly_review_state(scenario: &Scenario) -> Result<State> {
+    let mut state = scenario.initial()?;
+    state.day = 30;
+    for household in 0..4 {
+        state.set(Field::LivingMembers, household, 1);
+    }
+    Ok(state)
+}
+
+#[test]
+fn company_purchases_price_all_sites_and_respect_each_shareholder_on_gpu() -> Result<()> {
+    use crate::domain::{
+        company::Company,
+        enterprise::{Ownership, OwnershipShare},
+    };
+
+    let device = device(64)?;
+    for (seed, opening, closing, reserve, sold) in [
+        (2, 50, 50, 0, true),
+        (1, 50, 50, 0, false),
+        (2, 50, 100, 0, false),
+        (1, 100, 50, 0, true),
+        (2, 50, 50, 9900, false),
+    ] {
+        let mut config = acquisition_config(seed)?;
+        config.reserve = reserve;
+        config.companies = vec![Company {
+            identity: 6,
+            sites: vec![6, 7],
+        }];
+        config.ownership = vec![Ownership {
+            firm: 6,
+            shares: vec![
+                OwnershipShare {
+                    household: 2,
+                    units: 250_000,
+                },
+                OwnershipShare {
+                    household: 3,
+                    units: 750_000,
+                },
+            ],
+        }];
+        let scenario = Scenario::new(config)?;
+        let mut state = monthly_review_state(&scenario)?;
+        state.set(Field::BusinessOpeningCash, 6, opening);
+        state.set(Field::BusinessClosingCash, 6, closing);
+        state.set(Field::BusinessRevenue, 6, closing);
+        state.set(Field::BusinessOpeningCash, 4, 60);
+        state.set(Field::BusinessClosingCash, 4, 50);
+        let mut sim = Simulation::from_state(scenario.clone(), state.clone(), device.clone())?;
+        sim.commit_enterprises(RegistryAudit::Full)?;
+        let actual = sim.download()?;
+        assert_eq!(
+            actual.company_identity(7) == 5,
+            sold,
+            "seed {seed} with profit {} and reserve {reserve}",
+            i128::from(closing) - i128::from(opening)
+        );
+        let price = match sold {
+            true => 281,
+            false => 0,
+        };
+        assert_eq!(actual.get(Field::Cash, 4), 10_000 - price);
+        assert_eq!(actual.get(Field::Cash, 1), price / 4);
+        assert_eq!(actual.get(Field::Cash, 2), price - price / 4);
+        assert_eq!(actual.get(Field::Cash, 5), 40);
+        assert_eq!(actual.get(Field::Cash, 6), 41);
+        assert_eq!(actual.actors.at(6).owner, u32::from(!sold));
+        assert_eq!(actual.ownership[2].shares, actual.ownership[1].shares);
+        assert_eq!(
+            actual.get(Field::InvestmentFirm, 1),
+            if sold { 0 } else { 7 }
+        );
+        #[cfg(feature = "viewer")]
+        {
+            let rows = sim.company_report()?.companies;
+            assert_eq!(rows.len(), if sold { 1 } else { 2 });
+            let owner = rows
+                .iter()
+                .find(|company| company.identity == actual.company_identity(7))
+                .unwrap();
+            assert_eq!(owner.size.sites, if sold { 3 } else { 2 });
+            assert_eq!(owner.size.worker_capacity, owner.size.sites as u64);
+            assert_eq!(
+                owner.profit,
+                i128::from(closing) - i128::from(opening) - if sold { 10 } else { 0 }
+            );
+        }
+        let mut reference = Simulation::from_state(scenario, state, device.clone())?;
+        reference.registry_execution = RegistryExecution::Reference;
+        reference.commit_enterprises(RegistryAudit::Full)?;
+        assert_eq!(actual, reference.download()?);
+        sim.copy_audited(CopyDirection::Save)?;
+        let mut replay = Simulation::from_checkpoint(sim.checkpoint()?, device.clone())?;
+        assert_eq!(actual, replay.download()?);
+    }
+    Ok(())
+}
+
+#[test]
+fn company_purchases_prefer_familiar_lines_and_require_scale_to_diversify_on_gpu() -> Result<()> {
+    use crate::domain::{company::Company, enterprise::Distributor};
+
+    #[derive(Clone, Copy, Debug)]
+    enum Target {
+        OtherProduct,
+        OtherModel,
+        MixedCompany,
+        FamiliarAlternative,
+    }
+
+    let device = device(64)?;
+    for (target, capacity, site_count, acquired) in [
+        (Target::OtherProduct, 249, 2, false),
+        (Target::OtherProduct, 250, 2, true),
+        (Target::OtherProduct, 24, 24, false),
+        (Target::OtherProduct, 25, 25, true),
+        (Target::OtherModel, 249, 2, false),
+        (Target::OtherModel, 250, 2, true),
+        (Target::MixedCompany, 249, 1, false),
+        (Target::FamiliarAlternative, 250, 1, true),
+    ] {
+        let mut config = acquisition_config(2)?;
+        let population = config
+            .population
+            .as_mut()
+            .context("acquisition population")?;
+        let base = population.firms[0].clone();
+        let buyer = &mut population.firms[0];
+        buyer.capacity = capacity - (site_count - 1);
+        let mut buyer_sites = vec![buyer.identity];
+        for number in 1..site_count {
+            let id = 7 + u64::from(number);
+            buyer_sites.push(id);
+            population.firms.push(FirmSeed {
+                identity: id,
+                cash: 0,
+                capacity: 1,
+                ..base.clone()
+            });
+        }
+        config.firms = population.firms.len() as u32;
+        config.companies = vec![Company {
+            identity: 5,
+            sites: buyer_sites,
+        }];
+        match target {
+            Target::OtherProduct => {
+                population.firms[1].good = Good::Flour;
+                population.firms[2].good = Good::Flour;
+            }
+            Target::OtherModel => {
+                config.distributors = [6, 7]
+                    .map(|firm| Distributor {
+                        firm,
+                        good: Good::Bread,
+                        handling_minutes: 60,
+                        units_per_shift: 2,
+                        reserve_days: 1,
+                        margin_per_mille: 100,
+                    })
+                    .to_vec();
+            }
+            Target::MixedCompany => {
+                population.firms[1].good = Good::Flour;
+                config.companies.push(Company {
+                    identity: 6,
+                    sites: vec![6, 7],
+                });
+            }
+            Target::FamiliarAlternative => {
+                population.firms[1].good = Good::Flour;
+            }
+        }
+        let scenario = Scenario::new(config)?;
+        let initial = monthly_review_state(&scenario)?;
+        let mut simulation = Simulation::from_state(scenario, initial, device.clone())?;
+        simulation.commit_enterprises(RegistryAudit::Full)?;
+        let state = simulation.download()?;
+        let bought = [6, 7]
+            .into_iter()
+            .filter(|&id| state.company_identity(id) == 5)
+            .collect::<Vec<_>>();
+        assert_eq!(
+            bought.len(),
+            usize::from(acquired),
+            "{target:?} at {capacity} worker places and {site_count} sites"
+        );
+        if let Target::FamiliarAlternative = target {
+            assert_eq!(bought, vec![7]);
+        }
+    }
+    Ok(())
+}

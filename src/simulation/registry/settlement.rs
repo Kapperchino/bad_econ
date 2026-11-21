@@ -4,6 +4,7 @@ use super::{
     records::PendingRecord,
 };
 use crate::domain::{ActorRows, Scenario, State, enterprise::Ownership};
+use crate::simulation::enterprise::acquisitions::PURCHASE;
 use crate::simulation::{Device, decode, encode, enterprise, layout::TICK_WORDS};
 use anyhow::{Context, Result, anyhow};
 use burn_wgpu::CubeTensor;
@@ -11,6 +12,7 @@ use std::collections::{BTreeMap, BTreeSet};
 
 pub(in crate::simulation) struct SettlementBatch {
     pub ownership: Option<Vec<Ownership>>,
+    pub companies: Option<Vec<crate::domain::company::Company>>,
     pub owners: Vec<OwnerChange>,
     pub readback_bytes: u64,
     indices: CubeTensor,
@@ -29,7 +31,7 @@ impl SettlementBatch {
         migrations: &MigrationRegistry,
     ) -> bool {
         requests.iter().any(|record| match record.request >> 24 {
-            4 | 7 => true,
+            4 | 7 | PURCHASE => true,
             5 => migrations
                 .children(metadata.actors.at(record.actor as usize).identity)
                 .next()
@@ -69,10 +71,10 @@ impl SettlementBatch {
         for record in requests.iter().filter(|record| record.request > 0) {
             selected.insert(record.actor as usize);
             match record.request >> 24 {
-                2 | 7 => {
+                2 | 7 | PURCHASE => {
                     let target = (record.request & 0x00ffffff) as usize - 1;
                     selected.insert(target);
-                    if record.request >> 24 == 7 {
+                    if record.request >> 24 != 2 {
                         firms.insert(target);
                     }
                 }
@@ -112,14 +114,20 @@ impl SettlementBatch {
                 .copied()
                 .filter(|&index| metadata.actors.at(index).kind > 0),
         );
-        let company_sites = firms
+        let founders = metadata.company_founders();
+        let company_of = |index| {
+            let id = metadata.actors.at(index).identity;
+            founders.get(&id).copied().unwrap_or(id)
+        };
+        let companies = firms
             .iter()
-            .flat_map(|&firm| metadata.company_sites(metadata.actors.at(firm).identity))
+            .copied()
+            .map(company_of)
             .collect::<BTreeSet<_>>();
         metadata
             .actors
             .firm_indices()
-            .filter(|&index| company_sites.contains(&metadata.actors.at(index).identity))
+            .filter(|&index| companies.contains(&company_of(index)))
             .for_each(|index| {
                 firms.insert(index);
                 selected.insert(index);
@@ -239,7 +247,7 @@ impl SettlementBatch {
                 .ok()
                 .context("missing settlement actor")?;
             actions[actor] = match record.request >> 24 {
-                kind @ (2 | 7) => {
+                kind @ (2 | 7 | PURCHASE) => {
                     let target = (record.request & 0x00ffffff) as usize - 1;
                     (kind << 24)
                         + selected
@@ -256,7 +264,8 @@ impl SettlementBatch {
             .iter()
             .map(|actor| actor.owner)
             .collect::<Vec<_>>();
-        enterprise::transitions(&mut compact, scenario, &actions)?;
+        enterprise::transitions_in_rows(&mut compact, scenario, &actions, |row| selected[row])?;
+        let companies = (compact.companies != metadata.companies).then_some(compact.companies);
         let owners = compact
             .actors
             .iter()
@@ -267,9 +276,10 @@ impl SettlementBatch {
                 owner: selected[actor.owner as usize] as u32,
             })
             .collect();
-        let ownership = match requests
-            .iter()
-            .any(|record| matches!(record.request >> 24, 5 | 7))
+        let ownership = match companies.is_some()
+            || requests
+                .iter()
+                .any(|record| matches!(record.request >> 24, 5 | 7))
         {
             false => None,
             true => {
@@ -288,6 +298,7 @@ impl SettlementBatch {
             }
         };
         Ok(Self {
+            companies,
             ownership,
             owners,
             readback_bytes,

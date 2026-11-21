@@ -1,5 +1,7 @@
 use super::{
-    Dashboard, Speed, feedback,
+    Dashboard, Speed,
+    companies::{self, Direction, Ranking},
+    feedback,
     model::{Chart, Menu, Period, SeriesSelection},
 };
 use bevy::{
@@ -55,6 +57,9 @@ pub(super) enum ActorSelection {
 #[derive(Component, Message, Clone, Copy, Debug, PartialEq, Eq)]
 pub(super) enum UiAction {
     Menu(Menu),
+    Companies,
+    Rank(Ranking),
+    CompanyPage(Direction),
     Chart(Chart),
     NextChart,
     Period(Period),
@@ -73,6 +78,9 @@ pub(super) enum UiAction {
 impl UiAction {
     pub fn hint(self) -> String {
         match self {
+            Self::Companies => "Compare company sizes and daily cash profits".into(),
+            Self::Rank(order) => order.label().into(),
+            Self::CompanyPage(direction) => direction.label().into(),
             Self::Menu(menu) => menu.description().into(),
             Self::Chart(chart) => chart.label().into(),
             Self::Period(period) => format!("Show {} across charts", period.label()),
@@ -119,7 +127,7 @@ pub(super) enum Label {
 }
 
 #[derive(Component)]
-struct Report;
+pub(super) struct Report;
 #[derive(Component)]
 struct InspectorDetails;
 #[derive(Component)]
@@ -163,7 +171,7 @@ pub(super) fn text(value: impl Into<String>, size: f32, color: Color) -> impl Bu
     )
 }
 
-fn column(gap: f32) -> Node {
+pub(super) fn column(gap: f32) -> Node {
     Node {
         flex_direction: FlexDirection::Column,
         row_gap: px(gap),
@@ -172,7 +180,7 @@ fn column(gap: f32) -> Node {
     }
 }
 
-fn row(gap: f32) -> Node {
+pub(super) fn row(gap: f32) -> Node {
     Node {
         align_items: AlignItems::Center,
         column_gap: px(gap),
@@ -311,6 +319,7 @@ fn setup(mut commands: Commands, mut fonts: ResMut<Assets<Font>>) {
                 })
                 .with_children(|workspace| {
                     report(workspace);
+                    companies::panel(workspace);
                     map(workspace);
                     inspector(workspace);
                 });
@@ -359,6 +368,7 @@ fn navigation(parent: &mut ChildSpawnerCommands) {
             Menu::ALL.into_iter().for_each(|menu| {
                 button(nav, UiAction::Menu(menu), menu.label());
             });
+            button(nav, UiAction::Companies, "Companies");
             nav.spawn(Node {
                 flex_grow: 1.0,
                 ..default()
@@ -375,20 +385,24 @@ fn navigation(parent: &mut ChildSpawnerCommands) {
         });
 }
 
+pub(super) fn report_panel() -> Node {
+    Node {
+        width: percent(52),
+        min_width: px(400),
+        max_width: px(800),
+        flex_shrink: 0.0,
+        padding: UiRect::all(px(18)),
+        border: UiRect::all(px(1)),
+        overflow: Overflow::scroll_y(),
+        ..column(12.0)
+    }
+}
+
 fn report(parent: &mut ChildSpawnerCommands) {
     parent
         .spawn((
             Report,
-            Node {
-                width: percent(52),
-                min_width: px(400),
-                max_width: px(800),
-                flex_shrink: 0.0,
-                padding: UiRect::all(px(18)),
-                border: UiRect::all(px(1)),
-                overflow: Overflow::scroll_y(),
-                ..column(12.0)
-            },
+            report_panel(),
             ScrollPosition::default(),
             RelativeCursorPosition::default(),
             BackgroundColor(PANEL),
@@ -647,7 +661,13 @@ fn style_buttons(
         let display = dashboard.data.lock().expect("dashboard lock");
         buttons.iter_mut().for_each(|mut button| {
             let selected = match button.action {
-                UiAction::Menu(menu) => *menu == dashboard.chart.menu(),
+                UiAction::Menu(menu) => {
+                    dashboard.company_page.is_none() && *menu == dashboard.chart.menu()
+                }
+                UiAction::Companies => dashboard.company_page.is_some(),
+                UiAction::Rank(order) => dashboard
+                    .company_page
+                    .is_some_and(|page| page.ranking == *order),
                 UiAction::Chart(chart) => *chart == dashboard.chart,
                 UiAction::Period(period) => *period == dashboard.period,
                 UiAction::AllSeries => dashboard.series == SeriesSelection::All,

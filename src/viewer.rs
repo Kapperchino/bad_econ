@@ -1,3 +1,4 @@
+mod companies;
 mod feedback;
 mod graph;
 mod model;
@@ -75,6 +76,11 @@ enum VerificationState {
         identity: u64,
         presentation: RetainedPresentation,
     },
+    AwaitCompanies,
+    AwaitCompanyRanking,
+    AwaitCompanyCapture,
+    LeaveCompanies,
+    AwaitOverview,
     AwaitMenu(Chart),
     AwaitChart(Chart),
     Frames(u32),
@@ -133,6 +139,7 @@ struct Dashboard {
     data: Arc<Mutex<Display>>,
     selected: u64,
     chart: Chart,
+    company_page: Option<companies::CompanyPage>,
     period: Period,
     series: SeriesSelection,
 }
@@ -142,6 +149,7 @@ struct Display {
     comparison: Option<ComparisonRun>,
     inspection: Option<Inspection>,
     firms: Vec<Actor>,
+    companies: Vec<crate::simulation::company_report::Business>,
     identities: Vec<u64>,
     status: DisplayState,
     error: Option<String>,
@@ -153,6 +161,29 @@ struct Display {
     map_revision: u64,
     cues: VecDeque<Cue>,
 }
+impl Display {
+    fn new(scenario: &Scenario) -> Self {
+        Self {
+            snapshot: ObservationSnapshot::default(),
+            history: VecDeque::new(),
+            comparison: None,
+            inspection: None,
+            firms: Vec::new(),
+            companies: Vec::new(),
+            identities: Vec::new(),
+            status: DisplayState::Initializing,
+            error: None,
+            seed: scenario.config().seed,
+            map_size: scenario.config().map_size,
+            speed: Speed::Normal,
+            revision: 0,
+            observation_revision: 0,
+            map_revision: 0,
+            cues: VecDeque::new(),
+        }
+    }
+}
+
 enum Control {
     Simulation(Box<SimulationCommand>),
     Inspect(InspectionRequest),
@@ -218,6 +249,7 @@ pub fn run(scenario: Scenario, workgroup: u32, mode: ViewMode) -> Result<()> {
     }))
     .add_plugins((
         ui::UiPlugin,
+        companies::CompaniesPlugin,
         presentation::PresentationPlugin,
         pacing::PacingPlugin,
         feedback::FeedbackPlugin,
@@ -247,29 +279,14 @@ pub fn run(scenario: Scenario, workgroup: u32, mode: ViewMode) -> Result<()> {
 
 fn setup(mut commands: Commands, launch: Res<Launch>, event_loop: Res<EventLoopProxyWrapper>) {
     commands.spawn((Camera2d, IsDefaultUiCamera));
-    let data = Arc::new(Mutex::new(Display {
-        snapshot: ObservationSnapshot::default(),
-        history: VecDeque::new(),
-        comparison: None,
-        inspection: None,
-        firms: Vec::new(),
-        identities: Vec::new(),
-        status: DisplayState::Initializing,
-        error: None,
-        seed: launch.scenario.config().seed,
-        map_size: launch.scenario.config().map_size,
-        speed: Speed::Normal,
-        revision: 0,
-        observation_revision: 0,
-        map_revision: 0,
-        cues: VecDeque::new(),
-    }));
+    let data = Arc::new(Mutex::new(Display::new(&launch.scenario)));
     let (sender, receiver) = unbounded();
     commands.insert_resource(Dashboard {
         sender,
         data: data.clone(),
         selected: launch.scenario.identity(0).expect("first household"),
         chart: Chart::Employment,
+        company_page: None,
         period: Period::default(),
         series: SeriesSelection::All,
     });
@@ -441,6 +458,37 @@ fn verify(
                         && matches!(verification.click, VerificationClick::Idle) =>
                     {
                         presentation.assert_retained(retained);
+                        verification.click = VerificationClick::Move(UiAction::Companies);
+                        VerificationState::AwaitCompanies
+                    }
+                    VerificationState::AwaitCompanies
+                        if dashboard.company_page.is_some()
+                            && matches!(verification.click, VerificationClick::Idle) =>
+                    {
+                        verification.click =
+                            VerificationClick::Move(UiAction::Rank(companies::Ranking::Profit));
+                        VerificationState::AwaitCompanyRanking
+                    }
+                    VerificationState::AwaitCompanyRanking
+                        if dashboard
+                            .company_page
+                            .is_some_and(|page| page.ranking == companies::Ranking::Profit)
+                            && matches!(verification.click, VerificationClick::Idle) =>
+                    {
+                        commands
+                            .spawn(Screenshot::primary_window())
+                            .observe(capture_companies);
+                        VerificationState::AwaitCompanyCapture
+                    }
+                    VerificationState::LeaveCompanies => {
+                        verification.click =
+                            VerificationClick::Move(UiAction::Menu(model::Menu::Overview));
+                        VerificationState::AwaitOverview
+                    }
+                    VerificationState::AwaitOverview
+                        if dashboard.company_page.is_none()
+                            && matches!(verification.click, VerificationClick::Idle) =>
+                    {
                         VerificationState::Frames(3)
                     }
                     VerificationState::AwaitMenu(chart)
@@ -624,12 +672,34 @@ fn controls(
     if let Some(mut dashboard) = dashboard {
         pending.into_iter().for_each(|action| {
             let control = match action {
+                UiAction::Companies => {
+                    dashboard.company_page = Some(companies::CompanyPage::default());
+                    None
+                }
+                UiAction::Rank(order) => {
+                    dashboard.company_page = Some(companies::CompanyPage::new(order));
+                    None
+                }
+                UiAction::CompanyPage(direction) => {
+                    let count = dashboard
+                        .data
+                        .lock()
+                        .expect("dashboard lock")
+                        .companies
+                        .len();
+                    if let Some(page) = &mut dashboard.company_page {
+                        page.turn(direction, count);
+                    }
+                    None
+                }
                 UiAction::Menu(menu) => {
+                    dashboard.company_page = None;
                     dashboard.chart = menu.charts()[0];
                     dashboard.series = SeriesSelection::All;
                     None
                 }
                 UiAction::Chart(chart) => {
+                    dashboard.company_page = None;
                     dashboard.chart = chart;
                     dashboard.series = SeriesSelection::All;
                     None
@@ -647,6 +717,7 @@ fn controls(
                     None
                 }
                 UiAction::NextChart => {
+                    dashboard.company_page = None;
                     dashboard.chart = dashboard.chart.next();
                     dashboard.series = SeriesSelection::All;
                     None
@@ -723,6 +794,11 @@ fn capture_step_feedback(captured: On<ScreenshotCaptured>, mut verification: Res
     verification.state = VerificationState::InspectHousehold;
 }
 
+fn capture_companies(captured: On<ScreenshotCaptured>, mut verification: ResMut<Verification>) {
+    verification.capture(&captured.image, "companies");
+    verification.state = VerificationState::LeaveCompanies;
+}
+
 fn capture_verified_frame(
     captured: On<ScreenshotCaptured>,
     dashboard: Res<Dashboard>,
@@ -765,7 +841,7 @@ fn capture_compact_frame(
         });
     verification.capture(&captured.image, "compact");
     eprintln!(
-        "viewer interaction and layout verification passed: separate rendering and simulation queues, native mouse clicks, reset/step/comparison feedback, audited days, household and firm inspection, refreshed inspection, all five menus and 29 charts, four history periods, series focus, retained GPU chart on speed and inspection changes, previous/next navigation, footer controls, compact window"
+        "viewer interaction and layout verification passed: separate rendering and simulation queues, native mouse clicks, reset/step/comparison feedback, audited days, household and firm inspection, refreshed inspection, company rankings, all five chart menus and 29 charts, four history periods, series focus, retained GPU chart on speed and inspection changes, previous/next navigation, footer controls, compact window"
     );
     match &verification.capture_error {
         None => {
