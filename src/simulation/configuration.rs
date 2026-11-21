@@ -101,6 +101,8 @@ pub struct EconomyConfig {
     pub food_income: crate::domain::food::FoodIncome,
     pub wheat_kg_per_hectare: u32,
     #[cube(comptime)]
+    pub commercial_wheat: crate::domain::food::WheatHusbandry,
+    #[cube(comptime)]
     pub economy: crate::domain::Economy,
     #[cube(comptime)]
     pub cohorts: Feature,
@@ -163,6 +165,7 @@ pub struct Configuration {
     pub food_rich_salary: u32,
     pub food_income: crate::domain::food::FoodIncome,
     pub wheat_kg_per_hectare: u32,
+    pub commercial_wheat: crate::domain::food::WheatHusbandry,
     pub economy: crate::domain::Economy,
     pub cohorts: Feature,
     pub home: HomeProduction,
@@ -350,6 +353,10 @@ impl Configuration {
                 .food
                 .map_or(crate::domain::food::FoodIncome::Nominal, |food| food.income),
             wheat_kg_per_hectare: config.food.map_or(0, |food| food.wheat_kg_per_hectare),
+            commercial_wheat: config
+                .food
+                .map(|food| food.commercial_wheat)
+                .unwrap_or_default(),
             economy: config.economy,
             cohorts: Feature::from(config.people.as_ref()),
             home: HomeProduction::new(config.household_production),
@@ -477,6 +484,7 @@ impl Configuration {
             food_rich_salary: self.food_rich_salary,
             food_income: self.food_income,
             wheat_kg_per_hectare: self.wheat_kg_per_hectare,
+            commercial_wheat: self.commercial_wheat,
             economy: self.economy,
             cohorts: self.cohorts,
             home: self.home.launch(),

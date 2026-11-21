@@ -25,7 +25,12 @@ impl ProductionCycle {
                     ..
                 },
             ) => Self {
-                work_days: u64::from(211.min(365 - harvest_days)),
+                work_days: u64::from(match (good, config.food) {
+                    (Good::Grain, Some(food)) => {
+                        food.commercial_wheat.paid_days(211.min(365 - harvest_days))
+                    }
+                    _ => 211.min(365 - harvest_days),
+                }),
                 output_days: 365,
             },
             _ => Self {

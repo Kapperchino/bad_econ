@@ -1575,7 +1575,13 @@ fn buffered_capacity_recovery(initial_capacity: usize, contention: ClaimContenti
     );
     let mut buffered = Simulation::from_state(scenario.clone(), state.clone(), device.clone())?;
     let mut synchronous = Simulation::from_state(scenario, state, device.clone())?;
-    reserve_claims(&device, &mut buffered.config, initial_capacity as u64)?;
+    let mut limited = device.clone();
+    let resources = (buffered.config.actors + buffered.config.railway.region_count) as usize;
+    let requested = ClaimAllocation::new(initial_capacity as u64, resources)?;
+    limited.memory_budget = crate::simulation::MemoryBudget::Dedicated {
+        available_bytes: device.memory_usage().bytes_reserved + requested.bytes(),
+    };
+    reserve_claims(&limited, &mut buffered.config, initial_capacity as u64)?;
     assert_eq!(
         buffered.config.railway.freight.claim_capacity,
         initial_capacity
@@ -1594,6 +1600,7 @@ fn buffered_capacity_recovery(initial_capacity: usize, contention: ClaimContenti
             assert!(buffered.snapshot.used[Good::Railway as usize - 1] > 0);
         }
         ClaimContention::Present => {
+            assert!(grown_capacity >= buffered.config.railway.freight.sorting.tile());
             assert!(
                 grown_capacity > 1,
                 "day {}, activity {:?}, purchased {}, rail used {}, rail operating {:?}, rail stocks {:?}",

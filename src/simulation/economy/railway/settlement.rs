@@ -587,6 +587,10 @@ impl ClaimAllocation {
         u32::try_from(words).context("freight claims exceed GPU indexing capacity")?;
         Ok(Self { capacity, words })
     }
+
+    fn bytes(&self) -> u64 {
+        self.words as u64 * size_of::<u32>() as u64
+    }
 }
 
 fn claim_work(
@@ -600,13 +604,8 @@ fn claim_work(
             count,
             (config.actors + config.railway.region_count) as usize,
         )?;
-        let additional = allocation.words as u64 * size_of::<u32>() as u64;
-        device.reclaim_memory(additional)?;
-        let reserved = device
-            .client
-            .memory_report(cubecl::MemoryScope::Device)
-            .usage()
-            .bytes_reserved;
+        let additional = allocation.bytes();
+        let reserved = device.reclaim_memory(additional)?.bytes_reserved;
         match reserved.saturating_add(additional) <= device.memory_budget.bytes() {
             true => Ok(()),
             false => Err(anyhow::anyhow!(
@@ -627,7 +626,22 @@ pub fn reserve_claims(
     config: &mut Configuration,
     count: u64,
 ) -> anyhow::Result<()> {
-    claim_work(device, config, count).map(|_| ())
+    let tile = config.railway.freight.sorting.tile() as u64;
+    let capacity = match count {
+        1.. if count < tile => {
+            let resources = (config.actors + config.railway.region_count) as usize;
+            let available = device
+                .memory_budget
+                .bytes()
+                .saturating_sub(device.memory_usage().bytes_reserved);
+            match ClaimAllocation::new(tile, resources) {
+                Ok(allocation) if allocation.bytes() <= available => tile,
+                _ => count,
+            }
+        }
+        _ => count,
+    };
+    claim_work(device, config, capacity).map(|_| ())
 }
 
 fn word_range(tensor: &CubeTensor, start: usize, words: usize) -> cubecl::server::Handle {

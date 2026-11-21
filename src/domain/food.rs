@@ -17,12 +17,42 @@ impl FoodIncome {
     }
 }
 
+#[derive(Clone, Copy, Debug, Default, Hash, Serialize, Deserialize, PartialEq, Eq)]
+pub enum WheatHusbandry {
+    #[default]
+    AnnualWheat,
+    NorfolkFourCourse,
+}
+
+impl WheatHusbandry {
+    pub(crate) const ROTATION_FIELDS: u32 = 4;
+    pub(crate) const GROSS_PARTS: u32 = 8;
+    pub(crate) const MARKETABLE_PARTS: u32 = 7;
+    pub(crate) const HARVEST_WORK_PER_PACKET: u32 = 8;
+    const HAND_WORK_MINUTES_PER_UNIT: u32 = 12;
+
+    fn is_annual(&self) -> bool {
+        *self == Self::AnnualWheat
+    }
+
+    pub(crate) fn paid_days(self, growing_days: u32) -> u32 {
+        match self {
+            Self::AnnualWheat => growing_days,
+            Self::NorfolkFourCourse => {
+                growing_days + growing_days.div_ceil(Self::HARVEST_WORK_PER_PACKET)
+            }
+        }
+    }
+}
+
 #[derive(Clone, Copy, Debug, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(deny_unknown_fields)]
 pub struct FoodPolicy {
     pub medium_daily_salary: u32,
     pub rich_daily_salary: u32,
     pub wheat_kg_per_hectare: u32,
+    #[serde(default, skip_serializing_if = "WheatHusbandry::is_annual")]
+    pub commercial_wheat: WheatHusbandry,
     #[serde(default, skip_serializing_if = "FoodIncome::is_nominal")]
     pub income: FoodIncome,
 }
@@ -33,6 +63,7 @@ impl Default for FoodPolicy {
             medium_daily_salary: 2000,
             rich_daily_salary: 10_000,
             wheat_kg_per_hectare: 1601,
+            commercial_wheat: WheatHusbandry::AnnualWheat,
             income: FoodIncome::Nominal,
         }
     }
@@ -46,6 +77,7 @@ impl FoodPolicy {
     pub fn industrial() -> Self {
         Self {
             income: FoodIncome::PurchasingPower,
+            commercial_wheat: WheatHusbandry::NorfolkFourCourse,
             ..Self::default()
         }
     }
@@ -87,8 +119,14 @@ impl FoodPolicy {
     }
 
     pub fn hectares(self, workers: u32, technique: Technique) -> u64 {
-        (u64::from(workers) * u64::from(technique.output_ticks) * 365)
-            .div_ceil(u64::from(self.wheat_kg_per_hectare))
+        let annual_output = u64::from(workers) * u64::from(technique.output_ticks) * 365;
+        let yield_kg = u64::from(self.wheat_kg_per_hectare);
+        match self.commercial_wheat {
+            WheatHusbandry::AnnualWheat => annual_output.div_ceil(yield_kg),
+            WheatHusbandry::NorfolkFourCourse => (annual_output
+                * u64::from(WheatHusbandry::ROTATION_FIELDS * WheatHusbandry::GROSS_PARTS))
+            .div_ceil(yield_kg * u64::from(WheatHusbandry::MARKETABLE_PARTS)),
+        }
     }
 }
 
@@ -134,6 +172,15 @@ pub(super) fn technique(config: &ScenarioConfig, good: Good) -> Technique {
         output_ticks: config.packet_output,
     };
     match (config.food, good) {
+        (Some(food), Good::Grain) if food.commercial_wheat == WheatHusbandry::NorfolkFourCourse => {
+            let minutes = WheatHusbandry::HAND_WORK_MINUTES_PER_UNIT.min(config.work_cap);
+            let output_ticks = base.output_ticks.min(config.work_cap / minutes);
+            Technique {
+                labor_minutes: output_ticks * minutes,
+                output_ticks,
+                ..base
+            }
+        }
         (Some(_), Good::Flour) => Technique {
             input_ticks: 25,
             output_ticks: 20,
