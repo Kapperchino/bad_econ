@@ -353,7 +353,7 @@ impl Chart {
     pub fn description(self) -> &'static str {
         match self {
             Self::Employment => {
-                "Paid work counts individual hires, including farmers who take supplementary shifts. Subsistence counts farmers with land. Inactive includes people unavailable for work."
+                "Paid work counts people who worked a paid shift that day, including farmers. Workers can keep a job through an idle day. Subsistence counts farmers with land. Inactive includes people unavailable for work."
             }
             Self::Unemployment => {
                 "Share of unemployed people among wage workers and unemployed people. Available after the first simulated day."

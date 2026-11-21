@@ -269,22 +269,9 @@ fn local(
                             );
                         }
                     }
-                    let mut planning_wage =
-                        number(state, config, comptime!(Field::Wage as u32), id);
-                    if comptime!(config.bargaining.enabled == Feature::Enabled) {
-                        planning_wage = legal_grid_rate(config);
-                    }
-                    planned = minimum(
-                        planned,
-                        divide(
-                            positive(
-                                value(state, config, comptime!(Field::Cash as u32), id),
-                                rent::obligation(state, config, control, id),
-                            ),
-                            planning_wage
-                                * number(state, config, comptime!(Field::LaborMinutes as u32), id),
-                        ),
-                    );
+                    let budget = employment::ShiftBudget::new(state, config, control, id);
+                    let funded = divide(budget.cash, budget.pay);
+                    planned = minimum(planned, funded);
                     let distributor =
                         number(state, config, comptime!(Field::EnterpriseModel as u32), id) == 1;
                     if distributor {
@@ -300,14 +287,6 @@ fn local(
                         let shifts = divide(
                             add_checked(control, minimum(stock, demand), ticks(units - 1, 0)),
                             units,
-                        );
-                        let funded = divide(
-                            positive(
-                                value(state, config, comptime!(Field::Cash as u32), id),
-                                rent::obligation(state, config, control, id),
-                            ),
-                            planning_wage
-                                * number(state, config, comptime!(Field::LaborMinutes as u32), id),
                         );
                         let capacity = ticks(
                             actors[ActorLayout::CAPACITY * (actors.len() / ActorLayout::WORDS)
@@ -332,7 +311,7 @@ fn local(
             }
             Phase::WorkPayment => {
                 if k.is(comptime!(ActorKind::Household)) {
-                    employment::finish_day(state, config, parameters, id);
+                    employment::finish_day(state, config, actors, id);
                 }
                 if number(state, config, comptime!(Field::EnterpriseModel as u32), id) == 1 {
                     let services = value(state, config, comptime!(Field::Pipeline as u32), id);
@@ -837,6 +816,7 @@ fn propose(
     control: &[Atomic<u32>],
     parameters: &EconomyParameters,
     invocation: u32,
+    #[comptime] labor_round: employment::LaborRound,
 ) -> u32 {
     let mut chosen = u32::new(comptime!(i64::from(NO_ACTOR)));
     if invocation < config.actors {
@@ -866,8 +846,15 @@ fn propose(
         }
         match market {
             MarketFlag::Labor => {
-                let labor =
-                    employment::LaborSearch::new(state, actors, config, control, parameters, id);
+                let labor = employment::LaborSearch::new(
+                    state,
+                    actors,
+                    config,
+                    control,
+                    parameters,
+                    id,
+                    comptime!(labor_round),
+                );
                 chosen = labor.peer;
                 quantity = labor.quantity;
                 trip = labor.trip;
@@ -1011,7 +998,7 @@ fn propose(
         if good > 0 {
             search = search && !equal(wanted, zero()) && !equal(purchasing_power, zero());
         }
-        if search {
+        if comptime!(labor_round != employment::LaborRound::Retained) && search {
             let px = actors[ActorLayout::X * (actors.len() / ActorLayout::WORDS) + id as usize];
             let py = actors[ActorLayout::Y * (actors.len() / ActorLayout::WORDS) + id as usize];
             let radius = config.search_radius;
@@ -2294,6 +2281,7 @@ pub enum EconomyStage {
     MarketBoundary,
     GroupRanges,
     ProposeCompact,
+    ProposeRetainedCompact,
     GroupCompactFill,
     GroupRadixLocal,
     GroupRadixScatter,
@@ -2328,6 +2316,7 @@ pub fn economy(
                     | EconomyStage::GroupMerge
                     | EconomyStage::GroupRanges
                     | EconomyStage::ProposeCompact
+                    | EconomyStage::ProposeRetainedCompact
                     | EconomyStage::GroupCompactFill
                     | EconomyStage::GroupRadixLocal
                     | EconomyStage::GroupRadixScatter
@@ -2378,7 +2367,7 @@ pub fn economy(
                     }
                 }
             }
-            EconomyStage::ProposeCompact => {
+            EconomyStage::ProposeCompact | EconomyStage::ProposeRetainedCompact => {
                 let actor = (id + parameters.settlement_rotation) % max(parameters.count, 1);
                 let peer = propose(
                     state,
@@ -2389,6 +2378,10 @@ pub fn economy(
                     control,
                     parameters,
                     select(id < parameters.count, actor, config.actors),
+                    comptime!(match stage {
+                        EconomyStage::ProposeRetainedCompact => employment::LaborRound::Retained,
+                        _ => employment::LaborRound::Vacancies,
+                    }),
                 );
                 markets::compact_proposal(peer, bundles, parameters, id);
             }
@@ -2435,7 +2428,15 @@ pub fn economy(
             EconomyStage::Local => local(state, actors, config, control, parameters, id),
             EconomyStage::Propose => {
                 propose(
-                    state, actors, config, spatial, proposals, control, parameters, id,
+                    state,
+                    actors,
+                    config,
+                    spatial,
+                    proposals,
+                    control,
+                    parameters,
+                    id,
+                    comptime!(employment::LaborRound::FromClock),
                 );
             }
             EconomyStage::MarketActivity => {

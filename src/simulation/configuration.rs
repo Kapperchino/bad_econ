@@ -204,17 +204,16 @@ pub struct Configuration {
     pub industrial_expansion: u32,
 }
 impl Configuration {
-    pub(super) fn graph_buffers(&self) -> Vec<burn_wgpu::CubeTensor> {
+    pub(super) fn graph_buffers(&self) -> impl Iterator<Item = &burn_wgpu::CubeTensor> + Clone {
         [
-            self.consumption_intervals.clone(),
-            self.price_table.clone(),
-            self.property_regions.clone(),
-            self.grain_farms.clone(),
-            self.rental_accounts.clone(),
+            &self.consumption_intervals,
+            &self.price_table,
+            &self.property_regions,
+            &self.grain_farms,
+            &self.rental_accounts,
         ]
         .into_iter()
         .chain(self.railway.graph_buffers())
-        .collect()
     }
 
     pub fn new(device: &super::Device, scenario: &Scenario, state: &State) -> Self {

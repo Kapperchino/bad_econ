@@ -536,8 +536,6 @@ impl Simulation {
             scan: parallel::ScanMode::new(&self.device),
             empty_orders: parameters::EmptyOrderMode::Settle,
             day,
-            employment_term_days: crate::domain::calendar::CalendarDate::on_day(self.day)
-                .days_until_next_month(),
             matching_round: match self.provisioning {
                 Provisioning::Standard => self.matching_round as u32,
                 Provisioning::Minimum => 0,
@@ -1839,20 +1837,20 @@ impl Simulation {
                 .map(|_| MatchingState::Searching),
         }
     }
-    fn market_graph_buffers(&self) -> Vec<CubeTensor> {
-        let mut buffers = vec![
-            self.state.clone(),
-            self.actors.clone(),
-            self.spatial.clone(),
-            self.proposals.clone(),
-            self.scratch.clone(),
-            self.control.clone(),
-            self.searches.requests.clone(),
-            self.searches.successes.clone(),
-            self.searches.dispatches.clone(),
-        ];
-        buffers.extend(self.config.graph_buffers());
-        buffers
+    fn market_graph_buffers(&self) -> impl Iterator<Item = &CubeTensor> + Clone {
+        [
+            &self.state,
+            &self.actors,
+            &self.spatial,
+            &self.proposals,
+            &self.scratch,
+            &self.control,
+            &self.searches.requests,
+            &self.searches.successes,
+            &self.searches.dispatches,
+        ]
+        .into_iter()
+        .chain(self.config.graph_buffers())
     }
 
     fn initialize_market(&self, market: Market, trace: Trace, parameters: &EconomyParameters) {
@@ -1967,10 +1965,12 @@ impl Simulation {
                 );
             }
         };
-        let refresh_index = match (market, self.matching_round) {
+        let preparation = market_graphs::Preparation::new(market, self.matching_round);
+        let refresh_index = match (market, preparation) {
+            (_, market_graphs::Preparation::RetainedLabor) => false,
             (Market::Labor | Market::Household, _) => true,
             (Market::Input(Good::Bread) | Market::Consumer(Good::Bread), _) => true,
-            (Market::Input(_) | Market::Consumer(_), 0) => true,
+            (Market::Input(_) | Market::Consumer(_), market_graphs::Preparation::First) => true,
             _ => false,
         };
         if refresh_index {
@@ -2130,7 +2130,13 @@ impl Simulation {
         }
         match market {
             Market::Labor | Market::Payroll | Market::Distribution => {
-                launch(EconomyStage::ProposeCompact, count, &parameters);
+                let stage = match preparation {
+                    market_graphs::Preparation::RetainedLabor => {
+                        EconomyStage::ProposeRetainedCompact
+                    }
+                    _ => EconomyStage::ProposeCompact,
+                };
+                launch(stage, count, &parameters);
                 parallel::scan(
                     &self.device,
                     &self.scratch,
@@ -2508,21 +2514,16 @@ impl Simulation {
                 self.device_market_prefix(market, trace, parameters, &device_profile)?
             }
             parameters::MarketClock::Device => {
-                let buffers = self.market_graph_buffers();
                 let key = market_graphs::MarketKey {
                     market: market.into(),
                     phase,
                     routing: self.config.railway.route_availability(),
                     freight: self.freight_execution,
-                    preparation: match self.matching_round {
-                        0 => market_graphs::Preparation::First,
-                        _ => market_graphs::Preparation::Repeat,
-                    },
+                    preparation: market_graphs::Preparation::new(market, self.matching_round),
                 };
-                let device = self.device.clone();
                 let mut graphs = std::mem::take(&mut self.market_graphs);
-                let result = graphs.run(&device, key, buffers, || {
-                    self.device_market_prefix(market, trace, parameters, &device_profile)
+                let result = graphs.run(self, key, |simulation| {
+                    simulation.device_market_prefix(market, trace, parameters, &device_profile)
                 });
                 let result = result.and_then(|source| match (regional_transport, key.routing) {
                     (true, economy::railway::RouteAvailability::Dormant) => {
@@ -3171,7 +3172,11 @@ impl Simulation {
                 .map(|demand| demand.records.get());
             attempt = match required {
                 Some(records) => {
-                    match settlement::reserve_claims(&self.device, &mut self.config, records) {
+                    match settlement::reserve_claims_for_replay(
+                        &self.device,
+                        &mut self.config,
+                        records,
+                    ) {
                         Ok(()) => {
                             self.status = previous_status.clone();
                             self.market_graphs = market_graphs::MarketGraphs::default();
@@ -3312,6 +3317,7 @@ impl Simulation {
             inventory: values[Field::Grain as usize..Field::Escrow as usize].try_into()?,
             transit: values[Field::Transit as usize],
             fatigue: values[Field::Fatigue as usize],
+            job_days_remaining: values[Field::JobDaysRemaining as usize],
             employer: match values[Field::Employer as usize] {
                 0 => values[Field::Job as usize],
                 employer => employer,

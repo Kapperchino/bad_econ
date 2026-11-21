@@ -304,14 +304,22 @@ fn farmer_and_worker_sizes_preserve_people_and_opening_resources_on_gpu() -> Res
             .filter(|(_, actor)| actor.kind == 0)
         {
             if let Some(firm) = state.get(Field::Job, row).checked_sub(1) {
+                let remaining = state.get(Field::JobDaysRemaining, row);
                 *counts
-                    .entry(state.actors.at(firm as usize).identity)
+                    .entry((state.actors.at(firm as usize).identity, remaining))
                     .or_insert(0u32) += actor.capacity;
             }
         }
         counts
     };
-    assert_eq!(jobs(&original), jobs(&initial));
+    let opening_jobs = jobs(&initial);
+    assert_eq!(jobs(&original), opening_jobs);
+    assert!(
+        opening_jobs
+            .keys()
+            .any(|&(_, days)| (1..14).contains(&days))
+    );
+    assert!(opening_jobs.keys().any(|&(_, days)| days > 30));
     for row in 0..grouped.population_rows() {
         let actor = initial.actors.at(row);
         let bound = if initial.get(Field::LandPlots, row) > 0 {

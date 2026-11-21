@@ -14,6 +14,7 @@ pub use cohorts::CohortSizes;
 pub mod demography;
 pub mod diagnostics;
 mod employment;
+pub(crate) use employment::HiringTerm;
 pub mod enterprise;
 pub mod finance;
 pub mod food;
@@ -1489,13 +1490,13 @@ impl Scenario {
                 .employer(self.source(actor))
                 .map(|source| self.row(source))
             {
+                let employer = state.actors.at(firm);
+                let term = HiringTerm::at_firm(&state, firm, state.get(Field::LandPlots, actor))?;
                 state.set(Field::Job, actor, firm as u64 + 1);
                 state.set(
                     Field::JobDaysRemaining,
                     actor,
-                    calendar::CalendarDate::default()
-                        .days_until_next_month()
-                        .into(),
+                    term.opening_days(self.config.seed, employer.identity),
                 );
             }
             if state.actors.at(actor).kind == 0 {
@@ -2315,6 +2316,8 @@ pub struct Inspection {
     pub transit: u64,
     pub fatigue: u64,
     pub employer: u64,
+    #[serde(default)]
+    pub job_days_remaining: u64,
     pub owner_identity: u64,
     pub company_identity: u64,
     pub company_sites: Vec<u64>,
@@ -2407,6 +2410,7 @@ impl Inspection {
             inventory: Good::ALL.map(|good| state.get(Field::inventory(good), index)),
             transit: state.get(Field::Transit, index),
             fatigue: state.get(Field::Fatigue, index),
+            job_days_remaining: state.get(Field::JobDaysRemaining, index),
             employer: match state.get(Field::Employer, index) {
                 0 => state.get(Field::Job, index),
                 employer => employer,
@@ -2862,12 +2866,12 @@ impl<'a> AuditedState<'a> {
             let job = match state.get(Field::Job, i) {
                 0 => remaining == 0,
                 employer => {
-                    remaining <= 31
-                        && state.actors.at(i).kind == 0
-                        && state
-                            .actors
-                            .get((employer - 1) as usize)
-                            .is_some_and(|actor| actor.kind > 0)
+                    let firm = (employer - 1) as usize;
+                    state.actors.at(i).kind == 0
+                        && state.actors.get(firm).is_some_and(|actor| actor.kind > 0)
+                        && (remaining <= 31
+                            || HiringTerm::at_firm(state, firm, 0)
+                                .is_ok_and(|term| remaining <= term as u64))
                 }
             };
             let limits = state.get(Field::HousingStatus, i) <= HousingState::Homeless as u64

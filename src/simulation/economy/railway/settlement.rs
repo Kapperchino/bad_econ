@@ -171,15 +171,15 @@ pub struct Buffers {
 }
 
 impl Buffers {
-    pub(in crate::simulation) fn graph_buffers(&self) -> [CubeTensor; 7] {
+    pub(in crate::simulation) fn graph_buffers(&self) -> [&CubeTensor; 7] {
         [
-            self.resources.clone(),
-            self.accounts.clone(),
-            self.bookings.clone(),
-            self.queue.clone(),
-            self.claims.clone(),
-            self.progress.clone(),
-            self.dispatches.clone(),
+            &self.resources,
+            &self.accounts,
+            &self.bookings,
+            &self.queue,
+            &self.claims,
+            &self.progress,
+            &self.dispatches,
         ]
     }
 
@@ -575,8 +575,9 @@ struct ClaimAllocation {
 }
 
 impl ClaimAllocation {
-    fn new(count: u64, resources: usize) -> anyhow::Result<Self> {
+    fn new(count: u64, config: &Configuration) -> anyhow::Result<Self> {
         use anyhow::Context;
+        let resources = (config.actors + config.railway.region_count) as usize;
         let capacity = usize::try_from(count)?
             .checked_next_power_of_two()
             .context("too many freight claims")?;
@@ -587,6 +588,10 @@ impl ClaimAllocation {
         u32::try_from(words).context("freight claims exceed GPU indexing capacity")?;
         Ok(Self { capacity, words })
     }
+
+    fn bytes(&self) -> u64 {
+        self.words as u64 * size_of::<u32>() as u64
+    }
 }
 
 fn claim_work(
@@ -594,25 +599,16 @@ fn claim_work(
     config: &mut Configuration,
     count: u64,
 ) -> anyhow::Result<ClaimWork> {
-    let buffers = &mut config.railway.freight;
-    if count > buffers.claim_capacity as u64 {
-        let allocation = ClaimAllocation::new(
-            count,
-            (config.actors + config.railway.region_count) as usize,
-        )?;
-        let additional = allocation.words as u64 * size_of::<u32>() as u64;
-        device.reclaim_memory(additional)?;
-        let reserved = device
-            .client
-            .memory_report(cubecl::MemoryScope::Device)
-            .usage()
-            .bytes_reserved;
-        match reserved.saturating_add(additional) <= device.memory_budget.bytes() {
+    if count > config.railway.freight.claim_capacity as u64 {
+        let allocation = ClaimAllocation::new(count, config)?;
+        let reserved = device.reclaim_memory(allocation.bytes())?.bytes_reserved;
+        match reserved.saturating_add(allocation.bytes()) <= device.memory_budget.bytes() {
             true => Ok(()),
             false => Err(anyhow::anyhow!(
                 "freight claims exceed the device memory budget"
             )),
         }?;
+        let buffers = &mut config.railway.freight;
         buffers.claims = device.empty(allocation.words);
         buffers.claim_capacity = allocation.capacity;
     }
@@ -622,12 +618,26 @@ fn claim_work(
     })
 }
 
-pub fn reserve_claims(
+pub fn reserve_claims_for_replay(
     device: &Device,
     config: &mut Configuration,
     count: u64,
 ) -> anyhow::Result<()> {
-    claim_work(device, config, count).map(|_| ())
+    let tile = config.railway.freight.sorting.tile() as u64;
+    let records = match ClaimAllocation::new(tile, config) {
+        Ok(allocation)
+            if (1..tile).contains(&count)
+                && device
+                    .memory_usage()
+                    .bytes_reserved
+                    .saturating_add(allocation.bytes())
+                    <= device.memory_budget.bytes() =>
+        {
+            tile
+        }
+        _ => count,
+    };
+    claim_work(device, config, records).map(|_| ())
 }
 
 fn word_range(tensor: &CubeTensor, start: usize, words: usize) -> cubecl::server::Handle {

@@ -401,7 +401,6 @@ impl ProposalCase {
             clock: crate::simulation::parameters::MarketClock::Scalars,
             scan: self.scan,
             empty_orders: crate::simulation::parameters::EmptyOrderMode::Settle,
-            employment_term_days: 31,
             day: 0,
             matching_round: 0,
             settlement_rotation: self.rotation as u32,
