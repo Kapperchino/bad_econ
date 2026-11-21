@@ -251,11 +251,20 @@ fn consolidate(
             comptime!(Field::PendingCapacity as u32),
             farm,
         );
+        let labor_efficient = if comptime!(
+            config.commercial_wheat == crate::domain::food::WheatHusbandry::NorfolkFourCourse
+        ) && config.home.harvest_days < 365
+        {
+            output * 365 * config.home.cultivation_minutes
+                > labor * farming::paid_days(config, comptime!(Good::Grain as u32))
+        } else {
+            output * config.home.cultivation_minutes > labor
+        };
         let status = select(
             operating
                 && producer
                 && output * 365 > config.home.annual_yield_per_plot
-                && output * config.home.cultivation_minutes > labor,
+                && labor_efficient,
             select(
                 completed,
                 comptime!(ConsolidationState::Ready as u32),

@@ -101,6 +101,8 @@ pub struct EconomyConfig {
     pub food_income: crate::domain::food::FoodIncome,
     pub wheat_kg_per_hectare: u32,
     #[cube(comptime)]
+    pub commercial_wheat: crate::domain::food::WheatHusbandry,
+    #[cube(comptime)]
     pub economy: crate::domain::Economy,
     pub home: HomeProduction,
     pub consumption_intervals: Box<[u32]>,
@@ -161,6 +163,7 @@ pub struct Configuration {
     pub food_rich_salary: u32,
     pub food_income: crate::domain::food::FoodIncome,
     pub wheat_kg_per_hectare: u32,
+    pub commercial_wheat: crate::domain::food::WheatHusbandry,
     pub economy: crate::domain::Economy,
     pub home: HomeProduction,
     pub consumption_intervals: burn_wgpu::CubeTensor,
@@ -347,6 +350,10 @@ impl Configuration {
                 .food
                 .map_or(crate::domain::food::FoodIncome::Nominal, |food| food.income),
             wheat_kg_per_hectare: config.food.map_or(0, |food| food.wheat_kg_per_hectare),
+            commercial_wheat: config
+                .food
+                .map(|food| food.commercial_wheat)
+                .unwrap_or_default(),
             economy: config.economy,
             home: HomeProduction::new(config.household_production),
             property_mode: Feature::from(config.property.as_ref()),
@@ -473,6 +480,7 @@ impl Configuration {
             food_rich_salary: self.food_rich_salary,
             food_income: self.food_income,
             wheat_kg_per_hectare: self.wheat_kg_per_hectare,
+            commercial_wheat: self.commercial_wheat,
             economy: self.economy,
             home: self.home.launch(),
             consumption_intervals: self.consumption_intervals.buffer_arg(),

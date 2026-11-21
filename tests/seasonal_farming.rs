@@ -1,11 +1,33 @@
 use super::support;
 use anyhow::Result;
 use bad_econ::{
-    domain::{enterprise::HouseholdProduction, *},
+    domain::{
+        enterprise::{HouseholdProduction, LandAccess},
+        food::FoodPolicy,
+        research::{AdoptionPolicy, ResearchConfig, ResearchConsent, ResearchLab},
+        *,
+    },
     simulation::Simulation,
 };
 
 const CROPS: [Good; 4] = [Good::Grain, Good::Flax, Good::Cotton, Good::Dye];
+
+#[test]
+fn generated_industrial_wheat_budget_matches_its_land_and_opening_prices_on_gpu() -> Result<()> {
+    let scenario = Scenario::industrial(100, 42, Experiment::Baseline)?;
+    let state = Simulation::new(scenario.clone(), support::device(64)?)?.download()?;
+    let farm = 100;
+    assert_eq!(state.actors.at(farm).kind, Good::Grain as u32);
+    assert_eq!(state.get(Field::LaborMinutes, farm), 240);
+    assert_eq!(state.get(Field::OutputTicks, farm), 20);
+    let annual = u64::from(state.actors.at(farm).capacity) * 20 * 365;
+    assert_eq!(
+        state.get(Field::FarmHectares, farm),
+        (annual * 32).div_ceil(1601 * 7)
+    );
+    assert_eq!(scenario.config().prices, [118, 200, 103]);
+    Ok(())
+}
 
 fn farming_scenario(home: HouseholdProduction) -> Result<Scenario> {
     let mut config = Scenario::baseline(12, 42, Experiment::Concentrated)?
@@ -148,5 +170,138 @@ fn wrapped_household_harvest_runs_once_across_new_year_on_gpu() -> Result<()> {
     let following = simulation.download()?;
     assert_eq!(following.get(Field::Grain, 0), 20);
     assert_eq!(following.get(Field::CropWork, 0), 0);
+    Ok(())
+}
+
+#[test]
+fn commercial_wheat_needs_harvest_workers_before_the_crop_spoils_on_gpu() -> Result<()> {
+    let mut config = farming_scenario(HouseholdProduction::Unavailable)?
+        .config()
+        .clone();
+    config.food = Some(FoodPolicy::industrial());
+    let firms = &mut config.population.as_mut().unwrap().firms;
+    firms[1].good = Good::Grain;
+    firms[1].cash = 0;
+    let scenario = Scenario::new(config)?;
+    let mut initial = scenario.initial()?;
+    initial.day = 298;
+    for farm in [12, 13] {
+        initial.set(Field::CropWork, farm, 200);
+    }
+    let mut simulation =
+        Simulation::from_checkpoint(Checkpoint::new(&scenario, &initial)?, support::device(64)?)?;
+    simulation.advance()?;
+    let first = simulation.download()?;
+    assert_eq!(first.get(Field::CropWork, 12), 120);
+    assert_eq!(
+        first.get(Field::Produced, 12),
+        (200 * 365 / 211) - (120 * 365 / 211)
+    );
+    assert_eq!(first.get(Field::CropWork, 13), 200);
+    assert_eq!(first.get(Field::Produced, 13), 0);
+    let mut resumed = Simulation::from_checkpoint(simulation.checkpoint()?, support::device(64)?)?;
+    resumed.advance()?;
+    simulation.advance()?;
+    let closed = resumed.download()?;
+    assert_eq!(closed, simulation.download()?);
+    assert_eq!(
+        closed.get(Field::Produced, 12),
+        (200 * 365 / 211) - (40 * 365 / 211)
+    );
+    assert_eq!(closed.get(Field::Produced, 13), 0);
+    assert_eq!(closed.get(Field::CropWork, 12), 0);
+    assert_eq!(closed.get(Field::CropWork, 13), 0);
+    Ok(())
+}
+
+#[test]
+fn threshing_and_consolidation_respect_rotation_and_seed_corn_on_gpu() -> Result<()> {
+    let mut config = farming_scenario(HouseholdProduction::Unavailable)?
+        .config()
+        .clone();
+    config.food = Some(FoodPolicy {
+        wheat_kg_per_hectare: 320,
+        ..FoodPolicy::industrial()
+    });
+    config.land_access = Some(LandAccess {
+        total_plots: 4,
+        allocations: Vec::new(),
+    });
+    config.population.as_mut().unwrap().firms[0].inventories[Good::Tools as usize - 1] = 10;
+    config.research = Some(ResearchConfig {
+        labs: vec![ResearchLab {
+            owner: 13,
+            researcher: 1,
+            discovered: 1,
+            mastered: 1,
+            permitted: 1,
+            adopted: 1,
+            consent: ResearchConsent::Granted,
+            production_requirements: 0,
+            adoption: AdoptionPolicy::Manual,
+            methods: vec![ProductionMethod::MechanicalHarvesting],
+            projects: Vec::new(),
+        }],
+        ..Default::default()
+    });
+    let scenario = Scenario::new(config)?;
+    let device = support::device(64)?;
+    let mut initial = Simulation::new(scenario.clone(), device.clone())?.download()?;
+    assert_eq!(initial.get(Field::FarmHectares, 12), 4);
+    initial.set(Field::FarmHectares, 12, 2);
+    initial.set(Field::OccupiedPlots, 12, 2);
+    initial.set(Field::CropWork, 12, 400);
+    initial.day = 270;
+    let mut simulation =
+        Simulation::from_checkpoint(Checkpoint::new(&scenario, &initial)?, device)?;
+    simulation.advance()?;
+    let harvest = simulation.download()?;
+    assert_eq!(
+        harvest.get(Field::ActiveMethod, 12),
+        ProductionMethod::MechanicalHarvesting as u64
+    );
+    assert_eq!(harvest.get(Field::UnscaledProduced, 12), 276);
+    assert_eq!(harvest.get(Field::Produced, 12), 280);
+    assert_eq!(harvest.get(Field::HarvestedThisYear, 12), 280);
+    assert_eq!(harvest.get(Field::CropWork, 12), 0);
+    simulation.advance()?;
+    assert_eq!(simulation.download()?.get(Field::Produced, 12), 280);
+    simulation.checkpoint()?.restore()?;
+    Ok(())
+}
+
+#[test]
+fn continuous_commercial_wheat_reopens_its_land_budget_once_per_year_on_gpu() -> Result<()> {
+    let mut config = farming_scenario(HouseholdProduction::Available {
+        milling_minutes: 30,
+        baking_minutes: 30,
+        cultivation_minutes: 10,
+        harvest_start: 0,
+        harvest_days: 365,
+        annual_yield_per_plot: 730,
+    })?
+    .config()
+    .clone();
+    config.food = Some(FoodPolicy {
+        wheat_kg_per_hectare: 32,
+        ..FoodPolicy::industrial()
+    });
+    config.land_access = Some(LandAccess {
+        total_plots: 1,
+        allocations: Vec::new(),
+    });
+    let scenario = Scenario::new(config)?;
+    let mut initial = scenario.initial()?;
+    initial.day = 364;
+    initial.set(Field::Demand, 12, 100);
+    let mut simulation =
+        Simulation::from_checkpoint(Checkpoint::new(&scenario, &initial)?, support::device(64)?)?;
+    for total in [7, 14, 14] {
+        simulation.advance()?;
+        let state = simulation.download()?;
+        assert_eq!(state.get(Field::Produced, 12), total);
+        assert_eq!(state.get(Field::HarvestedThisYear, 12), 7);
+    }
+    assert_eq!(simulation.download()?.get(Field::Plan, 12), 0);
     Ok(())
 }

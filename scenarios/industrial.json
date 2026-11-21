@@ -11,6 +11,12 @@
   "experiment": "Concentrated",
   "firm_cash": 200000,
   "firms": 16,
+  "food": {
+    "commercial_wheat": "NorfolkFourCourse",
+    "medium_daily_salary": 2000,
+    "rich_daily_salary": 10000,
+    "wheat_kg_per_hectare": 1601
+  },
   "forecast_weight": 250,
   "household_cash": 5000,
   "household_need": 1,

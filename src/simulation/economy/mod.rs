@@ -37,7 +37,7 @@ pub(super) mod batch;
 mod clearing;
 mod consumption;
 pub(super) mod enterprises;
-mod farming;
+pub(super) mod farming;
 pub(in crate::simulation) mod food;
 mod household_production;
 pub(super) mod indexing;
@@ -493,35 +493,32 @@ fn local(
                     set32(state, config, comptime!(Field::Fatigue as u32), id, fatigue);
                 }
                 _ => {
-                    let mut output = value(state, config, comptime!(Field::Pipeline as u32), id);
-                    if farming::farm(state, config, id, k.output()) {
-                        output = farming::harvest(
-                            state,
-                            config,
-                            control,
-                            id,
-                            parameters.day,
-                            output,
-                            k.output(),
-                        );
-                    }
+                    let completed = value(state, config, comptime!(Field::Pipeline as u32), id);
+                    let output = farming::finish(
+                        state,
+                        config,
+                        control,
+                        id,
+                        parameters.day,
+                        k.output(),
+                        completed,
+                    );
                     increase(
                         state,
                         config,
                         control,
                         comptime!(Field::UnscaledProduced as u32),
                         id,
-                        output,
+                        output.unscaled,
                     );
-                    let output = property::scaled_output(state, config, control, id, output);
-                    increase(state, config, control, k.output(), id, output);
+                    increase(state, config, control, k.output(), id, output.finished);
                     increase(
                         state,
                         config,
                         control,
                         comptime!(Field::Produced as u32),
                         id,
-                        output,
+                        output.finished,
                     );
                     set32(state, config, comptime!(Field::Pipeline as u32), id, 0u32);
                 }

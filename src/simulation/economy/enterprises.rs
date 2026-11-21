@@ -383,8 +383,13 @@ pub(super) fn lifecycle(
         number(state, config, comptime!(Field::Wage as u32), firm),
         number(state, config, comptime!(Field::LaborMinutes as u32), firm),
     );
-    let crop = farming::farm(state, config, firm, kind(actors, firm).output());
-    let payroll = select(crop && !farming::cultivating(config, day), zero(), payroll);
+    let good = kind(actors, firm).output();
+    let crop = farming::farm(state, config, firm, good);
+    let payroll = select(
+        crop && !farming::fieldwork(config, day, good),
+        zero(),
+        payroll,
+    );
     let carrying = crop
         && (!equal(
             value(state, config, comptime!(Field::CropWork as u32), firm),
@@ -649,7 +654,10 @@ pub(super) fn operating_plan(
         let replacement = multiply(control, input_cost, coverage);
         let payroll_days = select(
             farming::farm(state, config, firm, kind(actors, firm).output()),
-            max(coverage, farming::growing_days(config)),
+            max(
+                coverage,
+                farming::paid_days(config, kind(actors, firm).output()),
+            ),
             coverage,
         );
         let reserve = multiply(

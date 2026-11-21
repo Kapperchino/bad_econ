@@ -29,7 +29,7 @@ impl PacketCost {
         let mut cost = select(
             farming::farm(state, config, firm, good) && config.home.harvest_days < 365,
             divide(
-                multiply(control, payroll, farming::growing_days(config)),
+                multiply(control, payroll, farming::paid_days(config, good)),
                 365,
             ),
             payroll,
