@@ -113,6 +113,7 @@ fn network() -> Result<ScenarioConfig> {
                 good,
                 cash: match good {
                     Good::Bread => 10_000,
+                    Good::Railway => 60,
                     _ => 0,
                 },
                 inventories,
@@ -151,13 +152,27 @@ fn connected_railways_charge_freight_and_foreign_track_fees_on_gpu() -> Result<(
     let quantity = state.get(Field::Purchased, 0);
     assert!(quantity > 0);
     assert_eq!(delivered(&state, &scenario, 1), quantity);
-    assert_eq!(state.get(Field::Cash, 0), 1000 - quantity * 10);
+    assert_eq!(
+        state.get(Field::Cash, 0),
+        1000 + state.get(Field::GrossIncome, 0) - quantity * 10
+    );
     assert_eq!(state.get(Field::Cash, 4), 10_000 + quantity * 3);
     assert_eq!(state.get(Field::Cash, 5), quantity * 2);
     assert_eq!(state.get(Field::Cash, 6), quantity * 5);
     assert_eq!(state.get(Field::BusinessRevenue, 5), quantity * 2);
     assert_eq!(state.get(Field::BusinessRevenue, 6), quantity * 5);
     assert_eq!(state.get(Field::FreightEscrow, 0), 0);
+    for firm in [5, 6] {
+        assert_eq!(
+            state.get(Field::Plan, firm) - state.get(Field::Slots, firm),
+            1
+        );
+        let payroll: u64 = (0..4)
+            .filter(|&worker| state.get(Field::Employer, worker) == firm as u64 + 1)
+            .map(|worker| state.get(Field::GrossIncome, worker))
+            .sum();
+        assert_eq!(payroll, 60);
+    }
     assert_eq!(simulation.snapshot.used[Good::Coal as usize - 1], 8);
     assert_eq!(simulation.snapshot.used[Good::Steel as usize - 1], 12);
     assert_eq!(simulation.snapshot.used[Good::Locomotives as usize - 1], 4);
@@ -171,7 +186,9 @@ fn connected_railways_charge_freight_and_foreign_track_fees_on_gpu() -> Result<(
         assert_eq!(state, replay.download()?);
         assert_eq!(simulation.snapshot.cash, state.initial_cash);
         assert!((0..scenario.config().households as usize).all(|actor| {
-            state.get(Field::Hours, actor) + state.get(Field::Time, actor)
+            state.get(Field::Hours, actor)
+                + state.get(Field::Time, actor)
+                + state.get(Field::CartageMinutes, actor)
                 <= u64::from(scenario.config().work_cap)
         }));
     }
@@ -202,7 +219,28 @@ fn disconnected_or_unbuilt_tracks_use_animals_on_gpu() -> Result<()> {
         assert!(quantity > 0);
         assert_eq!(delivered(&state, &scenario, 9), quantity);
         assert_eq!(delivered(&state, &scenario, 1), 0);
-        assert_eq!(state.get(Field::Cash, 0), 1000 - quantity * 10);
+        let fare = quantity * 9 * 3;
+        assert!(fare > quantity * 7);
+        assert_eq!(
+            state.get(Field::Cash, 0),
+            1000 + state.get(Field::GrossIncome, 0) + state.get(Field::CartageIncome, 0)
+                - quantity * 10
+                - fare
+        );
+        assert_eq!(
+            (0..4)
+                .map(|worker| state.get(Field::CartageIncome, worker))
+                .sum::<u64>(),
+            fare
+        );
+        assert!(
+            (0..4)
+                .map(|worker| state.get(Field::CartageMinutes, worker))
+                .sum::<u64>()
+                >= quantity * 9 * 2
+        );
+        assert_eq!(state.get(Field::RoadFreight, 0), 0);
+        assert_eq!(state.get(Field::CartagePayable, 0), 0);
         assert_eq!(state.get(Field::Cash, 5), 0);
         assert_eq!(state.get(Field::Cash, 6), 0);
         if missing.is_some() {
@@ -267,7 +305,7 @@ fn concurrent_shared_freight_preserves_capacity_payments_and_checkpoints_on_gpu(
         FreightLoad {
             capacity: 1000,
             budget: 10_000,
-            delivered: 261,
+            delivered: 273,
         },
         FreightLoad {
             capacity: 1000,
@@ -365,10 +403,85 @@ fn a_household_can_ship_its_grain_surplus_to_a_distributor_by_rail_on_gpu() -> R
     );
     assert_eq!(
         delivered.get(Field::Cash, 0),
-        1000 + u64::from(scenario.config().prices[0]) - 7
+        1000 + delivered.get(Field::GrossIncome, 0) + u64::from(scenario.config().prices[0]) - 7
     );
     assert_eq!(delivered.get(Field::RailRevenue, 5), 2);
     assert_eq!(delivered.get(Field::RailRevenue, 6), 5);
     simulation.checkpoint()?.restore()?;
+    Ok(())
+}
+
+#[test]
+fn freight_waits_for_workers_then_dispatches_after_checkpoint_restore_on_gpu() -> Result<()> {
+    let mut config = network()?;
+    let working_age = config.demography.minimum_work_age_years * calendar::DAYS_PER_YEAR;
+    config.demography.people = (1..=4)
+        .map(|household| demography::PersonSeed {
+            identity: 100 + household,
+            household,
+            age_days: working_age - 2,
+            sex: demography::Sex::Male,
+        })
+        .collect();
+    let scenario = Scenario::new(config)?;
+    let mut simulation = Simulation::new(scenario.clone(), support::device(64)?)?;
+    simulation.advance()?;
+    let state = simulation.download()?;
+    let quantity = state.get(Field::Purchased, 0);
+    assert!(quantity > 0);
+    assert_eq!(state.get(Field::CartagePayable, 0), quantity * 27);
+    assert_eq!(state.get(Field::RoadFreight, 0), quantity);
+    assert_eq!(delivered(&state, &scenario, 9), 0);
+    assert_eq!(simulation.snapshot.economy.transport_workers, 0);
+    assert_eq!(simulation.snapshot.economy.cartage_receipts, 0);
+    for firm in [5, 6] {
+        assert_eq!(state.get(Field::RailBuilt, firm), 0);
+        assert_eq!(state.get(Field::Used, firm), 0);
+    }
+    let checkpoint = simulation.checkpoint()?;
+    let mut resumed = Simulation::from_checkpoint(checkpoint, support::device(64)?)?;
+    let mut receipts = 0;
+    for _ in 0..4 {
+        simulation.advance()?;
+        resumed.advance()?;
+        receipts += simulation.snapshot.economy.cartage_receipts;
+        assert_eq!(resumed.snapshot, simulation.snapshot);
+    }
+    assert!(receipts >= 27 * quantity);
+    assert_eq!(simulation.download()?, resumed.download()?);
+    Ok(())
+}
+
+#[test]
+fn funded_transport_companies_can_run_wagons_without_tracks_on_gpu() -> Result<()> {
+    let mut config = network()?;
+    config.railway.segments.clear();
+    let scenario = Scenario::new(config)?;
+    let mut simulation = Simulation::new(scenario.clone(), support::device(64)?)?;
+    simulation.advance()?;
+    let state = simulation.download()?;
+    let company_receipts: u64 = [5, 6]
+        .into_iter()
+        .map(|firm| state.get(Field::CartageIncome, firm))
+        .sum();
+    assert!(company_receipts > 0);
+    assert_eq!(simulation.snapshot.economy.transport_workers, 2);
+    for firm in [5, 6] {
+        assert_eq!(state.get(Field::RailOperating, firm), 0);
+        assert_eq!(state.get(Field::RailRevenue, firm), 0);
+        assert_eq!(
+            state.get(Field::BusinessRevenue, firm),
+            state.get(Field::CartageIncome, firm)
+        );
+        assert!(state.get(Field::CartageMinutes, firm) <= 60);
+    }
+    assert_eq!(
+        simulation.snapshot.economy.cartage_receipts,
+        delivered(&state, &scenario, 9) * 27
+    );
+    assert_eq!(
+        simulation.snapshot,
+        ObservationSnapshot::from_state(&scenario, &state)?
+    );
     Ok(())
 }

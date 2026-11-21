@@ -1299,13 +1299,16 @@ fn transfer_estate(
         .chain(Good::ALL.map(|good| Field::inventory(good) as usize))
         .chain([
             Field::Transit as usize,
+            Field::RoadFreight as usize,
+            Field::CartagePayable as usize,
             Field::LandPlots as usize,
             Field::CropWork as usize,
             Field::InstalledCapital as usize,
         ])
         .chain(crate::domain::TRANSIT_FIELDS..crate::domain::TRANSIT_FIELDS + Good::COUNT)
         .chain(
-            crate::domain::BASE_FIELDS..crate::domain::BASE_FIELDS + scenario.ring() * Good::COUNT,
+            crate::domain::BASE_FIELDS
+                ..crate::domain::BASE_FIELDS + 2 * scenario.ring() * Good::COUNT,
         )
         .filter(|&field| {
             shared_region || ![Field::LandPlots as usize, Field::CropWork as usize].contains(&field)
@@ -1353,7 +1356,7 @@ fn liquidate(
             ])
             .chain(
                 crate::domain::BASE_FIELDS
-                    ..crate::domain::BASE_FIELDS + scenario.ring() * Good::COUNT,
+                    ..crate::domain::BASE_FIELDS + 2 * scenario.ring() * Good::COUNT,
             );
         for field in fields {
             let balance = state.values[field * count + firm];
@@ -1364,6 +1367,8 @@ fn liquidate(
                 crate::arithmetic::add(state.values[field * count + receiver], amount)?;
         }
         for actor in [firm, receiver] {
+            let mut awaiting = 0;
+            let mut payable = 0;
             let mut total = 0;
             for good in Good::ALL {
                 let mut transit = 0;
@@ -1371,13 +1376,25 @@ fn liquidate(
                     let coordinate = state
                         .shipment_coordinate(good, slot, scenario.ring(), actor)
                         .0 as usize;
-                    transit = crate::arithmetic::add(transit, state.values[coordinate])?;
+                    let waiting = state.values[coordinate + Good::COUNT * scenario.ring() * count];
+                    awaiting = crate::arithmetic::add(awaiting, waiting)?;
+                    let rate = slot as u64
+                        * u64::from(crate::domain::railway::CART_BILLABLE_MINUTES_PER_UNIT_DAY)
+                        * u64::from(scenario.config().wage);
+                    payable =
+                        crate::arithmetic::add(payable, crate::arithmetic::mul(waiting, rate)?)?;
+                    transit = crate::arithmetic::add(
+                        transit,
+                        crate::arithmetic::add(state.values[coordinate], waiting)?,
+                    )?;
                 }
                 state.values[(crate::domain::TRANSIT_FIELDS + good as usize - 1) * count + actor] =
                     transit;
                 total = crate::arithmetic::add(total, transit)?;
             }
             state.set(Field::Transit, actor, total);
+            state.set(Field::RoadFreight, actor, awaiting);
+            state.set(Field::CartagePayable, actor, payable);
         }
         remaining -= u64::from(share.units);
     }

@@ -204,6 +204,8 @@ pub struct Configuration {
     pub property_mode: Feature,
     pub property_regions: burn_wgpu::CubeTensor,
     pub grain_farms: burn_wgpu::CubeTensor,
+    pub cartage_accounts: burn_wgpu::CubeTensor,
+    pub cartage_firms: u32,
     pub rental_accounts: burn_wgpu::CubeTensor,
     pub rental_businesses: u32,
     pub small_business_expansion: u32,
@@ -217,6 +219,7 @@ impl Configuration {
             &self.property_regions,
             &self.grain_farms,
             &self.rental_accounts,
+            &self.cartage_accounts,
         ]
         .into_iter()
         .chain(self.railway.graph_buffers())
@@ -331,11 +334,28 @@ impl Configuration {
         railway: super::economy::railway::Network,
     ) -> Self {
         let config = scenario.config();
+        let mut carriers = state
+            .actors
+            .firm_indices()
+            .filter(|&row| state.actors.at(row).kind == Good::Railway as u32)
+            .map(|row| row as u32)
+            .collect::<Vec<_>>();
+        let cartage_firms = carriers.len() as u32;
+        carriers.extend(
+            state
+                .actors
+                .iter()
+                .enumerate()
+                .filter(|(_, actor)| actor.kind == 0)
+                .map(|(row, _)| row as u32),
+        );
         Self {
             heating_per_person: crate::domain::calendar::Weather::on_day(state.day)
                 .heating_units_per_person,
             small_business_expansion: config.expansion.small_business_per_mille,
             industrial_expansion: config.expansion.industrial_per_mille,
+            cartage_accounts: device.tensor(&carriers),
+            cartage_firms,
             rental_accounts: device.tensor(&rentals.words()),
             rental_businesses: rentals.accounts.len() as u32,
             rentals,

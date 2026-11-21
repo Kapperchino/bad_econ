@@ -107,8 +107,8 @@ pub(super) fn buyer_settlement(
     let retained = household_production::reserve(state, actors, config, other, good);
     let _ = add_checked(control, retained, quantity);
     let route = railway::animal_route(actors, config, actor, other);
-    let slot =
-        BASE_FIELDS as u32 + (good - 1) * config.ring + (parameters.day + route.days) % config.ring;
+    let trip = distance(actors, actor, other);
+    let slot = cartage::booking_field(config, good, parameters.day, route.days, trip);
     let cash = value(state, config, comptime!(Field::Cash as u32), actor);
     let incoming = plus(value(state, config, slot, actor), quantity);
     let transit_good = plus(
@@ -123,11 +123,32 @@ pub(super) fn buyer_settlement(
         value(state, config, comptime!(Field::Purchased as u32), actor),
         quantity,
     );
-    let faults = incoming
+    let mut faults = incoming
         .faults
         .union(transit_good.faults)
         .union(transit.faults)
         .union(purchased.faults);
+    let mut waiting = zero();
+    let mut payable = zero();
+    if trip > 0 {
+        let freight = multiply(control, quantity, cartage::rate(config, route.days));
+        let orders = plus(
+            value(state, config, comptime!(Field::RoadFreight as u32), actor),
+            quantity,
+        );
+        let fees = plus(
+            value(
+                state,
+                config,
+                comptime!(Field::CartagePayable as u32),
+                actor,
+            ),
+            freight,
+        );
+        faults.insert(orders.faults.union(fees.faults));
+        waiting = orders.value;
+        payable = fees.value;
+    }
     let mut status = KernelEventStatus::new(comptime!(EventStatus::Rejected));
     if !lt(cash, cost) {
         status.set(comptime!(EventStatus::Accepted));
@@ -147,6 +168,22 @@ pub(super) fn buyer_settlement(
             minus(cash, cost),
         );
         set(state, config, slot, actor, incoming.value);
+        if trip > 0 {
+            set(
+                state,
+                config,
+                comptime!(Field::CartagePayable as u32),
+                actor,
+                payable,
+            );
+            set(
+                state,
+                config,
+                comptime!(Field::RoadFreight as u32),
+                actor,
+                waiting,
+            );
+        }
         if good == comptime!(Good::Bread as u32)
             && kind(actors, actor).is(comptime!(ActorKind::Household))
         {

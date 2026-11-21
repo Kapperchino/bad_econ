@@ -208,6 +208,10 @@ pub struct SummaryLayout {
     pub subsistence: TickLayout,
     pub inactive: TickLayout,
     pub rural_employed: TickLayout,
+    pub transport_workers: TickLayout,
+    pub cartage_minutes: TickLayout,
+    pub cartage_receipts: TickLayout,
+    pub awaiting_pickup: TickLayout,
     pub household_cash: TickLayout,
     pub active_by_good: [TickLayout; Good::COUNT],
     pub business_types: [TickLayout; 3],
@@ -257,6 +261,10 @@ impl SummaryLayout {
     pub const SUBSISTENCE: u32 = (offset_of!(Self, subsistence) / TICK_BYTES) as u32;
     pub const INACTIVE: u32 = (offset_of!(Self, inactive) / TICK_BYTES) as u32;
     pub const RURAL_EMPLOYED: u32 = (offset_of!(Self, rural_employed) / TICK_BYTES) as u32;
+    pub const TRANSPORT_WORKERS: u32 = (offset_of!(Self, transport_workers) / TICK_BYTES) as u32;
+    pub const CARTAGE_MINUTES: u32 = (offset_of!(Self, cartage_minutes) / TICK_BYTES) as u32;
+    pub const CARTAGE_RECEIPTS: u32 = (offset_of!(Self, cartage_receipts) / TICK_BYTES) as u32;
+    pub const AWAITING_PICKUP: u32 = (offset_of!(Self, awaiting_pickup) / TICK_BYTES) as u32;
     pub const HOUSEHOLD_CASH: u32 = (offset_of!(Self, household_cash) / TICK_BYTES) as u32;
     pub const ACTIVE_BY_GOOD: u32 = (offset_of!(Self, active_by_good) / TICK_BYTES) as u32;
     pub const BUSINESS_TYPES: u32 = (offset_of!(Self, business_types) / TICK_BYTES) as u32;

@@ -129,6 +129,17 @@ pub(super) fn advance(
                 / u64::cast_from(max(adults, 1));
         }
         let home = get(state, config, comptime!(Field::HomeMinutes as u32), row) / max(adults, 1);
+        let cartage =
+            get(state, config, comptime!(Field::CartageMinutes as u32), row) / max(adults, 1);
+        occupational += wide(occupation(
+            policy.occupational[comptime!(crate::domain::Good::Railway as usize - 1)],
+            cartage,
+            policy.parameters.reference_minutes,
+            1000,
+            0,
+            fatigue,
+            0,
+        ));
         occupational += wide(occupation(
             policy.occupational[0],
             home,
@@ -324,6 +335,11 @@ fn observe(state: &mut [u32], config: &EconomyConfig, totals: &mut [u64]) {
             ));
         }
         totals[start + 7] = u64::cast_from(get(state, config, comptime!(Field::Hours as u32), row))
+            + u64::cast_from(select(
+                get(state, config, comptime!(Field::HouseholdBudget as u32), row) > 0,
+                get(state, config, comptime!(Field::CartageMinutes as u32), row),
+                0,
+            ))
             + u64::cast_from(get(
                 state,
                 config,

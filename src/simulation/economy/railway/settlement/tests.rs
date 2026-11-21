@@ -195,6 +195,7 @@ impl FitRoute {
             Self::Repeated | Self::ManyNodes | Self::Property => 200,
             Self::Long => 20,
         };
+        config.wage = 100;
         if matches!(self, Self::Repeated | Self::ManyNodes | Self::Property) {
             config.railway.segments[0].to = Position { x: 400, y: 400 };
             config.railway.segments[1].company = config.railway.companies[0].firm;
@@ -834,13 +835,11 @@ fn freight_execution(
     };
     let delivered = delivered_buyers.len();
     for buyer in 0..shipments {
-        let delivery = state.shipment_coordinate(
-            good,
-            (parameters.day as usize + 9) % scenario.ring(),
-            scenario.ring(),
-            buyer,
-        );
-        state.values[delivery.0 as usize] = u64::from(load.accepts(buyer));
+        let delivery = state.cartage_coordinate(good, 9, scenario.ring(), buyer);
+        let amount = u64::from(load.accepts(buyer));
+        state.values[delivery.0 as usize] = amount;
+        state.set(Field::RoadFreight, buyer, amount);
+        state.set(Field::CartagePayable, buyer, amount * 27);
         let sender = load.sender(buyer, seller);
         proposals[buyer * ProposalLayout::WORDS + ProposalLayout::ACTOR] = sender as u32;
         proposals[buyer * ProposalLayout::WORDS + ProposalLayout::QUANTITY_LOW] = 1;
@@ -1097,16 +1096,11 @@ fn freight_execution(
             actual.values[delivery.0 as usize],
             u64::from(delivered_buyers.contains(&buyer))
         );
-        let animal = actual.shipment_coordinate(
-            good,
-            (parameters.day as usize + 9) % scenario.ring(),
-            scenario.ring(),
-            buyer,
-        );
-        assert_eq!(
-            actual.values[animal.0 as usize],
-            u64::from(load.accepts(buyer) && !delivered_buyers.contains(&buyer))
-        );
+        let animal = actual.cartage_coordinate(good, 9, scenario.ring(), buyer);
+        let waiting = u64::from(load.accepts(buyer) && !delivered_buyers.contains(&buyer));
+        assert_eq!(actual.get(Field::RoadFreight, buyer), waiting);
+        assert_eq!(actual.get(Field::CartagePayable, buyer), waiting * 27);
+        assert_eq!(actual.values[animal.0 as usize], waiting);
     }
     device.read(&simulation.state)
 }
@@ -1569,6 +1563,25 @@ fn buffered_capacity_recovery(initial_capacity: usize, contention: ClaimContenti
             let coordinate =
                 state.shipment_coordinate(Good::Bread, slot, scenario.ring(), household);
             state.values[coordinate.0 as usize] = 0;
+            let pickup = state.cartage_coordinate(Good::Bread, slot, scenario.ring(), household);
+            let waiting = state.values[pickup.0 as usize];
+            state.values[pickup.0 as usize] = 0;
+            state.set(
+                Field::RoadFreight,
+                household,
+                state.get(Field::RoadFreight, household) - waiting,
+            );
+            let fare = waiting
+                * slot as u64
+                * u64::from(
+                    crate::domain::railway::CART_BILLABLE_MINUTES_PER_UNIT_DAY
+                        * scenario.config().wage,
+                );
+            state.set(
+                Field::CartagePayable,
+                household,
+                state.get(Field::CartagePayable, household) - fare,
+            );
         }
     }
     state.set(

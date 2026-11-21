@@ -126,7 +126,7 @@ impl CohortLayout {
         let mut open = BTreeMap::new();
         let mut rental_sites = BTreeMap::<usize, Vec<usize>>::new();
         let mut tenants = BTreeMap::<usize, usize>::new();
-        let stride = (super::BASE_FIELDS + scenario.ring() * super::Good::COUNT) * 2;
+        let stride = (super::BASE_FIELDS + 2 * scenario.ring() * super::Good::COUNT) * 2;
         let farmers = match (config.household_production, &grants) {
             (_, Some(grants)) => grants.len() as u32,
             (HouseholdProduction::Unavailable, _) => 0,

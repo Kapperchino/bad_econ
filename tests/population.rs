@@ -450,6 +450,17 @@ fn a_founder_buys_materials_and_leaves_an_explicit_cohort_on_gpu() -> Result<()>
     Ok(())
 }
 
+fn legacy_fields(state: &mut State, scenario: &Scenario, missing: std::ops::Range<usize>) {
+    let rows = state.actors.len();
+    if missing.end == USED_FIELDS {
+        let shipments = Good::COUNT * scenario.ring();
+        state
+            .values
+            .drain((BASE_FIELDS + shipments) * rows..(BASE_FIELDS + 2 * shipments) * rows);
+    }
+    state.values.drain(missing.start * rows..missing.end * rows);
+}
+
 #[test]
 fn legacy_checkpoints_migrate_and_resume_on_gpu() -> Result<()> {
     use bad_econ::simulation::Simulation;
@@ -461,17 +472,19 @@ fn legacy_checkpoints_migrate_and_resume_on_gpu() -> Result<()> {
     simulation.advance()?;
     let state = simulation.download()?;
     let checkpoint = serde_json::to_value(simulation.checkpoint()?)?;
-    for (version, first_missing) in [
-        (23, Field::JobDaysRemaining),
-        (24, Field::EligibleWorkers),
-        (25, Field::Infants),
-        (26, Field::GrainReserve),
+    for (version, missing) in [
+        (23, Field::JobDaysRemaining as usize..USED_FIELDS),
+        (24, Field::EligibleWorkers as usize..USED_FIELDS),
+        (25, Field::Infants as usize..USED_FIELDS),
+        (26, Field::GrainReserve as usize..USED_FIELDS),
+        (27, Field::RoadFreight as usize..USED_FIELDS),
+        (
+            27,
+            Field::GrainReserve as usize..Field::RoadFreight as usize,
+        ),
     ] {
-        let rows = state.actors.len();
         let mut old_state = state.clone();
-        old_state
-            .values
-            .drain(first_missing as usize * rows..USED_FIELDS * rows);
+        legacy_fields(&mut old_state, &scenario, missing);
         let checksum = bad_econ::arithmetic::hex(&Sha256::digest(serde_json::to_vec(&(
             scenario.config(),
             &old_state,
@@ -520,10 +533,7 @@ fn individual_checkpoint_members_resume_as_cohort_counts_on_gpu() -> Result<()> 
     let scenario = Scenario::new(config)?;
     let initial = scenario.initial()?;
     let mut legacy = initial.clone();
-    let rows = legacy.actors.len();
-    legacy
-        .values
-        .drain(Field::Infants as usize * rows..USED_FIELDS * rows);
+    legacy_fields(&mut legacy, &scenario, Field::Infants as usize..USED_FIELDS);
     legacy.next_identity = 1030;
     legacy.people = scenario
         .config()

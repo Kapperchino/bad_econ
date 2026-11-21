@@ -325,6 +325,15 @@ fn prepare(
                 search = search
                     && number(state, config, comptime!(Field::Time as u32), id)
                         >= select(comptime!(market == MarketFlag::Labor), 1u32, 0);
+                if parameters.traded_good() > 0 {
+                    purchasing_power = minimum(
+                        purchasing_power,
+                        positive(
+                            value(state, config, comptime!(Field::Cash as u32), id),
+                            value(state, config, comptime!(Field::CartagePayable as u32), id),
+                        ),
+                    );
+                }
                 if good > 0 {
                     search = search && !equal(wanted, zero()) && !equal(purchasing_power, zero());
                 }
@@ -674,6 +683,10 @@ fn candidate_supply(
                     },
                 ),
             };
+            let quote = match comptime!(market) {
+                MarketFlag::Labor => quote,
+                _ => cartage::delivered_price(config, quote, dist, days),
+            };
             score = ticks(quote + days * config.delivery_penalty, 0u32);
             amount = ticks(1u32, 0u32);
             if comptime!(market == MarketFlag::Labor) {
@@ -847,8 +860,12 @@ fn consumer_candidate(
                     buyer_access,
                 },
             );
+            let quote = cartage::delivered_price(config, quote, dist, days);
             score = ticks(quote + days * config.delivery_penalty, 0);
-            let usable = firm != id && quote > 0 && !equal(wanted, zero());
+            let usable = firm != id
+                && supply.quote > 0
+                && !lt(purchasing_power, ticks(quote, 0))
+                && !equal(wanted, zero());
             eligible = usable && supply.offered;
             empty = usable && supply.producer && !supply.offered;
         }
@@ -1704,7 +1721,17 @@ fn search(
             {
                 let supply =
                     index::Supply::new(state, actors, config, chosen, parameters.traded_good());
-                let affordable = minimum(wanted, divide(purchasing_power, max(supply.quote, 1)));
+                let days = railway::delivery_days(
+                    config,
+                    railway::DeliveryRequest {
+                        buyer: id,
+                        seller: chosen,
+                        trip,
+                        buyer_access,
+                    },
+                );
+                let delivered = cartage::delivered_price(config, supply.quote, trip, days);
+                let affordable = minimum(wanted, divide(purchasing_power, max(delivered, 1)));
                 quantity = select(
                     missing_supply,
                     affordable,

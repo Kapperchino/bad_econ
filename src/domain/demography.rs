@@ -693,7 +693,7 @@ impl CohortPopulation {
             ]) {
                 *sum += value(field);
             }
-            total.work_minutes += value(Hours) + value(HomeMinutes);
+            total.work_minutes += value(Hours) + value(HomeMinutes) + value(CartageMinutes);
             total.famine_exposure += living * value(CohortFamineExposure);
             total.cold_exposure += living * value(CohortColdExposure);
         }
