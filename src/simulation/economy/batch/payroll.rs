@@ -196,7 +196,7 @@ mod tests {
                 let mut state = initial.clone();
                 state.set(Field::Escrow, peer, case.escrow);
                 let mut proposals = vec![0; count * ProposalLayout::WORDS];
-                let mut scratch = vec![0; actual.scratch.meta.num_elements()];
+                let mut scratch = vec![0; actual.work.scratch.meta.num_elements()];
                 for (actor, &amount) in case.amounts.iter().enumerate() {
                     state.set(Field::Due, actor, amount);
                     state.set(Field::Employer, actor, peer as u64 + 1);
@@ -219,8 +219,8 @@ mod tests {
                         &simulation.state,
                         bytemuck::cast_slice(&encode(&state.values)),
                     );
-                    device.write(&simulation.proposals, &proposals);
-                    device.write(&simulation.scratch, &scratch);
+                    device.write(&simulation.work.proposals, &proposals);
+                    device.write(&simulation.work.scratch, &scratch);
                     device.write(&simulation.control, &control);
                 }
                 let parameters =
@@ -234,8 +234,8 @@ mod tests {
                         actors: expected.actors.buffer_arg(),
                         config: expected.config.launch(),
                         spatial: expected.spatial.buffer_arg(),
-                        proposals: expected.proposals.buffer_arg(),
-                        bundles: expected.scratch.buffer_arg(),
+                        proposals: expected.work.proposals.buffer_arg(),
+                        bundles: expected.work.scratch.buffer_arg(),
                         control: expected.control.buffer_arg(),
                         parameters: parameters.launch(),
                         stage: EconomyStage::GroupExecute,
@@ -249,15 +249,15 @@ mod tests {
                         state: actual.state.buffer_arg(),
                         actors: actual.actors.buffer_arg(),
                         config: actual.config.launch(),
-                        proposals: actual.proposals.buffer_arg(),
-                        scratch: actual.scratch.buffer_arg(),
+                        proposals: actual.work.proposals.buffer_arg(),
+                        scratch: actual.work.scratch.buffer_arg(),
                         control: actual.control.buffer_arg(),
                         parameters: parameters.launch(),
                     },
                 );
                 for (name, actual, expected) in [
                     ("state", &actual.state, &expected.state),
-                    ("statuses", &actual.scratch, &expected.scratch),
+                    ("statuses", &actual.work.scratch, &expected.work.scratch),
                     ("faults", &actual.control, &expected.control),
                 ] {
                     let actual = device.read(actual)?;

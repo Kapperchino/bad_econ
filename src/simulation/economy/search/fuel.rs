@@ -14,19 +14,22 @@ enum ScanPopulation {
 }
 
 #[cube]
-pub(super) fn search(
-    economy: &mut EconomyView<'_>,
-    spatial: &[u32],
-    proposals: &mut [u32],
-    searches: &mut [u32],
-    successes: &[Atomic<u32>],
-    scratch: &[u32],
-    control: &[Atomic<u32>],
-    parameters: &EconomyParameters,
-    #[comptime] suppliers: SupplierSearch,
-    #[comptime] collection: OrderCollection,
-    #[comptime] order: SearchOrder,
-) {
+pub(super) fn search(input: &mut SearchInput) {
+    let order = comptime!(match input.program.stage {
+        SearchStage::SearchSpatialFuel => SearchOrder::Spatial,
+        _ => SearchOrder::Compact,
+    });
+    let mut view = EconomyView::new(&mut input.state, &input.actors, &input.config);
+    let economy = &mut view;
+    let parameters = &input.parameters;
+    let spatial: &[u32] = &input.spatial;
+    let proposals: &mut [u32] = &mut input.proposals;
+    let searches: &mut [u32] = &mut input.searches;
+    let successes: &[Atomic<u32>] = &input.successes;
+    let scratch: &[u32] = &input.scratch;
+    let control: &[Atomic<u32>] = &input.control;
+    let suppliers = comptime!(input.program.suppliers);
+    let collection = comptime!(input.program.collection);
     let config = economy.ledger.config;
     let job = ABSOLUTE_POS as u32;
     let jobs = control[SEARCHES_WORD].load();
@@ -48,14 +51,9 @@ pub(super) fn search(
             let cells = config.spatial_side * config.spatial_side;
             let indexed = comptime!(matches!(parameters.market, MarketFlag::Consumer(_)))
                 && spatial[cells as usize] <= empty::LIMIT;
-            let wanted = ticks(
-                searches[(config.actors + id) as usize],
-                searches[(2 * config.actors + id) as usize],
-            );
-            let purchasing_power = ticks(
-                searches[(3 * config.actors + id) as usize],
-                searches[(4 * config.actors + id) as usize],
-            );
+            let demand = BuyerDemand::load(&*searches, config.actors, id);
+            let wanted = demand.wanted;
+            let purchasing_power = demand.purchasing_power;
             let inbound = railway::serves_buyer(config, id);
             let mut buyer_access = 0u32;
             if comptime!(config.railway.routes_enabled == Feature::Enabled)
@@ -409,12 +407,12 @@ pub(super) fn search(
                 }
                 economy.ledger.set_number(Field::FoodAccess, id, failure);
             }
-            proposals[id as usize * ProposalLayout::WORDS + ProposalLayout::ACTOR] = chosen;
-            proposals[id as usize * ProposalLayout::WORDS + ProposalLayout::QUANTITY_LOW] =
-                quantity.extract(LOW_WORD);
-            proposals[id as usize * ProposalLayout::WORDS + ProposalLayout::QUANTITY_HIGH] =
-                quantity.extract(HIGH_WORD);
-            proposals[id as usize * ProposalLayout::WORDS + ProposalLayout::DISTANCE] = trip;
+            MarketProposal {
+                peer: chosen,
+                quantity,
+                trip,
+            }
+            .store(proposals, id);
             if chosen != NO_ACTOR {
                 if comptime!(collection != OrderCollection::ConsumerMask) {
                     record_success(successes, parameters, id);

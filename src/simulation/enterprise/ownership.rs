@@ -1,5 +1,6 @@
 use crate::domain::{Field, Good, State, enterprise::EstateStatus};
-use crate::simulation::configuration::{Configuration, EconomyConfig};
+use crate::simulation::DeviceEconomy;
+use crate::simulation::configuration::EconomyConfig;
 #[cfg(test)]
 use crate::simulation::layout::ActorLayout;
 use crate::simulation::{
@@ -132,10 +133,12 @@ impl OwnershipRuntime {
     }
     pub fn distribute(
         &self,
-        device: &Device,
-        state: &CubeTensor,
-        actors: &CubeTensor,
-        config: &Configuration,
+        DeviceEconomy {
+            device,
+            state,
+            actors,
+            config,
+        }: DeviceEconomy<'_>,
     ) -> Result<()> {
         device.write(&self.control, &[0; 4]);
         OwnershipPayments::launch_elements(
@@ -402,6 +405,7 @@ mod tests {
         Experiment, Scenario,
         enterprise::{Ownership, OwnershipShare},
     };
+    use crate::simulation::configuration::Configuration;
     use crate::simulation::{encode, layout::ActorMetadataRows};
     use std::collections::BTreeMap;
 
@@ -501,7 +505,12 @@ mod tests {
                     original.buffer_arg(),
                     control.buffer_arg(),
                 );
-                let result = runtime.distribute(&device, &actual, &actors, &config);
+                let result = runtime.distribute(DeviceEconomy {
+                    device: &device,
+                    state: &actual,
+                    actors: &actors,
+                    config: &config,
+                });
                 let expected_faults = FaultFlags::read(&device.read(&control)?)?;
                 assert_eq!(result.is_ok(), expected_faults.is_empty());
                 assert_eq!(

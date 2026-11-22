@@ -63,7 +63,7 @@ mod systems;
 use super::scheduler::Posting;
 use clearing::{PeerBalances, PeerOffer, actor_settlement};
 use events::{EventStorage, construct};
-use proposals::{InputDemand, trial_packet};
+use proposals::{InputDemand, MarketProposal, trial_packet};
 pub(super) use systems::{EconomyInputLaunch, EconomySystem};
 
 #[cube]

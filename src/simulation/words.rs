@@ -189,15 +189,22 @@ pub fn load(values: &mut [u32], coordinate: u32) -> Ticks {
 
 #[cube]
 pub fn read_ticks(values: &[u32], coordinate: u32) -> Ticks {
-    ticks(
-        values[(coordinate * TICK_WORDS as u32) as usize],
-        values[(coordinate * TICK_WORDS as u32 + HIGH_WORD as u32) as usize],
-    )
+    read_tick_words(values, (coordinate * TICK_WORDS as u32) as usize)
 }
 #[cube]
 pub fn store(values: &mut [u32], coordinate: u32, value: Ticks) {
-    values[(coordinate * TICK_WORDS as u32) as usize] = value.extract(LOW_WORD);
-    values[(coordinate * TICK_WORDS as u32 + HIGH_WORD as u32) as usize] = value.extract(HIGH_WORD);
+    write_tick_words(values, (coordinate * TICK_WORDS as u32) as usize, value);
+}
+
+#[cube]
+pub fn read_tick_words(values: &[u32], word: usize) -> Ticks {
+    ticks(values[word + LOW_WORD], values[word + HIGH_WORD])
+}
+
+#[cube]
+pub fn write_tick_words(values: &mut [u32], word: usize, value: Ticks) {
+    values[word + LOW_WORD] = value.extract(LOW_WORD);
+    values[word + HIGH_WORD] = value.extract(HIGH_WORD);
 }
 
 #[cfg(test)]

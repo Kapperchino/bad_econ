@@ -202,13 +202,13 @@ fn sorted_gpu_prefixes_match_wide_reference_with_repeated_visits_and_overflow() 
         )?;
         let advance = |stage| {
             launch(
-                &device,
-                &simulation.state,
-                &simulation.actors,
+                DeviceEconomy {
+                    device: &device,
+                    ..simulation.gpu()
+                },
                 &simulation.spatial,
-                &simulation.config,
-                &simulation.proposals,
-                &simulation.scratch,
+                &simulation.work.proposals,
+                &simulation.work.scratch,
                 &simulation.control,
                 &parameters,
                 stage,

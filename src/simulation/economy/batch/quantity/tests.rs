@@ -178,7 +178,7 @@ fn quantity_batches_match_ordered_settlement_with_shortages_and_wide_faults_on_g
             state.set(Field::Price, peer, case.quote.into());
             let words = encode(&state.values);
             let mut proposals = vec![0; count * ProposalLayout::WORDS];
-            let mut scratch = vec![0; actual.scratch.meta.num_elements()];
+            let mut scratch = vec![0; actual.work.scratch.meta.num_elements()];
             for slot in 0..case.length {
                 let actor = (slot + 17) % 513;
                 let quantity = case.quantities[slot % case.quantities.len()];
@@ -199,8 +199,8 @@ fn quantity_batches_match_ordered_settlement_with_shortages_and_wide_faults_on_g
             control[RANGE_SLOTS_WORD] = 1;
             for simulation in [&actual, &expected] {
                 device.write(&simulation.state, bytemuck::cast_slice(&words));
-                device.write(&simulation.proposals, bytemuck::cast_slice(&proposals));
-                device.write(&simulation.scratch, bytemuck::cast_slice(&scratch));
+                device.write(&simulation.work.proposals, bytemuck::cast_slice(&proposals));
+                device.write(&simulation.work.scratch, bytemuck::cast_slice(&scratch));
                 device.write(&simulation.control, bytemuck::cast_slice(&control));
             }
             let market = Market::Consumer(Good::Coal);
@@ -215,8 +215,8 @@ fn quantity_batches_match_ordered_settlement_with_shortages_and_wide_faults_on_g
                     actors: expected.actors.buffer_arg(),
                     config: expected.config.launch(),
                     spatial: expected.spatial.buffer_arg(),
-                    proposals: expected.proposals.buffer_arg(),
-                    bundles: expected.scratch.buffer_arg(),
+                    proposals: expected.work.proposals.buffer_arg(),
+                    bundles: expected.work.scratch.buffer_arg(),
                     control: expected.control.buffer_arg(),
                     parameters: original.launch(),
                     stage: EconomyStage::GroupExecute,
@@ -231,8 +231,8 @@ fn quantity_batches_match_ordered_settlement_with_shortages_and_wide_faults_on_g
                     state: actual.state.buffer_arg(),
                     actors: actual.actors.buffer_arg(),
                     config: actual.config.launch(),
-                    proposals: actual.proposals.buffer_arg(),
-                    scratch: actual.scratch.buffer_arg(),
+                    proposals: actual.work.proposals.buffer_arg(),
+                    scratch: actual.work.scratch.buffer_arg(),
                     control: actual.control.buffer_arg(),
                     parameters: parameters.launch(),
                 },
@@ -246,8 +246,8 @@ fn quantity_batches_match_ordered_settlement_with_shortages_and_wide_faults_on_g
                     actors: actual.actors.buffer_arg(),
                     config: actual.config.launch(),
                     spatial: actual.spatial.buffer_arg(),
-                    proposals: actual.proposals.buffer_arg(),
-                    bundles: actual.scratch.buffer_arg(),
+                    proposals: actual.work.proposals.buffer_arg(),
+                    bundles: actual.work.scratch.buffer_arg(),
                     control: actual.control.buffer_arg(),
                     parameters: parameters.launch(),
                     stage: EconomyStage::GroupRemainder,
@@ -263,8 +263,8 @@ fn quantity_batches_match_ordered_settlement_with_shortages_and_wide_faults_on_g
                 ),
                 (
                     "statuses",
-                    &actual.scratch,
-                    &expected.scratch,
+                    &actual.work.scratch,
+                    &expected.work.scratch,
                     4 * count,
                     count,
                 ),

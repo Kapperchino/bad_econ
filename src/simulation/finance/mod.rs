@@ -1,7 +1,9 @@
-mod kernels;
+mod bank;
+mod credit;
 mod payments;
 mod policies;
 mod scan;
+mod support;
 mod systems;
 
 use super::rows::{RowIndex, row_layout};
@@ -81,6 +83,25 @@ pub enum FinanceStage {
     Opening,
     Lending,
     Audit,
+}
+
+#[repr(u32)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum LoanDecision {
+    NoEvent,
+    Accepted,
+    Rejected,
+}
+
+impl LoanDecision {
+    fn decode(code: u32) -> Option<Result<crate::ledger::Decision>> {
+        match code {
+            code if code == Self::NoEvent as u32 => None,
+            code if code == Self::Accepted as u32 => Some(Ok(crate::ledger::Decision::Accepted)),
+            code if code == Self::Rejected as u32 => Some(Ok(crate::ledger::Decision::Rejected)),
+            _ => Some(Err(anyhow!("unknown financial event decision"))),
+        }
+    }
 }
 
 #[derive(Clone, Debug, Default, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
@@ -416,12 +437,7 @@ impl FinanceRuntime {
             count => device
                 .read_range(&self.decisions, 0, count)?
                 .into_iter()
-                .filter_map(|code| match code {
-                    0 => None,
-                    1 => Some(Ok(crate::ledger::Decision::Accepted)),
-                    2 => Some(Ok(crate::ledger::Decision::Rejected)),
-                    _ => Some(Err(anyhow!("unknown financial event decision"))),
-                })
+                .filter_map(LoanDecision::decode)
                 .collect(),
         }
     }

@@ -4,7 +4,7 @@ use crate::domain::{
     landlords::{EXPANSION_OCCUPANCY_PERCENT, MAINTENANCE_DAYS},
     property::{CONSTRUCTION_WORK_PER_PLOT, ProjectStatus},
 };
-use crate::simulation::{Device, configuration::Configuration};
+use crate::simulation::DeviceEconomy;
 use burn_wgpu::CubeTensor;
 
 #[derive(Clone, Copy, Debug, Hash, PartialEq, Eq)]
@@ -64,10 +64,12 @@ impl GpuPass<RentalInput> for AdvanceRentals {
 }
 
 pub(in crate::simulation) fn launch(
-    device: &Device,
-    state: &CubeTensor,
-    actors: &CubeTensor,
-    config: &Configuration,
+    DeviceEconomy {
+        device,
+        state,
+        actors,
+        config,
+    }: DeviceEconomy<'_>,
     control: &CubeTensor,
     phase: Phase,
 ) {
@@ -396,6 +398,7 @@ mod tests {
     use crate::domain::{
         Experiment, Scenario, enterprise::ExpansionPolicy, landlords::RentalRegistry,
     };
+    use crate::simulation::configuration::Configuration;
     use crate::simulation::{decode, encode, tests::device};
     use anyhow::Result;
 
@@ -454,10 +457,12 @@ mod tests {
             let control = device.tensor(&[0; CONTROL_WORDS]);
             let mut actual = initial.clone();
             launch(
-                &device,
-                &state,
-                &actors,
-                &config,
+                DeviceEconomy {
+                    device: &device,
+                    state: &state,
+                    actors: &actors,
+                    config: &config,
+                },
                 &control,
                 Phase::Observation,
             );
@@ -466,10 +471,12 @@ mod tests {
             actual.set(Field::LivingMembers, departed, 0);
             device.write(&state, bytemuck::cast_slice(&encode(&actual.values)));
             launch(
-                &device,
-                &state,
-                &actors,
-                &config,
+                DeviceEconomy {
+                    device: &device,
+                    state: &state,
+                    actors: &actors,
+                    config: &config,
+                },
                 &control,
                 Phase::AccountsDecisions,
             );
@@ -516,10 +523,12 @@ mod tests {
         let state = device.tensor(bytemuck::cast_slice(&encode(&overflow.values)));
         let control = device.tensor(&[0; CONTROL_WORDS]);
         launch(
-            &device,
-            &state,
-            &actors,
-            &config,
+            DeviceEconomy {
+                device: &device,
+                state: &state,
+                actors: &actors,
+                config: &config,
+            },
             &control,
             Phase::AccountsDecisions,
         );

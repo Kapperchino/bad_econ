@@ -172,7 +172,7 @@ impl CohortLayout {
                 actor.position.x / config.search_radius,
                 actor.position.y / config.search_radius,
             );
-            let employer = scenario.initial_employment.employer(source as usize);
+            let employer = scenario.initial_employment().employer(source as usize);
             let key = (role, region, cell, employer);
             let row = match rental_site || individuals.contains(&actor.identity) || weight > 1 {
                 true => rows.len(),
@@ -196,7 +196,9 @@ impl CohortLayout {
             rows[row].female[band] += weight / 2 + (weight % 2) * u32::from(source % 2 == 0);
             rows[row].farmers += weight * u32::from(settlement.worker(source as usize).is_none());
             if config.population.is_none() {
-                let cash = scenario.initial_employment.cash(config, source as usize)?;
+                let cash = scenario
+                    .initial_employment()
+                    .cash(config, source as usize)?;
                 rows[row].cash = crate::arithmetic::add(
                     rows[row].cash,
                     cash.checked_mul(u64::from(weight))
@@ -371,13 +373,13 @@ fn generated_groups(
             let mut ordinal = start / spacing;
             while ordinal < end / spacing {
                 let source = |offset: u32| (ordinal + offset + 1) * spacing - 1;
-                let employer = scenario.initial_employment.employer(source(0) as usize);
+                let employer = scenario.initial_employment().employer(source(0) as usize);
                 let mut low = 1;
                 let mut high = (end / spacing - ordinal).min(sizes.workers.get());
                 while low < high {
                     let middle = (low + high).div_ceil(2);
                     match scenario
-                        .initial_employment
+                        .initial_employment()
                         .employer(source(middle - 1) as usize)
                         == employer
                     {

@@ -1,5 +1,15 @@
 use super::*;
+use super::{
+    economy::EconomyStage,
+    enterprise,
+    flags::{CONTROL_WORDS, FaultFlags},
+    layout::*,
+    registry::records::PendingRecord,
+    system::{AsBufferArg, System},
+};
 pub(super) use crate::tests::support::device;
+use crate::{domain::*, ledger::Decision};
+use anyhow::{Context, Result};
 
 struct WorkerReference {
     actor: usize,
@@ -1131,7 +1141,7 @@ fn speculative_candidates_only_commit_faults_inside_the_visited_prefix() -> Resu
                 8 => {
                     result?;
                     assert_eq!(
-                        simulation.device.read(&simulation.proposals)?[ProposalLayout::ACTOR],
+                        simulation.device.read(&simulation.work.proposals)?[ProposalLayout::ACTOR],
                         1
                     );
                 }
@@ -1189,8 +1199,8 @@ fn vectorized_opening_matches_serial_deliveries_resets_and_faults_on_gpu() -> Re
                 actors: simulation.actors.buffer_arg(),
                 config: simulation.config.launch(),
                 spatial: simulation.spatial.buffer_arg(),
-                proposals: simulation.proposals.buffer_arg(),
-                bundles: simulation.events.buffer_arg(),
+                proposals: simulation.work.proposals.buffer_arg(),
+                bundles: simulation.work.events.buffer_arg(),
                 control: expected_control.buffer_arg(),
                 parameters: parameters.launch(),
                 stage: EconomyStage::Local,
@@ -1311,8 +1321,8 @@ fn partitioned_audits_match_original_tiles_extrema_and_overflow_on_gpu() -> Resu
                 Amounts::Overflow => 0,
             };
             simulation.device.write(
-                &simulation.events,
-                &vec![poison; simulation.events.meta.num_elements()],
+                &simulation.work.events,
+                &vec![poison; simulation.work.events.meta.num_elements()],
             );
             simulation.audit_execution = AuditExecution::Tiled;
             let actual = simulation.observe();

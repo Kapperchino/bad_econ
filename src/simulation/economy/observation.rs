@@ -1,6 +1,30 @@
 use super::*;
 
 #[cube]
+pub(super) fn wealth_bin<L: ReadLedger>(ledger: &L, actor: u32, members: u32) -> u32 {
+    let cash = divide(ledger.value(Field::Cash, actor), max(members, 1));
+    let high = cash.extract(HIGH_WORD);
+    let bits = select(
+        high > 0,
+        TICK_BITS - high.leading_zeros(),
+        WORD_BITS - cash.extract(LOW_WORD).leading_zeros(),
+    );
+    min(bits, SummaryLayout::WEALTH_BINS as u32 - 1)
+}
+
+#[cube]
+pub(super) fn histogram_region<A: ActorMetadata>(
+    actors: &A,
+    config: &EconomyConfig,
+    actor: u32,
+) -> u32 {
+    let side = SummaryLayout::REGION_SIDE as u32;
+    let x = actors.x(actor) * side / config.map_size;
+    let y = actors.y(actor) * side / config.map_size;
+    y * side + x
+}
+
+#[cube]
 pub(super) fn summarize(
     economy: &EconomyView<'_>,
     bundles: &mut [u32],
@@ -153,22 +177,10 @@ pub(super) fn summarize(
                         economy.ledger.value(Field::Consumed, actor),
                     );
                     let members = consumption::consumers(&economy.ledger, actor);
-                    let cash = divide(economy.ledger.value(Field::Cash, actor), max(members, 1));
-                    let mut bin = WORD_BITS - cash.extract(LOW_WORD).leading_zeros();
-                    if cash.extract(HIGH_WORD) > 0u32 {
-                        bin = TICK_BITS - cash.extract(HIGH_WORD).leading_zeros();
-                    }
-                    control[(SummaryLayout::WEALTH_START as u32
-                        + min(bin, SummaryLayout::WEALTH_BINS as u32 - 1))
-                        as usize]
-                        .fetch_add(members);
-                    let x = economy.actors.x(actor) * SummaryLayout::REGION_SIDE as u32
-                        / config.map_size;
-                    let y = economy.actors.y(actor) * SummaryLayout::REGION_SIDE as u32
-                        / config.map_size;
-                    control[(SummaryLayout::REGIONS_START as u32
-                        + y * SummaryLayout::REGION_SIDE as u32
-                        + x) as usize]
+                    let bin = wealth_bin::<Ledger>(&economy.ledger, actor, members);
+                    control[(SummaryLayout::WEALTH_START as u32 + bin) as usize].fetch_add(members);
+                    let region = histogram_region::<ActorTable>(&economy.actors, config, actor);
+                    control[(SummaryLayout::REGIONS_START as u32 + region) as usize]
                         .fetch_add(economy.ledger.number(Field::Shortage, actor));
                 }
                 _ => {
@@ -248,7 +260,7 @@ pub(super) fn summarize(
                             economy.ledger.value(Field::Wage, actor),
                             totals[SummaryLayout::MAXIMUM_WAGE as usize],
                         );
-                        if pricing::stocked(&economy.ledger, actor, k.output()) {
+                        if pricing::stocked::<Ledger>(&economy.ledger, actor, k.output()) {
                             let price = economy.ledger.value(Field::Price, actor);
                             totals[(SummaryLayout::PRICE_COUNTS + good) as usize] = add_checked(
                                 control,

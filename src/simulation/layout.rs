@@ -306,3 +306,14 @@ impl ObservationControlLayout {
         Ok(bytemuck::from_bytes(bytemuck::cast_slice(record)))
     }
 }
+
+pub(super) fn encode(values: &[u64]) -> Vec<TickLayout> {
+    values.iter().copied().map(TickLayout::from).collect()
+}
+pub(super) fn decode(words: &[u32]) -> Vec<u64> {
+    bytemuck::cast_slice::<u32, TickLayout>(words)
+        .iter()
+        .copied()
+        .map(u64::from)
+        .collect()
+}

@@ -393,7 +393,7 @@ mod tests {
                 words[first_used] = case.first_used.into();
                 words[second_used] = case.second_used.into();
                 let mut proposals = vec![0; count * ProposalLayout::WORDS];
-                let mut scratch = vec![0; actual.scratch.meta.num_elements()];
+                let mut scratch = vec![0; actual.work.scratch.meta.num_elements()];
                 let first_length = match case_index {
                     0 => case.length / 2,
                     _ => case.length,
@@ -422,8 +422,8 @@ mod tests {
                 }
                 for simulation in [&actual, &expected] {
                     device.write(&simulation.state, bytemuck::cast_slice(&words));
-                    device.write(&simulation.proposals, bytemuck::cast_slice(&proposals));
-                    device.write(&simulation.scratch, bytemuck::cast_slice(&scratch));
+                    device.write(&simulation.work.proposals, bytemuck::cast_slice(&proposals));
+                    device.write(&simulation.work.scratch, bytemuck::cast_slice(&scratch));
                     device.write(&simulation.control, bytemuck::cast_slice(&control));
                 }
                 let mut original =
@@ -438,8 +438,8 @@ mod tests {
                         actors: expected.actors.buffer_arg(),
                         config: expected.config.launch(),
                         spatial: expected.spatial.buffer_arg(),
-                        proposals: expected.proposals.buffer_arg(),
-                        bundles: expected.scratch.buffer_arg(),
+                        proposals: expected.work.proposals.buffer_arg(),
+                        bundles: expected.work.scratch.buffer_arg(),
                         control: expected.control.buffer_arg(),
                         parameters: original.launch(),
                         stage: EconomyStage::GroupExecute,
@@ -453,10 +453,10 @@ mod tests {
                     CubeCount::Static(1, 1, 1),
                     CubeDim::new_1d(workgroup),
                     LaborInputLaunch {
-                        proposals: actual.proposals.buffer_arg(),
+                        proposals: actual.work.proposals.buffer_arg(),
                         state: actual.state.buffer_arg(),
                         config: actual.config.launch(),
-                        scratch: actual.scratch.buffer_arg(),
+                        scratch: actual.work.scratch.buffer_arg(),
                         control: actual.control.buffer_arg(),
                         parameters: parameters.launch(),
                         execution: LaborExecution::Complete,
@@ -464,7 +464,7 @@ mod tests {
                 );
                 for (name, actual, expected) in [
                     ("state", &actual.state, &expected.state),
-                    ("statuses", &actual.scratch, &expected.scratch),
+                    ("statuses", &actual.work.scratch, &expected.work.scratch),
                     ("faults", &actual.control, &expected.control),
                 ] {
                     let actual = device.read(actual)?;

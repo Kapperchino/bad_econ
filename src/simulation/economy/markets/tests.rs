@@ -80,16 +80,18 @@ fn compaction_and_ranges_preserve_buffers_after_unlatched_faults_on_gpu() -> Res
     control[FAULT_WORD] = FaultFlags::ARITHMETIC_OVERFLOW.bits();
     control[CONSTRUCTED_EVENTS_WORD] = 1;
     control[SEARCHES_WORD] = 1;
-    let mut scratch = vec![0; simulation.scratch.meta.num_elements()];
+    let mut scratch = vec![0; simulation.work.scratch.meta.num_elements()];
     scratch[0] = 1;
-    let mut proposals = vec![NO_ACTOR; simulation.proposals.meta.num_elements()];
+    let mut proposals = vec![NO_ACTOR; simulation.work.proposals.meta.num_elements()];
     proposals[ProposalLayout::ACTOR] = 2;
     let mut successes = vec![0; simulation.searches.successes.meta.num_elements()];
     successes[0] = 1;
     successes[search_counts_offset(count) + search_blocks(count) - 1] = 1;
     simulation.device.write(&simulation.control, &control);
-    simulation.device.write(&simulation.scratch, &scratch);
-    simulation.device.write(&simulation.proposals, &proposals);
+    simulation.device.write(&simulation.work.scratch, &scratch);
+    simulation
+        .device
+        .write(&simulation.work.proposals, &proposals);
     simulation
         .device
         .write(&simulation.searches.successes, &successes);
@@ -101,10 +103,13 @@ fn compaction_and_ranges_preserve_buffers_after_unlatched_faults_on_gpu() -> Res
         super::super::EconomyStage::GroupCompactFill,
         super::super::EconomyStage::GroupRanges,
     ] {
-        simulation.economy(stage, count, &parameters, &simulation.proposals);
-        assert_eq!(simulation.device.read(&simulation.scratch)?, scratch);
+        simulation.economy(stage, count, &parameters, &simulation.work.proposals);
+        assert_eq!(simulation.device.read(&simulation.work.scratch)?, scratch);
         assert_eq!(simulation.device.read(&simulation.control)?, control);
-        assert_eq!(simulation.device.read(&simulation.proposals)?, proposals);
+        assert_eq!(
+            simulation.device.read(&simulation.work.proposals)?,
+            proposals
+        );
     }
     search::MarketSearch::launch_elements(
         &simulation.device,
@@ -114,19 +119,22 @@ fn compaction_and_ranges_preserve_buffers_after_unlatched_faults_on_gpu() -> Res
             actors: simulation.actors.buffer_arg(),
             config: simulation.config.launch(),
             spatial: simulation.spatial.buffer_arg(),
-            proposals: simulation.proposals.buffer_arg(),
+            proposals: simulation.work.proposals.buffer_arg(),
             searches: simulation.searches.requests.buffer_arg(),
             successes: simulation.searches.successes.buffer_arg(),
-            scratch: simulation.scratch.buffer_arg(),
+            scratch: simulation.work.scratch.buffer_arg(),
             control: simulation.control.buffer_arg(),
             parameters: parameters.launch(),
             program: search::SearchStage::Compact.program(&simulation.config),
             status_reset: search::StatusReset::Full,
         },
     );
-    assert_eq!(simulation.device.read(&simulation.scratch)?, scratch);
+    assert_eq!(simulation.device.read(&simulation.work.scratch)?, scratch);
     assert_eq!(simulation.device.read(&simulation.control)?, control);
-    assert_eq!(simulation.device.read(&simulation.proposals)?, proposals);
+    assert_eq!(
+        simulation.device.read(&simulation.work.proposals)?,
+        proposals
+    );
     Ok(())
 }
 
@@ -157,13 +165,15 @@ fn indexed_feedback_ignores_stale_statuses_and_matches_dense_feedback_on_gpu() -
         simulation.parameters(Phase::ProvisionPurchase, Market::Household, 0, count)?;
     parameters.status_start = 4 * count as u32;
     parameters.sort_source = 2 * count as u32;
-    let mut proposals = vec![0; simulation.proposals.meta.num_elements()];
+    let mut proposals = vec![0; simulation.work.proposals.meta.num_elements()];
     for actor in 0..count {
         proposals[actor * ProposalLayout::WORDS + ProposalLayout::ACTOR] = firm as u32;
         proposals[actor * ProposalLayout::WORDS + ProposalLayout::QUANTITY_LOW] = 7;
     }
     proposals[64 * ProposalLayout::WORDS + ProposalLayout::QUANTITY_LOW] = 9;
-    simulation.device.write(&simulation.proposals, &proposals);
+    simulation
+        .device
+        .write(&simulation.work.proposals, &proposals);
     for case in [
         FeedbackCase::Active,
         FeedbackCase::Empty,
@@ -180,13 +190,13 @@ fn indexed_feedback_ignores_stale_statuses_and_matches_dense_feedback_on_gpu() -
             control[FAULT_WORD] = FaultFlags::ARITHMETIC_OVERFLOW.bits();
         }
         simulation.device.write(&simulation.control, &control);
-        let mut feedback = vec![0; simulation.feedback.meta.num_elements()];
+        let mut feedback = vec![0; simulation.work.feedback.meta.num_elements()];
         let base = CONTROL_WORDS + firm * TICK_WORDS;
         if let FeedbackCase::Overflow = case {
             feedback[base] = u32::MAX - 8;
             feedback[base + 1] = u32::MAX;
         }
-        let mut indexed = vec![0; simulation.scratch.meta.num_elements()];
+        let mut indexed = vec![0; simulation.work.scratch.meta.num_elements()];
         indexed[3 * count..3 * count + 3].copy_from_slice(&[64, 37, 3]);
         indexed[4 * count..5 * count].fill(EventStatus::Rejected as u32);
         indexed[4 * count + 37] = EventStatus::Accepted as u32;
@@ -200,12 +210,14 @@ fn indexed_feedback_ignores_stale_statuses_and_matches_dense_feedback_on_gpu() -
                 &simulation.state,
                 bytemuck::cast_slice(&encode(&initial.values)),
             );
-            simulation.device.write(&simulation.feedback, &feedback);
-            simulation.device.write(&simulation.scratch, outcomes);
+            simulation
+                .device
+                .write(&simulation.work.feedback, &feedback);
+            simulation.device.write(&simulation.work.scratch, outcomes);
             feedback_boundary(
                 &simulation.device,
                 &simulation.control,
-                &simulation.feedback,
+                &simulation.work.feedback,
                 FeedbackSource::Constructed,
             );
             simulation.feedback_operation(
@@ -217,7 +229,7 @@ fn indexed_feedback_ignores_stale_statuses_and_matches_dense_feedback_on_gpu() -
                 },
             );
             Ok(FeedbackSnapshot {
-                feedback: simulation.device.read(&simulation.feedback)?,
+                feedback: simulation.device.read(&simulation.work.feedback)?,
                 access: simulation.device.read_range(
                     &simulation.state,
                     Field::FoodAccess as usize * count * TICK_WORDS,

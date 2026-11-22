@@ -1,5 +1,5 @@
 use super::*;
-use crate::simulation::{Device, configuration::Configuration};
+use crate::simulation::DeviceEconomy;
 use burn_wgpu::CubeTensor;
 
 use crate::domain::railway::{CART_BILLABLE_MINUTES_PER_UNIT_DAY, CART_MINUTES_PER_UNIT_DAY};
@@ -238,10 +238,12 @@ impl GpuPass<CartageInput> for HaulGoods {
 }
 
 pub(in crate::simulation) fn dispatch(
-    device: &Device,
-    state: &CubeTensor,
-    actors: &CubeTensor,
-    config: &Configuration,
+    DeviceEconomy {
+        device,
+        state,
+        actors,
+        config,
+    }: DeviceEconomy<'_>,
     control: &CubeTensor,
     day: u32,
     manifest: &CubeTensor,

@@ -1,17 +1,7 @@
-use super::{
-    economy::{self, EconomyStage},
-    layout::WORD_BYTES,
-    memory::MemoryBudget,
-    parameters::{EconomyParameters, SchedulerParameters},
-    scheduler::{self, SchedulerStage},
-    system::{AsBufferArg, System},
-};
+use super::{layout::WORD_BYTES, memory::MemoryBudget};
 use anyhow::{Context, Result, anyhow};
-use burn::{
-    backend::Backend,
-    tensor::{DType, Shape},
-};
-use burn_wgpu::{CubeBackend, CubeTensor, WgpuSetup, wgpu};
+use burn::tensor::{DType, Shape};
+use burn_wgpu::{CubeTensor, WgpuSetup, wgpu};
 use cubecl::{CubeCount, CubeDim, client::Client};
 
 pub(super) const MAX_WORKGROUP_SIZE: u32 = 256;
@@ -374,97 +364,6 @@ impl Device {
             workgroup: workgroup.0,
             memory_budget: MemoryBudget::Unreported,
         })
-    }
-}
-
-pub struct EconomyBuffers<'a> {
-    pub state: &'a CubeTensor,
-    pub actors: &'a CubeTensor,
-    pub config: &'a super::configuration::Configuration,
-    pub spatial: &'a CubeTensor,
-    pub proposals: &'a CubeTensor,
-    pub events: &'a CubeTensor,
-    pub control: &'a CubeTensor,
-}
-
-#[derive(Clone, Copy)]
-pub struct SchedulerBuffers<'a> {
-    pub state: &'a CubeTensor,
-    pub events: &'a CubeTensor,
-    pub scratch: &'a CubeTensor,
-    pub control: &'a CubeTensor,
-    pub links: &'a CubeTensor,
-}
-
-pub trait EconomyOps: Backend {
-    fn economy(
-        device: &Device,
-        stage: EconomyStage,
-        count: usize,
-        buffers: EconomyBuffers<'_>,
-        parameters: &EconomyParameters,
-    );
-    fn schedule(
-        device: &Device,
-        stage: SchedulerStage,
-        count: usize,
-        buffers: SchedulerBuffers<'_>,
-        parameters: SchedulerParameters,
-    );
-}
-impl EconomyOps for CubeBackend {
-    fn economy(
-        device: &Device,
-        stage: EconomyStage,
-        count: usize,
-        buffers: EconomyBuffers<'_>,
-        parameters: &EconomyParameters,
-    ) {
-        match (stage, parameters.phase) {
-            (EconomyStage::Local, crate::domain::Phase::Opening) => economy::opening::launch(
-                device,
-                buffers.state,
-                buffers.config,
-                buffers.control,
-                parameters.day,
-            ),
-            _ => economy::EconomySystem::launch_elements(
-                device,
-                count,
-                economy::EconomyInputLaunch {
-                    state: buffers.state.buffer_arg(),
-                    actors: buffers.actors.buffer_arg(),
-                    config: buffers.config.launch(),
-                    spatial: buffers.spatial.buffer_arg(),
-                    proposals: buffers.proposals.buffer_arg(),
-                    bundles: buffers.events.buffer_arg(),
-                    control: buffers.control.buffer_arg(),
-                    parameters: parameters.launch(),
-                    stage,
-                },
-            ),
-        }
-    }
-    fn schedule(
-        device: &Device,
-        stage: SchedulerStage,
-        count: usize,
-        buffers: SchedulerBuffers<'_>,
-        parameters: SchedulerParameters,
-    ) {
-        scheduler::EventScheduling::launch_elements(
-            device,
-            count,
-            scheduler::ScheduleInputLaunch {
-                balances: buffers.state.buffer_arg(),
-                events: buffers.events.buffer_arg(),
-                scratch: buffers.scratch.buffer_arg(),
-                control: buffers.control.buffer_arg(),
-                links: buffers.links.buffer_arg(),
-                params: parameters.launch(),
-                stage,
-            },
-        );
     }
 }
 

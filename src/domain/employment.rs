@@ -141,7 +141,7 @@ impl InitialEmployment {
                 let mut slots = 0;
                 let employers = (0..config.firms as usize)
                     .map(|firm| {
-                        let good = super::generated_good(config, firm);
+                        let good = super::scenario::generated_good(config, firm);
                         let index = good as usize - 1;
                         let actor = config.population_size() as usize + firm;
                         let (output, capacity) = match (retailers.get(&(actor as u64 + 1)), good) {
@@ -194,10 +194,9 @@ impl InitialEmployment {
             config.seed,
             household as u64 + 1,
         )?;
-        let days = match self
-            .employer(household)
-            .map(|firm| super::generated_good(config, firm - config.population_size() as usize))
-        {
+        let days = match self.employer(household).map(|firm| {
+            super::scenario::generated_good(config, firm - config.population_size() as usize)
+        }) {
             Some(Good::Grain | Good::Flax | Good::Cotton | Good::Dye) => self.seasonal_days,
             _ => 0,
         };

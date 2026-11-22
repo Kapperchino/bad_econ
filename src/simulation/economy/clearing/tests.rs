@@ -431,7 +431,7 @@ fn compacted_goods_buyers_match_event_checks_rejections_and_faults_on_gpu() -> R
             proposals[ProposalLayout::QUANTITY_LOW] = 3;
             proposals[ProposalLayout::QUANTITY_HIGH] = 0;
             proposals[ProposalLayout::DISTANCE] = 0;
-            device.write(&simulation.proposals, &proposals);
+            device.write(&simulation.work.proposals, &proposals);
             let mut control = vec![0; simulation.control.meta.num_elements()];
             control[markets::SEARCHES_WORD] = 1;
             device.write(&simulation.control, &control);
@@ -454,10 +454,10 @@ fn compacted_goods_buyers_match_event_checks_rejections_and_faults_on_gpu() -> R
                     actors: simulation.actors.buffer_arg(),
                     config: simulation.config.launch(),
                     spatial: simulation.spatial.buffer_arg(),
-                    proposals: simulation.proposals.buffer_arg(),
+                    proposals: simulation.work.proposals.buffer_arg(),
                     searches: simulation.searches.requests.buffer_arg(),
                     successes: simulation.searches.successes.buffer_arg(),
-                    scratch: simulation.scratch.buffer_arg(),
+                    scratch: simulation.work.scratch.buffer_arg(),
                     control: simulation.control.buffer_arg(),
                     parameters: parameters.launch(),
                     status_reset: search::StatusReset::Active,
@@ -473,7 +473,7 @@ fn compacted_goods_buyers_match_event_checks_rejections_and_faults_on_gpu() -> R
                     state: expected_state.buffer_arg(),
                     actors: simulation.actors.buffer_arg(),
                     config: simulation.config.launch(),
-                    proposals: simulation.proposals.buffer_arg(),
+                    proposals: simulation.work.proposals.buffer_arg(),
                     control: expected_control.buffer_arg(),
                     statuses: expected_status.buffer_arg(),
                     parameters: EconomyParameters {
@@ -490,7 +490,7 @@ fn compacted_goods_buyers_match_event_checks_rejections_and_faults_on_gpu() -> R
                 device.read(&expected_state)?
             );
             assert_eq!(
-                device.read_range(&simulation.scratch, 4 * count, 1)?,
+                device.read_range(&simulation.work.scratch, 4 * count, 1)?,
                 device.read(&expected_status)?,
             );
             let control = device.read(&simulation.control)?;
@@ -499,8 +499,11 @@ fn compacted_goods_buyers_match_event_checks_rejections_and_faults_on_gpu() -> R
                 device.read(&expected_control)?[crate::simulation::flags::FAULT_WORD]
             );
             assert_eq!(control[CONSTRUCTED_EVENTS_WORD], 1);
-            assert_eq!(device.read_range(&simulation.scratch, 0, 1)?, [peer as u32]);
-            assert_eq!(device.read_range(&simulation.scratch, count, 1)?, [0]);
+            assert_eq!(
+                device.read_range(&simulation.work.scratch, 0, 1)?,
+                [peer as u32]
+            );
+            assert_eq!(device.read_range(&simulation.work.scratch, count, 1)?, [0]);
         }
     }
     Ok(())
@@ -606,7 +609,7 @@ fn exhausted_purchase_queues_match_serial_settlement_and_faults_on_gpu() -> Resu
                 state.set(Field::RetailOpen, peer, case.stock);
             }
             let mut proposals = vec![0; count * ProposalLayout::WORDS];
-            let mut scratch = vec![NO_ACTOR; actual.scratch.meta.num_elements()];
+            let mut scratch = vec![NO_ACTOR; actual.work.scratch.meta.num_elements()];
             for actor in 0..512 {
                 let quantity = match actor % 17 {
                     0 => 0,
@@ -636,8 +639,8 @@ fn exhausted_purchase_queues_match_serial_settlement_and_faults_on_gpu() -> Resu
                     &simulation.state,
                     bytemuck::cast_slice(&encode(&state.values)),
                 );
-                device.write(&simulation.proposals, &proposals);
-                device.write(&simulation.scratch, &scratch);
+                device.write(&simulation.work.proposals, &proposals);
+                device.write(&simulation.work.scratch, &scratch);
                 device.write(&simulation.control, &control);
                 let mut parameters =
                     simulation.parameters(Phase::ProvisionPurchase, Market::Household, 0, count)?;
@@ -658,8 +661,8 @@ fn exhausted_purchase_queues_match_serial_settlement_and_faults_on_gpu() -> Resu
                             actors: simulation.actors.buffer_arg(),
                             config: simulation.config.launch(),
                             spatial: simulation.spatial.buffer_arg(),
-                            proposals: simulation.proposals.buffer_arg(),
-                            bundles: simulation.scratch.buffer_arg(),
+                            proposals: simulation.work.proposals.buffer_arg(),
+                            bundles: simulation.work.scratch.buffer_arg(),
                             control: simulation.control.buffer_arg(),
                             parameters: parameters.launch(),
                             stage,
@@ -673,8 +676,8 @@ fn exhausted_purchase_queues_match_serial_settlement_and_faults_on_gpu() -> Resu
                 "state: {workgroup} {seller:?} {case:?}"
             );
             assert_eq!(
-                device.read_range(&actual.scratch, 4 * count, count)?,
-                device.read_range(&expected.scratch, 4 * count, count)?,
+                device.read_range(&actual.work.scratch, 4 * count, count)?,
+                device.read_range(&expected.work.scratch, 4 * count, count)?,
                 "statuses: {workgroup} {seller:?} {case:?}"
             );
             assert_eq!(

@@ -254,7 +254,7 @@ impl Population {
         let mut state = State {
             day: 0,
             next_identity: self.next_identity(),
-            actors: scenario.initial_actors.as_ref().clone(),
+            actors: scenario.initial_actors().clone(),
             values: vec![0; scenario.fields() * count],
             initial_cash: 0,
             initial_goods: [0; Good::COUNT],

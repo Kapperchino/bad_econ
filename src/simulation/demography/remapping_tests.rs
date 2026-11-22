@@ -65,7 +65,7 @@ fn births_preserve_worker_identities_occupations_and_audited_rollback_on_gpu() -
         &simulation.device,
         &records.records,
         previous.next_identity,
-        &simulation.scratch,
+        &simulation.work.scratch,
     )?;
     grown.remap_workers_from(
         &simulation.device,
@@ -164,7 +164,7 @@ fn formation_and_combined_births_preserve_workers_and_match_constructor_referenc
                     &simulation.device,
                     &records.records,
                     original.next_identity,
-                    &simulation.scratch,
+                    &simulation.work.scratch,
                 )?
             }
         };

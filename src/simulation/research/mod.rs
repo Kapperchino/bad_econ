@@ -1,9 +1,13 @@
 use crate::domain::Good;
 use crate::simulation::system::AsBufferArg;
+mod access;
 pub mod capabilities;
+mod capacity;
 mod kernels;
 mod layout;
+mod monitor;
 mod nonlinear;
+mod projects;
 
 use self::{
     kernels::{ResearchInputLaunch, ResearchStage, ResearchSystem},

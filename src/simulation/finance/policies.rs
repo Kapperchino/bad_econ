@@ -136,21 +136,25 @@ fn lending(input: &[u32], output: &mut [u32], control: &[Atomic<u32>], count: u3
     if id < count {
         let base = id as usize * LendingRecord::WORDS;
         let mut faults = KernelFaults::none();
-        let value = super::kernels::lending_limit(
-            read(input, base + LendingRecord::REQUESTED),
-            input[base + LendingRecord::TERM],
-            input[base + LendingRecord::RATE],
-            read(input, base + LendingRecord::SURPLUS),
-            read(input, base + LendingRecord::DEBT_SERVICE),
-            input[base + LendingRecord::SERVICE_FRACTION],
-            input[base + LendingRecord::ADVANCE],
-            read(input, base + LendingRecord::COLLATERAL),
-            read(input, base + LendingRecord::SECURED),
-            read(input, base + LendingRecord::EQUITY),
-            input[base + LendingRecord::MINIMUM_CAPITAL],
-            read(input, base + LendingRecord::RISK_ASSETS),
-            input[base + LendingRecord::RISK_WEIGHT],
-            read(input, base + LendingRecord::LIQUIDITY),
+        let value = super::credit::lending_limit(
+            &super::credit::CreditTerms {
+                requested: read(input, base + LendingRecord::REQUESTED),
+                term: input[base + LendingRecord::TERM],
+                rate: input[base + LendingRecord::RATE],
+                surplus: read(input, base + LendingRecord::SURPLUS),
+                debt_service: read(input, base + LendingRecord::DEBT_SERVICE),
+                service_fraction: input[base + LendingRecord::SERVICE_FRACTION],
+                advance: input[base + LendingRecord::ADVANCE],
+                collateral: read(input, base + LendingRecord::COLLATERAL),
+                secured: read(input, base + LendingRecord::SECURED),
+            },
+            &super::credit::CreditCapacity {
+                equity: read(input, base + LendingRecord::EQUITY),
+                minimum_capital: input[base + LendingRecord::MINIMUM_CAPITAL],
+                risk_assets: read(input, base + LendingRecord::RISK_ASSETS),
+                risk_weight: input[base + LendingRecord::RISK_WEIGHT],
+                liquidity: read(input, base + LendingRecord::LIQUIDITY),
+            },
             &mut faults,
         );
         faults.record(control);

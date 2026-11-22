@@ -1,4 +1,12 @@
-use super::{ActorRows, Good, ScenarioConfig, enterprise::HouseholdProduction};
+use super::{
+    ActorRows, Economy, Good, ScenarioConfig, calendar,
+    enterprise::{Distributor, HouseholdProduction},
+    food, railway,
+    scenario::{generated_firm_identity, generated_good},
+};
+use crate::arithmetic::add;
+use anyhow::Result;
+use std::collections::BTreeMap;
 
 pub(crate) struct SupplierCacheLayout {
     pub extra_words: usize,
@@ -11,7 +19,7 @@ impl SupplierCacheLayout {
     pub fn new(actors: &ActorRows) -> Self {
         let mut producers = [0usize; Good::COUNT];
         for firm in actors.firm_indices() {
-            producers[actors.kind[firm] as usize - 1] += 1;
+            producers[actors.at(firm).kind as usize - 1] += 1;
         }
         let largest = Good::ALL
             .into_iter()
@@ -31,9 +39,9 @@ impl SupplierCacheLayout {
 }
 
 pub(super) struct StartingReserves {
-    pub household_stock: u64,
-    pub coal: u64,
-    pub wood: u64,
+    household_stock: u64,
+    coal: u64,
+    wood: u64,
     days: u32,
     buffer_days: u32,
     food: Option<super::food::FoodPolicy>,
@@ -61,7 +69,24 @@ impl StartingReserves {
         }
     }
 
-    pub fn inputs(&self, output: Good, daily: u64) -> u64 {
+    pub fn household(&self, members: u64) -> [StartingStock; 3] {
+        [
+            StartingStock {
+                good: Good::Coal,
+                units: self.coal * members,
+            },
+            StartingStock {
+                good: Good::Wood,
+                units: self.wood * members,
+            },
+            StartingStock {
+                good: Good::Bread,
+                units: self.household_stock * members,
+            },
+        ]
+    }
+
+    fn inputs(&self, output: Good, daily: u64) -> u64 {
         let days = match output {
             Good::Flour | Good::Bread => self.days,
             _ => self.buffer_days,
@@ -69,6 +94,119 @@ impl StartingReserves {
         let quantity = daily * u64::from(days);
         self.food
             .map_or(quantity, |food| food.inputs(output, quantity))
+    }
+}
+
+pub(super) struct StartingStock {
+    pub good: Good,
+    pub units: u64,
+}
+
+impl StartingStock {
+    pub fn add_to(&self, goods: &mut [u64; Good::COUNT]) -> Result<()> {
+        let total = &mut goods[self.good as usize - 1];
+        *total = add(*total, self.units)?;
+        Ok(())
+    }
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(super) struct StartingProduction {
+    pub capacities: [u32; Good::COUNT],
+    pub daily: [u64; Good::COUNT],
+    stocks: [u64; Good::COUNT],
+}
+
+impl StartingProduction {
+    pub fn new(config: &ScenarioConfig, retailers: &BTreeMap<u64, Distributor>) -> Self {
+        let mut firm_counts = [0u32; Good::COUNT];
+        for firm in 0..config.firms as usize {
+            if !retailers.contains_key(&(generated_firm_identity(config, firm))) {
+                firm_counts[generated_good(config, firm) as usize - 1] += 1;
+            }
+        }
+        let demand = StartingDemand::new(config);
+        let daily = Good::ALL.map(|good| {
+            demand.daily[good as usize - 1]
+                .div_ceil(u64::from(firm_counts[good as usize - 1].max(1)))
+                .max(1)
+        });
+        let production = Good::ALL.map(|good| {
+            demand
+                .production(good)
+                .div_ceil(u64::from(firm_counts[good as usize - 1].max(1)))
+                .max(1)
+        });
+        let capacities = std::array::from_fn(|good| match (Good::ALL[good], config.economy) {
+            (Good::Housing, _) => 0,
+            (Good::Railway, _) => railway::DEFAULT_CREW_CAPACITY,
+            (_, Economy::Agrarian) => config.capacity,
+            (_, Economy::Industrial) => (production[good]
+                .div_ceil(food::technique(config, Good::ALL[good]).output_ticks.into())
+                as u32)
+                .max(20)
+                .min(config.capacity),
+        });
+        let stocks = std::array::from_fn(|good| match (Good::ALL[good], config.economy) {
+            (Good::Railway, _) => 0,
+            (Good::Grain | Good::Flax | Good::Cotton | Good::Dye, _) => {
+                production[good]
+                    * match config.buffer_days {
+                        0 => 0,
+                        _ => u64::from(calendar::DAYS_PER_YEAR),
+                    }
+            }
+            (_, Economy::Agrarian) => {
+                u64::from(config.capacity)
+                    * u64::from(config.packet_output)
+                    * u64::from(config.buffer_days)
+            }
+            (_, Economy::Industrial) => {
+                daily[good]
+                    * u64::from(
+                        config
+                            .producer_buffer_days
+                            .unwrap_or(config.buffer_days)
+                            .min(config.coverage.saturating_sub(1)),
+                    )
+            }
+        });
+        Self {
+            capacities,
+            daily,
+            stocks,
+        }
+    }
+
+    pub fn inventory<'a>(
+        &self,
+        config: &ScenarioConfig,
+        reserves: &'a StartingReserves,
+        output: Good,
+        retailer: Option<&Distributor>,
+    ) -> impl Iterator<Item = StartingStock> + use<'a> {
+        let slot = output as usize - 1;
+        let daily = self.daily[slot];
+        let economy = config.economy;
+        let units = match retailer {
+            Some(store) => daily * u64::from(config.buffer_days.min(store.reserve_days)),
+            None => self.stocks[slot],
+        };
+        let inputs = match retailer {
+            Some(_) => [None; 2],
+            None => output.inputs(),
+        };
+        std::iter::once(StartingStock {
+            good: output,
+            units,
+        })
+        .chain(inputs.into_iter().flatten().map(move |good| StartingStock {
+            good,
+            units: match economy {
+                Economy::Agrarian => units,
+                Economy::Industrial => reserves.inputs(output, daily),
+            },
+        }))
     }
 }
 

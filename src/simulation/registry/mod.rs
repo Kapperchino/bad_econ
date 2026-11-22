@@ -1,10 +1,14 @@
-use crate::simulation::configuration::{Configuration, EconomyConfig};
+use crate::simulation::DeviceEconomy;
+use crate::simulation::configuration::EconomyConfig;
+mod commit;
 pub(super) mod entries;
+mod growth;
 pub(super) mod metadata;
 pub(super) mod records;
 pub(super) mod settlement;
 pub(super) mod spatial;
 mod systems;
+mod transitions;
 use super::{
     Device, enterprise,
     layout::ActorLayout as A,
@@ -16,6 +20,9 @@ use super::{
 use crate::domain::{ActorRows, Field, Position, Scenario, State};
 use anyhow::{Context, Result};
 use burn_wgpu::CubeTensor;
+pub(super) use commit::RegistryAudit;
+#[cfg(test)]
+pub(super) use commit::RegistryExecution;
 use cubecl::{CubeDim, prelude::*};
 use records::PendingRecord;
 use std::collections::BTreeMap;
@@ -298,10 +305,12 @@ fn transition(
 }
 
 pub(super) fn apply(
-    device: &Device,
-    state: &CubeTensor,
-    actors: &CubeTensor,
-    config: &Configuration,
+    DeviceEconomy {
+        device,
+        state,
+        actors,
+        config,
+    }: DeviceEconomy<'_>,
     requests: &CubeTensor,
     scratch: &CubeTensor,
     day: u32,

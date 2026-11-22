@@ -27,17 +27,8 @@ impl GpuPass<BankInput> for UpdateBanks {
     type Output = ();
 
     fn execute(mut input: BankInput) {
-        kernels::banks(
-            &mut input.state,
-            &input.banks,
-            &input.loans,
-            &mut input.output,
-            &mut input.decisions,
-            &input.control,
-            input.day,
-            input.count,
-            comptime!(input.stage),
-        );
+        let stage = comptime!(input.stage);
+        bank::account(&mut input, stage);
     }
 }
 
@@ -62,12 +53,7 @@ impl GpuPass<SupportNeedsInput> for CalculateSupportNeeds {
     type Output = ();
 
     fn execute(mut input: SupportNeedsInput) {
-        kernels::support_needs(
-            &mut input.state,
-            &input.recipients,
-            &mut input.output,
-            input.count,
-        );
+        support::needs(&mut input);
     }
 }
 
@@ -95,15 +81,7 @@ impl GpuPass<SupportPlanInput> for PlanSupport {
     type Output = ();
 
     fn execute(mut input: SupportPlanInput) {
-        kernels::support_plan(
-            &mut input.state,
-            &input.recipients,
-            &mut input.scanned,
-            &mut input.output,
-            &input.control,
-            input.count,
-            input.treasury,
-        );
+        support::plan(&mut input);
     }
 }
 
@@ -129,12 +107,6 @@ impl GpuPass<SupportPostInput> for PostSupport {
     type Output = ();
 
     fn execute(mut input: SupportPostInput) {
-        kernels::support_post(
-            &mut input.state,
-            &input.recipients,
-            &mut input.output,
-            input.count,
-            input.treasury,
-        );
+        support::post(&mut input);
     }
 }

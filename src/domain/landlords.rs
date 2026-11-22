@@ -559,7 +559,7 @@ pub fn initialize(scenario: &Scenario, state: &mut State) -> Result<()> {
             actor.kind == Good::Housing as u32 && region(scenario, &actor) == region_index
         });
         if !existing {
-            let sites: Vec<_> = match &scenario.cohorts {
+            let sites: Vec<_> = match scenario.cohorts() {
                 Some(layout) => layout
                     .rental_sites
                     .get(&region_index)

@@ -1,7 +1,6 @@
 use super::{
     Device,
     configuration::Configuration,
-    profiling_day,
     settlement::{Stage, Wave, WaveBookings},
 };
 use crate::domain::Market;
@@ -214,4 +213,16 @@ pub(super) fn audit_checkpoints(device: &Device, day: u64) -> impl FnMut(&str) +
             *previous = now;
         }
     }
+}
+
+pub(super) fn profiling_day() -> u64 {
+    static DAY: std::sync::OnceLock<u64> = std::sync::OnceLock::new();
+    *DAY.get_or_init(|| match std::env::var("BAD_ECON_PROFILE_DAY") {
+        Ok(day) => day
+            .parse::<std::num::NonZeroU64>()
+            .expect("BAD_ECON_PROFILE_DAY must be a positive day number")
+            .get(),
+        Err(std::env::VarError::NotPresent) => 30,
+        Err(error) => panic!("BAD_ECON_PROFILE_DAY: {error}"),
+    })
 }

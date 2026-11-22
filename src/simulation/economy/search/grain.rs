@@ -312,15 +312,10 @@ pub(super) fn dealer_tiles(
     let job = CUBE_POS_Y;
     if jobs <= comptime!(DEALERS) && job < jobs {
         let buyer = searches[job as usize];
-        let cash = ticks(
-            searches[(3 * config.actors + buyer) as usize],
-            searches[(4 * config.actors + buyer) as usize],
-        );
+        let demand = BuyerDemand::load(&*searches, config.actors, buyer);
+        let cash = demand.purchasing_power;
         if tiled_dealer(economy, spatial, control, jobs, buyer, cash) {
-            let wanted = ticks(
-                searches[(config.actors + buyer) as usize],
-                searches[(2 * config.actors + buyer) as usize],
-            );
+            let wanted = demand.wanted;
             let mut access = 0u32;
             if comptime!(config.railway.routes_enabled == Feature::Enabled)
                 && config.railway.nodes > 0

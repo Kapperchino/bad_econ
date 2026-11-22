@@ -245,7 +245,7 @@ pub(super) fn inventory_target(
 }
 
 #[cube]
-pub(super) fn stocked(ledger: &Ledger<'_>, actor: u32, good: u32) -> bool {
+pub(super) fn stocked<L: ReadLedger>(ledger: &L, actor: u32, good: u32) -> bool {
     good == comptime!(Good::Housing as u32)
         || good == comptime!(Good::Railway as u32)
         || !equal(ledger.value_at(good, actor), zero())

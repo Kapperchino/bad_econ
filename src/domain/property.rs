@@ -2,6 +2,7 @@ use super::{
     Field, Good, GoodKind, Position, Scenario, State,
     enterprise::{EnterpriseModel, EnterpriseState},
 };
+use crate::arithmetic::add;
 use anyhow::{Context, Result, anyhow};
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeSet;
@@ -426,19 +427,19 @@ impl PropertySnapshot {
                 .and_then(|number| regions.get_mut(number as usize))
                 .context("invalid property region")?;
             match state.get(Field::PropertyUse, index) {
-                1 => region.housing = super::add(region.housing, plots)?,
-                2 => region.farms = super::add(region.farms, plots)?,
-                3 => region.factories = super::add(region.factories, plots)?,
-                4 => region.stores = super::add(region.stores, plots)?,
+                1 => region.housing = add(region.housing, plots)?,
+                2 => region.farms = add(region.farms, plots)?,
+                3 => region.factories = add(region.factories, plots)?,
+                4 => region.stores = add(region.stores, plots)?,
                 _ => Err(anyhow!("invalid property use"))?,
             }
-            region.reserved = super::add(region.reserved, reserved)?;
+            region.reserved = add(region.reserved, reserved)?;
             let current = config.region(state.actors.at(index).position)?;
-            regions[current].subsistence = super::add(
+            regions[current].subsistence = add(
                 regions[current].subsistence,
                 state.get(Field::LandPlots, index),
             )?;
-            displaced_plots = super::add(displaced_plots, state.get(Field::DisplacedPlots, index))?;
+            displaced_plots = add(displaced_plots, state.get(Field::DisplacedPlots, index))?;
         }
         for region in &mut regions {
             let occupied = u128::from(region.housing)

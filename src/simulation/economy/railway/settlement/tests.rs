@@ -428,8 +428,8 @@ impl FitFixture {
                     actors: simulation.actors.buffer_arg(),
                     spatial: simulation.spatial.buffer_arg(),
                     config: simulation.config.launch(),
-                    proposals: simulation.proposals.buffer_arg(),
-                    scratch: simulation.scratch.buffer_arg(),
+                    proposals: simulation.work.proposals.buffer_arg(),
+                    scratch: simulation.work.scratch.buffer_arg(),
                     control: simulation.control.buffer_arg(),
                     resources: buffers.resources.buffer_arg(),
                     accounts: buffers.accounts.buffer_arg(),
@@ -862,8 +862,8 @@ fn freight_execution(
         &simulation.state,
         bytemuck::cast_slice(&encode(&state.values)),
     );
-    device.write(&simulation.proposals, &proposals);
-    device.write(&simulation.scratch, &scratch);
+    device.write(&simulation.work.proposals, &proposals);
+    device.write(&simulation.work.scratch, &scratch);
     device.write(&simulation.control, &control);
     for stage in [RailStage::Access, RailStage::Routes, RailStage::Quotes] {
         simulation.railways(stage);
@@ -884,13 +884,13 @@ fn freight_execution(
     let wave = std::cell::Cell::new(execution);
     let advance = |stage| {
         launch_buffered(
-            &device,
-            &simulation.state,
-            &simulation.actors,
+            DeviceEconomy {
+                device: &device,
+                ..simulation.gpu()
+            },
             &simulation.spatial,
-            &simulation.config,
-            &simulation.proposals,
-            &simulation.scratch,
+            &simulation.work.proposals,
+            &simulation.work.scratch,
             &simulation.control,
             &parameters,
             stage,
@@ -947,7 +947,7 @@ fn freight_execution(
                     device.read_range(&buffers.progress, Wave::Initial as usize, 1)?[0] as usize;
                 let queued = device.read_range(&buffers.queue, 0, active)?;
                 let buyers = device.read_range(
-                    &simulation.scratch,
+                    &simulation.work.scratch,
                     parameters.sort_source as usize + count,
                     count,
                 )?;
@@ -1267,13 +1267,13 @@ fn buffered_claim_admission_preserves_zero_wide_counts_and_prior_faults_on_gpu()
         device.write(&buffers.progress, &progress);
         device.write(&buffers.dispatches, &dispatches);
         launch_buffered(
-            &device,
-            &simulation.state,
-            &simulation.actors,
+            DeviceEconomy {
+                device: &device,
+                ..simulation.gpu()
+            },
             &simulation.spatial,
-            &simulation.config,
-            &simulation.proposals,
-            &simulation.scratch,
+            &simulation.work.proposals,
+            &simulation.work.scratch,
             &simulation.control,
             &parameters,
             Stage::AdmitClaims,
@@ -1351,13 +1351,13 @@ fn disabled_buffered_freight_retry_preserves_all_settlement_buffers_on_gpu() -> 
         simulation.config.actors as usize,
     )?;
     launch(
-        &device,
-        &simulation.state,
-        &simulation.actors,
+        DeviceEconomy {
+            device: &device,
+            ..simulation.gpu()
+        },
         &simulation.spatial,
-        &simulation.config,
-        &simulation.proposals,
-        &simulation.scratch,
+        &simulation.work.proposals,
+        &simulation.work.scratch,
         &simulation.control,
         &parameters,
         Stage::Snapshot,
@@ -1365,8 +1365,8 @@ fn disabled_buffered_freight_retry_preserves_all_settlement_buffers_on_gpu() -> 
     let initial_dispatches = device.read(&buffers.dispatches)?;
     let tensors = [
         simulation.state.clone(),
-        simulation.scratch.clone(),
-        simulation.proposals.clone(),
+        simulation.work.scratch.clone(),
+        simulation.work.proposals.clone(),
         buffers.resources.clone(),
         buffers.accounts.clone(),
         buffers.bookings.clone(),
@@ -1407,13 +1407,13 @@ fn disabled_buffered_freight_retry_preserves_all_settlement_buffers_on_gpu() -> 
             Stage::Accounts,
         ] {
             launch_buffered(
-                &device,
-                &simulation.state,
-                &simulation.actors,
+                DeviceEconomy {
+                    device: &device,
+                    ..simulation.gpu()
+                },
                 &simulation.spatial,
-                &simulation.config,
-                &simulation.proposals,
-                &simulation.scratch,
+                &simulation.work.proposals,
+                &simulation.work.scratch,
                 &simulation.control,
                 &parameters,
                 stage,
@@ -1455,13 +1455,13 @@ fn disabled_buffered_freight_retry_preserves_all_settlement_buffers_on_gpu() -> 
     );
     device.write(&buffers.progress, &[7, 11, 17, 0, 13]);
     launch_buffered(
-        &device,
-        &simulation.state,
-        &simulation.actors,
+        DeviceEconomy {
+            device: &device,
+            ..simulation.gpu()
+        },
         &simulation.spatial,
-        &simulation.config,
-        &simulation.proposals,
-        &simulation.scratch,
+        &simulation.work.proposals,
+        &simulation.work.scratch,
         &simulation.control,
         &parameters,
         Stage::Queue,

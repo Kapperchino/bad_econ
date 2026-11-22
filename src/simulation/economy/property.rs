@@ -3,6 +3,7 @@ use crate::domain::{
     enterprise::EnterpriseState,
     property::{ProjectStatus, PropertyUse},
 };
+use crate::simulation::DeviceEconomy;
 use crate::simulation::{Device, configuration::Configuration};
 use burn_wgpu::CubeTensor;
 
@@ -136,11 +137,13 @@ impl GpuPass<PropertyInput> for AllocateProperty {
 }
 
 pub(in crate::simulation) fn launch(
-    device: &Device,
-    state: &CubeTensor,
-    actors: &CubeTensor,
+    DeviceEconomy {
+        device,
+        state,
+        actors,
+        config,
+    }: DeviceEconomy<'_>,
     spatial: &CubeTensor,
-    config: &Configuration,
     control: &CubeTensor,
     phase: Phase,
 ) {

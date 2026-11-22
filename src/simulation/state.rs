@@ -8,6 +8,85 @@ use crate::domain::Field;
 use cubecl::prelude::*;
 
 #[derive(CubeType)]
+pub(super) struct BalanceBuffer<'a> {
+    words: &'a mut [u32],
+}
+
+#[cube]
+impl<'a> BalanceBuffer<'a> {
+    pub fn new(words: &'a mut [u32]) -> Self {
+        BalanceBuffer::<'a> { words }
+    }
+
+    pub fn value(&self, coordinate: u32) -> Ticks {
+        read_ticks(&*self.words, coordinate)
+    }
+
+    pub fn set(&mut self, coordinate: u32, value: Ticks) {
+        store(self.words, coordinate, value);
+    }
+}
+
+#[derive(CubeType)]
+pub(super) struct ActorBalances<'a> {
+    balances: BalanceBuffer<'a>,
+    stride: u32,
+}
+
+#[cube]
+impl<'a> ActorBalances<'a> {
+    pub fn new(words: &'a mut [u32], stride: u32) -> Self {
+        ActorBalances::<'a> {
+            balances: BalanceBuffer::new(words),
+            stride,
+        }
+    }
+
+    pub fn set_at(&mut self, field: u32, actor: u32, value: Ticks) {
+        self.balances.set(field * self.stride + actor, value);
+    }
+
+    pub fn set(&mut self, #[comptime] field: Field, actor: u32, value: Ticks) {
+        self.set_at(comptime!(field as u32), actor, value);
+    }
+
+    pub fn set_number(&mut self, #[comptime] field: Field, actor: u32, value: u32) {
+        self.set(field, actor, ticks(value, 0));
+    }
+
+    pub fn increase(
+        &mut self,
+        control: &[Atomic<u32>],
+        #[comptime] field: Field,
+        actor: u32,
+        amount: Ticks,
+    ) {
+        let total = plus(self.value(field, actor), amount);
+        total.faults.record(control);
+        self.set(field, actor, total.value);
+    }
+}
+
+#[cube]
+impl<'a> ReadLedger for ActorBalances<'a> {
+    fn value_at(&self, field: u32, actor: u32) -> Ticks {
+        self.balances.value(field * self.stride + actor)
+    }
+
+    fn number_at(&self, field: u32, actor: u32) -> u32 {
+        self.value_at(field, actor).extract(LOW_WORD)
+    }
+
+    fn value(&self, #[comptime] field: Field, actor: u32) -> Ticks {
+        self.value_at(comptime!(field as u32), actor)
+    }
+
+    fn number(&self, #[comptime] field: Field, actor: u32) -> u32 {
+        self.value(field, actor).extract(LOW_WORD)
+    }
+}
+
+#[derive(CubeType)]
 pub(super) struct EconomyView<'a> {
     pub ledger: Ledger<'a>,
     pub actors: ActorTable<'a>,
@@ -89,7 +168,7 @@ impl<'a> LedgerColumn<'a> {
 }
 
 #[cube]
-pub(super) trait ReadLedger {
+pub(super) trait ReadLedger: CubeType {
     fn value_at(&self, field: u32, actor: u32) -> Ticks;
     fn number_at(&self, field: u32, actor: u32) -> u32;
     fn value(&self, #[comptime] field: Field, actor: u32) -> Ticks;
@@ -169,7 +248,7 @@ impl<'a> ActorTable<'a> {
 }
 
 #[cube]
-pub(super) trait ActorMetadata {
+pub(super) trait ActorMetadata: CubeType {
     fn kind(&self, actor: u32) -> KernelActorKind;
     fn x(&self, actor: u32) -> u32;
     fn y(&self, actor: u32) -> u32;

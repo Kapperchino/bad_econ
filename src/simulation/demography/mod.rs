@@ -1,3 +1,4 @@
+use crate::simulation::DeviceEconomy;
 mod cohorts;
 mod households;
 mod kernels;
@@ -336,10 +337,12 @@ impl DemographyRuntime {
     }
     fn launch(
         &self,
-        device: &Device,
-        state: &CubeTensor,
-        actors: &CubeTensor,
-        config: &super::configuration::Configuration,
+        DeviceEconomy {
+            device,
+            state,
+            actors,
+            config,
+        }: DeviceEconomy<'_>,
         day: u64,
         stage: Stage,
     ) -> Result<()> {
@@ -382,41 +385,19 @@ impl DemographyRuntime {
         );
         Ok(())
     }
-    pub fn before(
-        &self,
-        device: &Device,
-        state: &CubeTensor,
-        actors: &CubeTensor,
-        config: &super::configuration::Configuration,
-        phase: Phase,
-        day: u64,
-    ) -> Result<()> {
+    pub fn before(&self, economy: DeviceEconomy<'_>, phase: Phase, day: u64) -> Result<()> {
         match phase {
-            Phase::Observation => {
-                self.launch(device, state, actors, config, day, Stage::Observation)
-            }
-            Phase::PhysicalClose => {
-                self.launch(device, state, actors, config, day, Stage::Requirements)
-            }
+            Phase::Observation => self.launch(economy, day, Stage::Observation),
+            Phase::PhysicalClose => self.launch(economy, day, Stage::Requirements),
             _ => Ok(()),
         }
     }
-    pub fn after(
-        &self,
-        device: &Device,
-        state: &CubeTensor,
-        actors: &CubeTensor,
-        config: &super::configuration::Configuration,
-        phase: Phase,
-        day: u64,
-    ) -> Result<()> {
+    pub fn after(&self, economy: DeviceEconomy<'_>, phase: Phase, day: u64) -> Result<()> {
         match phase {
-            Phase::WorkPayment if config.food_medium_salary > 0 => {
-                self.launch(device, state, actors, config, day, Stage::Diet)
+            Phase::WorkPayment if economy.config.food_medium_salary > 0 => {
+                self.launch(economy, day, Stage::Diet)
             }
-            Phase::PhysicalClose => {
-                self.launch(device, state, actors, config, day, Stage::Mortality)
-            }
+            Phase::PhysicalClose => self.launch(economy, day, Stage::Mortality),
             _ => Ok(()),
         }
     }
@@ -793,7 +774,7 @@ mod tests {
                 &simulation.device,
                 &records,
                 simulation.metadata.next_identity,
-                &simulation.scratch,
+                &simulation.work.scratch,
             )?;
             let reference = simulation.demography.reference_births(
                 &simulation.device,
@@ -818,19 +799,12 @@ mod tests {
             let reference_state = simulation
                 .device
                 .tensor(&simulation.device.read(&simulation.state)?);
-            fused.before(
-                &simulation.device,
-                &simulation.state,
-                &simulation.actors,
-                &simulation.config,
-                Phase::Observation,
-                0,
-            )?;
+            fused.before(simulation.gpu(), Phase::Observation, 0)?;
             reference.before(
-                &simulation.device,
-                &reference_state,
-                &simulation.actors,
-                &simulation.config,
+                DeviceEconomy {
+                    state: &reference_state,
+                    ..simulation.gpu()
+                },
                 Phase::Observation,
                 0,
             )?;
@@ -887,7 +861,7 @@ mod tests {
                         &constrained,
                         &records,
                         simulation.metadata.next_identity + 3,
-                        &simulation.scratch,
+                        &simulation.work.scratch,
                     )
                     .is_err()
             );

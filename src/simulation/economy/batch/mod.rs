@@ -1,4 +1,5 @@
 use super::*;
+use crate::simulation::DeviceEconomy;
 
 pub(in crate::simulation) mod labor;
 pub(in crate::simulation) mod payroll;
@@ -232,10 +233,12 @@ impl GpuPass<SettlementInput> for SettleTail {
 }
 
 pub(in crate::simulation) fn settle_consumers(
-    device: &crate::simulation::Device,
-    state: &burn_wgpu::CubeTensor,
-    actors: &burn_wgpu::CubeTensor,
-    config: &crate::simulation::configuration::Configuration,
+    DeviceEconomy {
+        device,
+        state,
+        actors,
+        config,
+    }: DeviceEconomy<'_>,
     scratch: &burn_wgpu::CubeTensor,
     control: &burn_wgpu::CubeTensor,
     dispatches: &burn_wgpu::CubeTensor,
@@ -447,7 +450,7 @@ mod tests {
         let device = crate::simulation::tests::device(64)?;
         let actual = Simulation::new(scenario.clone(), device.clone())?;
         let expected = Simulation::new(scenario.clone(), device.clone())?;
-        let mut scratch = vec![0; actual.scratch.meta.num_elements()];
+        let mut scratch = vec![0; actual.work.scratch.meta.num_elements()];
         for actor in 0..length {
             scratch[actor] = peer as u32;
             scratch[count + actor] = actor as u32;
@@ -498,7 +501,7 @@ mod tests {
             let words = encode(&padded);
             for simulation in [&actual, &expected] {
                 device.write(&simulation.state, bytemuck::cast_slice(&words));
-                device.write(&simulation.scratch, &scratch);
+                device.write(&simulation.work.scratch, &scratch);
                 device.write(&simulation.control, &control);
             }
             let parameters = actual.parameters(
@@ -515,18 +518,18 @@ mod tests {
                     state: expected.state.buffer_arg(),
                     actors: expected.actors.buffer_arg(),
                     config: expected.config.launch(),
-                    scratch: expected.scratch.buffer_arg(),
+                    scratch: expected.work.scratch.buffer_arg(),
                     control: expected.control.buffer_arg(),
                     parameters: parameters.launch(),
                 },
             );
             markets::prepare_dispatch(&device, &actual.control, &actual.searches.dispatches, count);
             settle_consumers(
-                &device,
-                &actual.state,
-                &actual.actors,
-                &actual.config,
-                &actual.scratch,
+                DeviceEconomy {
+                    device: &device,
+                    ..actual.gpu()
+                },
+                &actual.work.scratch,
                 &actual.control,
                 &actual.searches.dispatches,
                 &parameters,
@@ -537,8 +540,8 @@ mod tests {
                 device.read(&expected.control)?
             );
             assert_eq!(
-                device.read_range(&actual.scratch, 4 * count, count)?,
-                device.read_range(&expected.scratch, 4 * count, count)?
+                device.read_range(&actual.work.scratch, 4 * count, count)?,
+                device.read_range(&expected.work.scratch, 4 * count, count)?
             );
         }
         Ok(())
@@ -694,7 +697,7 @@ mod tests {
                 state.set(Field::Price, peer, case.quote.into());
                 let words = encode(&state.values);
                 let mut proposals = vec![0; count * ProposalLayout::WORDS];
-                let mut scratch = vec![0; parallel.scratch.meta.num_elements()];
+                let mut scratch = vec![0; parallel.work.scratch.meta.num_elements()];
                 for slot in 0..case.length {
                     let actor = (slot + 17) % 513;
                     proposals[actor * ProposalLayout::WORDS + ProposalLayout::ACTOR] = peer as u32;
@@ -711,8 +714,8 @@ mod tests {
                 control[RANGE_SLOTS_WORD] = 1;
                 for simulation in [&expected, &parallel] {
                     device.write(&simulation.state, bytemuck::cast_slice(&words));
-                    device.write(&simulation.proposals, bytemuck::cast_slice(&proposals));
-                    device.write(&simulation.scratch, bytemuck::cast_slice(&scratch));
+                    device.write(&simulation.work.proposals, bytemuck::cast_slice(&proposals));
+                    device.write(&simulation.work.scratch, bytemuck::cast_slice(&scratch));
                     device.write(&simulation.control, bytemuck::cast_slice(&control));
                 }
                 let market = Market::Consumer(Good::Tools);
@@ -728,8 +731,8 @@ mod tests {
                         actors: expected.actors.buffer_arg(),
                         config: expected.config.launch(),
                         spatial: expected.spatial.buffer_arg(),
-                        proposals: expected.proposals.buffer_arg(),
-                        bundles: expected.scratch.buffer_arg(),
+                        proposals: expected.work.proposals.buffer_arg(),
+                        bundles: expected.work.scratch.buffer_arg(),
                         control: expected.control.buffer_arg(),
                         parameters: original.launch(),
                         stage: EconomyStage::GroupExecute,
@@ -745,11 +748,11 @@ mod tests {
                     count,
                 );
                 settle_consumers(
-                    &device,
-                    &parallel.state,
-                    &parallel.actors,
-                    &parallel.config,
-                    &parallel.scratch,
+                    DeviceEconomy {
+                        device: &device,
+                        ..parallel.gpu()
+                    },
+                    &parallel.work.scratch,
                     &parallel.control,
                     &parallel.searches.dispatches,
                     &parameters,
@@ -764,8 +767,10 @@ mod tests {
                     device.read(&expected.control)?,
                     "parallel counters case {case_index}"
                 );
-                let parallel_statuses = device.read_range(&parallel.scratch, 4 * count, count)?;
-                let expected_statuses = device.read_range(&expected.scratch, 4 * count, count)?;
+                let parallel_statuses =
+                    device.read_range(&parallel.work.scratch, 4 * count, count)?;
+                let expected_statuses =
+                    device.read_range(&expected.work.scratch, 4 * count, count)?;
                 assert_eq!(
                     parallel_statuses, expected_statuses,
                     "parallel statuses case {case_index}"

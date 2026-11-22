@@ -28,7 +28,7 @@ pub(super) enum Cadence {
 
 fn update(
     cadence: Res<Cadence>,
-    verification: Option<Res<super::Verification>>,
+    verification: Option<Res<super::verification::Verification>>,
     mut settings: ResMut<WinitSettings>,
 ) {
     let interval = match *cadence {

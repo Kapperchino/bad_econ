@@ -159,10 +159,10 @@ impl RailTables {
         let config = Configuration::new(&simulation.device, &simulation.scenario, state);
         for stage in [RailStage::Routes, RailStage::Quotes] {
             launch(
-                &simulation.device,
-                &simulation.state,
-                &simulation.actors,
-                &config,
+                DeviceEconomy {
+                    config: &config,
+                    ..simulation.gpu()
+                },
                 &simulation.control,
                 stage,
             );
@@ -684,8 +684,8 @@ fn repeated_input_initialization_resets_prior_suppliers_and_preserves_faults_on_
                     actors: simulation.actors.buffer_arg(),
                     config: simulation.config.launch(),
                     spatial: simulation.spatial.buffer_arg(),
-                    proposals: simulation.proposals.buffer_arg(),
-                    bundles: simulation.scratch.buffer_arg(),
+                    proposals: simulation.work.proposals.buffer_arg(),
+                    bundles: simulation.work.scratch.buffer_arg(),
                     control: simulation.control.buffer_arg(),
                     parameters: parameters.launch(),
                     stage,
@@ -699,7 +699,7 @@ fn repeated_input_initialization_resets_prior_suppliers_and_preserves_faults_on_
         let mut control = vec![0; simulation.control.meta.num_elements()];
         device.write(&simulation.control, &control);
         initialize(EconomyStage::InputMarketStart);
-        let clean_statuses = device.read_range(&simulation.scratch, 4 * count, count)?;
+        let clean_statuses = device.read_range(&simulation.work.scratch, 4 * count, count)?;
         let cells = (simulation.config.spatial_side * simulation.config.spatial_side) as usize;
         let mut spatial = vec![0; simulation.spatial.meta.num_elements()];
         match case {
@@ -720,8 +720,8 @@ fn repeated_input_initialization_resets_prior_suppliers_and_preserves_faults_on_
         device.write(&simulation.control, &control);
         device.write(&simulation.spatial, &spatial);
         device.write(
-            &simulation.scratch,
-            &vec![sentinel; simulation.scratch.meta.num_elements()],
+            &simulation.work.scratch,
+            &vec![sentinel; simulation.work.scratch.meta.num_elements()],
         );
         initialize(EconomyStage::InputMarketRepeat);
         let expected_statuses = match case {
@@ -729,7 +729,7 @@ fn repeated_input_initialization_resets_prior_suppliers_and_preserves_faults_on_
             _ => clean_statuses,
         };
         assert_eq!(
-            device.read_range(&simulation.scratch, 4 * count, count)?,
+            device.read_range(&simulation.work.scratch, 4 * count, count)?,
             expected_statuses,
             "{case:?}, workgroup {workgroup}, statuses"
         );
@@ -766,10 +766,11 @@ fn indexed_routes_match_dense_routes_quotes_and_destination_access_on_gpu() -> R
         config.railway = Network::with_stations(&device, &scenario, &state, &stations, storage);
         for stage in [RailStage::Routes, RailStage::Quotes] {
             launch(
-                &device,
-                &simulation.state,
-                &simulation.actors,
-                &config,
+                DeviceEconomy {
+                    device: &device,
+                    config: &config,
+                    ..simulation.gpu()
+                },
                 &simulation.control,
                 stage,
             );

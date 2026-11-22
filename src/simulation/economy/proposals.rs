@@ -1,6 +1,24 @@
 use super::*;
 
 #[derive(CubeType)]
+pub(super) struct MarketProposal {
+    pub peer: u32,
+    pub quantity: Ticks,
+    pub trip: u32,
+}
+
+#[cube]
+impl MarketProposal {
+    pub fn store(&self, proposals: &mut [u32], actor: u32) {
+        let base = actor as usize * ProposalLayout::WORDS;
+        proposals[base + ProposalLayout::ACTOR] = self.peer;
+        proposals[base + ProposalLayout::QUANTITY_LOW] = self.quantity.extract(LOW_WORD);
+        proposals[base + ProposalLayout::QUANTITY_HIGH] = self.quantity.extract(HIGH_WORD);
+        proposals[base + ProposalLayout::DISTANCE] = self.trip;
+    }
+}
+
+#[derive(CubeType)]
 pub(super) struct InputDemand {
     pub search: bool,
     pub wanted: Ticks,
@@ -555,12 +573,12 @@ pub(super) fn propose(
             }
             economy.ledger.set_number(Field::FoodAccess, id, failure);
         }
-        proposals[id as usize * ProposalLayout::WORDS + ProposalLayout::ACTOR] = chosen;
-        proposals[id as usize * ProposalLayout::WORDS + ProposalLayout::QUANTITY_LOW] =
-            quantity.extract(LOW_WORD);
-        proposals[id as usize * ProposalLayout::WORDS + ProposalLayout::QUANTITY_HIGH] =
-            quantity.extract(HIGH_WORD);
-        proposals[id as usize * ProposalLayout::WORDS + ProposalLayout::DISTANCE] = trip;
+        MarketProposal {
+            peer: chosen,
+            quantity,
+            trip,
+        }
+        .store(proposals, id);
     }
     chosen
 }
