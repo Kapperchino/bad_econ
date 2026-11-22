@@ -11,7 +11,7 @@ impl SearchInput {
         let mut view = EconomyView::new(&mut self.state, &self.actors, &self.config);
         let economy = &mut view;
         let parameters = &self.parameters;
-        let spatial: &mut [u32] = &mut self.spatial;
+        let spatial: &[u32] = &self.spatial;
         let proposals: &mut [u32] = &mut self.proposals;
         let searches: &mut [u32] = &mut self.searches;
         let successes: &[Atomic<u32>] = &self.successes;
@@ -55,8 +55,7 @@ impl SearchInput {
             let mut chosen = u32::new(comptime!(i64::from(NO_ACTOR)));
             let mut quantity = ticks(0u32, 0u32);
             let mut trip = 0u32;
-            let mut search = false;
-            let mut good = 0u32;
+            let good = parameters.traded_good();
             let mut wanted = ticks(0u32, 0u32);
             let household_demand = match comptime!(parameters.market) {
                 MarketFlag::Input(_) => {
@@ -98,10 +97,6 @@ impl SearchInput {
             match preparation {
                 0 => {
                     let mut purchasing_power = economy.ledger.value(Field::Cash, id);
-                    if comptime!(matches!(market, MarketFlag::Input(_))) {
-                        purchasing_power =
-                            enterprises::FirmPolicy::new(id, control).purchasing_power(&*economy);
-                    }
                     match market {
                         MarketFlag::Labor => {
                             let labor = employment::LaborSearch::new(
@@ -114,172 +109,23 @@ impl SearchInput {
                             chosen = labor.peer;
                             quantity = labor.quantity;
                             trip = labor.trip;
-                            search = labor.vacancies;
+                            searching = labor.vacancies;
                         }
-                        MarketFlag::Input(_) => {
-                            good = parameters.traded_good();
-                            let demand = InputDemand::new(economy, control, id, &k, good);
-                            search = demand.search;
-                            wanted = demand.wanted;
+                        MarketFlag::Input(_) | MarketFlag::Consumer(_) | MarketFlag::Household => {
+                            let order =
+                                PurchaseRequest::new(economy, spatial, control, parameters, id);
+                            searching = order.search;
+                            wanted = order.wanted;
+                            purchasing_power = order.purchasing_power;
                         }
-                        MarketFlag::Consumer(_) => {
-                            good = parameters.traded_good();
-                            let purchase = consumption::HouseholdPurchase::new(
-                                &*economy, &*spatial, control, parameters, id,
-                            );
-                            if comptime!(matches!(
-                                market,
-                                MarketFlag::Consumer(Good::Coal | Good::Wood)
-                            )) {
-                                wanted = purchase.fuel_target(good);
-                                let held = plus(
-                                    economy.ledger.value_at(good, id),
-                                    economy
-                                        .ledger
-                                        .value_at(TRANSIT_FIELDS as u32 + good - 1, id),
-                                )
-                                .record(control);
-                                search = k.is(comptime!(ActorKind::Household))
-                                    && economy.ledger.number(Field::LivingMembers, id) > 0
-                                    && !lt(
-                                        economy.ledger.value(Field::Bread, id),
-                                        ticks(
-                                            food::HouseholdRation::new(&economy.ledger, id)
-                                                .minimum(),
-                                            0,
-                                        ),
-                                    )
-                                    && lt(held, wanted)
-                                    && !equal(purchasing_power, zero());
-                                if search {
-                                    search = purchase.preferred_fuel(good) == good;
-                                }
-                            } else {
-                                let interval = config.consumption_intervals[good as usize - 1];
-                                let until_due = (interval
-                                    - (parameters.day + id) % max(interval, 1))
-                                    % max(interval, 1);
-                                search = k.is(comptime!(ActorKind::Household))
-                                    && economy.ledger.number(Field::LivingMembers, id) > 0
-                                    && (until_due <= config.coverage + config.ring
-                                        || comptime!(
-                                            matches!(
-                                                market,
-                                                MarketFlag::Consumer(
-                                                    Good::LuxuryClothes | Good::LuxuryFurniture
-                                                )
-                                            ) && config.food_income
-                                                == crate::domain::food::FoodIncome::PurchasingPower
-                                        ));
-                                let reserve = ticks(
-                                    food::HouseholdRation::new(&economy.ledger, id).reserve(config)
-                                        * (config.coverage + config.ring - 1),
-                                    0,
-                                );
-                                let food = plus(
-                                    economy.ledger.value(Field::Bread, id),
-                                    economy.ledger.value_at(
-                                        TRANSIT_FIELDS as u32 + comptime!(Good::Bread as u32) - 1,
-                                        id,
-                                    ),
-                                )
-                                .record(control);
-                                let cash_reserve =
-                                    times(reserve, economy.ledger.number(Field::FoodPrice, id))
-                                        .record(control);
-                                search = search
-                                    && !lt(food, reserve)
-                                    && lt(cash_reserve, economy.ledger.value(Field::Cash, id));
-                                if comptime!(matches!(
-                                    market,
-                                    MarketFlag::Consumer(
-                                        Good::LuxuryClothes | Good::LuxuryFurniture
-                                    )
-                                )) {
-                                    purchasing_power = purchase.budget(good);
-                                }
-                                search = search && !equal(purchasing_power, zero());
-                                wanted = ticks(consumption::consumers(&economy.ledger, id), 0);
-                                if comptime!(matches!(
-                                    market,
-                                    MarketFlag::Consumer(
-                                        Good::LuxuryClothes | Good::LuxuryFurniture
-                                    )
-                                )) && search
-                                {
-                                    wanted = purchase.durable_target(good, purchasing_power);
-                                }
-                            }
-                        }
-                        MarketFlag::Household => {
-                            good = comptime!(Good::Bread as u32);
-                            search = k.is(comptime!(ActorKind::Household));
-                            wanted = ticks(
-                                food::HouseholdRation::new(&economy.ledger, id)
-                                    .purchase(config, parameters)
-                                    * (config.coverage + config.ring - 1u32),
-                                0u32,
-                            );
-                        }
-                        MarketFlag::Payroll => {
-                            quantity = economy.ledger.value(Field::Due, id);
-                            if !equal(quantity, ticks(0u32, 0u32)) {
-                                chosen = economy.ledger.number(Field::Employer, id) - 1u32;
-                            }
-                        }
-                        MarketFlag::Distribution => {
-                            if !k.is(comptime!(ActorKind::Household)) {
-                                quantity = ratio(
-                                    positive(
-                                        economy.ledger.value(Field::Cash, id),
-                                        maximum(
-                                            select(
-                                                k.bits() == comptime!(Good::Housing as u32),
-                                                zero(),
-                                                ticks(config.reserve_low, config.reserve_high),
-                                            ),
-                                            economy.ledger.value(Field::OperatingReserve, id),
-                                        ),
-                                    ),
-                                    config.distribution_rate,
-                                    POLICY_SCALE,
-                                )
-                                .record(control);
-                                if !equal(quantity, ticks(0u32, 0u32)) {
-                                    chosen = economy.actors.owner(id);
-                                }
-                            }
+                        MarketFlag::Payroll | MarketFlag::Distribution => {
+                            let payment =
+                                MarketProposal::payment(&*economy, control, id, comptime!(market));
+                            chosen = payment.peer;
+                            quantity = payment.quantity;
                         }
                     }
-                    if good > 0u32 {
-                        wanted = positive(
-                            wanted,
-                            plus(
-                                economy.ledger.value_at(good, id),
-                                economy
-                                    .ledger
-                                    .value_at(TRANSIT_FIELDS as u32 + good - 1, id),
-                            )
-                            .record(control),
-                        );
-                    }
-                    search = search
-                        && economy.ledger.number(Field::Time, id)
-                            >= select(comptime!(market == MarketFlag::Labor), 1u32, 0);
-                    if parameters.traded_good() > 0 {
-                        purchasing_power = minimum(
-                            purchasing_power,
-                            positive(
-                                economy.ledger.value(Field::Cash, id),
-                                economy.ledger.value(Field::CartagePayable, id),
-                            ),
-                        );
-                    }
-                    if good > 0 {
-                        search =
-                            search && !equal(wanted, zero()) && !equal(purchasing_power, zero());
-                    }
-                    searching = search;
+
                     if comptime!(
                         round == PreparationRound::Capture
                             && market == MarketFlag::Input(InputMarket::Grain)
@@ -306,13 +152,7 @@ impl SearchInput {
                             control,
                             good,
                         );
-                        let held = plus(
-                            economy.ledger.value_at(good, id),
-                            economy
-                                .ledger
-                                .value_at(TRANSIT_FIELDS as u32 + good - 1, id),
-                        )
-                        .record(control);
+                        let held = economy.ledger.stock_with_transit(good, id).record(control);
                         eligible = economy.ledger.number(Field::LivingMembers, id) > 0
                             && !lt(
                                 economy.ledger.value(Field::Bread, id),
@@ -343,13 +183,10 @@ impl SearchInput {
                         PreparationRound::First | PreparationRound::Capture
                     )) {
                         let inactive_good = parameters.traded_good();
-                        plus(
-                            economy.ledger.value_at(inactive_good, id),
-                            economy
-                                .ledger
-                                .value_at(TRANSIT_FIELDS as u32 + inactive_good - 1, id),
-                        )
-                        .record(control);
+                        economy
+                            .ledger
+                            .stock_with_transit(inactive_good, id)
+                            .record(control);
                     }
                 }
             }

@@ -178,7 +178,6 @@ impl PreparationWorkgroup {
     }
 }
 
-#[cfg(test)]
 pub(in crate::simulation) fn prepare_dispatch(
     device: &crate::simulation::Device,
     control: &burn_wgpu::CubeTensor,

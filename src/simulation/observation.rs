@@ -3,7 +3,6 @@ use super::{Simulation, economy, finance, flags::FaultFlags, layout::*, research
 use super::{economy::EconomyStage, reduction, tensor};
 use crate::{arithmetic::add, domain::*};
 use anyhow::Result;
-use bytemuck::Zeroable;
 
 #[cfg(test)]
 #[derive(Clone, Copy)]
@@ -29,10 +28,7 @@ impl Simulation {
         &mut self,
         rings: economy::accounting::audit::RingValidation<'_>,
     ) -> Result<ObservationSnapshot> {
-        self.device.write(
-            &self.control,
-            bytemuck::cast_slice(&[ObservationControlLayout::zeroed()]),
-        );
+        self.clear_control();
         let input = economy::accounting::audit::AuditInput {
             economy: self.gpu(),
             spatial: &self.spatial,

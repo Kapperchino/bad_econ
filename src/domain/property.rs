@@ -226,16 +226,14 @@ impl PropertyConfig {
         for building in &self.buildings {
             let site = state
                 .actors
-                .iter()
-                .position(|actor| actor.identity == building.site)
+                .index_of(building.site)
                 .context("building references a missing site")?;
             state.set(Field::OccupiedPlots, site, building.plots.into());
         }
         for order in &self.orders {
             let site = state
                 .actors
-                .iter()
-                .position(|actor| actor.identity == order.site)
+                .index_of(order.site)
                 .context("construction order references a missing site")?;
             let actor = state.actors.at(site);
             let region = &self.regions[self.region(actor.position)?];

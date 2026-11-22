@@ -28,25 +28,6 @@ impl GpuPass<EconomyInput> for AdvanceEconomy {
 
     fn execute(mut input: EconomyInput) {
         input.parameters.refresh(&mut input.config);
-        if comptime!(matches!(
-            input.stage,
-            EconomyStage::MarketStart
-                | EconomyStage::InputMarketStart
-                | EconomyStage::InputMarketPrepare
-                | EconomyStage::InputMarketRepeat
-        )) && ABSOLUTE_POS == 0
-        {
-            input.config.consumption_intervals[crate::domain::Good::COUNT + 0usize] =
-                input.parameters.day;
-            input.config.consumption_intervals[crate::domain::Good::COUNT + 1usize] =
-                input.parameters.settlement_rotation;
-            input.config.consumption_intervals[crate::domain::Good::COUNT + 2usize] =
-                input.parameters.good;
-            input.config.consumption_intervals[crate::domain::Good::COUNT + 3usize] =
-                input.config.heating_per_person;
-            input.config.consumption_intervals[crate::domain::Good::COUNT + 4usize] =
-                input.parameters.matching_round;
-        }
         input.dispatch();
     }
 }
@@ -63,7 +44,7 @@ impl EconomyInput {
         let control: &[Atomic<u32>] = &self.control;
         let parameters = &self.parameters;
 
-        let market = market::MarketControl::new(control, parameters);
+        let market = market::MarketControl::new(control);
         let id = ABSOLUTE_POS as u32;
         let guarded = comptime!(
             self.parameters.discovery == Discovery::Indexed && self.stage.requires_open_market()
@@ -74,18 +55,17 @@ impl EconomyInput {
                     pricing::ReplacementMarket::new(&*spatial, control, parameters.day)
                         .refresh(economy, id)
                 }
-                EconomyStage::MarketStart
-                | EconomyStage::InputMarketStart
-                | EconomyStage::InputMarketPrepare
-                | EconomyStage::InputMarketRepeat
-                | EconomyStage::MarketBoundary => {
-                    market.boundary(bundles, comptime!(self.stage), id)
+                EconomyStage::MarketBoundary => {
+                    if id == 0 {
+                        control[LATCH_WORD]
+                            .store(control[crate::simulation::flags::FAULT_WORD].load());
+                    }
                 }
                 EconomyStage::ProposeCompact | EconomyStage::ProposeRetainedCompact => {
                     let actor = (id + parameters.settlement_rotation) % max(parameters.count, 1);
                     let peer = proposals::propose(
                         economy,
-                        spatial,
+                        &*spatial,
                         proposals,
                         control,
                         parameters,
@@ -155,7 +135,7 @@ impl EconomyInput {
                 EconomyStage::Propose => {
                     proposals::propose(
                         economy,
-                        spatial,
+                        &*spatial,
                         proposals,
                         control,
                         parameters,

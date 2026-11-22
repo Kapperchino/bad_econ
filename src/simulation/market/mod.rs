@@ -302,24 +302,18 @@ impl<'a> MarketRound<'a> {
     }
 
     fn initialize(&self, simulation: &Simulation) {
-        use EconomyStage::*;
-        let stage = match (self.market, self.index, self.trace) {
-            (Market::Input(_) | Market::Consumer(_), 0, Trace::Discard) => InputMarketPrepare,
-            (Market::Input(_) | Market::Consumer(_), 0, Trace::Record) => InputMarketStart,
-            (Market::Input(_) | Market::Consumer(_), _, Trace::Record) => InputMarketRepeat,
-            _ => MarketStart,
+        use crate::simulation::economy::market::MarketStart;
+        let start = match (self.market, self.index, self.trace) {
+            (Market::Input(_) | Market::Consumer(_), 0, Trace::Discard) => {
+                MarketStart::PrepareCandidates
+            }
+            (Market::Input(_) | Market::Consumer(_), 0, Trace::Record) => {
+                MarketStart::ResetCandidatesAndOrders
+            }
+            (Market::Input(_) | Market::Consumer(_), _, Trace::Record) => MarketStart::ResetOrders,
+            _ => MarketStart::Standard,
         };
-        let count = match stage {
-            InputMarketStart | InputMarketRepeat => self.count,
-            _ => 1,
-        };
-        EconomySystem::launch_elements(
-            &simulation.device,
-            count,
-            simulation
-                .market_buffers()
-                .launch_input(stage, &self.parameters),
-        );
+        start.launch(simulation.market_buffers(), &self.parameters);
     }
 
     fn launch_stage(&self, simulation: &Simulation, stage: EconomyStage, invocations: usize) {
@@ -343,12 +337,11 @@ impl<'a> MarketRound<'a> {
             _ => device.count(invocations).into(),
         };
         match stage {
-            MarketBoundary => orders::prepare_dispatch_for(
+            MarketBoundary => orders::prepare_dispatch(
                 device,
                 &simulation.control,
                 &simulation.searches.dispatches,
                 self.count,
-                orders::PreparationWorkgroup::Native,
             ),
             _ => EconomySystem::launch(
                 device,

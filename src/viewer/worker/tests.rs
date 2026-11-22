@@ -11,6 +11,39 @@ use crate::{
 use bevy::prelude::{App, Assets, ColorMaterial, Image, Mesh, MinimalPlugins};
 
 #[test]
+fn comparing_seeds_preserves_history_and_starts_a_new_run_on_gpu() -> Result<()> {
+    let scenario = Scenario::baseline(8, 42, Experiment::Baseline)?;
+    let mut simulation = Simulation::new(scenario.clone(), Device::headless(64)?)?;
+    let publisher = Publisher {
+        data: Arc::new(Mutex::new(Display::new(&scenario))),
+        wake: || (),
+    };
+    publish(&mut simulation, &publisher, Publication::Restart, None)?;
+    simulation.advance()?;
+    publish(&mut simulation, &publisher, Publication::Snapshot, None)?;
+    let history = publisher.data.lock().unwrap().history.clone();
+
+    assert_eq!(
+        compare(&mut simulation, &publisher)?,
+        RunTarget::UntilDay(1)
+    );
+    {
+        let display = publisher.data.lock().unwrap();
+        let reference = display.comparison.as_ref().unwrap();
+        assert_eq!(reference.seed, 42);
+        assert_eq!(reference.horizon, 1);
+        assert_eq!(reference.history, history);
+        assert_eq!(display.seed, 43);
+        assert_eq!(display.history.len(), 1);
+        assert_eq!(display.history[0].day, 0);
+    }
+    simulation.command(SimulationCommand::Reset(scenario.into()))?;
+    publish(&mut simulation, &publisher, Publication::Restart, None)?;
+    assert!(publisher.data.lock().unwrap().comparison.is_none());
+    Ok(())
+}
+
+#[test]
 fn closed_firms_leave_the_map_navigation_and_inspector_on_gpu() -> Result<()> {
     let mut config = Scenario::baseline(3, 91, Experiment::Baseline)?
         .config()

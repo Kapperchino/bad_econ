@@ -71,15 +71,21 @@ impl EconomyParameters {
 
 #[cube]
 impl EconomyParameters {
+    pub fn write_clock(&self, clock: &mut [u32], heating: u32) {
+        clock[Good::COUNT] = self.day;
+        clock[Good::COUNT + 1] = self.settlement_rotation;
+        clock[Good::COUNT + 2] = self.good;
+        clock[Good::COUNT + 3] = heating;
+        clock[Good::COUNT + 4] = self.matching_round;
+    }
+
     pub fn refresh(&mut self, config: &mut super::configuration::EconomyConfig) {
         if comptime!(self.clock == MarketClock::Device) {
-            self.day = config.consumption_intervals[crate::domain::Good::COUNT + 0usize];
-            self.settlement_rotation =
-                config.consumption_intervals[crate::domain::Good::COUNT + 1usize];
-            self.good = config.consumption_intervals[crate::domain::Good::COUNT + 2usize];
-            self.matching_round = config.consumption_intervals[crate::domain::Good::COUNT + 4usize];
-            config.heating_per_person =
-                config.consumption_intervals[crate::domain::Good::COUNT + 3usize];
+            self.day = config.consumption_intervals[Good::COUNT];
+            self.settlement_rotation = config.consumption_intervals[Good::COUNT + 1usize];
+            self.good = config.consumption_intervals[Good::COUNT + 2usize];
+            self.matching_round = config.consumption_intervals[Good::COUNT + 4usize];
+            config.heating_per_person = config.consumption_intervals[Good::COUNT + 3usize];
         }
     }
 

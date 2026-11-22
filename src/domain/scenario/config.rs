@@ -16,9 +16,19 @@ pub enum Experiment {
     Concentrated,
 }
 
-#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
-#[serde(try_from = "ScenarioDocument", deny_unknown_fields)]
-pub struct ScenarioConfig {
+macro_rules! scenario_config {
+    ($($field:tt)*) => {
+        #[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
+        #[serde(try_from = "ScenarioDocument")]
+        pub struct ScenarioConfig { $($field)* }
+
+        #[derive(Deserialize)]
+        #[serde(remote = "ScenarioConfig", deny_unknown_fields)]
+        struct CurrentScenario { $($field)* }
+    };
+}
+
+scenario_config! {
     #[serde(default)]
     pub economy: Economy,
     pub version: u32,
@@ -344,7 +354,7 @@ impl TryFrom<ScenarioDocument> for ScenarioConfig {
                 "unsupported scenario format; expected version 1 or 2"
             ))?,
         }
-        let current: CurrentScenario = serde_json::from_value(value)?;
+        let current = CurrentScenario::deserialize(value)?;
         match (current.people, current.households) {
             (Some(_), 1..) => Err(anyhow!("choose one population count: people or households"))?,
             (None, _) if current.cohort_sizes != CohortSizes::default() => {
@@ -352,149 +362,6 @@ impl TryFrom<ScenarioDocument> for ScenarioConfig {
             }
             _ => (),
         }
-        Ok(Self {
-            economy: current.economy,
-            version: current.version,
-            seed: current.seed,
-            people: current.people,
-            cohort_sizes: current.cohort_sizes,
-            households: current.households,
-            firms: current.firms,
-            map_size: current.map_size,
-            resources: current.resources,
-            search_radius: current.search_radius,
-            commute_speed: current.commute_speed,
-            shipment_speed: current.shipment_speed,
-            railway: current.railway,
-            household_cash: current.household_cash,
-            household_liquidity: current.household_liquidity,
-            entrepreneurship: current.entrepreneurship,
-            expansion: current.expansion,
-            firm_cash: current.firm_cash,
-            buffer_days: current.buffer_days,
-            producer_buffer_days: current.producer_buffer_days,
-            household_need: current.household_need,
-            food: current.food,
-            capacity: current.capacity,
-            packet_output: current.packet_output,
-            durable_packet_output: current.durable_packet_output,
-            packet_minutes: current.packet_minutes,
-            work_cap: current.work_cap,
-            reserved_minutes: current.reserved_minutes,
-            wage: current.wage,
-            prices: current.prices,
-            reserve: current.reserve,
-            distribution_rate: current.distribution_rate,
-            forecast_weight: current.forecast_weight,
-            coverage: current.coverage,
-            minimum_price: current.minimum_price,
-            maximum_price: current.maximum_price,
-            delivery_penalty: current.delivery_penalty,
-            batch_size: current.batch_size,
-            experiment: current.experiment,
-            population: current.population,
-            behavior: current.behavior,
-            payroll: current.payroll,
-            rent: current.rent,
-            household_policy: current.household_policy,
-            finance: current.finance,
-            research: current.research,
-            bargaining: current.bargaining,
-            demography: current.demography,
-            household_production: current.household_production,
-            distributors: current.distributors,
-            ownership: current.ownership,
-            companies: current.companies,
-            land_access: current.land_access,
-            property: current.property,
-            working_conditions: current.working_conditions,
-        })
+        Ok(current)
     }
-}
-#[derive(Deserialize)]
-#[serde(deny_unknown_fields)]
-struct CurrentScenario {
-    #[serde(default)]
-    pub economy: Economy,
-    pub version: u32,
-    pub seed: u64,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub people: Option<u32>,
-    #[serde(default, skip_serializing_if = "CohortSizes::is_default")]
-    pub cohort_sizes: CohortSizes,
-    #[serde(default, skip_serializing_if = "is_zero_count")]
-    pub households: u32,
-    pub firms: u32,
-    pub map_size: u32,
-    #[serde(default)]
-    pub resources: ResourceMap,
-    pub search_radius: u32,
-    pub commute_speed: u32,
-    pub shipment_speed: u32,
-    #[serde(default)]
-    pub railway: railway::RailwayConfig,
-    pub household_cash: u64,
-    #[serde(default)]
-    pub household_liquidity: HouseholdLiquidity,
-    #[serde(default)]
-    pub entrepreneurship: enterprise::EntrepreneurshipPolicy,
-    #[serde(default)]
-    pub expansion: enterprise::ExpansionPolicy,
-    pub firm_cash: u64,
-    pub buffer_days: u32,
-    #[serde(default)]
-    pub producer_buffer_days: Option<u32>,
-    pub household_need: u32,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub food: Option<food::FoodPolicy>,
-    pub capacity: u32,
-    pub packet_output: u32,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub durable_packet_output: Option<u32>,
-    pub packet_minutes: u32,
-    pub work_cap: u32,
-    pub reserved_minutes: u32,
-    pub wage: u32,
-    pub prices: [u32; 3],
-    pub reserve: u64,
-    pub distribution_rate: u32,
-    pub forecast_weight: u32,
-    pub coverage: u32,
-    pub minimum_price: u32,
-    pub maximum_price: u32,
-    pub delivery_penalty: u32,
-    pub batch_size: u32,
-    pub experiment: Experiment,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub population: Option<Population>,
-    #[serde(default, skip_serializing_if = "BehaviorPolicy::is_default")]
-    pub behavior: BehaviorPolicy,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub payroll: Option<PayrollPolicy>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub rent: Option<RentPolicy>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub household_policy: Option<HouseholdPolicy>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub finance: Option<finance::FinanceConfig>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub research: Option<research::ResearchConfig>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub bargaining: Option<bargaining::BargainingPolicy>,
-    #[serde(default)]
-    pub demography: demography::DemographicPolicy,
-    #[serde(default)]
-    pub household_production: enterprise::HouseholdProduction,
-    #[serde(default)]
-    pub distributors: Vec<enterprise::Distributor>,
-    #[serde(default)]
-    pub ownership: Vec<enterprise::Ownership>,
-    #[serde(default, skip_serializing_if = "Vec::is_empty")]
-    pub companies: Vec<company::Company>,
-    #[serde(default)]
-    pub land_access: Option<enterprise::LandAccess>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub property: Option<property::PropertyConfig>,
-    #[serde(default)]
-    pub working_conditions: Vec<enterprise::FirmConditions>,
 }

@@ -20,8 +20,8 @@ pub(in crate::simulation::economy) fn wealth_bin<L: ReadLedger>(
 }
 
 #[cube]
-pub(in crate::simulation::economy) fn histogram_region<A: ActorMetadata>(
-    actors: &A,
+pub(in crate::simulation::economy) fn histogram_region(
+    actors: &ActorTable<'_>,
     config: &EconomyConfig,
     actor: u32,
 ) -> u32 {
@@ -193,7 +193,7 @@ impl<'a> EconomyView<'a> {
                         let bin = wealth_bin::<Ledger>(&self.ledger, actor, members);
                         control[(SummaryLayout::WEALTH_START as u32 + bin) as usize]
                             .fetch_add(members);
-                        let region = histogram_region::<ActorTable>(&self.actors, config, actor);
+                        let region = histogram_region(&self.actors, config, actor);
                         control[(SummaryLayout::REGIONS_START as u32 + region) as usize]
                             .fetch_add(self.ledger.number(Field::Shortage, actor));
                     }

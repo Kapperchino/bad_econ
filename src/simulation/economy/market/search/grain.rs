@@ -131,8 +131,7 @@ pub(super) fn search(
                 let rank = u32::cast_from(
                     u64::cast_from(offset) * u64::cast_from(inverse) % u64::cast_from(length),
                 );
-                let score = (u64::cast_from(offer.score.extract(HIGH_WORD)) << 32)
-                    | u64::cast_from(offer.score.extract(LOW_WORD));
+                let score = native(offer.score);
                 if offer.empty {
                     empty = min(empty, (score << 32) | u64::cast_from(rank));
                 } else if offer.score.extract(HIGH_WORD) == 0 {
@@ -441,8 +440,7 @@ pub(super) fn dealer_trade(
         while rank < end && seen < included {
             let offer = query.offer(economy, spatial, control, parameters, rank);
             let class = select(offer.eligible, 0u32, select(offer.empty, 1u32, 2u32));
-            let score = u64::cast_from(offer.score.extract(HIGH_WORD)) << 32
-                | u64::cast_from(offer.score.extract(LOW_WORD));
+            let score = native(offer.score);
             if class < 2
                 && (class < category
                     || (class == category && (score < best || (score == best && rank < winner))))

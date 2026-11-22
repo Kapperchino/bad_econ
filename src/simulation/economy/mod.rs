@@ -47,8 +47,9 @@ use crate::{
 use clearing::{PeerBalances, PeerOffer, actor_settlement};
 use cubecl::prelude::*;
 use events::{EventStorage, construct};
+use market::demand::{PurchaseRequest, trial_packet};
 use market::orders::{LATCH_WORD, RANGE_SLOTS_WORD};
-use proposals::{InputDemand, MarketProposal, trial_packet};
+use proposals::MarketProposal;
 use settlement::scheduler::{Posting, apply};
 pub(super) use systems::{EconomyInputLaunch, EconomySystem};
 
@@ -80,10 +81,6 @@ pub enum EconomyStage {
     GroupFinalize,
     FinalizeFixedWages,
     SettleInputTile,
-    MarketStart,
-    InputMarketStart,
-    InputMarketPrepare,
-    InputMarketRepeat,
     MarketBoundary,
     GroupRanges,
     SupplierRanges,

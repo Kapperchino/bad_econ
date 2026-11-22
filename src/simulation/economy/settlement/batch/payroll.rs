@@ -38,8 +38,7 @@ impl GpuPass<PayrollInput> for SettlePayroll {
             let balance = economy.ledger.value(Field::Escrow, peer);
             let mut escrow = Shared::<[u64]>::new_slice(1usize);
             if UNIT_POS == 0 {
-                escrow[0usize] = u64::cast_from(balance.extract(LOW_WORD))
-                    | (u64::cast_from(balance.extract(HIGH_WORD)) << 32);
+                escrow[0usize] = native(balance);
             }
             sync_cube();
             let mut cursor = start;

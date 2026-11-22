@@ -53,7 +53,6 @@ impl MarketRound<'_> {
         if let Market::Household = self.market {
             self.launch_stage(simulation, GroupRemainder, self.count);
         }
-        self.launch_stage(simulation, MarketBoundary, 1);
         self.finalize_orders(simulation, batch, limit);
         self.launch_stage(simulation, MarketBoundary, 1);
         if let Some(execution) = freight {
@@ -239,6 +238,7 @@ impl MarketRound<'_> {
                 MarketBatch::Labor(LaborExecution::Deferred) => EconomyStage::FinalizeFixedWages,
                 _ => EconomyStage::GroupFinalize,
             };
+            self.launch_stage(simulation, EconomyStage::MarketBoundary, 1);
             self.launch_stage(simulation, stage, limit);
         }
     }

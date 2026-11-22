@@ -7,9 +7,7 @@ use crate::simulation::{
     Device,
     flags::FaultFlags,
     pass::GpuPass,
-    state::{
-        ActorMetadata, ActorMetadataExpand, ActorTable, ReadLedger, ReadLedgerExpand, TickLedger,
-    },
+    state::{ActorTable, ReadLedger, ReadLedgerExpand, TickLedger},
     system::{AsBufferArg, System, gpu_passes},
     words::*,
 };

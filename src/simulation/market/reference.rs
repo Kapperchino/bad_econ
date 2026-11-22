@@ -7,13 +7,12 @@ use crate::{
         economy::EconomyStage,
         execute,
         flags::{EventStatus, FaultFlags},
-        layout::{DISCOVERY_BLOCK, ObservationControlLayout},
+        layout::DISCOVERY_BLOCK,
         parallel,
         policy::MATCHING_ROUNDS,
     },
 };
 use anyhow::Result;
-use bytemuck::Zeroable;
 
 struct ReferenceRound {
     market: Market,
@@ -49,19 +48,12 @@ impl Simulation {
             (_, MarketExecution::Grouped) => unreachable!(),
         }
     }
-
-    fn reset_market_control(&self) {
-        self.device.write(
-            &self.control,
-            bytemuck::cast_slice(&[ObservationControlLayout::zeroed()]),
-        );
-    }
 }
 
 impl ReferenceRound {
     fn prepare_orders(&self, simulation: &mut Simulation) -> Result<u32> {
         use EconomyStage::*;
-        simulation.reset_market_control();
+        simulation.clear_control();
         let parameters = simulation.parameters(self.phase, self.market, 0, self.count)?;
         if let Market::Labor | Market::Input(_) | Market::Consumer(_) | Market::Household =
             self.market
@@ -110,7 +102,7 @@ impl ReferenceRound {
         use EconomyStage::*;
         let mut parameters = simulation.parameters(self.phase, self.market, 0, self.count)?;
         parameters.sort_count = active;
-        simulation.reset_market_control();
+        simulation.clear_control();
         let buffers = simulation.market_buffers();
         buffers.run(GroupInitialize, self.count, &parameters);
         if let Market::Labor | Market::Input(_) | Market::Consumer(_) | Market::Household =
@@ -193,7 +185,7 @@ impl ReferenceRound {
         use EconomyStage::*;
         let mut parameters =
             simulation.parameters(self.phase, self.market, batch.offset, batch.count)?;
-        simulation.reset_market_control();
+        simulation.clear_control();
         simulation.economy(
             Construct,
             batch.count,

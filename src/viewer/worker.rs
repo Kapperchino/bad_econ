@@ -81,7 +81,6 @@ pub(super) fn run(
                 simulation.command(*command).and_then(|()| {
                     if let Publication::Restart = publication {
                         target = RunTarget::Open;
-                        publisher.update(|display| display.comparison = None);
                     }
                     publish(&mut simulation, &publisher, publication, Some(cue))
                 })
@@ -160,18 +159,11 @@ fn compare(simulation: &mut Simulation, publisher: &Publisher<impl Fn()>) -> Res
         .ok_or_else(|| anyhow::anyhow!("seed overflow"))?;
     let scenario = Scenario::new(config)?;
     let horizon = simulation.snapshot.day;
-    let reference = ComparisonRun {
+    let publication = Publication::Comparison {
         seed: simulation.scenario.config().seed,
         horizon,
-        history: publisher
-            .data
-            .lock()
-            .expect("dashboard lock")
-            .history
-            .clone(),
     };
     simulation.command(SimulationCommand::Reset(scenario.into()))?;
-    publisher.update(|display| display.comparison = Some(reference));
     let target = match horizon {
         0 => RunTarget::Open,
         _ => {
@@ -182,7 +174,7 @@ fn compare(simulation: &mut Simulation, publisher: &Publisher<impl Fn()>) -> Res
     publish(
         simulation,
         publisher,
-        Publication::Restart,
+        publication,
         match target {
             RunTarget::Open => Some(Cue::Compared),
             RunTarget::UntilDay(_) => None,
@@ -197,20 +189,21 @@ fn publish(
     publication: Publication,
     cue: Option<Cue>,
 ) -> Result<()> {
-    let observation = {
-        let display = publisher.data.lock().expect("dashboard lock");
-        match (
-            publication,
-            display.history.back().map(|snapshot| snapshot.day),
-        ) {
-            (Publication::Snapshot, Some(day)) if day == simulation.snapshot.day => None,
-            _ => Some(()),
-        }
-    }
-    .map(|()| ObservationUpdate::new(simulation))
-    .transpose()?;
+    let new_observation = match publication {
+        Publication::Snapshot => publisher
+            .data
+            .lock()
+            .expect("dashboard lock")
+            .history
+            .back()
+            .is_none_or(|snapshot| snapshot.day != simulation.snapshot.day),
+        Publication::Restart | Publication::Comparison { .. } => true,
+    };
+    let observation = new_observation
+        .then(|| ObservationUpdate::new(simulation))
+        .transpose()?;
     let request = match publication {
-        Publication::Restart => None,
+        Publication::Restart | Publication::Comparison { .. } => None,
         Publication::Snapshot => {
             let display = publisher.data.lock().expect("dashboard lock");
             let identities = observation
@@ -221,12 +214,10 @@ fn publish(
             display
                 .inspection
                 .as_ref()
-                .filter(|inspection| identities.contains(&inspection.actor.identity))
                 .filter(|inspection| inspection.day != simulation.snapshot.day)
-                .map(|inspection| {
-                    InspectionRequest::from_registry(inspection.actor.identity, identities)
+                .and_then(|inspection| {
+                    InspectionRequest::find(inspection.actor.identity, identities)
                 })
-                .transpose()?
         }
     };
     let refreshed = request
@@ -236,7 +227,15 @@ fn publish(
         if let Some(inspection) = refreshed {
             display.inspection = Some(inspection);
         }
-        if let Publication::Restart = publication {
+        if !matches!(publication, Publication::Snapshot) {
+            display.comparison = match publication {
+                Publication::Comparison { seed, horizon } => Some(ComparisonRun {
+                    seed,
+                    horizon,
+                    history: std::mem::take(&mut display.history),
+                }),
+                _ => None,
+            };
             display.map_size = simulation.scenario.config().map_size;
             display.history.clear();
             display.inspection = None;

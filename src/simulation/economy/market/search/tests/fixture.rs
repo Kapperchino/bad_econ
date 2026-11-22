@@ -505,7 +505,7 @@ impl SearchProbe {
 
     pub(super) fn prepared_inputs(
         &self,
-        initialization: EconomyStage,
+        initialization: market::MarketStart,
         stage: SearchStage,
     ) -> Result<PreparedInputs> {
         let simulation = &self.simulation;
@@ -515,21 +515,7 @@ impl SearchProbe {
             &simulation.state,
             bytemuck::cast_slice(&encode(&self.state.values)),
         );
-        EconomySystem::launch_elements(
-            device,
-            count,
-            EconomyInputLaunch {
-                state: simulation.state.buffer_arg(),
-                actors: simulation.actors.buffer_arg(),
-                config: simulation.config.launch(),
-                spatial: simulation.spatial.buffer_arg(),
-                proposals: simulation.work.proposals.buffer_arg(),
-                bundles: simulation.work.scratch.buffer_arg(),
-                control: simulation.control.buffer_arg(),
-                parameters: self.parameters.launch(),
-                stage: initialization,
-            },
-        );
+        initialization.launch(simulation.market_buffers(), &self.parameters);
         let dispatch = match stage {
             SearchStage::PrepareSelected => orders::dispatch(
                 &simulation.searches.dispatches,

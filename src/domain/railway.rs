@@ -505,8 +505,7 @@ impl RailGeography {
         for (company, stock) in scenario.config().railway.companies.iter().zip(stocks) {
             let firm = state
                 .actors
-                .iter()
-                .position(|actor| actor.identity == company.firm)
+                .index_of(company.firm)
                 .ok_or_else(|| anyhow!("unknown railway operator"))?;
             match state.get(Field::Railway, firm) == stock {
                 true => (),

@@ -22,12 +22,6 @@ use std::time::Instant;
 
 const MILLISECONDS_PER_SECOND: f64 = 1000.0;
 
-#[derive(Clone, Copy, PartialEq, Eq)]
-enum AdvanceAttempt {
-    Pending,
-    Complete,
-}
-
 #[derive(Debug)]
 pub(super) struct ClaimCapacityDemand {
     records: std::num::NonZeroU64,
@@ -46,10 +40,19 @@ impl std::fmt::Display for ClaimCapacityDemand {
 impl std::error::Error for ClaimCapacityDemand {}
 
 impl Simulation {
+    pub(super) fn clear_control(&self) {
+        self.device.write(
+            &self.control,
+            bytemuck::cast_slice(&[ObservationControlLayout::zeroed()]),
+        );
+    }
+
     pub(super) fn fault_check(&mut self) -> Result<()> {
-        let control = self.device.read_range(&self.control, 0, CONTROL_WORDS)?;
-        self.readback_bytes += (CONTROL_WORDS * WORD_BYTES) as u64;
-        self.fault_result(control[flags::FAULT_WORD])
+        let faults = self
+            .device
+            .read_range(&self.control, flags::FAULT_WORD, 1)?;
+        self.readback_bytes += WORD_BYTES as u64;
+        self.fault_result(faults[0])
     }
     pub(super) fn fault_result(&mut self, bits: u32) -> Result<()> {
         let mut faults = FaultFlags::new(bits)?;
@@ -82,7 +85,7 @@ impl Simulation {
             )),
             (_, true) => Ok(()),
         }?;
-        let previous = self.snapshot.clone();
+        let previous = (phase == Phase::Audit).then(|| self.snapshot.clone());
         self.status = RuntimeState::Advancing(phase);
         let result = self
             .device
@@ -112,7 +115,9 @@ impl Simulation {
             }
             Err(error) => {
                 self.day = self.audited_day;
-                self.snapshot = previous;
+                if let Some(snapshot) = previous {
+                    self.snapshot = snapshot;
+                }
                 self.next_phase = Phase::Opening;
                 self.status = RuntimeState::Fault {
                     last_audited_day: self.audited_day,
@@ -132,10 +137,7 @@ impl Simulation {
                 .assign(&self.device, &self.state, &self.config, self.day as u32);
         }
         let mut evidence = PhaseEvidence::default();
-        self.device.write(
-            &self.control,
-            bytemuck::cast_slice(&[ObservationControlLayout::zeroed()]),
-        );
+        self.clear_control();
         if let Some(research) = &self.research {
             research.before_phase(&self.device, &self.state, phase, self.day)?;
         }
@@ -154,6 +156,7 @@ impl Simulation {
             Phase::WorkPayment => {
                 self.market(Market::Payroll, phase, trace, &mut evidence)?;
                 self.market_result(&mut evidence)?;
+                self.clear_control();
                 self.local(phase)
             }
             Phase::ProvisionPurchase => self.provision(trace, &mut evidence),
@@ -240,10 +243,6 @@ impl Simulation {
     }
 
     fn local(&mut self, phase: Phase) -> Result<()> {
-        self.device.write(
-            &self.control,
-            bytemuck::cast_slice(&[ObservationControlLayout::zeroed()]),
-        );
         let parameters = self.parameters(phase, Market::Labor, 0, self.metadata.actors.len())?;
         if matches!(phase, Phase::Proposal | Phase::AccountsDecisions) {
             self.economy(
@@ -307,59 +306,56 @@ impl Simulation {
             )),
         }?;
         let previous_execution = self.freight_execution;
-        let previous_status = self.status.clone();
         self.freight_execution = match self.device.cube {
             cubecl::Device::Wgpu(_) | cubecl::Device::Metal(_) => FreightExecution::Buffered,
             _ => FreightExecution::Synchronous,
         };
-        let mut attempt = AdvanceAttempt::Pending;
-        let mut result = Ok(());
-        while attempt == AdvanceAttempt::Pending {
-            self.timings.clear();
-            result = Phase::ALL.into_iter().try_for_each(|phase| -> Result<()> {
-                let start = Instant::now();
-                let evidence = self.phase(phase, Trace::Discard)?;
-                self.timings.push(PhaseTiming {
-                    phase,
-                    milliseconds: start.elapsed().as_secs_f64() * MILLISECONDS_PER_SECOND,
-                    events: evidence.events,
-                    frontier_depth: evidence.frontier_depth,
-                });
-                Ok(())
-            });
-            let required = result
-                .as_ref()
-                .err()
-                .and_then(|error| error.downcast_ref::<ClaimCapacityDemand>())
-                .map(|demand| demand.records.get());
-            attempt = match required {
-                Some(records) => {
-                    match settlement::reserve_claims_for_replay(
-                        &self.device,
-                        &mut self.config,
-                        records,
-                    ) {
-                        Ok(()) => {
-                            self.status = previous_status.clone();
-                            self.market_graphs = market_graphs::MarketGraphs::default();
-                            AdvanceAttempt::Pending
-                        }
-                        Err(error) => {
-                            self.status = RuntimeState::Fault {
-                                last_audited_day: self.audited_day,
-                                message: error.to_string(),
-                            };
-                            result = Err(error);
-                            AdvanceAttempt::Complete
-                        }
-                    }
-                }
-                None => AdvanceAttempt::Complete,
-            };
-        }
+        let result = self.advance_with_replay();
         self.freight_execution = previous_execution;
         result
     }
+
+    fn advance_with_replay(&mut self) -> Result<()> {
+        let previous_status = self.status.clone();
+        let mut result = self.run_day();
+        while let Some(demand) = result
+            .as_ref()
+            .err()
+            .and_then(|error| error.downcast_ref::<ClaimCapacityDemand>())
+        {
+            settlement::reserve_claims_for_replay(
+                &self.device,
+                &mut self.config,
+                demand.records.get(),
+            )
+            .inspect_err(|error| {
+                self.status = RuntimeState::Fault {
+                    last_audited_day: self.audited_day,
+                    message: error.to_string(),
+                };
+            })?;
+            self.status = previous_status.clone();
+            self.market_graphs = market_graphs::MarketGraphs::default();
+            result = self.run_day();
+        }
+        result
+    }
+
+    fn run_day(&mut self) -> Result<()> {
+        self.timings.clear();
+        Phase::ALL.into_iter().try_for_each(|phase| -> Result<()> {
+            let start = Instant::now();
+            let evidence = self.phase(phase, Trace::Discard)?;
+            self.timings.push(PhaseTiming {
+                phase,
+                milliseconds: start.elapsed().as_secs_f64() * MILLISECONDS_PER_SECOND,
+                events: evidence.events,
+                frontier_depth: evidence.frontier_depth,
+            });
+            Ok(())
+        })
+    }
+
     pub fn command(&mut self, command: SimulationCommand) -> Result<()> {
         match command {
             SimulationCommand::Pause => {

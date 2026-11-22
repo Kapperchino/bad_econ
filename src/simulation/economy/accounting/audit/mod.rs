@@ -160,11 +160,6 @@ impl AuditInput<'_> {
     }
 }
 
-#[cube]
-fn native(value: Ticks) -> u64 {
-    u64::cast_from(value.extract(LOW_WORD)) | (u64::cast_from(value.extract(HIGH_WORD)) << 32)
-}
-
 #[derive(CubeType, CubeLaunch)]
 struct ValidationInput {
     state: Box<[Ticks]>,
@@ -403,7 +398,7 @@ impl<'a> LedgerAudit<'a> {
             histograms[bin as usize].fetch_add(members);
             let shortage = self.ledger.number(Field::Shortage, actor);
             if shortage > 0 {
-                let region = observation::histogram_region::<ActorTable>(actors, config, actor);
+                let region = observation::histogram_region(actors, config, actor);
                 histograms[(SummaryLayout::WEALTH_BINS as u32 + region) as usize]
                     .fetch_add(shortage);
             }

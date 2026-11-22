@@ -132,6 +132,11 @@ pub fn times(a: Ticks, b: u32) -> CheckedTicks {
     }
 }
 #[cube]
+pub fn native(value: Ticks) -> u64 {
+    u64::cast_from(value.extract(LOW_WORD)) | (u64::cast_from(value.extract(HIGH_WORD)) << 32)
+}
+
+#[cube]
 pub fn divide(a: Ticks, b: u32) -> Ticks {
     match b {
         1 => a,

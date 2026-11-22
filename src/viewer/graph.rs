@@ -169,43 +169,35 @@ impl Geometry {
                 3.0 + (1.0 - range.fraction(value) as f32) * (size.y - 6.0).max(0.0),
             )
         };
-        let last = chart
-            .samples(history, range.first_day, range.last_day)
-            .map(|sample| {
+        let mut previous = Vec::<Vec2>::new();
+        let mut current = Vec::new();
+        for sample in chart.samples(history, range.first_day, range.last_day) {
+            current.extend(
                 sample
                     .values
                     .into_iter()
-                    .map(|value| point(sample.day, value))
-                    .collect::<Vec<_>>()
-            })
-            .reduce(|previous, current| {
-                previous
-                    .iter()
-                    .zip(&current)
-                    .enumerate()
-                    .filter(|(series, (from, to))| {
-                        range.selection.includes(*series) && from.is_finite() && to.is_finite()
-                    })
-                    .for_each(|(series, (&from, &to))| {
-                        self.line(from, to, style.color(chart_color(chart, series)));
-                    });
-                current
-            });
-        if let Some(last) = last {
-            last.iter()
-                .enumerate()
-                .filter(|(series, point)| range.selection.includes(*series) && point.is_finite())
-                .for_each(|(series, &point)| {
-                    self.quad(
-                        [
-                            point + Vec2::new(-3.0, -3.0),
-                            point + Vec2::new(3.0, -3.0),
-                            point + Vec2::new(3.0, 3.0),
-                            point + Vec2::new(-3.0, 3.0),
-                        ],
-                        style.color(chart_color(chart, series)),
-                    );
-                });
+                    .map(|value| point(sample.day, value)),
+            );
+            for (series, (&from, &to)) in previous.iter().zip(&current).enumerate() {
+                if range.selection.includes(series) && from.is_finite() && to.is_finite() {
+                    self.line(from, to, style.color(chart_color(chart, series)));
+                }
+            }
+            std::mem::swap(&mut previous, &mut current);
+            current.clear();
+        }
+        for (series, point) in previous.into_iter().enumerate() {
+            if range.selection.includes(series) && point.is_finite() {
+                self.quad(
+                    [
+                        point + Vec2::new(-3.0, -3.0),
+                        point + Vec2::new(3.0, -3.0),
+                        point + Vec2::new(3.0, 3.0),
+                        point + Vec2::new(-3.0, 3.0),
+                    ],
+                    style.color(chart_color(chart, series)),
+                );
+            }
         }
     }
 

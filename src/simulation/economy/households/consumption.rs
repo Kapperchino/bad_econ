@@ -110,13 +110,77 @@ impl<'a, 'b> HouseholdPurchase<'a, 'b> {
         }
     }
 
-    pub fn fuel_target(&self, good: u32) -> Ticks {
+    pub fn prepare(&self, order: &mut PurchaseRequest, good: u32) {
+        let economy = self.economy;
+        let parameters = self.parameters;
+        let config = economy.ledger.config;
+        let control = self.control;
+        let id = self.household;
+        let market = comptime!(parameters.market);
+        let living_household = economy.actors.kind(id).is(comptime!(ActorKind::Household))
+            && economy.ledger.number(Field::LivingMembers, id) > 0;
+        if comptime!(matches!(
+            market,
+            MarketFlag::Consumer(Good::Coal | Good::Wood)
+        )) {
+            order.wanted = self.fuel_target(good);
+            let held = economy.ledger.stock_with_transit(good, id).record(control);
+            order.search = living_household
+                && !lt(
+                    economy.ledger.value(Field::Bread, id),
+                    ticks(food::HouseholdRation::new(&economy.ledger, id).minimum(), 0),
+                )
+                && lt(held, order.wanted)
+                && !equal(order.purchasing_power, zero());
+            if order.search {
+                order.search = self.preferred_fuel(good) == good;
+            }
+        } else {
+            let luxury = comptime!(matches!(
+                market,
+                MarketFlag::Consumer(Good::LuxuryClothes | Good::LuxuryFurniture)
+            ));
+            let interval = config.consumption_intervals[good as usize - 1];
+            let until_due =
+                (interval - (parameters.day + id) % max(interval, 1)) % max(interval, 1);
+            order.search = living_household
+                && (until_due <= config.coverage + config.ring
+                    || (luxury
+                        && comptime!(
+                            config.food_income == crate::domain::food::FoodIncome::PurchasingPower
+                        )));
+            let reserve = ticks(
+                food::HouseholdRation::new(&economy.ledger, id).reserve(config)
+                    * (config.coverage + config.ring - 1),
+                0,
+            );
+            let food = economy
+                .ledger
+                .stock_with_transit(comptime!(Good::Bread as u32), id)
+                .record(control);
+            let cash_reserve =
+                times(reserve, economy.ledger.number(Field::FoodPrice, id)).record(control);
+            order.search = order.search
+                && !lt(food, reserve)
+                && lt(cash_reserve, economy.ledger.value(Field::Cash, id));
+            if luxury {
+                order.purchasing_power = self.budget(good);
+            }
+            order.search = order.search && !equal(order.purchasing_power, zero());
+            order.wanted = ticks(consumers(&economy.ledger, id), 0);
+            if luxury && order.search {
+                order.wanted = self.durable_target(good, order.purchasing_power);
+            }
+        }
+    }
+
+    fn fuel_target(&self, good: u32) -> Ticks {
         let ledger = &self.economy.ledger;
         let demand = HeatingDemand::new(ledger, self.household);
         demand.purchase_target(ledger, self.control, self.parameters, good)
     }
 
-    pub fn durable_target(&self, good: u32, budget: Ticks) -> Ticks {
+    fn durable_target(&self, good: u32, budget: Ticks) -> Ticks {
         let household = self.household;
         let parameters = self.parameters;
         let control = self.control;
@@ -140,7 +204,7 @@ impl<'a, 'b> HouseholdPurchase<'a, 'b> {
         }
     }
 
-    pub fn preferred_fuel(&self, good: u32) -> u32 {
+    fn preferred_fuel(&self, good: u32) -> u32 {
         let household = self.household;
         let parameters = self.parameters;
         let spatial = self.spatial;
@@ -180,7 +244,7 @@ impl<'a, 'b> HouseholdPurchase<'a, 'b> {
         selected
     }
 
-    pub fn budget(&self, good: u32) -> Ticks {
+    fn budget(&self, good: u32) -> Ticks {
         let ledger = &self.economy.ledger;
         let household = self.household;
         let control = self.control;
@@ -196,11 +260,7 @@ impl<'a, 'b> HouseholdPurchase<'a, 'b> {
             ),
         );
         if basic > 0 {
-            let stock = plus(
-                ledger.value_at(basic, household),
-                ledger.value_at(TRANSIT_FIELDS as u32 + basic - 1, household),
-            )
-            .record(control);
+            let stock = ledger.stock_with_transit(basic, household).record(control);
             let daily = plus(
                 times32(
                     food::HouseholdRation::new(ledger, household).reserve(config),
@@ -285,11 +345,7 @@ impl HeatingDemand {
         );
         let units = select(coal, 2u32, 1u32);
         let other_units = select(coal, 1u32, 2u32);
-        let other_stock = plus(
-            ledger.value_at(other, household),
-            ledger.value_at(TRANSIT_FIELDS as u32 + other - 1, household),
-        )
-        .record(control);
+        let other_stock = ledger.stock_with_transit(other, household).record(control);
         let target = times32(need, config.coverage + config.ring - 1);
         let remaining = positive(
             target,

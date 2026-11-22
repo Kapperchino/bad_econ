@@ -1,3 +1,4 @@
+use super::market::MarketStart;
 use super::*;
 
 #[derive(Debug, PartialEq, Eq)]
@@ -252,10 +253,10 @@ fn sparse_input_preparation_preserves_stable_eligibility_and_all_round_requests_
             probe.clear_preparation();
         }
         let expected =
-            dense.prepared_inputs(EconomyStage::InputMarketStart, SearchStage::Prepare)?;
+            dense.prepared_inputs(MarketStart::ResetCandidatesAndOrders, SearchStage::Prepare)?;
         assert_eq!(
             sparse.prepared_inputs(
-                EconomyStage::InputMarketStart,
+                MarketStart::ResetCandidatesAndOrders,
                 SearchStage::PrepareCandidates
             )?,
             expected,
@@ -281,13 +282,9 @@ fn sparse_input_preparation_preserves_stable_eligibility_and_all_round_requests_
                 probe.state.set(Field::Cash, 0, 5_000);
                 probe.state.set(Field::inventory(good), 0, 0);
             }
-            let expected =
-                dense.prepared_inputs(EconomyStage::InputMarketRepeat, SearchStage::Prepare)?;
+            let expected = dense.prepared_inputs(MarketStart::ResetOrders, SearchStage::Prepare)?;
             assert_eq!(
-                sparse.prepared_inputs(
-                    EconomyStage::InputMarketRepeat,
-                    SearchStage::PrepareSelected
-                )?,
+                sparse.prepared_inputs(MarketStart::ResetOrders, SearchStage::PrepareSelected)?,
                 expected,
                 "{case:?}, workgroup {workgroup}, round {round}"
             );
@@ -297,14 +294,10 @@ fn sparse_input_preparation_preserves_stable_eligibility_and_all_round_requests_
                 probe.state.set(Field::inventory(good), 0, u64::MAX);
                 probe.state.values[(TRANSIT_FIELDS + good as usize - 1) * count] = 1;
             }
-            let expected =
-                dense.prepared_inputs(EconomyStage::InputMarketRepeat, SearchStage::Prepare)?;
+            let expected = dense.prepared_inputs(MarketStart::ResetOrders, SearchStage::Prepare)?;
             assert_ne!(expected.faults, 0);
             assert_eq!(
-                sparse.prepared_inputs(
-                    EconomyStage::InputMarketRepeat,
-                    SearchStage::PrepareSelected
-                )?,
+                sparse.prepared_inputs(MarketStart::ResetOrders, SearchStage::PrepareSelected)?,
                 expected,
                 "{case:?}, workgroup {workgroup}, repeated demand overflow"
             );
@@ -365,11 +358,11 @@ fn grain_capture_skips_stable_household_nonbuyers_and_keeps_firm_retries_on_gpu(
                 }
                 probe.clear_preparation();
             }
-            let expected =
-                dense.prepared_inputs(EconomyStage::InputMarketStart, SearchStage::Prepare)?;
+            let expected = dense
+                .prepared_inputs(MarketStart::ResetCandidatesAndOrders, SearchStage::Prepare)?;
             assert_eq!(
                 sparse.prepared_inputs(
-                    EconomyStage::InputMarketStart,
+                    MarketStart::ResetCandidatesAndOrders,
                     SearchStage::PrepareCandidates,
                 )?,
                 expected,
@@ -405,13 +398,11 @@ fn grain_capture_skips_stable_household_nonbuyers_and_keeps_firm_retries_on_gpu(
                     }
                 }
                 let expected =
-                    dense.prepared_inputs(EconomyStage::InputMarketRepeat, SearchStage::Prepare)?;
+                    dense.prepared_inputs(MarketStart::ResetOrders, SearchStage::Prepare)?;
                 assert!(expected.queue.contains(&1));
                 assert_eq!(
-                    sparse.prepared_inputs(
-                        EconomyStage::InputMarketRepeat,
-                        SearchStage::PrepareSelected,
-                    )?,
+                    sparse
+                        .prepared_inputs(MarketStart::ResetOrders, SearchStage::PrepareSelected,)?,
                     expected,
                     "{demand:?}, WG{workgroup}, round {round}",
                 );
@@ -433,7 +424,7 @@ fn sparse_input_preparation_preserves_first_round_inventory_faults_on_gpu() -> R
     probe.state.values[(TRANSIT_FIELDS + Good::Linen as usize - 1) * count] = 1;
     probe.clear_preparation();
     let first = probe.prepared_inputs(
-        EconomyStage::InputMarketStart,
+        MarketStart::ResetCandidatesAndOrders,
         SearchStage::PrepareCandidates,
     )?;
     assert_ne!(first.faults, 0);
@@ -442,10 +433,7 @@ fn sparse_input_preparation_preserves_first_round_inventory_faults_on_gpu() -> R
         &probe.simulation.work.scratch,
         &vec![sentinel; probe.simulation.work.scratch.meta.num_elements()],
     );
-    let repeated = probe.prepared_inputs(
-        EconomyStage::InputMarketRepeat,
-        SearchStage::PrepareSelected,
-    )?;
+    let repeated = probe.prepared_inputs(MarketStart::ResetOrders, SearchStage::PrepareSelected)?;
     assert_eq!(repeated.faults, first.faults);
     assert_eq!(repeated.statuses, vec![sentinel; count]);
     assert!(repeated.queue.is_empty());
@@ -485,12 +473,12 @@ fn selected_fuel_retries_include_buyers_with_only_freezing_reserves_on_gpu() -> 
             probe.clear_preparation();
         }
         let expected =
-            dense.prepared_inputs(EconomyStage::InputMarketStart, SearchStage::Prepare)?;
+            dense.prepared_inputs(MarketStart::ResetCandidatesAndOrders, SearchStage::Prepare)?;
         assert!(expected.queue.is_empty());
         assert_eq!(expected.faults, 0);
         assert_eq!(
             selected.prepared_inputs(
-                EconomyStage::InputMarketStart,
+                MarketStart::ResetCandidatesAndOrders,
                 SearchStage::PrepareCandidates,
             )?,
             expected,
@@ -514,12 +502,9 @@ fn selected_fuel_retries_include_buyers_with_only_freezing_reserves_on_gpu() -> 
             for probe in [&mut dense, &mut selected] {
                 probe.parameters.matching_round = round as u32;
             }
-            let expected =
-                dense.prepared_inputs(EconomyStage::InputMarketRepeat, SearchStage::Prepare)?;
-            let actual = selected.prepared_inputs(
-                EconomyStage::InputMarketRepeat,
-                SearchStage::PrepareSelected,
-            )?;
+            let expected = dense.prepared_inputs(MarketStart::ResetOrders, SearchStage::Prepare)?;
+            let actual =
+                selected.prepared_inputs(MarketStart::ResetOrders, SearchStage::PrepareSelected)?;
             assert_eq!(actual, expected, "{good:?} round {round}");
             match round + 1 == MATCHING_ROUNDS {
                 true => {
@@ -598,10 +583,10 @@ fn selected_fuel_buyers_match_dense_requests_and_reset_trace_statuses_on_gpu() -
         let mut dense = probe()?;
         let mut selected = probe()?;
         let expected =
-            dense.prepared_inputs(EconomyStage::InputMarketStart, SearchStage::Prepare)?;
+            dense.prepared_inputs(MarketStart::ResetCandidatesAndOrders, SearchStage::Prepare)?;
         assert_eq!(
             selected.prepared_inputs(
-                EconomyStage::InputMarketStart,
+                MarketStart::ResetCandidatesAndOrders,
                 SearchStage::PrepareCandidates,
             )?,
             expected,
@@ -659,13 +644,9 @@ fn selected_fuel_buyers_match_dense_requests_and_reset_trace_statuses_on_gpu() -
                     &vec![u32::MAX; simulation.searches.successes.meta.num_elements()],
                 );
             }
-            let expected =
-                dense.prepared_inputs(EconomyStage::InputMarketRepeat, SearchStage::Prepare)?;
+            let expected = dense.prepared_inputs(MarketStart::ResetOrders, SearchStage::Prepare)?;
             assert_eq!(
-                selected.prepared_inputs(
-                    EconomyStage::InputMarketRepeat,
-                    SearchStage::PrepareSelected,
-                )?,
+                selected.prepared_inputs(MarketStart::ResetOrders, SearchStage::PrepareSelected,)?,
                 expected,
                 "{good:?} round {round}",
             );

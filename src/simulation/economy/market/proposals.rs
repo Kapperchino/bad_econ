@@ -9,165 +9,52 @@ pub(in crate::simulation::economy) struct MarketProposal {
 
 #[cube]
 impl MarketProposal {
+    pub fn payment(
+        economy: &EconomyView<'_>,
+        control: &[Atomic<u32>],
+        id: u32,
+        #[comptime] market: MarketFlag,
+    ) -> Self {
+        let config = economy.ledger.config;
+        let mut quantity = zero();
+        let recipient = match comptime!(market) {
+            MarketFlag::Payroll => {
+                quantity = economy.ledger.value(Field::Due, id);
+                economy.ledger.number(Field::Employer, id) - 1
+            }
+            MarketFlag::Distribution => {
+                let kind = economy.actors.kind(id);
+                if !kind.is(comptime!(ActorKind::Household)) {
+                    let cash_reserve = select(
+                        kind.bits() == comptime!(Good::Housing as u32),
+                        zero(),
+                        ticks(config.reserve_low, config.reserve_high),
+                    );
+                    let reserve = maximum(
+                        cash_reserve,
+                        economy.ledger.value(Field::OperatingReserve, id),
+                    );
+                    let surplus = positive(economy.ledger.value(Field::Cash, id), reserve);
+                    quantity =
+                        ratio(surplus, config.distribution_rate, POLICY_SCALE).record(control);
+                }
+                economy.actors.owner(id)
+            }
+            _ => u32::new(comptime!(i64::from(NO_ACTOR))),
+        };
+        MarketProposal {
+            peer: select(equal(quantity, zero()), NO_ACTOR, recipient),
+            quantity,
+            trip: 0,
+        }
+    }
+
     pub fn store(&self, proposals: &mut [u32], actor: u32) {
         let base = actor as usize * ProposalLayout::WORDS;
         proposals[base + ProposalLayout::ACTOR] = self.peer;
         proposals[base + ProposalLayout::QUANTITY_LOW] = self.quantity.extract(LOW_WORD);
         proposals[base + ProposalLayout::QUANTITY_HIGH] = self.quantity.extract(HIGH_WORD);
         proposals[base + ProposalLayout::DISTANCE] = self.trip;
-    }
-}
-
-#[derive(CubeType)]
-pub(in crate::simulation::economy) struct InputDemand {
-    pub search: bool,
-    pub wanted: Ticks,
-}
-
-#[cube]
-pub(in crate::simulation::economy) fn trial_packet(
-    ledger: &Ledger<'_>,
-    firm: u32,
-    good: u32,
-) -> Ticks {
-    let config = ledger.config;
-    let empty = comptime!(
-        config.economy == crate::domain::Economy::Industrial
-            && config.home_mode == Feature::Enabled
-    ) && ledger.number(Field::EnterpriseModel, firm) == 0
-        && ledger.number(Field::EnterpriseStatus, firm)
-            == comptime!(crate::domain::enterprise::EnterpriseState::Operating as u32)
-        && !farming::FarmSite::new(firm, good).is_farm(ledger)
-        && equal(ledger.value_at(good, firm), zero())
-        && equal(ledger.value(Field::Pipeline, firm), zero());
-    ticks(u32::cast_from(empty), 0)
-}
-
-#[cube]
-impl InputDemand {
-    pub(super) fn new(
-        economy: &mut EconomyView<'_>,
-        control: &[Atomic<u32>],
-        id: u32,
-        k: &KernelActorKind,
-        good: u32,
-    ) -> Self {
-        let config = economy.ledger.config;
-        let pricing = pricing::FirmPricing::new(id, k.output(), control);
-        let mut search = !k.is(comptime!(ActorKind::Household))
-            && (economy.ledger.number(Field::FirstInput, id) == good
-                || economy.ledger.number(Field::SecondInput, id) == good);
-        let mut wanted = ticks(
-            economy.actors.capacity(id)
-                * economy.ledger.number(Field::InputTicks, id)
-                * consumption::input_coverage(config, k.bits()),
-            0u32,
-        );
-        if economy.ledger.number(Field::EnterpriseModel, id) == 1 {
-            search = good == k.output();
-            let forecast = maximum(economy.ledger.value(Field::Demand, id), ticks(1, 0));
-            wanted = pricing.distributor_target(&*economy, forecast);
-        }
-        if !k.is(comptime!(ActorKind::Household))
-            && economy.ledger.number(Field::EnterpriseModel, id) == 0
-            && comptime!(config.home_mode == Feature::Enabled)
-        {
-            let horizon = config.coverage + config.ring;
-            let packets = divide(
-                plus(
-                    times(economy.ledger.value(Field::Demand, id), horizon).record(control),
-                    ticks(economy.ledger.number(Field::OutputTicks, id) - 1, 0),
-                )
-                .record(control),
-                max(economy.ledger.number(Field::OutputTicks, id), 1),
-            );
-            let capacity = economy.actors.capacity(id);
-            let profitable = comptime!(config.economy != crate::domain::Economy::Industrial)
-                || config.price_response == 0
-                || pricing.covers_batch(&economy.ledger);
-            wanted = times(
-                minimum(
-                    maximum(
-                        select(profitable, packets, zero()),
-                        trial_packet(&economy.ledger, id, k.output()),
-                    ),
-                    times32(capacity, horizon),
-                ),
-                economy.ledger.number(Field::InputTicks, id),
-            )
-            .record(control);
-        }
-        if k.is(comptime!(ActorKind::Household))
-            && comptime!(config.home_mode == Feature::Enabled)
-            && good == comptime!(Good::Grain as u32)
-            && (comptime!(config.economy == crate::domain::Economy::Agrarian)
-                || economy.ledger.number(Field::LandPlots, id) > 0)
-            && economy.ledger.number(Field::LivingMembers, id) > 0
-        {
-            search = true;
-            let near_term = times32(
-                economy.ledger.number(Field::FoodNeed, id),
-                config.coverage + config.ring,
-            );
-            let reserve = economy.ledger.value(Field::GrainReserve, id);
-            let quoting = economy.ledger.number(Field::GrainQuote, id) > 0;
-            wanted = select(quoting, minimum(near_term, reserve), near_term);
-        }
-        let investment = economy.ledger.number(Field::InvestmentGood, id) > 0;
-        if k.is(comptime!(ActorKind::Household))
-            && investment
-            && comptime!(config.property_mode == Feature::Disabled)
-            && economy.ledger.number(Field::LivingMembers, id) > 0
-            && comptime!(config.home_mode == Feature::Enabled)
-            && (good == comptime!(Good::Tools as u32) || good == comptime!(Good::Wood as u32))
-        {
-            search = true;
-            let members = crate::simulation::enterprise::founder_shares(&*economy, id);
-            wanted = times32(
-                members,
-                select(good == comptime!(Good::Tools as u32), 2u32, 5u32),
-            );
-        }
-        if !k.is(comptime!(ActorKind::Household))
-            && comptime!(
-                config.home_mode == Feature::Enabled && config.property_mode == Feature::Disabled
-            )
-            && good == comptime!(Good::Wood as u32)
-            && economy.ledger.number(Field::Slots, id) == 0
-            && economy.ledger.number(Field::Plan, id) > 0
-            && !lt(economy.ledger.value(Field::Cash, id), ticks(10_000, 0))
-        {
-            wanted = select(search, maximum(wanted, ticks(5, 0)), ticks(5, 0));
-            search = true;
-        }
-        if !k.is(comptime!(ActorKind::Household))
-            && k.bits() != comptime!(Good::Railway as u32)
-            && good == comptime!(Good::Tools as u32)
-            && comptime!(config.home_mode == Feature::Enabled)
-        {
-            wanted = select(search, maximum(wanted, ticks(2, 0)), ticks(2, 0));
-            search = true;
-        }
-        if good == comptime!(Good::Construction as u32) {
-            let building = economy.ledger.number(Field::ProjectStatus, id)
-                == comptime!(crate::domain::property::ProjectStatus::Building as u32);
-            let work = economy.ledger.value(Field::ConstructionRemaining, id);
-            wanted = select(
-                building,
-                select(search, maximum(wanted, work), work),
-                wanted,
-            );
-            search = search || building;
-            if k.bits() == comptime!(Good::Housing as u32) {
-                wanted = plus(wanted, landlords::maintenance(&economy.ledger, id)).record(control);
-                search = true;
-            }
-        }
-        let rail = railway::demand(economy, id, good);
-        InputDemand {
-            search: search || !equal(rail, zero()),
-            wanted: maximum(wanted, rail),
-        }
     }
 }
 
@@ -178,7 +65,7 @@ impl InputDemand {
 #[cube]
 pub(in crate::simulation::economy) fn propose(
     economy: &mut EconomyView<'_>,
-    spatial: &mut [u32],
+    spatial: &[u32],
     proposals: &mut [u32],
     control: &[Atomic<u32>],
     parameters: &EconomyParameters,
@@ -196,11 +83,10 @@ pub(in crate::simulation::economy) fn propose(
                 3 * (cells + 1 + config.actors) + ceildiv(config.actors, DISCOVERY_BLOCK) + 1;
             id = spatial[(base + invocation) as usize];
         }
-        let k = economy.actors.kind(id);
         let mut quantity = ticks(0u32, 0u32);
         let mut trip = 0u32;
         let mut search = false;
-        let mut good = 0u32;
+        let good = parameters.traded_good();
         let mut wanted = ticks(0u32, 0u32);
         let mut seen_supply = false;
         let mut empty_seller = u32::new(comptime!(i64::from(NO_ACTOR)));
@@ -209,10 +95,6 @@ pub(in crate::simulation::economy) fn propose(
         let mut empty_score = ticks(u32::MAX, u32::MAX);
         let mut missing_supply = false;
         let mut purchasing_power = economy.ledger.value(Field::Cash, id);
-        if comptime!(matches!(market, MarketFlag::Input(_))) {
-            purchasing_power =
-                enterprises::FirmPolicy::new(id, control).purchasing_power(&*economy);
-        }
         match market {
             MarketFlag::Labor => {
                 let labor = employment::LaborSearch::new(
@@ -227,142 +109,27 @@ pub(in crate::simulation::economy) fn propose(
                 trip = labor.trip;
                 search = labor.vacancies;
             }
-            MarketFlag::Input(_) => {
-                good = parameters.traded_good();
-                let demand = InputDemand::new(economy, control, id, &k, good);
-                search = demand.search;
-                wanted = demand.wanted;
+            MarketFlag::Input(_) | MarketFlag::Consumer(_) | MarketFlag::Household => {
+                let order = PurchaseRequest::new(economy, spatial, control, parameters, id);
+                search = order.search;
+                wanted = order.wanted;
+                purchasing_power = order.purchasing_power;
             }
-            MarketFlag::Consumer(_) => {
-                good = parameters.traded_good();
-                let purchase = consumption::HouseholdPurchase::new(
-                    &*economy, &*spatial, control, parameters, id,
-                );
-                if good == comptime!(Good::Coal as u32) || good == comptime!(Good::Wood as u32) {
-                    wanted = purchase.fuel_target(good);
-                    let held = plus(
-                        economy.ledger.value_at(good, id),
-                        economy
-                            .ledger
-                            .value_at(TRANSIT_FIELDS as u32 + good - 1, id),
-                    )
-                    .record(control);
-                    search = k.is(comptime!(ActorKind::Household))
-                        && economy.ledger.number(Field::LivingMembers, id) > 0
-                        && !lt(
-                            economy.ledger.value(Field::Bread, id),
-                            ticks(food::HouseholdRation::new(&economy.ledger, id).minimum(), 0),
-                        )
-                        && lt(held, wanted)
-                        && !equal(purchasing_power, zero());
-                    if search {
-                        search = purchase.preferred_fuel(good) == good;
-                    }
-                } else {
-                    let interval = config.consumption_intervals[good as usize - 1];
-                    let until_due =
-                        (interval - (parameters.day + id) % max(interval, 1)) % max(interval, 1);
-                    search = k.is(comptime!(ActorKind::Household))
-                        && economy.ledger.number(Field::LivingMembers, id) > 0
-                        && (until_due <= config.coverage + config.ring
-                            || consumption::scaled_luxury(config, good));
-                    let reserve = ticks(
-                        food::HouseholdRation::new(&economy.ledger, id).reserve(config)
-                            * (config.coverage + config.ring - 1),
-                        0,
-                    );
-                    let food = plus(
-                        economy.ledger.value(Field::Bread, id),
-                        economy.ledger.value_at(
-                            TRANSIT_FIELDS as u32 + comptime!(Good::Bread as u32) - 1,
-                            id,
-                        ),
-                    )
-                    .record(control);
-                    let cash_reserve =
-                        times(reserve, economy.ledger.number(Field::FoodPrice, id)).record(control);
-                    search = search
-                        && !lt(food, reserve)
-                        && lt(cash_reserve, economy.ledger.value(Field::Cash, id));
-                    purchasing_power = purchase.budget(good);
-                    search = search && !equal(purchasing_power, zero());
-                    wanted = ticks(1, 0);
-                    if search {
-                        wanted = purchase.durable_target(good, purchasing_power);
-                    }
-                }
-            }
-            MarketFlag::Household => {
-                good = comptime!(Good::Bread as u32);
-                search = k.is(comptime!(ActorKind::Household));
-                wanted = ticks(
-                    food::HouseholdRation::new(&economy.ledger, id).purchase(config, parameters)
-                        * (config.coverage + config.ring - 1u32),
-                    0u32,
-                );
-            }
-            MarketFlag::Payroll => {
-                quantity = economy.ledger.value(Field::Due, id);
-                if !equal(quantity, ticks(0u32, 0u32)) {
-                    chosen = economy.ledger.number(Field::Employer, id) - 1u32;
-                }
-            }
-            MarketFlag::Distribution => {
-                if !k.is(comptime!(ActorKind::Household)) {
-                    quantity = ratio(
-                        positive(
-                            economy.ledger.value(Field::Cash, id),
-                            maximum(
-                                select(
-                                    k.bits() == comptime!(Good::Housing as u32),
-                                    zero(),
-                                    ticks(config.reserve_low, config.reserve_high),
-                                ),
-                                economy.ledger.value(Field::OperatingReserve, id),
-                            ),
-                        ),
-                        config.distribution_rate,
-                        POLICY_SCALE,
-                    )
-                    .record(control);
-                    let owner = economy.actors.owner(id);
-                    let estate = economy.ledger.number(Field::EstateSettled, owner);
-                    if !equal(quantity, zero())
-                        && estate
-                            != comptime!(crate::domain::enterprise::EstateStatus::Unclaimed as u32)
+            MarketFlag::Payroll | MarketFlag::Distribution => {
+                let payment = MarketProposal::payment(&*economy, control, id, comptime!(market));
+                chosen = payment.peer;
+                quantity = payment.quantity;
+                if comptime!(market == MarketFlag::Distribution) && chosen != NO_ACTOR {
+                    let estate = economy.ledger.number(Field::EstateSettled, chosen);
+                    if estate
+                        == comptime!(crate::domain::enterprise::EstateStatus::Unclaimed as u32)
                     {
-                        chosen = owner;
+                        chosen = comptime!(NO_ACTOR);
                     }
                 }
             }
         }
-        if good > 0u32 {
-            wanted = positive(
-                wanted,
-                plus(
-                    economy.ledger.value_at(good, id),
-                    economy
-                        .ledger
-                        .value_at(TRANSIT_FIELDS as u32 + good - 1, id),
-                )
-                .record(control),
-            );
-        }
-        search = search
-            && economy.ledger.number(Field::Time, id)
-                >= select(comptime!(market == MarketFlag::Labor), 1u32, 0);
-        if parameters.traded_good() > 0 {
-            purchasing_power = minimum(
-                purchasing_power,
-                positive(
-                    economy.ledger.value(Field::Cash, id),
-                    economy.ledger.value(Field::CartagePayable, id),
-                ),
-            );
-        }
-        if good > 0 {
-            search = search && !equal(wanted, zero()) && !equal(purchasing_power, zero());
-        }
+
         if comptime!(labor_round != employment::LaborRound::Retained) && search {
             let px = economy.actors.x(id);
             let py = economy.actors.y(id);

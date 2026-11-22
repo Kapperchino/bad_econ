@@ -13,7 +13,7 @@ use super::{
     Device, enterprise,
     layout::ActorLayout as A,
     pass::GpuPass,
-    state::{ActorMetadata, ActorMetadataExpand, EconomyView, ReadLedger, ReadLedgerExpand},
+    state::{EconomyView, ReadLedger, ReadLedgerExpand},
     system::{AsBufferArg, System, gpu_passes},
     words::*,
 };

@@ -450,9 +450,7 @@ impl Configuration {
                                 region.plots,
                                 state
                                     .actors
-                                    .identities()
-                                    .iter()
-                                    .position(|&identity| identity == region.landowner)
+                                    .index_of(region.landowner)
                                     .expect("validated landowner")
                                     as u32,
                             ]

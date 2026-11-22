@@ -676,31 +676,14 @@ fn repeated_input_initialization_resets_prior_suppliers_and_preserves_faults_on_
             0,
             count,
         )?;
-        let initialize = |stage| {
-            EconomySystem::launch(
-                &device,
-                device.count(count),
-                CubeDim::new_1d(workgroup),
-                EconomyInputLaunch {
-                    state: simulation.state.buffer_arg(),
-                    actors: simulation.actors.buffer_arg(),
-                    config: simulation.config.launch(),
-                    spatial: simulation.spatial.buffer_arg(),
-                    proposals: simulation.work.proposals.buffer_arg(),
-                    bundles: simulation.work.scratch.buffer_arg(),
-                    control: simulation.control.buffer_arg(),
-                    parameters: parameters.launch(),
-                    stage,
-                },
-            );
-        };
         device.write(
             &simulation.state,
             bytemuck::cast_slice(&encode(&initial.values)),
         );
         let mut control = vec![0; simulation.control.meta.num_elements()];
         device.write(&simulation.control, &control);
-        initialize(EconomyStage::InputMarketStart);
+        market::MarketStart::ResetCandidatesAndOrders
+            .launch(simulation.market_buffers(), &parameters);
         let clean_statuses = device.read_range(&simulation.work.scratch, 4 * count, count)?;
         let cells = (simulation.config.spatial_side * simulation.config.spatial_side) as usize;
         let mut spatial = vec![0; simulation.spatial.meta.num_elements()];
@@ -725,7 +708,7 @@ fn repeated_input_initialization_resets_prior_suppliers_and_preserves_faults_on_
             &simulation.work.scratch,
             &vec![sentinel; simulation.work.scratch.meta.num_elements()],
         );
-        initialize(EconomyStage::InputMarketRepeat);
+        market::MarketStart::ResetOrders.launch(simulation.market_buffers(), &parameters);
         let expected_statuses = match case {
             ResetCase::Fault => vec![sentinel; count],
             _ => clean_statuses,

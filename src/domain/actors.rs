@@ -42,6 +42,9 @@ impl ActorRows {
     pub(crate) fn identities(&self) -> &[u64] {
         &self.identity
     }
+    pub(crate) fn index_of(&self, identity: u64) -> Option<usize> {
+        self.identity.iter().position(|&id| id == identity)
+    }
     pub(crate) fn assigned_identity(&self, assignment: u64) -> Option<u64> {
         let index = usize::try_from(assignment.checked_sub(1)?).ok()?;
         self.identity.get(index).copied()

@@ -210,8 +210,7 @@ impl BreadDemand {
             .value,
             self.gross_income,
         );
-        let salary = (u64::cast_from(gross.extract(HIGH_WORD)) << 32)
-            | u64::cast_from(gross.extract(LOW_WORD));
+        let salary = native(gross);
         let per_capita = salary
             / u64::cast_from(select(
                 comptime!(config.cohorts == Feature::Enabled),

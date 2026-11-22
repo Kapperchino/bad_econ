@@ -1,8 +1,8 @@
 use super::{
-    Actor, Field, Good, HousingState, ProductionMethod, Scenario, State, calendar, diagnostics,
-    enterprise, industry, landlords, property, railway,
+    Actor, ActorRows, Field, Good, HousingState, ProductionMethod, Scenario, State, calendar,
+    diagnostics, enterprise, industry, landlords, property, railway,
 };
-use anyhow::{Context, Result, anyhow};
+use anyhow::{Context, Result};
 use serde::{Deserialize, Serialize};
 
 #[derive(Clone, Debug)]
@@ -11,17 +11,23 @@ pub struct InspectionRequest {
 }
 impl InspectionRequest {
     pub fn from_registry(identity: u64, identities: &[u64]) -> Result<Self> {
-        match identities.contains(&identity) {
-            true => Ok(Self { identity }),
-            false => Err(anyhow!("unknown actor identity")),
-        }
+        Self::find(identity, identities).context("unknown actor identity")
+    }
+    pub(crate) fn find(identity: u64, identities: &[u64]) -> Option<Self> {
+        identities.contains(&identity).then_some(Self { identity })
     }
     pub fn new(identity: u64, scenario: &Scenario) -> Result<Self> {
-        match scenario.index_of(identity).is_some() {
-            true => Ok(Self { identity }),
-            false => Err(anyhow!("unknown actor identity")),
-        }
+        scenario
+            .index_of(identity)
+            .map(|_| Self { identity })
+            .context("unknown actor identity")
     }
+    pub(crate) fn row(&self, actors: &ActorRows) -> Result<usize> {
+        actors
+            .index_of(self.identity)
+            .context("unknown actor identity")
+    }
+
     pub fn identity(&self) -> u64 {
         self.identity
     }
@@ -90,127 +96,125 @@ impl Inspection {
         state: &State,
         request: &InspectionRequest,
     ) -> Result<Self> {
-        let index = state
-            .actors
-            .iter()
-            .position(|actor| actor.identity == request.identity)
-            .context("unknown actor identity")?;
-        let contract_employer = state.actors.assigned_identity(state.get(Field::Job, index));
-        Ok(Self {
-            actor: state.actors.at(index),
-            railway_business: (state.actors.at(index).kind == Good::Railway as u32).then(|| {
+        let index = request.row(&state.actors)?;
+        Self::from_fields(
+            scenario,
+            state,
+            state.day,
+            state.actors.at(index),
+            |field| state.get(field, index),
+        )
+    }
+
+    pub(crate) fn from_fields(
+        scenario: &Scenario,
+        state: &State,
+        day: u64,
+        actor: Actor,
+        value: impl Fn(Field) -> u64,
+    ) -> Result<Self> {
+        let contract_employer = state.actors.assigned_identity(value(Field::Job));
+        Ok(Inspection {
+            railway_business: (actor.kind == Good::Railway as u32).then(|| {
                 railway::RailwayBusiness {
-                    built_segments: state.get(Field::RailBuilt, index),
-                    operating_segments: state.get(Field::RailOperating, index),
-                    daily_receipts: state.get(Field::RailRevenue, index),
-                    daily_capacity: state.get(Field::RailCapacity, index),
-                    available_units: state.get(Field::Railway, index),
+                    built_segments: value(Field::RailBuilt),
+                    operating_segments: value(Field::RailOperating),
+                    daily_receipts: value(Field::RailRevenue),
+                    daily_capacity: value(Field::RailCapacity),
+                    available_units: value(Field::Railway),
                 }
             }),
-            business_account: (state.actors.at(index).kind > 0).then(|| {
-                diagnostics::BusinessAccount {
-                    opening_cash: state.get(Field::BusinessOpeningCash, index),
-                    closing_cash: state.get(Field::BusinessClosingCash, index),
-                    revenue: state.get(Field::BusinessRevenue, index),
-                }
+            business_account: (actor.kind > 0).then(|| diagnostics::BusinessAccount {
+                opening_cash: value(Field::BusinessOpeningCash),
+                closing_cash: value(Field::BusinessClosingCash),
+                revenue: value(Field::BusinessRevenue),
             }),
-            production_method: ProductionMethod::from_index(state.get(Field::ActiveMethod, index))?,
-            labor_minutes: state.get(Field::LaborMinutes, index),
-            output_ticks: state.get(Field::OutputTicks, index),
-            day: state.day,
-            weather: scenario.weather(state.day),
-            cash: state.get(Field::Cash, index),
-            gross_income: state.get(Field::GrossIncome, index),
-            payroll_reserve: state.get(Field::PayrollReserve, index),
-            income_tax: state.get(Field::TaxTreasury, index),
-            employee_charges: state.get(Field::ChargeTreasury, index),
-            rent_collected: state.get(Field::RentTreasury, index),
-            rent_arrears: state.get(Field::RentArrears, index),
-            landlord_identity: state
-                .get(Field::Landlord, index)
-                .checked_sub(1)
-                .and_then(|landlord| state.actors.get(landlord as usize))
-                .map(|actor| actor.identity),
-            rental_business: (state.actors.at(index).kind == Good::Housing as u32).then(|| {
+            production_method: ProductionMethod::from_index(value(Field::ActiveMethod))?,
+            labor_minutes: value(Field::LaborMinutes),
+            output_ticks: value(Field::OutputTicks),
+            day,
+            weather: scenario.weather(day),
+            cash: value(Field::Cash),
+            gross_income: value(Field::GrossIncome),
+            payroll_reserve: value(Field::PayrollReserve),
+            income_tax: value(Field::TaxTreasury),
+            employee_charges: value(Field::ChargeTreasury),
+            rent_collected: value(Field::RentTreasury),
+            rent_arrears: value(Field::RentArrears),
+            landlord_identity: state.actors.assigned_identity(value(Field::Landlord)),
+            rental_business: (actor.kind == Good::Housing as u32).then(|| {
                 landlords::RentalBusiness {
-                    homes: state.get(Field::OccupiedPlots, index)
-                        * state.get(Field::OutputTicks, index),
-                    income: state.get(Field::RentalIncome, index),
+                    homes: value(Field::OccupiedPlots) * value(Field::OutputTicks),
+                    income: value(Field::RentalIncome),
                 }
             }),
-            housing_state: match state.actors.at(index).kind {
-                0 => Some(HousingState::from_index(
-                    state.get(Field::HousingStatus, index),
-                )?),
+            housing_state: match actor.kind {
+                0 => Some(HousingState::from_index(value(Field::HousingStatus))?),
                 _ => None,
             },
-            rent_overdue_days: state.get(Field::RentOverdueDays, index),
-            inventory: Good::ALL.map(|good| state.get(Field::inventory(good), index)),
-            transit: state.get(Field::Transit, index),
-            fatigue: state.get(Field::Fatigue, index),
-            job_days_remaining: state.get(Field::JobDaysRemaining, index),
+            rent_overdue_days: value(Field::RentOverdueDays),
+            inventory: Good::ALL.map(|good| value(Field::inventory(good))),
+            transit: value(Field::Transit),
+            fatigue: value(Field::Fatigue),
+            job_days_remaining: value(Field::JobDaysRemaining),
             contract_employer,
             employer: state
                 .actors
-                .assigned_identity(state.get(Field::Employer, index))
+                .assigned_identity(value(Field::Employer))
                 .or(contract_employer)
                 .unwrap_or(0),
-            owner_identity: state
-                .actors
-                .at(state.actors.at(index).owner as usize)
-                .identity,
-            available_minutes: state.get(Field::Time, index),
-            living_members: state.get(Field::LivingMembers, index),
-            heating_need: state.get(Field::HeatingNeed, index),
-            heating_served: state.get(Field::HeatingServed, index),
-            equipment_condition: state.get(Field::EquipmentCondition, index),
-            safety_provision: state.get(Field::SafetyProvision, index),
-            business_scale: (state.actors.at(index).kind > 0).then(|| {
+            owner_identity: state.actors.at(actor.owner as usize).identity,
+            available_minutes: value(Field::Time),
+            living_members: value(Field::LivingMembers),
+            heating_need: value(Field::HeatingNeed),
+            heating_served: value(Field::HeatingServed),
+            equipment_condition: value(Field::EquipmentCondition),
+            safety_provision: value(Field::SafetyProvision),
+            business_scale: (actor.kind > 0).then(|| {
                 enterprise::BusinessScale::for_business(
-                    &state.actors.at(index),
-                    state.get(Field::OccupiedPlots, index) * state.get(Field::OutputTicks, index),
+                    &actor,
+                    value(Field::OccupiedPlots) * value(Field::OutputTicks),
                 )
             }),
-            enterprise_model: match state.get(Field::EnterpriseModel, index) {
+            enterprise_model: match value(Field::EnterpriseModel) {
                 1 => enterprise::EnterpriseModel::Distributor,
                 _ => enterprise::EnterpriseModel::Producer,
             },
-            enterprise_state: match state.actors.at(index).kind {
+            enterprise_state: match actor.kind {
                 0 => None,
-                _ => Some(enterprise::EnterpriseState::from_index(
-                    state.get(Field::EnterpriseStatus, index),
-                )?),
+                _ => Some(enterprise::EnterpriseState::from_index(value(
+                    Field::EnterpriseStatus,
+                ))?),
             },
-            company_identity: match state.actors.at(index).kind {
+            company_identity: match actor.kind {
                 0 => 0,
-                _ => state.company_identity(request.identity),
+                _ => state.company_identity(actor.identity),
             },
-            company_sites: match state.actors.at(index).kind {
+            company_sites: match actor.kind {
                 0 => Vec::new(),
-                _ => state.company_sites(request.identity),
+                _ => state.company_sites(actor.identity),
             },
-            workers_per_plot: state.get(Field::WorkersPerPlot, index),
-            scale_bonus_per_mille: match state.actors.at(index).kind {
+            workers_per_plot: value(Field::WorkersPerPlot),
+            scale_bonus_per_mille: match actor.kind {
                 0 => 0,
                 _ => {
-                    industry::ProductionScale::for_plots(state.get(Field::OccupiedPlots, index))
+                    industry::ProductionScale::for_plots(value(Field::OccupiedPlots))
                         .bonus_per_mille
                 }
             },
-            construction_minutes_remaining: state.get(Field::ConstructionRemaining, index),
-            property_region: state.get(Field::PropertyRegion, index),
-            occupied_plots: state.get(Field::OccupiedPlots, index),
-            reserved_plots: state.get(Field::ReservedPlots, index),
-            subsistence_plots: state.get(Field::LandPlots, index),
-            displaced_plots: state.get(Field::DisplacedPlots, index),
-            project_status: property::ProjectStatus::from_index(
-                state.get(Field::ProjectStatus, index),
-            )?,
-            pending_capacity: state.get(Field::PendingCapacity, index),
-            wage: state.get(Field::Wage, index),
-            price: state.get(Field::Price, index),
-            planned_packets: state.get(Field::Plan, index),
-            open_slots: state.get(Field::Slots, index),
+            construction_minutes_remaining: value(Field::ConstructionRemaining),
+            property_region: value(Field::PropertyRegion),
+            occupied_plots: value(Field::OccupiedPlots),
+            reserved_plots: value(Field::ReservedPlots),
+            subsistence_plots: value(Field::LandPlots),
+            displaced_plots: value(Field::DisplacedPlots),
+            project_status: property::ProjectStatus::from_index(value(Field::ProjectStatus))?,
+            pending_capacity: value(Field::PendingCapacity),
+            wage: value(Field::Wage),
+            price: value(Field::Price),
+            planned_packets: value(Field::Plan),
+            open_slots: value(Field::Slots),
+            actor,
         })
     }
 }

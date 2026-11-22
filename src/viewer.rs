@@ -129,6 +129,7 @@ enum WorkerState {
 enum Publication {
     Snapshot,
     Restart,
+    Comparison { seed: u64, horizon: u64 },
 }
 
 pub fn run(scenario: Scenario, workgroup: u32, mode: ViewMode) -> Result<()> {

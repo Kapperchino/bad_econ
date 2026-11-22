@@ -34,8 +34,7 @@ impl TreeStorage for QuantityTree {
 
 #[cube]
 fn summarize(quantity: Ticks, prior: &KernelEventStatus) -> QuantitySummary {
-    let amount = u64::cast_from(quantity.extract(LOW_WORD))
-        | (u64::cast_from(quantity.extract(HIGH_WORD)) << 32);
+    let amount = native(quantity);
     let accepted = prior.contains(comptime!(EventStatus::Accepted));
     let flags = u32::cast_from(!accepted || prior.contains(comptime!(EventStatus::Faulted)));
     let minimum = select(accepted && amount > 0, amount, u64::MAX);

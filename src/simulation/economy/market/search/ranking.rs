@@ -52,8 +52,7 @@ pub(super) fn group_winner(rank: CandidateRank, #[comptime] mode: parallel::Scan
             sync_cube();
         }
     } else {
-        let score = u64::cast_from(rank.score.extract(LOW_WORD))
-            | (u64::cast_from(rank.score.extract(HIGH_WORD)) << 32);
+        let score = native(rank.score);
         let mut tree = CandidateTree {
             scores: WorkgroupTree::lanes::<u64>(select(rank.active > 0, score, u64::MAX)),
             lanes: WorkgroupTree::lanes::<u32>(select(rank.active > 0, UNIT_POS, NO_ACTOR)),

@@ -347,13 +347,10 @@ impl<'a> ReplacementMarket<'a> {
                         }
                     };
                     if good > 0 {
-                        let stock = plus(
-                            economy.ledger.value_at(good, buyer),
-                            economy
-                                .ledger
-                                .value_at(TRANSIT_FIELDS as u32 + good - 1, buyer),
-                        )
-                        .record(control);
+                        let stock = economy
+                            .ledger
+                            .stock_with_transit(good, buyer)
+                            .record(control);
                         let raw_material = input < 2
                             && comptime!(config.economy == crate::domain::Economy::Industrial)
                             && !lt(

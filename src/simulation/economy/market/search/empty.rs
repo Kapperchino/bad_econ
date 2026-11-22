@@ -268,7 +268,7 @@ pub(super) fn sort_scalar(
 }
 
 #[cube]
-fn write_bound_scalar(
+fn write_bound(
     actors: &ActorTable<'_>,
     config: &EconomyConfig,
     spatial: &[u32],
@@ -276,6 +276,7 @@ fn write_bound_scalar(
     node: u32,
     start: u32,
     end: u32,
+    #[comptime] mode: parallel::ScanMode,
 ) {
     let cells = config.spatial_side * config.spatial_side;
     let mut price = u32::new(comptime!(i64::from(u32::MAX)));
@@ -286,60 +287,14 @@ fn write_bound_scalar(
     let mut access = u32::new(comptime!(i64::from(u32::MAX)));
     let mut stocked = 0u32;
     let mut minimum_quote = u32::new(comptime!(i64::from(u32::MAX)));
-    for position in start..end {
-        let member = scratch[(7 * config.actors + position) as usize];
-        let supply = index::Supply::load(&*scratch, member);
-        stocked += u32::cast_from(supply.offered);
-        if (supply.offered || supply.producer) && supply.quote > 0 {
-            minimum_quote = min(minimum_quote, supply.quote);
-        }
-        if supply.producer && !supply.offered && supply.quote > 0 {
-            let actor = spatial[(cells + 1 + member) as usize];
-            let x = actors.x(actor);
-            let y = actors.y(actor);
-            price = min(price, supply.quote);
-            min_x = min(min_x, x);
-            max_x = max(max_x, x);
-            min_y = min(min_y, y);
-            max_y = max(max_y, y);
-            if comptime!(config.railway.routes_enabled == Feature::Enabled)
-                && config.railway.nodes > 0
-            {
-                access = min(access, config.railway.access[actor as usize * 2 + 1]);
-            }
-        }
+    let mut position = start;
+    let mut stride = 1u32;
+    let mut writer = true;
+    if comptime!(mode == parallel::ScanMode::Plane) && PLANE_DIM == 32 {
+        position += UNIT_POS_PLANE;
+        stride = 32;
+        writer = UNIT_POS_PLANE == 0;
     }
-    let base = 8 * config.actors + node * FIELDS;
-    scratch[(base + comptime!(Bound::Price as u32)) as usize] = price;
-    scratch[(base + comptime!(Bound::MinX as u32)) as usize] = min_x;
-    scratch[(base + comptime!(Bound::MaxX as u32)) as usize] = max_x;
-    scratch[(base + comptime!(Bound::MinY as u32)) as usize] = min_y;
-    scratch[(base + comptime!(Bound::MaxY as u32)) as usize] = max_y;
-    scratch[(base + comptime!(Bound::Access as u32)) as usize] = access;
-    scratch[(base + comptime!(Bound::Stocked as u32)) as usize] = stocked;
-    scratch[(base + comptime!(Bound::MinimumQuote as u32)) as usize] = minimum_quote;
-}
-
-#[cube]
-fn write_bound_plane(
-    actors: &ActorTable<'_>,
-    config: &EconomyConfig,
-    spatial: &[u32],
-    scratch: &mut [u32],
-    node: u32,
-    start: u32,
-    end: u32,
-) {
-    let cells = config.spatial_side * config.spatial_side;
-    let mut price = u32::new(comptime!(i64::from(u32::MAX)));
-    let mut min_x = u32::new(comptime!(i64::from(u32::MAX)));
-    let mut max_x = 0u32;
-    let mut min_y = u32::new(comptime!(i64::from(u32::MAX)));
-    let mut max_y = 0u32;
-    let mut access = u32::new(comptime!(i64::from(u32::MAX)));
-    let mut stocked = 0u32;
-    let mut minimum_quote = u32::new(comptime!(i64::from(u32::MAX)));
-    let mut position = start + UNIT_POS_PLANE;
     while position < end {
         let member = scratch[(7 * config.actors + position) as usize];
         let supply = index::Supply::load(&*scratch, member);
@@ -362,17 +317,19 @@ fn write_bound_plane(
                 access = min(access, config.railway.access[actor as usize * 2 + 1]);
             }
         }
-        position += 32;
+        position += stride;
     }
-    price = plane_min(price);
-    min_x = plane_min(min_x);
-    max_x = plane_max(max_x);
-    min_y = plane_min(min_y);
-    max_y = plane_max(max_y);
-    access = plane_min(access);
-    stocked = plane_sum(stocked);
-    minimum_quote = plane_min(minimum_quote);
-    if UNIT_POS_PLANE == 0 {
+    if comptime!(mode == parallel::ScanMode::Plane) && PLANE_DIM == 32 {
+        price = plane_min(price);
+        min_x = plane_min(min_x);
+        max_x = plane_max(max_x);
+        min_y = plane_min(min_y);
+        max_y = plane_max(max_y);
+        access = plane_min(access);
+        stocked = plane_sum(stocked);
+        minimum_quote = plane_min(minimum_quote);
+    }
+    if writer {
         let base = 8 * config.actors + node * FIELDS;
         scratch[(base + comptime!(Bound::Price as u32)) as usize] = price;
         scratch[(base + comptime!(Bound::MinX as u32)) as usize] = min_x;
@@ -382,24 +339,6 @@ fn write_bound_plane(
         scratch[(base + comptime!(Bound::Access as u32)) as usize] = access;
         scratch[(base + comptime!(Bound::Stocked as u32)) as usize] = stocked;
         scratch[(base + comptime!(Bound::MinimumQuote as u32)) as usize] = minimum_quote;
-    }
-}
-
-#[cube]
-fn write_bound(
-    actors: &ActorTable<'_>,
-    config: &EconomyConfig,
-    spatial: &[u32],
-    scratch: &mut [u32],
-    node: u32,
-    start: u32,
-    end: u32,
-    #[comptime] mode: parallel::ScanMode,
-) {
-    if comptime!(mode == parallel::ScanMode::Plane) && PLANE_DIM == 32 {
-        write_bound_plane(actors, config, spatial, scratch, node, start, end);
-    } else {
-        write_bound_scalar(actors, config, spatial, scratch, node, start, end);
     }
 }
 

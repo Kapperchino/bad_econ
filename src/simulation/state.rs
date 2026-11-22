@@ -4,7 +4,7 @@ use super::{
     layout::{ActorLayout, LOW_WORD},
     words::*,
 };
-use crate::domain::Field;
+use crate::domain::{Field, TRANSIT_FIELDS};
 use cubecl::prelude::*;
 
 #[derive(CubeType)]
@@ -66,25 +66,6 @@ impl<'a> ActorBalances<'a> {
     }
 }
 
-#[cube]
-impl<'a> ReadLedger for ActorBalances<'a> {
-    fn value_at(&self, field: u32, actor: u32) -> Ticks {
-        self.balances.value(field * self.stride + actor)
-    }
-
-    fn number_at(&self, field: u32, actor: u32) -> u32 {
-        self.value_at(field, actor).extract(LOW_WORD)
-    }
-
-    fn value(&self, #[comptime] field: Field, actor: u32) -> Ticks {
-        self.value_at(comptime!(field as u32), actor)
-    }
-
-    fn number(&self, #[comptime] field: Field, actor: u32) -> u32 {
-        self.value(field, actor).extract(LOW_WORD)
-    }
-}
-
 #[derive(CubeType)]
 pub(super) struct EconomyView<'a> {
     pub ledger: Ledger<'a>,
@@ -111,6 +92,13 @@ pub(super) struct Ledger<'a> {
 impl<'a> Ledger<'a> {
     pub fn new(words: &'a mut [u32], config: &'a EconomyConfig) -> Self {
         Ledger::<'a> { words, config }
+    }
+
+    pub fn stock_with_transit(&self, good: u32, actor: u32) -> CheckedTicks {
+        plus(
+            self.value_at(good, actor),
+            self.value_at(TRANSIT_FIELDS as u32 + good - 1, actor),
+        )
     }
 
     pub fn set_at(&mut self, field: u32, actor: u32, amount: Ticks) {
@@ -173,24 +161,39 @@ pub(super) trait ReadLedger: CubeType {
     fn number(&self, #[comptime] field: Field, actor: u32) -> u32;
 }
 
-#[cube]
-impl<'a> ReadLedger for Ledger<'a> {
+macro_rules! read_ledger {
+    ($ledger:ident, $read:item) => {
+        #[cube]
+        impl<'a> ReadLedger for $ledger<'a> {
+            $read
+            fn number_at(&self, field: u32, actor: u32) -> u32 {
+                self.value_at(field, actor).extract(LOW_WORD)
+            }
+
+            fn value(&self, #[comptime] field: Field, actor: u32) -> Ticks {
+                self.value_at(comptime!(field as u32), actor)
+            }
+
+            fn number(&self, #[comptime] field: Field, actor: u32) -> u32 {
+                self.number_at(comptime!(field as u32), actor)
+            }
+        }
+    };
+}
+
+read_ledger!(
+    ActorBalances,
+    fn value_at(&self, field: u32, actor: u32) -> Ticks {
+        self.balances.value(field * self.stride + actor)
+    }
+);
+
+read_ledger!(
+    Ledger,
     fn value_at(&self, field: u32, actor: u32) -> Ticks {
         read_ticks(&*self.words, self.config.coordinate(field, actor))
     }
-
-    fn number_at(&self, field: u32, actor: u32) -> u32 {
-        self.value_at(field, actor).extract(LOW_WORD)
-    }
-
-    fn value(&self, #[comptime] field: Field, actor: u32) -> Ticks {
-        self.value_at(comptime!(field as u32), actor)
-    }
-
-    fn number(&self, #[comptime] field: Field, actor: u32) -> u32 {
-        self.number_at(comptime!(field as u32), actor)
-    }
-}
+);
 
 #[derive(CubeType)]
 pub(super) struct TickLedger<'a> {
@@ -205,24 +208,12 @@ impl<'a> TickLedger<'a> {
     }
 }
 
-#[cube]
-impl<'a> ReadLedger for TickLedger<'a> {
+read_ledger!(
+    TickLedger,
     fn value_at(&self, field: u32, actor: u32) -> Ticks {
         self.balances[self.config.coordinate(field, actor) as usize]
     }
-
-    fn number_at(&self, field: u32, actor: u32) -> u32 {
-        self.value_at(field, actor).extract(LOW_WORD)
-    }
-
-    fn value(&self, #[comptime] field: Field, actor: u32) -> Ticks {
-        self.value_at(comptime!(field as u32), actor)
-    }
-
-    fn number(&self, #[comptime] field: Field, actor: u32) -> u32 {
-        self.number_at(comptime!(field as u32), actor)
-    }
-}
+);
 
 #[derive(CubeType)]
 pub(super) struct ActorTable<'a> {
@@ -243,56 +234,40 @@ impl<'a> ActorTable<'a> {
     fn column(&self, #[comptime] field: usize, actor: u32) -> u32 {
         self.words[field * self.stride + actor as usize]
     }
-}
 
-#[cube]
-pub(super) trait ActorMetadata: CubeType {
-    fn kind(&self, actor: u32) -> KernelActorKind;
-    fn x(&self, actor: u32) -> u32;
-    fn y(&self, actor: u32) -> u32;
-    fn owner(&self, actor: u32) -> u32;
-    fn capacity(&self, actor: u32) -> u32;
-    fn geographic_capacity(&self, actor: u32) -> u32;
-    fn expansion_draw(&self, actor: u32) -> u32;
-    fn entrepreneurial_interest(&self, actor: u32) -> u32;
-    fn distance(&self, a: u32, b: u32) -> u32;
-}
-
-#[cube]
-impl<'a> ActorMetadata for ActorTable<'a> {
-    fn kind(&self, actor: u32) -> KernelActorKind {
+    pub fn kind(&self, actor: u32) -> KernelActorKind {
         KernelActorKind::load(self.column(comptime!(ActorLayout::KIND), actor))
     }
 
-    fn x(&self, actor: u32) -> u32 {
+    pub fn x(&self, actor: u32) -> u32 {
         self.column(comptime!(ActorLayout::X), actor)
     }
 
-    fn y(&self, actor: u32) -> u32 {
+    pub fn y(&self, actor: u32) -> u32 {
         self.column(comptime!(ActorLayout::Y), actor)
     }
 
-    fn owner(&self, actor: u32) -> u32 {
+    pub fn owner(&self, actor: u32) -> u32 {
         self.column(comptime!(ActorLayout::OWNER), actor)
     }
 
-    fn capacity(&self, actor: u32) -> u32 {
+    pub fn capacity(&self, actor: u32) -> u32 {
         self.column(comptime!(ActorLayout::CAPACITY), actor)
     }
 
-    fn geographic_capacity(&self, actor: u32) -> u32 {
+    pub fn geographic_capacity(&self, actor: u32) -> u32 {
         self.column(comptime!(ActorLayout::GEOGRAPHIC_CAPACITY), actor)
     }
 
-    fn expansion_draw(&self, actor: u32) -> u32 {
+    pub fn expansion_draw(&self, actor: u32) -> u32 {
         self.column(comptime!(ActorLayout::EXPANSION_DRAW), actor)
     }
 
-    fn entrepreneurial_interest(&self, actor: u32) -> u32 {
+    pub fn entrepreneurial_interest(&self, actor: u32) -> u32 {
         self.column(comptime!(ActorLayout::ENTREPRENEURIAL_INTEREST), actor)
     }
 
-    fn distance(&self, a: u32, b: u32) -> u32 {
+    pub fn distance(&self, a: u32, b: u32) -> u32 {
         let ax = self.x(a);
         let ay = self.y(a);
         let bx = self.x(b);
