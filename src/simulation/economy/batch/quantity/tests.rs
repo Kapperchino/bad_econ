@@ -237,13 +237,47 @@ fn quantity_batches_match_ordered_settlement_with_shortages_and_wide_faults_on_g
                     parameters: parameters.launch(),
                 },
             );
-            for (name, actual, expected) in [
-                ("state", &actual.state, &expected.state),
-                ("statuses", &actual.scratch, &expected.scratch),
-                ("faults", &actual.control, &expected.control),
+            EconomySystem::launch(
+                &device,
+                device.count(case.length),
+                CubeDim::new_1d(workgroup),
+                EconomyInputLaunch {
+                    state: actual.state.buffer_arg(),
+                    actors: actual.actors.buffer_arg(),
+                    config: actual.config.launch(),
+                    spatial: actual.spatial.buffer_arg(),
+                    proposals: actual.proposals.buffer_arg(),
+                    bundles: actual.scratch.buffer_arg(),
+                    control: actual.control.buffer_arg(),
+                    parameters: parameters.launch(),
+                    stage: EconomyStage::GroupRemainder,
+                },
+            );
+            for (name, actual, expected, start, words) in [
+                (
+                    "state",
+                    &actual.state,
+                    &expected.state,
+                    0,
+                    actual.state.meta.num_elements(),
+                ),
+                (
+                    "statuses",
+                    &actual.scratch,
+                    &expected.scratch,
+                    4 * count,
+                    count,
+                ),
+                (
+                    "faults",
+                    &actual.control,
+                    &expected.control,
+                    0,
+                    actual.control.meta.num_elements(),
+                ),
             ] {
-                let actual = device.read(actual)?;
-                let expected = device.read(expected)?;
+                let actual = device.read_range(actual, start, words)?;
+                let expected = device.read_range(expected, start, words)?;
                 for (word, (actual, expected)) in actual.iter().zip(&expected).enumerate() {
                     assert_eq!(
                         actual, expected,

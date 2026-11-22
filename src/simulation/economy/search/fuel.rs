@@ -26,24 +26,23 @@ pub(super) fn search(
     control: &[Atomic<u32>],
     parameters: &EconomyParameters,
     #[comptime] suppliers: SupplierSearch,
+    #[comptime] collection: OrderCollection,
     #[comptime] order: SearchOrder,
 ) {
     let job = ABSOLUTE_POS as u32;
-    let count = match comptime!(order) {
-        SearchOrder::Compact => control[SEARCHES_WORD].load(),
-        SearchOrder::Spatial => config.actors,
-    };
+    let jobs = control[SEARCHES_WORD].load();
+    let spatial_order = comptime!(order == SearchOrder::Spatial) && jobs > config.actors / 8;
+    let count = select(spatial_order, config.actors, jobs);
     if job < count && control[LATCH_WORD].load() == 0 {
-        let id = match comptime!(order) {
-            SearchOrder::Compact => searches[job as usize],
-            SearchOrder::Spatial => {
-                let cells = config.spatial_side * config.spatial_side;
-                let base =
-                    3 * (cells + 1 + config.actors) + ceildiv(config.actors, DISCOVERY_BLOCK) + 1;
-                spatial[(base + job) as usize]
-            }
+        let id = if spatial_order {
+            let cells = config.spatial_side * config.spatial_side;
+            let base =
+                3 * (cells + 1 + config.actors) + ceildiv(config.actors, DISCOVERY_BLOCK) + 1;
+            spatial[(base + job) as usize]
+        } else {
+            searches[job as usize]
         };
-        let active = comptime!(order == SearchOrder::Compact)
+        let active = !spatial_order
             || searches[(config.actors + id) as usize] != 0
             || searches[(2 * config.actors + id) as usize] != 0;
         if active {
@@ -58,6 +57,7 @@ pub(super) fn search(
                 searches[(3 * config.actors + id) as usize],
                 searches[(4 * config.actors + id) as usize],
             );
+            let inbound = railway::serves_buyer(config, id);
             let mut buyer_access = 0u32;
             if comptime!(config.railway.routes_enabled == Feature::Enabled)
                 && config.railway.nodes > 0
@@ -68,14 +68,6 @@ pub(super) fn search(
             let py = actors[ActorLayout::Y * (actors.len() / ActorLayout::WORDS) + id as usize];
             let radius = config.search_radius;
             let whole_map = comptime!(matches!(suppliers, SupplierSearch::SingleCell { .. }));
-            let max_days = max(ceildiv(radius, config.shipment_speed), 1);
-            let maximum_delivery_cost = plus(
-                times32(max_days, config.delivery_penalty),
-                ticks(cartage::rate(config, max_days), 0),
-            )
-            .value;
-            let scaled_speed = times32(config.shipment_speed, config.railway.speed_multiplier);
-            let maximum_rail_days = ceildiv(u32::MAX, max(scaled_speed.extract(LOW_WORD), 1));
             let cx = if comptime!(whole_map) {
                 u32::cast_from(0u32)
             } else {
@@ -89,11 +81,14 @@ pub(super) fn search(
             let side = config.spatial_side;
             let mut chosen = u32::new(comptime!(i64::from(NO_ACTOR)));
             let mut trip = 0u32;
+            let mut price = 0u32;
+            let mut available = zero();
             let mut best = u32::new(comptime!(i64::from(u32::MAX)));
             let mut considered = 0u32;
             let mut seen_supply = false;
             let mut empty_seller = u32::new(comptime!(i64::from(NO_ACTOR)));
             let mut empty_trip = 0u32;
+            let mut empty_price = 0u32;
             let mut empty_score = u32::new(comptime!(i64::from(u32::MAX)));
             let mut stocked = spatial[cells as usize];
             let mut affordable = true;
@@ -229,113 +224,54 @@ pub(super) fn search(
                                     seen_supply =
                                         seen_supply || (distance <= radius && supply.offered);
                                 }
-                                let mut viable = firm != id
+                                let empty = !indexed && supply.producer && chosen == NO_ACTOR;
+                                if (supply.offered || empty)
+                                    && firm != id
                                     && distance <= radius
                                     && supply.quote > 0
                                     && !lt(purchasing_power, ticks(supply.quote, 0))
-                                    && !equal(wanted, zero());
-                                let animal_days = ceildiv(distance, config.shipment_speed);
-                                let road_price = plus(
-                                    ticks(supply.quote, 0),
-                                    ticks(cartage::rate(config, animal_days), 0),
-                                )
-                                .value;
-                                if viable && lt(purchasing_power, road_price) {
-                                    let days = railway::delivery_days(
-                                        config,
-                                        railway::DeliveryRequest {
-                                            buyer: id,
-                                            seller: firm,
-                                            trip: distance,
-                                            buyer_access,
-                                        },
-                                    );
-                                    viable = !lt(
-                                        purchasing_power,
-                                        ticks(
-                                            cartage::delivered_price(
-                                                config,
-                                                supply.quote,
-                                                distance,
-                                                days,
-                                            ),
-                                            0,
-                                        ),
-                                    );
-                                }
-                                let mut relevant = viable && supply.offered;
-                                if viable
-                                    && supply.producer
-                                    && !supply.offered
-                                    && chosen == NO_ACTOR
-                                    && !indexed
+                                    && !equal(wanted, zero())
                                 {
-                                    let days =
-                                        minimum_delivery_days(config, buyer_access, firm, distance);
-                                    let lower_score = supply.quote + days * config.delivery_penalty;
-                                    relevant =
-                                        empty_seller == NO_ACTOR || lower_score < empty_score;
-                                }
-                                let counted = u32::cast_from(relevant && supply.offered);
-                                if relevant && supply.offered && chosen != NO_ACTOR {
-                                    let maximum_score =
-                                        plus(ticks(supply.quote, 0), maximum_delivery_cost).value;
-                                    if maximum_score.extract(HIGH_WORD) == 0 {
-                                        let mut days = minimum_delivery_days(
+                                    let mut days = max(ceildiv(distance, config.shipment_speed), 1);
+                                    if inbound {
+                                        days = railway::delivery_days(
                                             config,
-                                            buyer_access,
-                                            firm,
-                                            distance,
+                                            railway::DeliveryRequest {
+                                                buyer: id,
+                                                seller: firm,
+                                                trip: distance,
+                                                buyer_access,
+                                            },
                                         );
-                                        if comptime!(
-                                            config.railway.routes_enabled == Feature::Enabled
-                                        ) && config.railway.nodes > 0
-                                        {
-                                            let access_days = ceildiv(
-                                                buyer_access
-                                                    + config.railway.access[firm as usize * 2 + 1],
-                                                config.shipment_speed,
-                                            );
-                                            let bounded = scaled_speed.extract(HIGH_WORD) == 0
-                                                && scaled_speed.extract(LOW_WORD) > 0
-                                                && access_days <= u32::MAX - maximum_rail_days;
-                                            days = select(bounded, days, 0);
-                                        }
-                                        let floor = supply.quote + days * config.delivery_penalty;
-                                        relevant = floor < best;
                                     }
-                                }
-                                if relevant {
-                                    let days = railway::delivery_days(
-                                        config,
-                                        railway::DeliveryRequest {
-                                            buyer: id,
-                                            seller: firm,
-                                            trip: distance,
-                                            buyer_access,
-                                        },
-                                    );
                                     let delivered = cartage::delivered_price(
                                         config,
                                         supply.quote,
                                         distance,
                                         days,
                                     );
+                                    let affordable = !lt(purchasing_power, ticks(delivered, 0));
                                     let score = delivered + days * config.delivery_penalty;
-                                    if !supply.offered
+                                    if affordable && supply.offered {
+                                        considered += 1;
+                                        if chosen == NO_ACTOR || score < best {
+                                            chosen = firm;
+                                            trip = distance;
+                                            best = score;
+                                            price = delivered;
+                                            available = supply.available;
+                                        }
+                                    }
+                                    if affordable
+                                        && !supply.offered
                                         && (empty_seller == NO_ACTOR || score < empty_score)
                                     {
                                         empty_seller = firm;
                                         empty_trip = distance;
                                         empty_score = score;
-                                    }
-                                    if supply.offered && (chosen == NO_ACTOR || score < best) {
-                                        chosen = firm;
-                                        trip = distance;
-                                        best = score;
+                                        empty_price = delivered;
                                     }
                                 }
-                                considered += counted;
                                 offset += 1;
                             }
                             j += width;
@@ -362,7 +298,32 @@ pub(super) fn search(
                     && (stocked == 0
                         || parameters.traded_good() != comptime!(Good::Bread as u32)
                             && empty::compacted(config, spatial[cells as usize]));
-                if cacheable {
+                let mut region = 0u32;
+                let mut local = false;
+                if comptime!(collection == OrderCollection::ConsumerMask)
+                    && cells == 1
+                    && config.actors >= 262_144
+                    && stocked <= 8
+                {
+                    region = road::candidates(config, px, py);
+                    local = road::available(config, &*searches, region, id);
+                }
+                if local {
+                    let selected = road::query(
+                        actors,
+                        config,
+                        spatial,
+                        scratch,
+                        &*searches,
+                        region,
+                        id,
+                        parameters.settlement_rotation,
+                        purchasing_power,
+                        buyer_access,
+                    );
+                    offer.actor = selected.actor;
+                    offer.trip = selected.trip;
+                } else if cacheable {
                     let cached = empty::cached_query(
                         actors,
                         config,
@@ -405,24 +366,37 @@ pub(super) fn search(
             }
             let mut quantity = zero();
             if chosen != NO_ACTOR {
-                let supply =
-                    index::Supply::new(state, actors, config, chosen, parameters.traded_good());
-                let days = railway::delivery_days(
-                    config,
-                    railway::DeliveryRequest {
-                        buyer: id,
-                        seller: chosen,
-                        trip,
-                        buyer_access,
-                    },
-                );
-                let delivered = cartage::delivered_price(config, supply.quote, trip, days);
-                let affordable = minimum(wanted, divide(purchasing_power, max(delivered, 1)));
-                quantity = select(
-                    missing_supply,
-                    affordable,
-                    minimum(affordable, supply.available),
-                );
+                if missing_supply {
+                    price = empty_price;
+                    if indexed {
+                        let terms = household_production::TradeFields::new(
+                            actors,
+                            chosen,
+                            parameters.traded_good(),
+                        );
+                        let quote = number(state, config, terms.price, chosen);
+                        let mut days = max(ceildiv(trip, config.shipment_speed), 1);
+                        if inbound {
+                            days = railway::delivery_days(
+                                config,
+                                railway::DeliveryRequest {
+                                    buyer: id,
+                                    seller: chosen,
+                                    trip,
+                                    buyer_access,
+                                },
+                            );
+                        }
+                        price = cartage::delivered_price(config, quote, trip, days);
+                    }
+                }
+                let affordable = minimum(wanted, divide(purchasing_power, max(price, 1)));
+                quantity = select(missing_supply, affordable, minimum(affordable, available));
+                if comptime!(collection == OrderCollection::ConsumerMask) && !missing_supply {
+                    filter::sample_order(
+                        state, config, successes, parameters, id, chosen, quantity,
+                    );
+                }
             }
             if comptime!(parameters.market == MarketFlag::Household) {
                 let mut failure = u32::cast_from(missing_supply);
@@ -444,7 +418,9 @@ pub(super) fn search(
                 quantity.extract(HIGH_WORD);
             proposals[id as usize * ProposalLayout::WORDS + ProposalLayout::DISTANCE] = trip;
             if chosen != NO_ACTOR {
-                record_success(successes, parameters, id);
+                if comptime!(collection != OrderCollection::ConsumerMask) {
+                    record_success(successes, parameters, id);
+                }
                 record_wide_order(control, parameters, quantity);
             }
         }

@@ -192,7 +192,8 @@ impl GpuPass<QuantityInput> for SettleQuantities {
                 QuantityBalances::new(&mut input.state, &input.actors, &input.config, peer, good);
             let mut shared = Shared::<[Ticks]>::new_slice(3usize);
             let mut cursor = start;
-            while cursor < end {
+            let deferred = comptime!(input.parameters.discovery == Discovery::Indexed);
+            while cursor < end && (!deferred || lt(balances.reserve, balances.stock)) {
                 let index = cursor + UNIT_POS;
                 let mut actor = 0u32;
                 let mut quantity = zero();
@@ -262,6 +263,9 @@ impl GpuPass<QuantityInput> for SettleQuantities {
                 cursor += CUBE_DIM;
             }
             if UNIT_POS == 0 {
+                if deferred {
+                    input.scratch[(7 * count + peer) as usize] = min(cursor, end);
+                }
                 balances.store(&mut input.state, &input.config, peer, good);
                 input.control[PROGRESS_WORD].fetch_max(length);
                 input.control[COMPLETED_WORD].fetch_add(length);

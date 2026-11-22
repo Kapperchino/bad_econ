@@ -7,9 +7,15 @@ use crate::simulation::{
 mod empty;
 mod filter;
 mod fuel;
+pub(in crate::simulation) mod grain;
 mod index;
+mod road;
+pub(in crate::simulation) use road::SIDE as ROAD_TILE_SIDE;
 
 pub(in crate::simulation) const INPUT_MINIMUM_QUOTE_WORD: usize = CONTROL_WORDS + 7;
+pub(in crate::simulation) const INPUT_RAIL_WORD: usize = markets::WIDE_ORDERS_WORD;
+pub(in crate::simulation) const INPUT_BUYERS_FIELD: u32 = 12;
+pub(super) const GRAIN_FIRMS_WORD: usize = CONTROL_WORDS + 8;
 
 #[cfg(test)]
 mod tests;
@@ -75,13 +81,10 @@ fn prepare(
         ) {
             searches[(14 * config.actors + id) as usize] = 0;
         }
-        if comptime!(market == MarketFlag::Household && parameters.discovery.indexed()) {
-            let cells = config.spatial_side * config.spatial_side;
-            let base =
-                3 * (cells + 1 + config.actors) + ceildiv(config.actors, DISCOVERY_BLOCK) + 1;
-            id = spatial[(base + invocation) as usize];
-        }
-        if comptime!(matches!(market, MarketFlag::Consumer(_))) {
+        if comptime!(matches!(
+            market,
+            MarketFlag::Consumer(_) | MarketFlag::Household
+        )) {
             searches[(config.actors + id) as usize] = 0;
             searches[(2 * config.actors + id) as usize] = 0;
         }
@@ -890,26 +893,47 @@ pub(in crate::simulation) enum SearchStage {
     PrepareSelected,
     Search,
     SearchIndexed,
+    GrainFirms,
+    GrainDealerTiles,
+    SearchGrain,
     #[cfg_attr(not(test), allow(dead_code))]
     SearchFuel,
+    #[cfg_attr(not(test), allow(dead_code))]
     SearchHousehold,
     SearchSpatialFuel,
     FilterEmpty,
+    FilterBuyers,
+    StockLimits,
+    RoadCandidates,
     FinishFiltered,
     Compact,
 }
 
 #[derive(Clone, Copy, Debug, Hash, PartialEq, Eq)]
-enum SupplierSearch {
+pub(super) enum SupplierSearch {
     Inactive,
     SingleCell { shipment_speed: u32 },
     Neighborhood { shipment_speed: u32 },
 }
 
 #[derive(Clone, Copy, Debug, Hash, PartialEq, Eq)]
+pub(in crate::simulation) enum OrderCollection {
+    Bitmap,
+    InputTile,
+    ConsumerMask,
+}
+
+#[derive(Clone, Copy, Debug, Hash, PartialEq, Eq)]
 pub(in crate::simulation) struct SearchProgram {
+    collection: OrderCollection,
     stage: SearchStage,
     suppliers: SupplierSearch,
+}
+
+impl SearchProgram {
+    pub(in crate::simulation) fn collecting(self, collection: OrderCollection) -> Self {
+        Self { collection, ..self }
+    }
 }
 
 impl SearchStage {
@@ -917,6 +941,7 @@ impl SearchStage {
         let shipment_speed = config.shipment_speed;
         let suppliers = match self {
             Self::Search
+            | Self::SearchGrain
             | Self::SearchIndexed
             | Self::SearchFuel
             | Self::SearchHousehold
@@ -929,6 +954,7 @@ impl SearchStage {
             _ => SupplierSearch::Inactive,
         };
         SearchProgram {
+            collection: OrderCollection::Bitmap,
             stage: self,
             suppliers,
         }
@@ -1003,6 +1029,7 @@ impl GpuPass<SearchInput> for Search {
                     &input.successes,
                     &input.control,
                     &input.parameters,
+                    comptime!(input.program.collection),
                 ),
                 SearchStage::EmptySort => empty::sort(
                     &input.config,
@@ -1020,42 +1047,84 @@ impl GpuPass<SearchInput> for Search {
                 ),
                 SearchStage::Prepare
                 | SearchStage::PrepareCandidates
-                | SearchStage::PrepareSelected => prepare(
+                | SearchStage::PrepareSelected => {
+                    let mut group = CUBE_POS as u32;
+                    let groups = match comptime!(input.program.stage) {
+                        SearchStage::PrepareSelected => {
+                            let clear = ceildiv(input.config.actors, 32)
+                                + ceildiv(input.config.actors, markets::COMPACTION_BLOCK);
+                            ceildiv(
+                                max(
+                                    clear,
+                                    input.control[markets::PREPARATION_ACTORS_WORD].load(),
+                                ),
+                                CUBE_DIM,
+                            )
+                        }
+                        _ => CUBE_COUNT as u32,
+                    };
+                    while group < groups {
+                        prepare(
+                            &mut input.state,
+                            &input.actors,
+                            &input.config,
+                            &mut input.spatial,
+                            &mut input.proposals,
+                            &input.control,
+                            &mut input.searches,
+                            &input.successes,
+                            &mut input.scratch,
+                            &input.parameters,
+                            group * CUBE_DIM + UNIT_POS,
+                            comptime!(match input.program.stage {
+                                SearchStage::PrepareCandidates => PreparationRound::Capture,
+                                SearchStage::PrepareSelected => PreparationRound::Selected,
+                                _ => PreparationRound::First,
+                            }),
+                            comptime!(input.status_reset),
+                        );
+                        group += CUBE_COUNT as u32;
+                        sync_cube();
+                    }
+                }
+                SearchStage::GrainDealerTiles => grain::dealer_tiles(
                     &mut input.state,
                     &input.actors,
                     &input.config,
-                    &mut input.spatial,
-                    &mut input.proposals,
-                    &input.control,
+                    &input.spatial,
                     &mut input.searches,
-                    &input.successes,
-                    &mut input.scratch,
+                    &input.control,
                     &input.parameters,
-                    ABSOLUTE_POS as u32,
-                    comptime!(match input.program.stage {
-                        SearchStage::PrepareCandidates => PreparationRound::Capture,
-                        SearchStage::PrepareSelected => PreparationRound::Selected,
-                        _ => PreparationRound::First,
-                    }),
-                    comptime!(input.status_reset),
                 ),
-                SearchStage::Search | SearchStage::SearchIndexed => search(
+                SearchStage::GrainFirms => grain::collect_firms(
                     &mut input.state,
                     &input.actors,
                     &input.config,
-                    &mut input.spatial,
-                    &mut input.proposals,
-                    &input.searches,
-                    &input.successes,
-                    &input.scratch,
+                    &input.spatial,
+                    &mut input.searches,
                     &input.control,
-                    &input.parameters,
-                    comptime!(input.program.suppliers),
-                    comptime!(match input.program.stage {
-                        SearchStage::SearchIndexed => index::SupplySource::Index,
-                        _ => index::SupplySource::State,
-                    }),
                 ),
+                SearchStage::Search | SearchStage::SearchGrain | SearchStage::SearchIndexed => {
+                    search(
+                        &mut input.state,
+                        &input.actors,
+                        &input.config,
+                        &mut input.spatial,
+                        &mut input.proposals,
+                        &mut input.searches,
+                        &input.successes,
+                        &input.scratch,
+                        &input.control,
+                        &input.parameters,
+                        comptime!(input.program.suppliers),
+                        comptime!(input.program.collection),
+                        comptime!(match input.program.stage {
+                            SearchStage::SearchIndexed => index::SupplySource::Index,
+                            SearchStage::SearchGrain => index::SupplySource::Grain,
+                            _ => index::SupplySource::State,
+                        }),
+                    )
+                }
                 SearchStage::SearchFuel
                 | SearchStage::SearchHousehold
                 | SearchStage::SearchSpatialFuel => fuel::search(
@@ -1070,10 +1139,36 @@ impl GpuPass<SearchInput> for Search {
                     &input.control,
                     &input.parameters,
                     comptime!(input.program.suppliers),
+                    comptime!(input.program.collection),
                     comptime!(match input.program.stage {
                         SearchStage::SearchSpatialFuel => fuel::SearchOrder::Spatial,
                         _ => fuel::SearchOrder::Compact,
                     }),
+                ),
+                SearchStage::RoadCandidates => road::prepare(
+                    &input.actors,
+                    &input.config,
+                    &input.spatial,
+                    &input.scratch,
+                    &mut input.searches,
+                    &input.control,
+                ),
+                SearchStage::StockLimits => filter::stock_limits(
+                    &mut input.state,
+                    &input.config,
+                    &input.spatial,
+                    &input.scratch,
+                    &input.successes,
+                ),
+                SearchStage::FilterBuyers => filter::buyers(
+                    &mut input.state,
+                    &input.actors,
+                    &input.config,
+                    &input.proposals,
+                    &input.searches,
+                    &input.successes,
+                    &input.control,
+                    &input.parameters,
                 ),
                 SearchStage::FilterEmpty => filter::orders(
                     &mut input.state,
@@ -1090,6 +1185,7 @@ impl GpuPass<SearchInput> for Search {
                     &input.successes,
                     &input.control,
                     &input.parameters,
+                    comptime!(input.program.collection),
                 ),
                 SearchStage::Compact => {
                     if input.control[crate::simulation::flags::FAULT_WORD].load() == 0 {
@@ -1167,12 +1263,13 @@ fn search(
     config: &EconomyConfig,
     spatial: &mut [u32],
     proposals: &mut [u32],
-    searches: &[u32],
+    searches: &mut [u32],
     successes: &[Atomic<u32>],
     scratch: &[u32],
     control: &[Atomic<u32>],
     parameters: &EconomyParameters,
     #[comptime] suppliers: SupplierSearch,
+    #[comptime] collection: OrderCollection,
     #[comptime] source: index::SupplySource,
 ) {
     let jobs = markets::job_count(control, SEARCHES_WORD);
@@ -1238,7 +1335,7 @@ fn search(
         let mut empty_score = ticks(u32::MAX, u32::MAX);
         let lanes = comptime!(match source {
             index::SupplySource::Index => crate::simulation::ops::MAX_WORKGROUP_SIZE as usize,
-            index::SupplySource::State => 32usize,
+            _ => 32usize,
         });
         let mut candidates = CandidateTile::new(lanes);
         let candidate_faults =
@@ -1253,6 +1350,61 @@ fn search(
         let mut visited = Shared::<u32>::new();
         let mut supply = Shared::<u32>::new();
         let mut y = max(cy, 1u32) - 1;
+        if comptime!(source == index::SupplySource::Grain)
+            && grain::tiled_dealer(
+                state,
+                actors,
+                config,
+                &*spatial,
+                control,
+                jobs,
+                id,
+                purchasing_power,
+            )
+        {
+            let trade = grain::dealer_trade(
+                state,
+                actors,
+                config,
+                &*spatial,
+                &*searches,
+                control,
+                parameters,
+                job,
+                id,
+                wanted,
+                purchasing_power,
+                buyer_access,
+            );
+            chosen = trade.seller;
+            quantity = trade.quantity;
+            trip = trade.trip;
+            y = side;
+        } else if comptime!(source == index::SupplySource::Grain)
+            && (!household_production::grain_dealer(state, actors, config, id)
+                || lt(
+                    purchasing_power,
+                    ticks(control[INPUT_MINIMUM_QUOTE_WORD].load(), 0),
+                ))
+        {
+            let trade = grain::search(
+                state,
+                actors,
+                config,
+                &*spatial,
+                &*searches,
+                control,
+                parameters,
+                id,
+                wanted,
+                purchasing_power,
+                buyer_access,
+            );
+            chosen = trade.seller;
+            quantity = trade.quantity;
+            trip = trade.trip;
+            y = side;
+        }
         if comptime!(
             source == index::SupplySource::Index
                 && matches!(parameters.market, MarketFlag::Input(_))
@@ -1573,7 +1725,7 @@ fn search(
                             considered += min(prefix.total & 0xffff, remaining);
                         }
                         if comptime!(
-                            source == index::SupplySource::State
+                            source != index::SupplySource::Index
                                 && parameters.scan == crate::simulation::parallel::ScanMode::Plane
                         ) {
                             cooperative = CUBE_DIM <= PLANE_DIM;
@@ -1758,6 +1910,21 @@ fn search(
                 quantity.extract(HIGH_WORD);
             proposals[id as usize * ProposalLayout::WORDS + ProposalLayout::DISTANCE] = trip;
             if chosen != NO_ACTOR {
+                if comptime!(
+                    matches!(parameters.market, MarketFlag::Input(_))
+                        && config.railway.routes_enabled == Feature::Enabled
+                ) && control[INPUT_RAIL_WORD].load() == 0
+                    && railway::may_book(config, id, chosen, trip, buyer_access)
+                {
+                    control[INPUT_RAIL_WORD].store(1);
+                }
+                if comptime!(collection == OrderCollection::InputTile) {
+                    let slot = control[CONSTRUCTED_EVENTS_WORD].fetch_add(1);
+                    if slot < comptime!(super::sorting::INPUT_TILE as u32) {
+                        searches[(comptime!(INPUT_BUYERS_FIELD) * config.actors + slot) as usize] =
+                            id;
+                    }
+                }
                 record_success(successes, parameters, id);
                 record_wide_order(control, parameters, quantity);
             }

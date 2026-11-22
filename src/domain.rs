@@ -1267,11 +1267,22 @@ impl Scenario {
                             * (railway::FREIGHT_ACCOUNT_WORDS
                                 + railway::FREIGHT_BOOKING_WORDS
                                 + railway::FREIGHT_QUEUE_WORDS
-                                + 2
+                                + 4
                                 + 2 * (railway::FREIGHT_CLAIM_WORDS
                                     + railway::FREIGHT_CLAIM_SORT_WORDS))
                                 as u64
-                        + companies * stations.pow(2) * railway::RAIL_ROUTE_WORDS as u64
+                        + match self.config.railway.route_storage(stations as usize) {
+                            railway::RouteStorage::Indexed => {
+                                let rows = self.config.railway.route_origins();
+                                (rows as u64 + 1) * stations * railway::RAIL_ROUTE_WORDS as u64
+                                    + companies * stations
+                                    + rows as u64
+                                    + stations
+                            }
+                            railway::RouteStorage::Dense => {
+                                companies * stations.pow(2) * railway::RAIL_ROUTE_WORDS as u64
+                            }
+                        }
                         + stations.pow(2) * self.ring() as u64
                         + companies.pow(2)
                         + 2 * companies

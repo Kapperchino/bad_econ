@@ -375,6 +375,7 @@ enum SearchExecution {
     Shared,
     Plane,
     Cached,
+    Grain,
     ScalarFuel,
     ScalarHousehold,
     SpatialFuel,
@@ -735,12 +736,47 @@ impl SearchProbe {
                 }
             }
         }
+        if let SearchExecution::Grain = execution {
+            for (stage, grid, width) in [
+                (
+                    SearchStage::GrainFirms,
+                    device.count(count),
+                    device.workgroup,
+                ),
+                (
+                    SearchStage::GrainDealerTiles,
+                    CubeCount::Static(8, 1, 1),
+                    256,
+                ),
+            ] {
+                MarketSearch::launch(
+                    device,
+                    grid,
+                    CubeDim::new_1d(width),
+                    SearchInputLaunch {
+                        state: simulation.state.buffer_arg(),
+                        actors: simulation.actors.buffer_arg(),
+                        config: simulation.config.launch(),
+                        spatial: simulation.spatial.buffer_arg(),
+                        proposals: simulation.proposals.buffer_arg(),
+                        searches: simulation.searches.requests.buffer_arg(),
+                        successes: simulation.searches.successes.buffer_arg(),
+                        scratch: simulation.scratch.buffer_arg(),
+                        control: simulation.control.buffer_arg(),
+                        parameters: parameters.launch(),
+                        status_reset: StatusReset::Full,
+                        program: stage.program(&simulation.config),
+                    },
+                );
+            }
+        }
         let stage = match execution {
             SearchExecution::Prepare => SearchStage::Prepare,
             SearchExecution::ScalarFuel => SearchStage::SearchFuel,
             SearchExecution::ScalarHousehold => SearchStage::SearchHousehold,
             SearchExecution::SpatialFuel => SearchStage::SearchSpatialFuel,
             SearchExecution::Cached => SearchStage::SearchIndexed,
+            SearchExecution::Grain => SearchStage::SearchGrain,
             _ => SearchStage::Search,
         };
         match execution {
@@ -796,6 +832,63 @@ impl SearchProbe {
             faults: device.read(&simulation.control)?[crate::simulation::flags::FAULT_WORD],
         })
     }
+}
+
+#[test]
+fn grain_firm_index_preserves_rotated_full_partial_and_empty_offers_on_gpu() -> Result<()> {
+    for case in [
+        SupplyCase::Capped,
+        SupplyCase::Sparse,
+        SupplyCase::Empty,
+        SupplyCase::Unaffordable,
+        SupplyCase::RetailSold,
+    ] {
+        let mut probe = SearchProbe::with_suppliers(case, 0, Market::Input(Good::Grain), 257)?;
+        probe.state.set(Field::FoodNeed, 1, 10);
+        probe.state.set(Field::InputTicks, 1, 1000);
+        for rotation in [0, 13, 128, 256] {
+            probe.parameters.settlement_rotation = rotation;
+            for buyer in [0, 1] {
+                let result = |mode| probe.actor_outcome(mode, 32, CacheRefresh::Reset, buyer);
+                assert_eq!(
+                    result(SearchExecution::Grain)?,
+                    result(SearchExecution::Plane)?,
+                    "{case:?}, buyer {buyer}, rotation {rotation}"
+                );
+            }
+        }
+    }
+    Ok(())
+}
+
+#[test]
+fn sparse_grain_dealers_preserve_rotated_quota_partial_and_empty_offers_on_gpu() -> Result<()> {
+    let mut probe =
+        SearchProbe::with_suppliers(SupplyCase::Capped, 0, Market::Input(Good::Grain), 8193)?;
+    let simulation = &probe.simulation;
+    let mut spatial = simulation.device.read(&simulation.spatial)?;
+    spatial[2] = 0;
+    simulation.device.write(&simulation.spatial, &spatial);
+    probe.state.set(Field::GrainQuote, 0, 4);
+    probe.state.set(Field::EnterpriseModel, 1, 1);
+    probe.state.set(Field::Cash, 1, 16);
+    probe.state.set(Field::FoodNeed, 1, 20);
+    for (stock, target) in [(20, 1), (2, 1000), (0, 1000)] {
+        probe.state.set(Field::InputTicks, 1, target);
+        for seller in 2..probe.state.actors.len() {
+            probe.state.set(Field::Grain, seller, stock);
+        }
+        for rotation in [0, 510] {
+            probe.parameters.settlement_rotation = rotation;
+            let result = |mode| probe.actor_outcome(mode, 32, CacheRefresh::Reset, 1);
+            assert_eq!(
+                result(SearchExecution::Grain)?,
+                result(SearchExecution::Plane)?,
+                "stock {stock}, input {target}, rotation {rotation}"
+            );
+        }
+    }
+    Ok(())
 }
 
 #[test]

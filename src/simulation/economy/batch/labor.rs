@@ -223,6 +223,12 @@ impl LaborBalances {
     }
 }
 
+#[derive(Clone, Copy, Debug, Hash, PartialEq, Eq)]
+pub(in crate::simulation) enum LaborExecution {
+    Complete,
+    Deferred,
+}
+
 #[derive(CubeType, CubeLaunch)]
 pub(in crate::simulation) struct LaborInput {
     pub state: Box<[u32]>,
@@ -231,6 +237,8 @@ pub(in crate::simulation) struct LaborInput {
     pub scratch: Box<[u32]>,
     pub control: Box<[Atomic<u32>]>,
     pub parameters: EconomyParameters,
+    #[cube(comptime)]
+    pub execution: LaborExecution,
 }
 
 pub(in crate::simulation) struct LaborSettlement;
@@ -254,6 +262,7 @@ impl GpuPass<LaborInput> for SettleLabor {
             &mut input.scratch,
             &input.control,
             &input.parameters,
+            comptime!(input.execution),
         );
     }
 }
@@ -266,6 +275,7 @@ fn settle_labor(
     scratch: &mut [u32],
     control: &[Atomic<u32>],
     parameters: &EconomyParameters,
+    #[comptime] execution: LaborExecution,
 ) {
     let jobs = markets::job_count(control, RANGE_SLOTS_WORD);
     let mut job = CUBE_POS as u32;
@@ -284,7 +294,11 @@ fn settle_labor(
         let mut accepted = 0u32;
         let mut cursor = start;
         let mut faulted = 0u32;
-        while cursor < end {
+        while cursor < end
+            && (comptime!(execution == LaborExecution::Complete)
+                || capacity.overflow <= capacity.available
+                || accepted < capacity.available)
+        {
             let index = cursor + UNIT_POS;
             let mut actor = 0u32;
             let mut prior = KernelEventStatus::new(comptime!(EventStatus::Inactive));
@@ -318,6 +332,9 @@ fn settle_labor(
             KernelFaults::new(comptime!(FaultFlags::ARITHMETIC_OVERFLOW)).record(control);
         }
         if UNIT_POS == 0 {
+            if comptime!(execution == LaborExecution::Deferred) {
+                scratch[(7 * count + peer) as usize] = min(cursor, end);
+            }
             balances.faults.record(control);
             balances.store(state, config, peer, accepted);
             control[PROGRESS_WORD].fetch_max(length);
@@ -512,6 +529,7 @@ mod tests {
                         scratch: actual.scratch.buffer_arg(),
                         control: actual.control.buffer_arg(),
                         parameters: parameters.launch(),
+                        execution: LaborExecution::Complete,
                     },
                 );
                 for (name, actual, expected) in [

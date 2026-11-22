@@ -9,6 +9,12 @@ use crate::simulation::{Device, decode, encode, enterprise, layout::TICK_WORDS};
 use anyhow::{Context, Result, anyhow};
 use burn_wgpu::CubeTensor;
 use std::collections::{BTreeMap, BTreeSet};
+mod tiles;
+
+enum SettlementValues {
+    Rows(CubeTensor),
+    Changes(tiles::TileChanges),
+}
 
 pub(in crate::simulation) struct SettlementBatch {
     pub ownership: Option<Vec<Ownership>>,
@@ -16,7 +22,7 @@ pub(in crate::simulation) struct SettlementBatch {
     pub owners: Vec<OwnerChange>,
     pub readback_bytes: u64,
     indices: CubeTensor,
-    values: CubeTensor,
+    values: SettlementValues,
 }
 
 pub(in crate::simulation) struct OwnerChange {
@@ -156,15 +162,26 @@ impl SettlementBatch {
                     .filter(|&household| household != founder_identity),
             );
         }
+        shareholders.retain(|&identity| {
+            match scenario
+                .index_of(identity)
+                .filter(|&row| metadata.actors.identities().get(row) == Some(&identity))
+            {
+                Some(row) => {
+                    selected.insert(row);
+                    false
+                }
+                None => true,
+            }
+        });
         if !shareholders.is_empty() {
             selected.extend(
                 metadata
                     .actors
+                    .identities()
                     .iter()
                     .enumerate()
-                    .filter_map(|(index, actor)| {
-                        shareholders.remove(&actor.identity).then_some(index)
-                    }),
+                    .filter_map(|(index, identity)| shareholders.remove(identity).then_some(index)),
             );
         }
         match shareholders.is_empty() {
@@ -190,7 +207,15 @@ impl SettlementBatch {
                     .div_ceil(crate::simulation::economy::audit::TILE_ACTORS),
             );
         }
-        let required = selected.len() as u64 * scenario.fields() as u64 * 16;
+        let fields = match requests
+            .iter()
+            .any(|record| matches!(record.request >> 24, 4 | 5))
+        {
+            true => scenario.fields(),
+            false => crate::domain::BASE_FIELDS,
+        };
+        let elements = selected.len() * fields;
+        let required = elements as u64 * 16;
         match device
             .reclaim_memory(required)?
             .bytes_reserved
@@ -208,17 +233,21 @@ impl SettlementBatch {
                 .map(|&actor| actor as u32)
                 .collect::<Vec<_>>(),
         );
-        let values = device.empty(selected.len() * scenario.fields() * TICK_WORDS);
-        transfer(
-            device,
-            state,
-            &values,
-            &indices,
-            state.meta.num_elements() / (scenario.fields() * TICK_WORDS),
-            Transfer::Gather,
-        );
-        let words = device.read(&values)?;
-        let readback_bytes = words.len() as u64 * 4;
+        let stride = state.meta.num_elements() / (scenario.fields() * TICK_WORDS);
+        let tiles = tiles::GatheredTiles::supported(device, elements)
+            .then(|| tiles::GatheredTiles::read(device, state, &indices, stride, elements))
+            .transpose()?;
+        let readback_bytes = tiles
+            .as_ref()
+            .map_or(elements as u64 * 8, |tiles| tiles.readback_bytes());
+        let values = match &tiles {
+            Some(tiles) => tiles.unpack(elements),
+            None => {
+                let values = device.empty(elements * TICK_WORDS);
+                transfer(device, state, &values, &indices, stride, Transfer::Gather);
+                decode(&device.read(&values)?)
+            }
+        };
         let mut compact = State {
             actors: selected
                 .iter()
@@ -229,7 +258,7 @@ impl SettlementBatch {
                     actor
                 })
                 .collect(),
-            values: decode(&words),
+            values,
             ownership,
             companies: metadata.companies.clone(),
             day,
@@ -303,7 +332,12 @@ impl SettlementBatch {
             owners,
             readback_bytes,
             indices,
-            values: device.tensor(bytemuck::cast_slice(&encode(&compact.values))),
+            values: match tiles {
+                Some(tiles) => SettlementValues::Changes(tiles.changes(device, &compact.values)),
+                None => SettlementValues::Rows(
+                    device.tensor(bytemuck::cast_slice(&encode(&compact.values))),
+                ),
+            },
         })
     }
 
@@ -320,13 +354,18 @@ impl SettlementBatch {
     }
 
     pub fn apply(&self, device: &Device, state: &CubeTensor, actors: usize) {
-        transfer(
-            device,
-            &self.values,
-            state,
-            &self.indices,
-            actors,
-            Transfer::Scatter,
-        );
+        match &self.values {
+            SettlementValues::Rows(values) => transfer(
+                device,
+                values,
+                state,
+                &self.indices,
+                actors,
+                Transfer::Scatter,
+            ),
+            SettlementValues::Changes(changes) => {
+                changes.apply(device, state, &self.indices, actors)
+            }
+        }
     }
 }

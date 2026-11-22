@@ -214,6 +214,92 @@ pub(super) fn copy_contiguous(device: &Device, source: &CubeTensor, target: &Cub
     }
 }
 
+#[derive(Clone, Default)]
+pub(super) struct AuditedBuffer {
+    segments: Vec<CubeTensor>,
+    capacity: usize,
+}
+
+struct SnapshotSegment {
+    offset: usize,
+    live: CubeTensor,
+    audited: CubeTensor,
+}
+
+fn word_slice(tensor: &CubeTensor, offset: usize, words: usize) -> CubeTensor {
+    let length = tensor.meta.num_elements();
+    let handle = tensor
+        .handle
+        .clone()
+        .offset_start((offset * size_of::<u32>()) as u64)
+        .offset_end(((length - offset - words) * size_of::<u32>()) as u64);
+    CubeTensor::new_contiguous(
+        tensor.client.clone(),
+        tensor.device.clone(),
+        Shape::new([words]),
+        handle,
+        DType::U32,
+    )
+}
+
+impl AuditedBuffer {
+    pub(super) fn additional_words(&self, words: usize) -> usize {
+        words
+            .saturating_sub(self.capacity)
+            .next_multiple_of(SNAPSHOT_BLOCK_WORDS)
+    }
+
+    pub(super) fn extended(&self, device: &Device, words: usize) -> Self {
+        let mut next = self.clone();
+        let additional = self.additional_words(words);
+        if additional > 0 {
+            next.segments.push(device.state_buffer(additional));
+            next.capacity += additional;
+        }
+        next
+    }
+
+    fn parts(&self, live: &CubeTensor) -> impl Iterator<Item = SnapshotSegment> {
+        self.segments.iter().scan(0, |offset, segment| {
+            let words = segment
+                .meta
+                .num_elements()
+                .min(live.meta.num_elements() - *offset);
+            let part = SnapshotSegment {
+                offset: *offset,
+                live: word_slice(live, *offset, words),
+                audited: word_slice(segment, 0, words),
+            };
+            *offset += words;
+            Some(part)
+        })
+    }
+
+    pub(super) fn read(&self, device: &Device, live: &CubeTensor) -> Result<Vec<u32>> {
+        let mut words = Vec::with_capacity(live.meta.num_elements());
+        for part in self.parts(live) {
+            words.extend(device.read(&part.audited)?);
+        }
+        Ok(words)
+    }
+
+    pub(super) fn restore(&self, device: &Device, live: &CubeTensor) {
+        for part in self.parts(live) {
+            copy_contiguous(device, &part.audited, &part.live);
+        }
+    }
+
+    #[cfg(test)]
+    pub(super) fn shares_prefix(&self, previous: &Self) -> bool {
+        self.segments.len() >= previous.segments.len()
+            && self
+                .segments
+                .iter()
+                .zip(&previous.segments)
+                .all(|(a, b)| super::market_graphs::same_buffer(a, b))
+    }
+}
+
 #[derive(Clone)]
 pub(super) enum SnapshotCopy {
     Full,
@@ -244,24 +330,29 @@ impl SnapshotCopy {
 
     #[cfg(test)]
     pub(super) fn save(&self, device: &Device, source: &CubeTensor, target: &CubeTensor) {
-        self.save_range(device, source, target, 0, 0);
+        self.save_range(device, source, target, 0, 0, 0);
     }
 
     pub(super) fn save_state(
         &self,
         device: &Device,
         source: &CubeTensor,
-        target: &CubeTensor,
+        target: &AuditedBuffer,
         stride: usize,
         ring: usize,
     ) {
-        self.save_range(
-            device,
-            source,
-            target,
-            crate::domain::BASE_FIELDS * stride * 2,
-            (crate::domain::BASE_FIELDS + ring * crate::domain::Good::COUNT) * stride * 2,
-        );
+        let start = crate::domain::BASE_FIELDS * stride * 2;
+        let end = (crate::domain::BASE_FIELDS + 2 * ring * crate::domain::Good::COUNT) * stride * 2;
+        for part in target.parts(source) {
+            self.save_range(
+                device,
+                &part.live,
+                &part.audited,
+                start.saturating_sub(part.offset),
+                end.saturating_sub(part.offset),
+                part.offset / SNAPSHOT_BLOCK_WORDS,
+            );
+        }
     }
 
     pub(super) fn ring_mask(&self) -> Option<&CubeTensor> {
@@ -278,6 +369,7 @@ impl SnapshotCopy {
         target: &CubeTensor,
         ring_start: usize,
         ring_end: usize,
+        group_offset: usize,
     ) {
         let hardware = &device.client.properties().hardware;
         let workgroup = match (
@@ -306,6 +398,7 @@ impl SnapshotCopy {
                     parts: SNAPSHOT_PARTS as u32,
                     ring_start: ring_start as u32,
                     ring_end: ring_end as u32,
+                    group_offset: group_offset as u32,
                 },
             ),
         }
@@ -321,6 +414,7 @@ struct SnapshotInput {
     groups: u32,
     ring_start: u32,
     ring_end: u32,
+    group_offset: u32,
     #[cube(comptime)]
     parts: u32,
 }
@@ -340,11 +434,12 @@ impl GpuPass<SnapshotInput> for SparseWords {
     fn execute(mut input: SnapshotInput) {
         let group = CUBE_POS * (CUBE_DIM as usize / 32) + UNIT_POS as usize / 32;
         if group < input.groups as usize {
-            let previous = input.nonzero[group];
+            let mask = input.group_offset as usize + group;
+            let previous = input.nonzero[mask];
             let start = group * (comptime!(input.parts) as usize * 32 * 4);
             let ring = start >= input.ring_start as usize
                 && start + comptime!(input.parts) as usize * 32 * 4 <= input.ring_end as usize;
-            let observed_zero = ring && input.current[group].load() == 0;
+            let observed_zero = ring && input.current[mask].load() == 0;
             if PLANE_DIM != 32 || !observed_zero || previous > 0 {
                 let mut local = 0u32;
                 #[unroll]
@@ -369,7 +464,7 @@ impl GpuPass<SnapshotInput> for SparseWords {
                 }
                 let current = plane_any(local != 0);
                 if UNIT_POS % 32 == 0 {
-                    input.nonzero[group] = u32::cast_from(current);
+                    input.nonzero[mask] = u32::cast_from(current);
                 }
             }
         }
@@ -486,10 +581,10 @@ mod tests {
                     .map(|block| u32::from(block.iter().any(|&value| value > 0)))
                     .collect::<Vec<_>>();
                 device.write(mask, &observed);
-                snapshot.save_range(&device, &source, &audited, start, end);
+                snapshot.save_range(&device, &source, &audited, start, end, 0);
                 assert_eq!(device.read(&audited)?, values);
                 reset_ring_mask(&device, mask, RingMaskState::Unknown);
-                snapshot.save_range(&device, &source, &audited, start, end);
+                snapshot.save_range(&device, &source, &audited, start, end, 0);
                 assert_eq!(device.read(&audited)?, values);
             }
         }
@@ -518,6 +613,7 @@ mod tests {
                 parts: SNAPSHOT_PARTS as u32,
                 ring_start: 0,
                 ring_end: 0,
+                group_offset: 0,
             },
         );
         assert_eq!(

@@ -65,6 +65,7 @@ struct Winner {
 
 #[derive(CubeType)]
 struct Buyer {
+    inbound: bool,
     actor: u32,
     x: u32,
     y: u32,
@@ -519,16 +520,21 @@ fn possible(
         let distance =
             max(buyer.x, min_x) - min(buyer.x, max_x) + max(buyer.y, min_y) - min(buyer.y, max_y);
         let mut days = max(ceildiv(distance, config.shipment_speed), 1);
-        if comptime!(config.railway.routes_enabled == Feature::Enabled) && config.railway.nodes > 0
-        {
+        let mut delivered = price;
+        if buyer.inbound {
             let access = scratch[(base + comptime!(Bound::Access as u32)) as usize];
             days = min(
                 days,
                 ceildiv(buyer.access + access, config.shipment_speed) + 1,
             );
         }
-        let bound = price + days * config.delivery_penalty;
-        possible = distance <= config.search_radius && bound <= winner.score;
+        if !buyer.inbound {
+            delivered = cartage::delivered_price(config, price, distance, days);
+        }
+        let bound = delivered + days * config.delivery_penalty;
+        possible = distance <= config.search_radius
+            && bound <= winner.score
+            && !lt(buyer.cash, ticks(delivered, 0));
     }
     possible
 }
@@ -580,21 +586,27 @@ fn visit(
                 relative + length - cell_rotation,
             );
             let preceding = cell < winner.cell || cell == winner.cell && rank < winner.rank;
-            let days = minimum_delivery_days(config, buyer.access, seller, distance);
-            let bound = supply.quote + days * config.delivery_penalty;
+            let mut days = max(ceildiv(distance, config.shipment_speed), 1);
+            if buyer.inbound {
+                days = minimum_delivery_days(config, buyer.access, seller, distance);
+            }
+            let minimum = cartage::delivered_price(config, supply.quote, distance, days);
+            let bound = minimum + days * config.delivery_penalty;
             let improves = bound < winner.score
                 || bound == winner.score
                     && (preceding || comptime!(cache_mode == CacheMode::Capture));
-            if distance <= config.search_radius && improves {
-                let days = railway::delivery_days(
-                    config,
-                    railway::DeliveryRequest {
-                        buyer: buyer.actor,
-                        seller,
-                        trip: distance,
-                        buyer_access: buyer.access,
-                    },
-                );
+            if distance <= config.search_radius && improves && !lt(buyer.cash, ticks(minimum, 0)) {
+                if buyer.inbound {
+                    days = railway::delivery_days(
+                        config,
+                        railway::DeliveryRequest {
+                            buyer: buyer.actor,
+                            seller,
+                            trip: distance,
+                            buyer_access: buyer.access,
+                        },
+                    );
+                }
                 let delivered = cartage::delivered_price(config, supply.quote, distance, days);
                 let affordable = !lt(buyer.cash, ticks(delivered, 0));
                 let score = delivered + days * config.delivery_penalty;
@@ -641,6 +653,7 @@ fn query_with_cache(
     let blocks = ceildiv(count, BLOCK);
     let first = first_block(config, scratch, count, key(config, x, y));
     let buyer = Buyer {
+        inbound: railway::serves_buyer(config, buyer),
         actor: buyer,
         x,
         y,

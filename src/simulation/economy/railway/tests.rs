@@ -738,3 +738,73 @@ fn repeated_input_initialization_resets_prior_suppliers_and_preserves_faults_on_
     }
     Ok(())
 }
+
+#[test]
+fn indexed_routes_match_dense_routes_quotes_and_destination_access_on_gpu() -> Result<()> {
+    let scenario = Scenario::new(serde_json::from_str(include_str!(
+        "../../../../scenarios/railway.json"
+    ))?)?;
+    let mut state = scenario.initial()?;
+    let network = &scenario.config().railway;
+    for company in &network.companies {
+        let firm = scenario.index_of(company.firm).unwrap();
+        let built = network
+            .segments
+            .iter()
+            .filter(|segment| segment.company == company.firm)
+            .count() as u64;
+        state.set(Field::RailBuilt, firm, built);
+        state.set(Field::RailOperating, firm, built);
+    }
+    let device = crate::simulation::tests::device(64)?;
+    let simulation = Simulation::from_state(scenario.clone(), state.clone(), device.clone())?;
+    let stations = network.stations();
+    let tables = |storage| {
+        let mut config = Configuration::new(&device, &scenario, &state);
+        config.state_stride = simulation.config.state_stride;
+        config.railway = Network::with_stations(&device, &scenario, &state, &stations, storage);
+        for stage in [RailStage::Routes, RailStage::Quotes] {
+            launch(
+                &device,
+                &simulation.state,
+                &simulation.actors,
+                &config,
+                &simulation.control,
+                stage,
+            );
+        }
+        config.railway
+    };
+    let dense = tables(RouteStorage::Dense);
+    let indexed = tables(RouteStorage::Indexed);
+    let lookup = device.read(&indexed.station_companies)?;
+    let expected = RailTables::read(&device, &dense)?;
+    let actual = RailTables::read(&device, &indexed)?;
+    let nodes = stations.len();
+    let row = nodes * ROUTE_WORDS;
+    let missing = [UNREACHABLE, u32::MAX, u32::MAX, 0, 0, UNREACHABLE].repeat(nodes);
+    assert!(indexed.route_rows < dense.route_rows);
+    for i in 0..dense.route_rows as usize {
+        let position = lookup[indexed.route_index as usize + i] as usize;
+        let expected_row = match position == indexed.route_rows as usize {
+            true => missing.as_slice(),
+            false => &expected.routes[i * row..(i + 1) * row],
+        };
+        assert_eq!(
+            &actual.routes[position * row..(position + 1) * row],
+            expected_row
+        );
+    }
+    assert_eq!(&actual.quotes[..expected.quotes.len()], &expected.quotes);
+    for destination in 0..nodes {
+        let connected = (0..nodes).any(|origin| {
+            expected.quotes[(origin * nodes + destination + 1) * scenario.ring() - 1]
+                < dense.company_count
+        });
+        assert_eq!(
+            actual.quotes[expected.quotes.len() + destination],
+            u32::from(connected)
+        );
+    }
+    Ok(())
+}

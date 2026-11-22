@@ -273,6 +273,105 @@ impl SortGraph {
     }
 }
 
+pub(in crate::simulation) const INPUT_TILE: usize = 2048;
+
+pub(in crate::simulation) fn sort_input_tile(
+    device: &Device,
+    searches: &CubeTensor,
+    proposals: &CubeTensor,
+    scratch: &CubeTensor,
+    control: &CubeTensor,
+    parameters: &EconomyParameters,
+    orders: usize,
+) {
+    input_tile::launch(
+        &device.client,
+        CubeCount::Static(1, 1, 1),
+        CubeDim::new_1d(128),
+        searches.buffer_arg(),
+        proposals.buffer_arg(),
+        scratch.buffer_arg(),
+        control.buffer_arg(),
+        parameters.count,
+        parameters.settlement_rotation,
+        orders as u32,
+        orders.next_power_of_two() as u32,
+    );
+}
+
+#[cube(launch)]
+fn input_tile(
+    searches: &[u32],
+    proposals: &[u32],
+    scratch: &mut [u32],
+    control: &[Atomic<u32>],
+    count: u32,
+    rotation: u32,
+    orders: u32,
+    length: u32,
+) {
+    let mut keys = Shared::<[u64]>::new_slice(INPUT_TILE);
+    let mut slot = UNIT_POS;
+    while slot < length {
+        let mut key = u64::cast_from(-1i64);
+        if slot < orders {
+            let actor = searches[(comptime!(crate::simulation::economy::search::INPUT_BUYERS_FIELD)
+                * count
+                + slot) as usize];
+            let peer = proposals[actor as usize * crate::simulation::layout::ProposalLayout::WORDS
+                + crate::simulation::layout::ProposalLayout::ACTOR];
+            crate::simulation::flags::KernelEventStatus::new(comptime!(
+                crate::simulation::flags::EventStatus::Inactive
+            ))
+            .store(scratch, 4 * count + actor);
+            let priority = select(
+                actor >= rotation,
+                actor - rotation,
+                actor + count - rotation,
+            );
+            key = (u64::cast_from(peer) << 32) | u64::cast_from(priority);
+        }
+        keys[slot as usize] = key;
+        slot += CUBE_DIM;
+    }
+    sync_cube();
+    let mut width = 2u32;
+    while width <= length {
+        let mut step = width / 2;
+        while step > 0 {
+            let mut pair = UNIT_POS;
+            while pair < length / 2 {
+                let left = 2 * pair - (pair & (step - 1));
+                let right = left + step;
+                let a = keys[left as usize];
+                let b = keys[right as usize];
+                let ascending = left & width == 0;
+                keys[left as usize] = select(ascending, min(a, b), max(a, b));
+                keys[right as usize] = select(ascending, max(a, b), min(a, b));
+                pair += CUBE_DIM;
+            }
+            sync_cube();
+            step /= 2;
+        }
+        width *= 2;
+    }
+    let mut slot = UNIT_POS;
+    while slot < orders {
+        let key = keys[slot as usize];
+        let peer = u32::cast_from(key >> 32);
+        let rotated = u32::cast_from(key) + rotation;
+        let previous = keys[(max(slot, 1) - 1) as usize];
+        let first = slot == 0 || u32::cast_from(previous >> 32) != peer;
+        scratch[slot as usize] = peer;
+        scratch[(count + slot) as usize] = select(rotated < count, rotated, rotated - count);
+        scratch[(5 * count + slot) as usize] = select(first, slot, u32::MAX);
+        slot += CUBE_DIM;
+    }
+    if UNIT_POS == 0 {
+        control[markets::RANGE_SLOTS_WORD].store(orders);
+    }
+}
+
 impl MarketSort {
     pub fn encode_keys(
         device: &Device,

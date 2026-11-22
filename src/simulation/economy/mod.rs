@@ -2429,12 +2429,15 @@ pub enum EconomyStage {
     GroupRemainder,
     GroupPrepare,
     GroupFinalize,
+    FinalizeFixedWages,
+    SettleInputTile,
     MarketStart,
     InputMarketStart,
     InputMarketPrepare,
     InputMarketRepeat,
     MarketBoundary,
     GroupRanges,
+    SupplierRanges,
     ProposeCompact,
     ProposeRetainedCompact,
     GroupCompactFill,
@@ -2469,6 +2472,7 @@ pub fn economy(
                     | EconomyStage::GroupPrepare
                     | EconomyStage::GroupSort
                     | EconomyStage::GroupMerge
+                    | EconomyStage::SupplierRanges
                     | EconomyStage::GroupRanges
                     | EconomyStage::ProposeCompact
                     | EconomyStage::ProposeRetainedCompact
@@ -2478,6 +2482,7 @@ pub fn economy(
                     | EconomyStage::GroupExecute
                     | EconomyStage::GroupRemainder
                     | EconomyStage::GroupFinalize
+                    | EconomyStage::FinalizeFixedWages
             )
     );
     if !guarded || control[LATCH_WORD].load() == 0 {
@@ -2497,6 +2502,15 @@ pub fn economy(
                         control[RANGE_SLOTS_WORD].store(0);
                         control[markets::SEARCHES_WORD].store(0);
                         control[search::INPUT_MINIMUM_QUOTE_WORD].store(u32::MAX);
+                        if comptime!(matches!(parameters.market, MarketFlag::Input(_))) {
+                            control[search::INPUT_RAIL_WORD].store(0);
+                        }
+                        if comptime!(
+                            parameters.market
+                                == MarketFlag::Input(crate::simulation::flags::InputMarket::Grain)
+                        ) {
+                            control[search::GRAIN_FIRMS_WORD].store(0);
+                        }
                         if comptime!(
                             parameters.empty_orders
                                 == crate::simulation::parameters::EmptyOrderMode::FeedbackOnly
@@ -2548,6 +2562,9 @@ pub fn economy(
             EconomyStage::GroupRadixLocal => markets::radix_local(bundles, control, parameters, id),
             EconomyStage::GroupRadixScatter => {
                 markets::radix_scatter(bundles, control, parameters, id)
+            }
+            EconomyStage::SupplierRanges => {
+                markets::supplier_ranges(bundles, &*spatial, control, config, parameters, id)
             }
             EconomyStage::GroupRanges => {
                 if control[crate::simulation::flags::FAULT_WORD].load() == 0 {
@@ -2623,6 +2640,9 @@ pub fn economy(
             }
             EconomyStage::GroupSort => group_sort(bundles, control, parameters, id),
             EconomyStage::GroupMerge => group_merge(bundles, control, parameters, id),
+            EconomyStage::SettleInputTile => settle_input_tile(
+                state, actors, config, proposals, bundles, control, parameters,
+            ),
             EconomyStage::GroupExecute => group_execute(
                 state, actors, config, proposals, bundles, control, parameters, id,
             ),
@@ -2640,17 +2660,36 @@ pub fn economy(
                 id,
                 comptime!(Posting::CheckActor),
             ),
-            EconomyStage::GroupFinalize => actor_settlement(
-                state,
-                actors,
-                config,
-                proposals,
-                bundles,
-                control,
-                parameters,
-                id,
-                comptime!(Posting::ApplyActor),
-            ),
+            EconomyStage::GroupFinalize | EconomyStage::FinalizeFixedWages => {
+                if comptime!(stage == EconomyStage::FinalizeFixedWages)
+                    && id < markets::active(control, parameters)
+                {
+                    let count = parameters.count;
+                    let peer = bundles[(parameters.sort_source + id) as usize];
+                    if id >= bundles[(7 * count + peer) as usize] {
+                        let actor = bundles[(parameters.sort_source + count + id) as usize];
+                        let prior = KernelEventStatus::load(bundles, 4 * count + actor);
+                        let mut status = KernelEventStatus::new(comptime!(EventStatus::Rejected));
+                        if prior.contains(comptime!(EventStatus::Faulted)) {
+                            status.set(comptime!(EventStatus::Faulted));
+                        }
+                        status.store(bundles, 4 * count + actor);
+                        proposals[(actor + parameters.offset) as usize * ProposalLayout::WORDS
+                            + ProposalLayout::QUANTITY_HIGH] = 0;
+                    }
+                }
+                actor_settlement(
+                    state,
+                    actors,
+                    config,
+                    proposals,
+                    bundles,
+                    control,
+                    parameters,
+                    id,
+                    comptime!(Posting::ApplyActor),
+                );
+            }
             EconomyStage::Summarize => summarize(state, actors, config, bundles, control, id),
             EconomyStage::Inspect => inspect(state, config, proposals, parameters, id),
         }
@@ -2814,6 +2853,66 @@ fn group_merge(
         let target = destination + base + id - select(first, base, middle) + low - start;
         scratch[target as usize] = key;
         scratch[(target + count) as usize] = item;
+    }
+}
+
+#[cube]
+fn settle_input_tile(
+    state: &mut [u32],
+    actors: &[u32],
+    config: &EconomyConfig,
+    proposals: &mut [u32],
+    scratch: &mut [u32],
+    control: &[Atomic<u32>],
+    parameters: &EconomyParameters,
+) {
+    let orders = markets::active(control, parameters);
+    if control[LATCH_WORD].load() == 0 {
+        let mut slot = UNIT_POS;
+        while slot < orders {
+            actor_settlement(
+                state,
+                actors,
+                config,
+                proposals,
+                scratch,
+                control,
+                parameters,
+                slot,
+                comptime!(Posting::CheckActor),
+            );
+            slot += CUBE_DIM;
+        }
+        sync_storage();
+        let mut slot = UNIT_POS;
+        while slot < orders {
+            group_execute(
+                state, actors, config, proposals, scratch, control, parameters, slot,
+            );
+            slot += CUBE_DIM;
+        }
+        sync_storage();
+        if UNIT_POS == 0 {
+            control[LATCH_WORD].store(control[crate::simulation::flags::FAULT_WORD].load());
+        }
+        sync_storage();
+        if control[LATCH_WORD].load() == 0 {
+            let mut slot = UNIT_POS;
+            while slot < orders {
+                actor_settlement(
+                    state,
+                    actors,
+                    config,
+                    proposals,
+                    scratch,
+                    control,
+                    parameters,
+                    slot,
+                    comptime!(Posting::ApplyActor),
+                );
+                slot += CUBE_DIM;
+            }
+        }
     }
 }
 

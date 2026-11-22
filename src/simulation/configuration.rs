@@ -151,6 +151,35 @@ pub struct EconomyConfig {
     pub small_business_expansion: u32,
     pub industrial_expansion: u32,
 }
+struct CartageAccounts {
+    accounts: burn_wgpu::CubeTensor,
+    firms: u32,
+}
+
+impl CartageAccounts {
+    fn new(device: &super::Device, state: &State) -> Self {
+        let mut carriers = state
+            .actors
+            .firm_indices()
+            .filter(|&row| state.actors.at(row).kind == Good::Railway as u32)
+            .map(|row| row as u32)
+            .collect::<Vec<_>>();
+        let cartage_firms = carriers.len() as u32;
+        carriers.extend(
+            state
+                .actors
+                .iter()
+                .enumerate()
+                .filter(|(_, actor)| actor.kind == 0)
+                .map(|(row, _)| row as u32),
+        );
+        Self {
+            accounts: device.tensor(&carriers),
+            firms: cartage_firms,
+        }
+    }
+}
+
 pub struct Configuration {
     pub heating_per_person: u32,
     rentals: crate::domain::landlords::RentalRegistry,
@@ -228,7 +257,14 @@ impl Configuration {
     pub fn new(device: &super::Device, scenario: &Scenario, state: &State) -> Self {
         let rentals = crate::domain::landlords::RentalRegistry::new(scenario, state);
         let railway = super::economy::railway::Network::new(device, scenario, state);
-        Self::with_rentals(device, scenario, state, rentals, railway)
+        Self::with_rentals(
+            device,
+            scenario,
+            state,
+            rentals,
+            railway,
+            CartageAccounts::new(device, state),
+        )
     }
 
     #[cfg(test)]
@@ -275,6 +311,20 @@ impl Configuration {
     ) -> Self {
         let profile = std::env::var_os("BAD_ECON_PROFILE_STAGES").is_some();
         let started = std::time::Instant::now();
+        let cartage = match changes {
+            crate::domain::landlords::RentalChanges::Selected(_)
+                if state
+                    .actors
+                    .iter_from(previous.len())
+                    .all(|actor| actor.kind > 0 && actor.kind != Good::Railway as u32) =>
+            {
+                CartageAccounts {
+                    accounts: self.cartage_accounts.clone(),
+                    firms: self.cartage_firms,
+                }
+            }
+            _ => CartageAccounts::new(device, state),
+        };
         let rentals = self.rentals.updated(scenario, previous, state, changes);
         if profile {
             eprintln!(
@@ -291,7 +341,7 @@ impl Configuration {
             );
         }
         let started = std::time::Instant::now();
-        let updated = Self::with_rentals(device, scenario, state, rentals, railway);
+        let updated = Self::with_rentals(device, scenario, state, rentals, railway, cartage);
         if profile {
             eprintln!(
                 "CONFIG_PART Buffers {:.3}",
@@ -332,30 +382,16 @@ impl Configuration {
         state: &State,
         rentals: crate::domain::landlords::RentalRegistry,
         railway: super::economy::railway::Network,
+        cartage: CartageAccounts,
     ) -> Self {
         let config = scenario.config();
-        let mut carriers = state
-            .actors
-            .firm_indices()
-            .filter(|&row| state.actors.at(row).kind == Good::Railway as u32)
-            .map(|row| row as u32)
-            .collect::<Vec<_>>();
-        let cartage_firms = carriers.len() as u32;
-        carriers.extend(
-            state
-                .actors
-                .iter()
-                .enumerate()
-                .filter(|(_, actor)| actor.kind == 0)
-                .map(|(row, _)| row as u32),
-        );
         Self {
             heating_per_person: crate::domain::calendar::Weather::on_day(state.day)
                 .heating_units_per_person,
             small_business_expansion: config.expansion.small_business_per_mille,
             industrial_expansion: config.expansion.industrial_per_mille,
-            cartage_accounts: device.tensor(&carriers),
-            cartage_firms,
+            cartage_accounts: cartage.accounts,
+            cartage_firms: cartage.firms,
             rental_accounts: device.tensor(&rentals.words()),
             rental_businesses: rentals.accounts.len() as u32,
             rentals,

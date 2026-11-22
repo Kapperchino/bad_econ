@@ -812,15 +812,25 @@ mod tests {
     }
 }
 
-fn resize_values(state: &mut crate::domain::State, fields: usize, actors: usize) {
+fn resize_values(
+    state: &mut crate::domain::State,
+    scenario: &crate::domain::Scenario,
+    actors: usize,
+) {
     let before = state.actors.len();
-    let mut values = vec![0; actors * fields];
-    for field in 0..fields {
-        values[field * actors..field * actors + before]
-            .copy_from_slice(&state.values[field * before..(field + 1) * before]);
+    if actors > before {
+        let fields = match (before, &scenario.config().finance) {
+            (1.., None) => state.values.len() / before,
+            _ => scenario.fields(),
+        };
+        let mut values = vec![0; actors * fields];
+        for field in 0..fields {
+            values[field * actors..field * actors + before]
+                .copy_from_slice(&state.values[field * before..(field + 1) * before]);
+        }
+        values.extend_from_slice(&state.values[before * fields..]);
+        state.values = values;
     }
-    values.extend_from_slice(&state.values[before * fields..]);
-    state.values = values;
 }
 
 pub(super) fn enter(
@@ -843,7 +853,7 @@ pub(super) fn enter(
         .collect::<anyhow::Result<Vec<_>>>()?;
     let before = state.actors.len();
     let after = before + entries.len();
-    resize_values(state, scenario.fields(), after);
+    resize_values(state, scenario, after);
     let actors = entries
         .iter()
         .map(|entry| {
@@ -970,7 +980,7 @@ pub(in crate::simulation) fn form_households(
     let before = state.actors.len();
     let after = before + splits.len();
     if after > before {
-        resize_values(state, scenario.fields(), after);
+        resize_values(state, scenario, after);
         let actors = splits
             .iter()
             .enumerate()
@@ -1115,6 +1125,7 @@ pub(super) fn transitions_in_rows(
         }
     }
     let mut heirs = std::collections::HashMap::new();
+    let sites = std::cell::OnceCell::new();
     for actor in 0..state.actors.len() {
         let parent = state.get(Field::ParentHousehold, actor);
         if state.actors.at(actor).kind == 0
@@ -1190,7 +1201,10 @@ pub(super) fn transitions_in_rows(
                 state.actors.set(actor, firm);
                 state.set(Field::PendingCapacity, actor, 0);
             }
-            7 => invest(state, actor, (action & 0x00ffffff) as usize - 1)?,
+            7 => {
+                let sites = sites.get_or_init(|| SettlementSites::new(state));
+                invest(state, sites, actor, (action & 0x00ffffff) as usize - 1)?;
+            }
             4 | 5 => {
                 let receiver = match action >> 24 {
                     4 => Some(state.actors.at(actor).owner as usize),
@@ -1225,7 +1239,10 @@ pub(super) fn transitions_in_rows(
                 };
                 if let (true, Some(receiver)) = (claims, receiver) {
                     match action >> 24 {
-                        4 => liquidate(state, scenario, actor)?,
+                        4 => {
+                            let sites = sites.get_or_init(|| SettlementSites::new(state));
+                            liquidate(state, sites, scenario, actor)?;
+                        }
                         _ => transfer_estate(state, scenario, actor, receiver)?,
                     }
                     match action >> 24 {
@@ -1327,24 +1344,55 @@ fn transfer_estate(
     Ok(())
 }
 
+struct SettlementSites {
+    rows: std::collections::HashMap<u64, usize>,
+    issued: std::collections::HashMap<u64, usize>,
+    companies: std::collections::HashMap<u64, usize>,
+}
+
+impl SettlementSites {
+    fn new(state: &crate::domain::State) -> Self {
+        Self {
+            rows: state
+                .actors
+                .identities()
+                .iter()
+                .enumerate()
+                .map(|(row, &id)| (id, row))
+                .collect(),
+            issued: state
+                .ownership
+                .iter()
+                .enumerate()
+                .map(|(row, issued)| (issued.firm, row))
+                .collect(),
+            companies: state
+                .companies
+                .iter()
+                .enumerate()
+                .flat_map(|(row, company)| company.sites.iter().map(move |&id| (id, row)))
+                .collect(),
+        }
+    }
+}
+
 fn liquidate(
     state: &mut crate::domain::State,
+    sites: &SettlementSites,
     scenario: &crate::domain::Scenario,
     firm: usize,
 ) -> anyhow::Result<()> {
     use anyhow::Context;
-    let ownership = state
-        .ownership
-        .iter()
-        .find(|ownership| ownership.firm == state.actors.at(firm).identity)
-        .context("liquidation requires ownership")?
-        .clone();
+    let issued = sites
+        .issued
+        .get(&state.actors.at(firm).identity)
+        .context("liquidation requires ownership")?;
+    let ownership = state.ownership[*issued].clone();
     let mut remaining = 1_000_000u64;
     for share in ownership.shares {
-        let receiver = state
-            .actors
-            .iter()
-            .position(|actor| actor.identity == share.household)
+        let receiver = *sites
+            .rows
+            .get(&share.household)
             .context("liquidation shareholder is missing")?;
         let count = state.actors.len();
         let fields = std::iter::once(Field::Cash as usize)
@@ -1401,7 +1449,12 @@ fn liquidate(
     Ok(())
 }
 
-fn invest(state: &mut crate::domain::State, investor: usize, firm: usize) -> anyhow::Result<()> {
+fn invest(
+    state: &mut crate::domain::State,
+    index: &SettlementSites,
+    investor: usize,
+    firm: usize,
+) -> anyhow::Result<()> {
     use crate::domain::enterprise::{Ownership, OwnershipShare};
     use anyhow::Context;
     let paid = 5000u64;
@@ -1410,14 +1463,19 @@ fn invest(state: &mut crate::domain::State, investor: usize, firm: usize) -> any
         .checked_sub(paid)
         .context("unfunded household investment")?;
     let funds = crate::arithmetic::add(state.get(Field::Cash, firm), paid)?;
-    let sites = state.company_sites(state.actors.at(firm).identity);
+    let identity = state.actors.at(firm).identity;
+    let sites = index
+        .companies
+        .get(&identity)
+        .map_or(std::slice::from_ref(&identity), |&row| {
+            state.companies[row].sites.as_slice()
+        });
     let book = u128::from(paid)
-        + state
-            .actors
+        + sites
             .iter()
-            .enumerate()
-            .filter(|(_, actor)| sites.contains(&actor.identity))
-            .map(|(site, actor)| {
+            .filter_map(|id| index.rows.get(id))
+            .map(|&site| {
+                let actor = state.actors.at(site);
                 u128::from(state.get(Field::Cash, site))
                     + u128::from(state.get(Field::InstalledCapital, site)) * 100
                     + u128::from(state.values[actor.kind as usize * state.actors.len() + site])
@@ -1426,13 +1484,12 @@ fn invest(state: &mut crate::domain::State, investor: usize, firm: usize) -> any
             .sum::<u128>();
     let units = (u128::from(paid) * 1_000_000 / book.max(1)).clamp(1, 250_000) as u32;
     let owner = state.actors.at(investor).identity;
-    let index = state
-        .ownership
-        .iter()
-        .position(|ownership| ownership.firm == state.actors.at(firm).identity)
+    let issued = *index
+        .issued
+        .get(&identity)
         .context("investment requires issued shares")?;
     let mut combined = std::collections::BTreeMap::<u64, u32>::new();
-    for share in &state.ownership[index].shares {
+    for share in &state.ownership[issued].shares {
         let retained = (u64::from(share.units) * u64::from(1_000_000 - units) / 1_000_000) as u32;
         if retained > 0 {
             combined.insert(share.household, retained);
@@ -1459,7 +1516,9 @@ fn invest(state: &mut crate::domain::State, investor: usize, firm: usize) -> any
             .map(|(household, units)| OwnershipShare { household, units })
             .collect(),
     })?;
-    state.set_company_ownership(ownership);
+    for row in sites.iter().filter_map(|site| index.issued.get(site)) {
+        state.ownership[*row].shares.clone_from(&ownership.shares);
+    }
     state.set(Field::Cash, investor, household_cash);
     state.set(Field::Cash, firm, funds);
     state.set(Field::EquityInvested, investor, paid);

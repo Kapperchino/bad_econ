@@ -9,6 +9,7 @@ pub(super) const HOUSEHOLD_Y_FIELD: u32 = 9;
 #[derive(Clone, Copy, Debug, Hash, PartialEq, Eq)]
 pub(super) enum SupplySource {
     State,
+    Grain,
     Index,
 }
 
@@ -90,7 +91,7 @@ impl Supply {
         }
     }
 
-    fn store(&self, scratch: &mut [u32], member: u32) {
+    pub(super) fn store(&self, scratch: &mut [u32], member: u32) {
         let base = member * 4;
         scratch[(base + comptime!(SupplyField::Quote as u32)) as usize] = self.quote;
         scratch[(base + comptime!(SupplyField::AvailableLow as u32)) as usize] =
@@ -135,6 +136,7 @@ pub(super) fn build(
     successes: &[Atomic<u32>],
     control: &[Atomic<u32>],
     parameters: &EconomyParameters,
+    #[comptime] collection: OrderCollection,
 ) {
     let reduction = comptime!(parameters.scan);
     let cells = config.spatial_side * config.spatial_side;
@@ -178,6 +180,11 @@ pub(super) fn build(
                     && matches!(parameters.market, MarketFlag::Consumer(_))
             ) {
                 successes[markets::filtered_count(config.actors, actor) as usize].store(0);
+                if comptime!(collection == OrderCollection::ConsumerMask) {
+                    let slot = filter::prefix_slot(successes, config.actors, actor);
+                    successes[slot].store(0);
+                    successes[slot + 1].store(0);
+                }
             }
             let supply = Supply::new(state, actors, config, actor, good);
             supply.store(scratch, member);

@@ -1,5 +1,5 @@
 use super::*;
-use crate::domain::railway::{RAIL_ROUTE_WORDS as ROUTE_WORDS, RailCapacityField};
+use crate::domain::railway::{RAIL_ROUTE_WORDS as ROUTE_WORDS, RailCapacityField, RouteStorage};
 use crate::simulation::{Device, configuration::Configuration};
 use burn_wgpu::CubeTensor;
 
@@ -27,6 +27,8 @@ pub struct RailNetwork {
     #[cube(comptime)]
     pub routes_enabled: Feature,
     pub nodes: u32,
+    pub route_index: u32,
+    pub route_rows: u32,
     pub company_count: u32,
     pub segment_count: u32,
     pub speed_multiplier: u32,
@@ -54,6 +56,8 @@ pub struct Network {
     freight: settlement::Buffers,
     firms: u32,
     nodes: u32,
+    route_index: u32,
+    route_rows: u32,
     company_count: u32,
     segment_count: u32,
     speed_multiplier: u32,
@@ -106,11 +110,6 @@ struct CompanyRecords {
 impl CompanyRecords {
     fn new(scenario: &crate::domain::Scenario, state: &crate::domain::State) -> Self {
         let config = &scenario.config().railway;
-        let sites = state
-            .actors
-            .firm_indices()
-            .map(|index| (state.actors.at(index).identity, index as u32))
-            .collect::<std::collections::BTreeMap<_, _>>();
         let company_identities = state.company_founders();
         let identities = config
             .companies
@@ -122,15 +121,33 @@ impl CompanyRecords {
                     .unwrap_or(company.firm)
             })
             .collect::<Vec<_>>();
+        let mut fallback = std::collections::BTreeMap::new();
+        let mut site = |identity| {
+            scenario
+                .index_of(identity)
+                .filter(|&row| state.actors.identities().get(row) == Some(&identity))
+                .map(|row| row as u32)
+                .unwrap_or_else(|| {
+                    if fallback.is_empty() {
+                        fallback.extend(
+                            state
+                                .actors
+                                .firm_indices()
+                                .map(|row| (state.actors.at(row).identity, row as u32)),
+                        );
+                    }
+                    fallback[&identity]
+                })
+        };
         let companies = config
             .companies
             .iter()
             .zip(&identities)
             .map(|(company, identity)| CompanyRecord {
-                firm: *sites.get(&company.firm).expect("railway firm"),
+                firm: site(company.firm),
                 freight_rate: company.freight_rate,
                 access_fee: company.access_fee,
-                founder: *sites.get(identity).expect("company founding site"),
+                founder: site(*identity),
             })
             .collect::<Vec<_>>();
         Self {
@@ -199,6 +216,22 @@ impl CompanyBuffers {
 }
 
 impl Network {
+    fn station_access(device: &Device, actors: usize) -> CubeTensor {
+        let capacity = crate::simulation::registry::entries::state_capacity(actors);
+        device.tensor(&vec![0; 4 * capacity])
+    }
+
+    pub(in crate::simulation) fn operating_counts(
+        &self,
+        device: &Device,
+    ) -> anyhow::Result<Vec<u32>> {
+        device.read_range(
+            &self.companies,
+            self.company_count as usize * COMPANY_WORDS + 2,
+            self.company_count as usize,
+        )
+    }
+
     pub(in crate::simulation) fn route_availability(&self) -> RouteAvailability {
         self.availability
     }
@@ -233,11 +266,22 @@ impl Network {
         scenario: &crate::domain::Scenario,
         state: &crate::domain::State,
     ) -> Self {
+        let stations = scenario.config().railway.stations();
+        let storage = scenario.config().railway.route_storage(stations.len());
+        Self::with_stations(device, scenario, state, &stations, storage)
+    }
+
+    fn with_stations(
+        device: &Device,
+        scenario: &crate::domain::Scenario,
+        state: &crate::domain::State,
+        stations: &[crate::domain::Position],
+        storage: RouteStorage,
+    ) -> Self {
         let config = &scenario.config().railway;
         let geography = scenario.rail_geography();
         let dynamic = CompanyBuffers::new(device, scenario, CompanyRecords::new(scenario, state));
         let mut segment_regions = Vec::new();
-        let stations = config.stations();
         let mut station_companies = vec![std::collections::BTreeSet::new(); stations.len()];
         let mut incident_segments = vec![Vec::new(); stations.len()];
         let mut ordinals = vec![0; config.companies.len()];
@@ -301,7 +345,7 @@ impl Network {
                     Some(*offset as u32)
                 }),
         );
-        offsets.extend(station_companies.into_iter().flatten());
+        offsets.extend(station_companies.iter().flatten().copied());
         let incident_start = offsets.len() + stations.len() + 1;
         offsets.push(incident_start as u32);
         offsets.extend(
@@ -313,6 +357,40 @@ impl Network {
                 }),
         );
         offsets.extend(incident_segments.into_iter().flatten());
+        let dense = stations.len() * config.companies.len();
+        let (route_index, route_rows, routes) = match storage {
+            RouteStorage::Indexed => {
+                let rows = carriers;
+                let index = offsets.len();
+                let stations_count = stations.len() as u32;
+                let origins = station_companies
+                    .iter()
+                    .enumerate()
+                    .flat_map(|(origin, owners)| {
+                        owners
+                            .iter()
+                            .map(move |&company| company * stations_count + origin as u32)
+                    })
+                    .collect::<Vec<_>>();
+                let mut lookup = vec![rows as u32; dense];
+                for (row, &pair) in origins.iter().enumerate() {
+                    lookup[pair as usize] = row as u32;
+                }
+                offsets.extend(lookup);
+                offsets.extend(origins);
+                let empty = [UNREACHABLE, u32::MAX, u32::MAX, 0, 0, UNREACHABLE];
+                (
+                    index,
+                    rows,
+                    device.tensor(&empty.repeat((rows + 1) * stations.len())),
+                )
+            }
+            RouteStorage::Dense => (
+                0,
+                dense,
+                device.empty((dense * stations.len() * ROUTE_WORDS).max(1)),
+            ),
+        };
         Self {
             availability: RouteAvailability::Available,
             firms: state.actors.firms() as u32,
@@ -335,9 +413,7 @@ impl Network {
                     .flat_map(|position| [position.x, position.y])
                     .collect::<Vec<_>>(),
             ),
-            access: device.empty(
-                crate::simulation::registry::entries::state_capacity(state.actors.len()) * 2,
-            ),
+            access: Self::station_access(device, state.actors.len()),
             companies: dynamic.companies,
             company_records: dynamic.records,
             station_companies: device.tensor(&offsets),
@@ -351,10 +427,14 @@ impl Network {
                     .chain(config.maintenance.quantities())
                     .collect::<Vec<_>>(),
             ),
-            routes: device.empty(
-                (config.companies.len() * stations.len() * stations.len() * ROUTE_WORDS).max(1),
+            routes,
+            route_index: route_index as u32,
+            route_rows: route_rows as u32,
+            quotes: device.empty(
+                (stations.len() * stations.len() * scenario.ring()
+                    + usize::from(route_index != 0) * stations.len())
+                .max(1),
             ),
-            quotes: device.empty((stations.len() * stations.len() * scenario.ring()).max(1)),
             regions: device.tensor(
                 &geography
                     .regions
@@ -393,11 +473,9 @@ impl Network {
             },
             false => CompanyBuffers::new(device, scenario, records),
         };
-        let access = match self.access.meta.num_elements() >= state.actors.len() * 2 {
+        let access = match self.access.meta.num_elements() >= state.actors.len() * 4 {
             true => self.access.clone(),
-            false => device.empty(
-                crate::simulation::registry::entries::state_capacity(state.actors.len()) * 2,
-            ),
+            false => Self::station_access(device, state.actors.len()),
         };
         Self {
             availability: RouteAvailability::Available,
@@ -411,6 +489,8 @@ impl Network {
                 self.region_count as usize,
             ),
             nodes: self.nodes,
+            route_index: self.route_index,
+            route_rows: self.route_rows,
             company_count: self.company_count,
             segment_count: self.segment_count,
             speed_multiplier: self.speed_multiplier,
@@ -446,6 +526,8 @@ impl Network {
                 _ => Feature::Enabled,
             },
             nodes: self.nodes,
+            route_index: self.route_index,
+            route_rows: self.route_rows,
             company_count: self.company_count,
             segment_count: self.segment_count,
             speed_multiplier: self.speed_multiplier,
@@ -473,6 +555,7 @@ impl Network {
 #[derive(Clone, Copy, Debug, Hash, PartialEq, Eq)]
 pub enum RailStage {
     Infrastructure,
+    DormantDemand,
     Access,
     Routes,
     Quotes,
@@ -482,10 +565,13 @@ pub enum RailStage {
 #[derive(Clone, Copy, Debug, Hash, PartialEq, Eq)]
 enum RailPass {
     Infrastructure,
+    DormantDemand,
     Access,
+    DirtyCarriers,
     PrepareRoutes,
     Routes,
     Quotes,
+    Inbound,
     CompleteQuotes,
     Close,
 }
@@ -518,10 +604,13 @@ impl GpuPass<RailInput> for AdvanceRailways {
                 &input.config,
                 &input.control,
             ),
+            RailPass::DormantDemand => dormant_demand(&mut input.state, &input.config),
             RailPass::Access => access(&input.actors, &mut input.config),
+            RailPass::DirtyCarriers => dirty_carriers(&mut input.state, &mut input.config),
             RailPass::PrepareRoutes => prepare_routes(&mut input.state, &mut input.config),
             RailPass::Routes => routes(&mut input.state, &mut input.config),
             RailPass::Quotes => quotes(&mut input.config),
+            RailPass::Inbound => inbound(&mut input.config),
             RailPass::CompleteQuotes => complete_quotes(&mut input.config),
             RailPass::Close => close(&mut input.state, &input.config, &input.control),
         }
@@ -539,8 +628,18 @@ pub fn launch(
     if config.railway.company_count > 0 {
         let passes: &[RailPass] = match stage {
             RailStage::Infrastructure => &[RailPass::Infrastructure],
+            RailStage::DormantDemand => &[RailPass::DormantDemand],
             RailStage::Access => &[RailPass::Access],
-            RailStage::Routes => &[RailPass::PrepareRoutes, RailPass::Routes],
+            RailStage::Routes => &[
+                RailPass::DirtyCarriers,
+                RailPass::PrepareRoutes,
+                RailPass::Routes,
+            ],
+            RailStage::Quotes if config.railway.route_index != 0 => &[
+                RailPass::Quotes,
+                RailPass::Inbound,
+                RailPass::CompleteQuotes,
+            ],
             RailStage::Quotes => &[RailPass::Quotes, RailPass::CompleteQuotes],
             RailStage::Close => &[RailPass::Close],
         };
@@ -548,8 +647,11 @@ pub fn launch(
             let count = match stage {
                 RailPass::Infrastructure => config.railway.company_count * device.workgroup,
                 RailPass::Close => config.railway.company_count,
+                RailPass::DormantDemand => config.railway.region_count,
                 RailPass::Access => config.actors,
-                RailPass::Routes => config.railway.nodes * config.railway.company_count,
+                RailPass::DirtyCarriers => config.railway.company_count * device.workgroup,
+                RailPass::Routes => config.railway.route_rows,
+                RailPass::Inbound => config.railway.nodes,
                 RailPass::Quotes => config.railway.nodes * config.railway.nodes * config.ring,
                 RailPass::PrepareRoutes | RailPass::CompleteQuotes => 1,
             };
@@ -936,49 +1038,88 @@ pub(super) fn demand(
 }
 
 #[cube]
-fn prepare_routes(state: &mut [u32], config: &mut EconomyConfig) {
-    if ABSOLUTE_POS == 0 {
-        let companies = config.railway.company_count;
-        let base = companies as usize * COMPANY_WORDS;
-        let unknown = config.railway.companies[base] == comptime!(RouteCacheState::Unknown as u32);
-        let mut changed = unknown;
-        for carrier in 0..companies {
-            let mut affected = unknown;
-            for owner in 0..companies {
-                let firm = config.railway.companies[owner as usize * COMPANY_WORDS];
-                let operating = load(
-                    state,
-                    comptime!(Field::RailOperating as u32) * config.state_stride + firm,
-                )
-                .extract(LOW_WORD);
-                let cached = config.railway.companies[base + 2 + owner as usize];
-                let allowed =
-                    config.railway.access_rights[(carrier * companies + owner) as usize] > 0;
-                affected = affected || (allowed && cached != operating);
-            }
-            changed = changed || affected;
-            config.railway.companies[base + 2 + companies as usize + carrier as usize] = select(
-                affected,
-                comptime!(RouteCacheState::Dirty as u32),
-                comptime!(RouteCacheState::Clean as u32),
-            );
-        }
-        for company in 0..companies {
-            let firm = config.railway.companies[company as usize * COMPANY_WORDS];
-            let operating = load(
-                state,
-                comptime!(Field::RailOperating as u32) * config.state_stride + firm,
-            )
-            .extract(LOW_WORD);
-            let cached = base + 2 + company as usize;
-            config.railway.companies[cached] = operating;
-        }
-        config.railway.companies[base] = select(
-            changed,
+fn dormant_demand(state: &mut [u32], config: &EconomyConfig) {
+    let region = ABSOLUTE_POS as u32;
+    if region < config.railway.region_count {
+        let units = times32(
+            regional_number(state, config, region, comptime!(RailCapacityField::Level)),
+            config.railway.units_per_level,
+        );
+        let available = regional_value(
+            state,
+            config,
+            region,
+            comptime!(RailCapacityField::Available),
+        );
+        let demand = regional_value(state, config, region, comptime!(RailCapacityField::Demand));
+        regional_set(
+            state,
+            config,
+            region,
+            maximum(demand, minus(units, available)),
+            comptime!(RailCapacityField::Demand),
+        );
+    }
+}
+
+#[cube]
+fn dirty_carriers(state: &mut [u32], config: &mut EconomyConfig) {
+    let companies = config.railway.company_count;
+    let base = companies as usize * COMPANY_WORDS;
+    let carrier = CUBE_POS as u32;
+    let mut affected = config.railway.companies[base] == comptime!(RouteCacheState::Unknown as u32);
+    let mut owner = UNIT_POS;
+    while owner < companies && !affected {
+        let firm = config.railway.companies[owner as usize * COMPANY_WORDS];
+        let operating = number(
+            state,
+            &*config,
+            comptime!(Field::RailOperating as u32),
+            firm,
+        );
+        let cached = config.railway.companies[base + 2 + owner as usize];
+        affected = cached != operating
+            && config.railway.access_rights[(carrier * companies + owner) as usize] > 0;
+        owner += CUBE_DIM;
+    }
+    let changed = parallel::reduce::<u32>(u32::cast_from(affected), comptime!(Reduction::Maximum));
+    if UNIT_POS == 0 && carrier < companies {
+        config.railway.companies[base + 2 + companies as usize + carrier as usize] = select(
+            changed > 0,
             comptime!(RouteCacheState::Dirty as u32),
             comptime!(RouteCacheState::Clean as u32),
         );
-        if changed {
+    }
+}
+
+#[cube]
+fn prepare_routes(state: &mut [u32], config: &mut EconomyConfig) {
+    let companies = config.railway.company_count;
+    let base = companies as usize * COMPANY_WORDS;
+    let mut changed = 0u32;
+    let mut owner = UNIT_POS;
+    while owner < companies {
+        let firm = config.railway.companies[owner as usize * COMPANY_WORDS];
+        config.railway.companies[base + 2 + owner as usize] = number(
+            state,
+            &*config,
+            comptime!(Field::RailOperating as u32),
+            firm,
+        );
+        changed |= u32::cast_from(
+            config.railway.companies[base + 2 + companies as usize + owner as usize]
+                == comptime!(RouteCacheState::Dirty as u32),
+        );
+        owner += CUBE_DIM;
+    }
+    let any = parallel::reduce::<u32>(changed, comptime!(Reduction::Maximum));
+    if UNIT_POS == 0 {
+        config.railway.companies[base] = select(
+            any > 0,
+            comptime!(RouteCacheState::Dirty as u32),
+            comptime!(RouteCacheState::Clean as u32),
+        );
+        if any > 0 {
             config.railway.companies[base + 1] = comptime!(RouteCacheState::Dirty as u32);
         }
     }
@@ -993,17 +1134,33 @@ fn complete_quotes(config: &mut EconomyConfig) {
 }
 
 #[cube]
+fn route_cell(config: &EconomyConfig, carrier: u32, origin: u32, destination: u32) -> usize {
+    let nodes = config.railway.nodes;
+    let mut row = carrier * nodes + origin;
+    if config.railway.route_index != 0 {
+        row = config.railway.station_companies[(config.railway.route_index + row) as usize];
+    }
+    (row * nodes + destination) as usize * ROUTE_WORDS
+}
+
+#[cube]
 fn routes(state: &mut [u32], config: &mut EconomyConfig) {
     let invocation = ABSOLUTE_POS as u32;
     let nodes = config.railway.nodes;
-    let carrier = invocation / max(nodes, 1);
+    let mut pair = invocation;
+    if config.railway.route_index != 0 && invocation < config.railway.route_rows {
+        pair = config.railway.station_companies[(config.railway.route_index
+            + nodes * config.railway.company_count
+            + invocation) as usize];
+    }
+    let carrier = pair / max(nodes, 1);
     let cache = config.railway.company_count as usize * COMPANY_WORDS;
     let cached_carrier = min(carrier, config.railway.company_count - 1);
     let dirty = config.railway.companies
         [cache + 2 + config.railway.company_count as usize + cached_carrier as usize]
         == comptime!(RouteCacheState::Dirty as u32);
-    if invocation < nodes * config.railway.company_count && dirty {
-        let origin = invocation % nodes;
+    if invocation < config.railway.route_rows && dirty {
+        let origin = pair % nodes;
         let row = invocation * nodes * ROUTE_WORDS as u32;
         let incident_start = config.railway.station_companies[nodes as usize];
         for node in 0..nodes {
@@ -1127,10 +1284,18 @@ fn station(actors: &[u32], config: &EconomyConfig, actor: u32) -> u32 {
 fn access(actors: &[u32], config: &mut EconomyConfig) {
     let actor = ABSOLUTE_POS as u32;
     if actor < config.actors && config.railway.nodes > 0 {
-        let node = station(actors, &*config, actor);
-        let distance = access_distance(actors, &*config, actor, node);
-        config.railway.access[actor as usize * 2] = node;
-        config.railway.access[actor as usize * 2 + 1] = distance;
+        let stride = actors.len() / ActorLayout::WORDS;
+        let x = actors[ActorLayout::X * stride + actor as usize];
+        let y = actors[ActorLayout::Y * stride + actor as usize];
+        let position = config.railway.access.len() / 2 + actor as usize * 2;
+        if config.railway.access[position] != x + 1 || config.railway.access[position + 1] != y {
+            let node = station(actors, &*config, actor);
+            config.railway.access[actor as usize * 2] = node;
+            config.railway.access[actor as usize * 2 + 1] =
+                access_distance(actors, &*config, actor, node);
+            config.railway.access[position] = x + 1;
+            config.railway.access[position + 1] = y;
+        }
     }
 }
 
@@ -1248,9 +1413,7 @@ impl FreightRequest {
             && config.railway.nodes > 0
             && company < config.railway.company_count
         {
-            let base = (((company * config.railway.nodes + self.origin) * config.railway.nodes
-                + self.destination)
-                * ROUTE_WORDS as u32) as usize;
+            let base = route_cell(config, company, self.origin, self.destination);
             let carrier = config.railway.routes[base + 2];
             let days = self.access_days
                 + max(
@@ -1273,22 +1436,59 @@ impl FreightRequest {
         result
     }
 
-    fn preferred(&self, config: &EconomyConfig) -> FreightRoute {
-        let mut result = self.animal();
+    fn quoted_carrier(&self, config: &EconomyConfig) -> u32 {
+        let mut company = u32::new(comptime!(i64::from(u32::MAX)));
         if comptime!(config.railway.routes_enabled == Feature::Enabled) && config.railway.nodes > 0
         {
             let limit = min(
                 max(self.animal_days, self.access_days + 1) - self.access_days - 1,
                 config.ring - 1,
             );
-            let company = config.railway.quotes[((self.origin * config.railway.nodes
+            company = config.railway.quotes[((self.origin * config.railway.nodes
                 + self.destination)
                 * config.ring
                 + limit) as usize];
-            result.replace(&self.candidate(config, company));
         }
-        result
+        company
     }
+
+    fn preferred(&self, config: &EconomyConfig) -> FreightRoute {
+        self.candidate(config, self.quoted_carrier(config))
+    }
+}
+
+#[cube]
+fn inbound(config: &mut EconomyConfig) {
+    let destination = ABSOLUTE_POS as u32;
+    let nodes = config.railway.nodes;
+    let table = nodes * nodes * config.ring;
+    let cache = config.railway.company_count as usize * COMPANY_WORDS;
+    if destination < nodes
+        && config.railway.companies[cache + 1] != comptime!(RouteCacheState::Clean as u32)
+    {
+        let mut origin = 0u32;
+        let mut connected = false;
+        while origin < nodes && !connected {
+            let last = (origin * nodes + destination + 1) * config.ring - 1;
+            connected = config.railway.quotes[last as usize] < config.railway.company_count;
+            origin += 1;
+        }
+        config.railway.quotes[(table + destination) as usize] = u32::cast_from(connected);
+    }
+}
+
+#[cube]
+pub(super) fn serves_buyer(config: &EconomyConfig, buyer: u32) -> bool {
+    let mut available = false;
+    if comptime!(config.railway.routes_enabled == Feature::Enabled) && config.railway.nodes > 0 {
+        available = true;
+        if config.railway.route_index != 0 {
+            let node = config.railway.access[buyer as usize * 2];
+            let table = config.railway.nodes * config.railway.nodes * config.ring;
+            available = config.railway.quotes[(table + node) as usize] != 0;
+        }
+    }
+    available
 }
 
 #[cube]
@@ -1312,7 +1512,7 @@ fn quotes(config: &mut EconomyConfig) {
         let end = config.railway.station_companies[selected.origin as usize + 1];
         for entry in start..end {
             let company = config.railway.station_companies[entry as usize];
-            let base = ((company * nodes * nodes + pair) * ROUTE_WORDS as u32) as usize;
+            let base = route_cell(&*config, company, selected.origin, selected.destination);
             let path = FreightRoute {
                 days: max(
                     ceildiv(
@@ -1356,6 +1556,27 @@ pub(super) struct DeliveryRequest {
 }
 
 #[cube]
+pub(super) fn may_book(
+    config: &EconomyConfig,
+    buyer: u32,
+    seller: u32,
+    trip: u32,
+    buyer_access: u32,
+) -> bool {
+    let animal_days = max(ceildiv(trip, config.shipment_speed), 1);
+    let request = FreightRequest {
+        animal_days,
+        origin: config.railway.access[seller as usize * 2],
+        destination: config.railway.access[buyer as usize * 2],
+        access_days: ceildiv(
+            config.railway.access[seller as usize * 2 + 1] + buyer_access,
+            config.shipment_speed,
+        ),
+    };
+    animal_days > config.ring || request.quoted_carrier(config) < config.railway.company_count
+}
+
+#[cube]
 pub(super) fn delivery_days(config: &EconomyConfig, request: DeliveryRequest) -> u32 {
     let mut days = max(ceildiv(request.trip, config.shipment_speed), 1);
     if comptime!(config.railway.routes_enabled == Feature::Enabled) && config.railway.nodes > 0 {
@@ -1369,9 +1590,7 @@ pub(super) fn delivery_days(config: &EconomyConfig, request: DeliveryRequest) ->
         let company = config.railway.quotes
             [((origin * config.railway.nodes + destination) * config.ring + limit) as usize];
         if company < config.railway.company_count {
-            let base = (((company * config.railway.nodes + origin) * config.railway.nodes
-                + destination)
-                * ROUTE_WORDS as u32) as usize;
+            let base = route_cell(config, company, origin, destination);
             let carrier = config.railway.routes[base + 2];
             let candidate = access
                 + max(
@@ -1470,11 +1689,7 @@ fn traverse(config: &EconomyConfig, path: &FreightRoute) -> RouteTraversal {
     let rate = config.railway.companies[path.carrier as usize * COMPANY_WORDS + 1];
     let mut steps = 0u32;
     while cursor != path.origin && steps < config.railway.nodes {
-        let edge = config.railway.routes[(((path.carrier * config.railway.nodes + path.origin)
-            * config.railway.nodes
-            + cursor)
-            * ROUTE_WORDS as u32
-            + 1) as usize];
+        let edge = config.railway.routes[route_cell(config, path.carrier, path.origin, cursor) + 1];
         if edge < config.railway.segment_count {
             let base = edge as usize * SEGMENT_WORDS;
             let owner = config.railway.segments[base + 2];

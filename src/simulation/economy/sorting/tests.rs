@@ -399,3 +399,72 @@ fn graph_sort_rebuilds_after_buffer_layout_device_workgroup_thread_and_stream_ch
     .expect("sort thread completed")?;
     Ok(())
 }
+
+#[test]
+fn input_tile_preserves_seller_ranges_and_rotated_buyer_priority_on_gpu() -> Result<()> {
+    use crate::simulation::{
+        economy::search::INPUT_BUYERS_FIELD, flags::EventStatus, layout::ProposalLayout,
+    };
+    let device = crate::simulation::tests::device(64)?;
+    let capacity = 2 * INPUT_TILE + 1;
+    let buffers = SortBuffers::new(&device, capacity);
+    let mut proposals = vec![0; capacity * ProposalLayout::WORDS];
+    for (buyer, proposal) in proposals
+        .chunks_exact_mut(ProposalLayout::WORDS)
+        .enumerate()
+    {
+        proposal[ProposalLayout::ACTOR] = (buyer % 13) as u32;
+    }
+    let proposals = device.tensor(&proposals);
+    for orders in [1, 127, 128, 129, INPUT_TILE - 1, INPUT_TILE] {
+        let case = SortCase {
+            capacity,
+            active: orders,
+            scan: parallel::ScanMode::new(&device),
+            fault: Fault::Clear,
+        };
+        let mut parameters = case.parameters();
+        parameters.settlement_rotation = 2079;
+        let mut jobs = vec![0; (INPUT_BUYERS_FIELD as usize + 1) * capacity];
+        let buyers = &mut jobs[INPUT_BUYERS_FIELD as usize * capacity..][..orders];
+        for (slot, buyer) in buyers.iter_mut().enumerate() {
+            *buyer = ((orders - slot) * 2) as u32;
+        }
+        let mut expected = buyers.to_vec();
+        expected.sort_by_key(|&buyer| {
+            (
+                buyer % 13,
+                (buyer + capacity as u32 - parameters.settlement_rotation) % capacity as u32,
+            )
+        });
+        buffers.reset(&device, &case);
+        sort_input_tile(
+            &device,
+            &device.tensor(&jobs),
+            &proposals,
+            &buffers.scratch,
+            &buffers.control,
+            &parameters,
+            orders,
+        );
+        let actual = device.read(&buffers.scratch)?;
+        for (slot, &buyer) in expected.iter().enumerate() {
+            assert_eq!(actual[slot], buyer % 13);
+            assert_eq!(actual[capacity + slot], buyer);
+            assert_eq!(
+                actual[4 * capacity + buyer as usize],
+                EventStatus::Inactive as u32
+            );
+            let first = slot == 0 || expected[slot - 1] % 13 != buyer % 13;
+            assert_eq!(
+                actual[5 * capacity + slot],
+                if first { slot as u32 } else { u32::MAX }
+            );
+        }
+        assert_eq!(
+            device.read(&buffers.control)?[markets::RANGE_SLOTS_WORD],
+            orders as u32
+        );
+    }
+    Ok(())
+}

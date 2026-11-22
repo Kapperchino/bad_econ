@@ -299,10 +299,14 @@ pub(super) fn advance(
 const METRICS: usize = 16;
 
 #[cube(launch)]
-fn observe(state: &mut [u32], config: &EconomyConfig, totals: &mut [u64]) {
+fn observe(state: &mut [u32], config: &EconomyConfig, output: &mut [u64], #[comptime] lanes: u32) {
     let row = ABSOLUTE_POS as u32;
+    let mut totals = Array::<u64>::new(METRICS);
+    #[unroll]
+    for metric in 0..METRICS {
+        totals[metric] = 0;
+    }
     if row < config.actors {
-        let start = row as usize * METRICS;
         let living = get(state, config, comptime!(Field::LivingMembers as u32), row);
         let adults = get(state, config, comptime!(Field::YoungAdults as u32), row)
             + get(state, config, comptime!(Field::OlderAdults as u32), row);
@@ -326,15 +330,15 @@ fn observe(state: &mut [u32], config: &EconomyConfig, totals: &mut [u64]) {
             get(state, config, comptime!(Field::Employed as u32), row),
             adults - owner - farmers,
         );
-        totals[start] = u64::cast_from(living);
-        totals[start + 1] = u64::cast_from(living - adults);
+        totals[0usize] = u64::cast_from(living);
+        totals[1usize] = u64::cast_from(living - adults);
         for metric in 0..5u32 {
-            totals[start + 2 + metric as usize] = wide(load(
+            totals[2 + metric as usize] = wide(load(
                 state,
                 (comptime!(Field::CohortBirths as u32) + metric) * config.state_stride + row,
             ));
         }
-        totals[start + 7] = u64::cast_from(get(state, config, comptime!(Field::Hours as u32), row))
+        totals[7usize] = u64::cast_from(get(state, config, comptime!(Field::Hours as u32), row))
             + u64::cast_from(select(
                 get(state, config, comptime!(Field::HouseholdBudget as u32), row) > 0,
                 get(state, config, comptime!(Field::CartageMinutes as u32), row),
@@ -346,26 +350,42 @@ fn observe(state: &mut [u32], config: &EconomyConfig, totals: &mut [u64]) {
                 comptime!(Field::HomeMinutes as u32),
                 row,
             ));
-        totals[start + 8] = u64::cast_from(living)
+        totals[8usize] = u64::cast_from(living)
             * u64::cast_from(get(
                 state,
                 config,
                 comptime!(Field::CohortFamineExposure as u32),
                 row,
             ));
-        totals[start + 9] = u64::cast_from(living)
+        totals[9usize] = u64::cast_from(living)
             * u64::cast_from(get(
                 state,
                 config,
                 comptime!(Field::CohortColdExposure as u32),
                 row,
             ));
-        totals[start + 10] = u64::cast_from(farmers);
-        totals[start + 11] = u64::cast_from(paid);
-        totals[start + 12] = u64::cast_from(owner);
-        totals[start + 13] = u64::cast_from(adults - owner - farmers - paid);
-        totals[start + 14] = u64::cast_from(living - adults);
-        totals[start + 15] = 0u64;
+        totals[10usize] = u64::cast_from(farmers);
+        totals[11usize] = u64::cast_from(paid);
+        totals[12usize] = u64::cast_from(owner);
+        totals[13usize] = u64::cast_from(adults - owner - farmers - paid);
+        totals[14usize] = u64::cast_from(living - adults);
+        totals[15usize] = 0u64;
+    }
+    #[unroll]
+    for metric in 0..METRICS {
+        let value = totals[metric];
+        if comptime!(lanes > 1) {
+            let low = plane_sum(u32::cast_from(value) & 0xffff);
+            let middle = plane_sum(u32::cast_from(value) >> 16);
+            let high = plane_sum(u32::cast_from(value >> 32));
+            if UNIT_POS_PLANE == 0 && row < config.actors {
+                output[(row / comptime!(lanes)) as usize * METRICS + metric] = u64::cast_from(low)
+                    + (u64::cast_from(middle) << 16)
+                    + (u64::cast_from(high) << 32);
+            }
+        } else if row < config.actors {
+            output[row as usize * METRICS + metric] = value;
+        }
     }
 }
 
@@ -376,7 +396,21 @@ pub(super) fn observation(
     initial_population: u64,
 ) -> Result<PopulationObservation> {
     let rows = config.actors as usize;
-    let totals = device.empty(rows * METRICS * 2);
+    let hardware = &device.client.properties().hardware;
+    let lanes = match (
+        crate::simulation::parallel::ScanMode::new(device),
+        hardware.plane_size_min,
+        hardware.plane_size_max,
+    ) {
+        (crate::simulation::parallel::ScanMode::Plane, 32, 32)
+            if device.workgroup.is_multiple_of(32) =>
+        {
+            32u32
+        }
+        _ => 1,
+    };
+    let partials = rows.div_ceil(lanes as usize);
+    let totals = device.empty(partials * METRICS * 2);
     observe::launch(
         &device.client,
         device.count(rows),
@@ -384,10 +418,14 @@ pub(super) fn observation(
         state.buffer_arg(),
         config.launch(),
         totals.buffer_arg(),
+        lanes,
     );
     let dtype = <u64 as Scalar>::elem_type_native();
-    let input =
-        cubecl::std::tensor::TensorHandle::new_contiguous([rows, METRICS], totals.handle, dtype);
+    let input = cubecl::std::tensor::TensorHandle::new_contiguous(
+        [partials, METRICS],
+        totals.handle,
+        dtype,
+    );
     let sums = crate::simulation::reduction::reduce(
         device,
         &input,

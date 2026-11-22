@@ -672,8 +672,8 @@ fn gpu_firm_growth_matches_full_rebuild_with_births_and_migration() -> Result<()
             .context("GPU growth")?;
         if gpu.actors().len() <= previous_stride as usize {
             assert!(market_graphs::same_buffer(&previous_state, &gpu.state));
-            assert!(market_graphs::same_buffer(&previous_audited, &gpu.audited));
         }
+        assert!(gpu.audited.shares_prefix(&previous_audited));
         assert!(gpu.config.state_stride as usize > gpu.actors().len());
         let mut expected = reference.download()?;
         let people = reference

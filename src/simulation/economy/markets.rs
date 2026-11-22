@@ -54,10 +54,36 @@ impl SearchBuffers {
         let layout = crate::domain::SupplierCacheLayout::new(rows);
         Self {
             requests: device.empty(actors * (SEARCH_REQUEST_FIELDS + layout.extra_words)),
-            successes: device
-                .empty(search_counts_offset(actors) + 2 * search_blocks(actors) + 512 + actors),
+            successes: device.empty(Self::success_words(rows)),
             dispatches: Self::dispatch_buffer(device),
         }
+    }
+
+    pub fn resized(
+        &self,
+        device: &crate::simulation::Device,
+        rows: &crate::domain::ActorRows,
+    ) -> Self {
+        let actors = rows.len();
+        let layout = crate::domain::SupplierCacheLayout::new(rows);
+        Self {
+            requests: device.resize_scratch(
+                &self.requests,
+                actors * (SEARCH_REQUEST_FIELDS + layout.extra_words),
+            ),
+            successes: device.resize_scratch(&self.successes, Self::success_words(rows)),
+            dispatches: self.dispatches.clone(),
+        }
+    }
+
+    fn success_words(rows: &crate::domain::ActorRows) -> usize {
+        let actors = rows.len();
+        let first_firm = rows.firm_indices().next().unwrap_or(actors);
+        search_counts_offset(actors)
+            + 2 * search_blocks(actors)
+            + 512
+            + actors
+            + 2 * (actors - first_firm)
     }
 
     pub(in crate::simulation) fn dispatch_buffer(
@@ -280,6 +306,46 @@ pub(in crate::simulation) fn active(
         Discovery::Indexed => control[CONSTRUCTED_EVENTS_WORD].load(),
         #[cfg(test)]
         _ => parameters.sort_count,
+    }
+}
+
+#[cube]
+pub(super) fn supplier_ranges(
+    scratch: &mut [u32],
+    spatial: &[u32],
+    control: &[Atomic<u32>],
+    config: &EconomyConfig,
+    parameters: &EconomyParameters,
+    member: u32,
+) {
+    let cells = config.spatial_side * config.spatial_side;
+    let orders = active(control, parameters);
+    if orders > 0 && member < spatial[cells as usize] {
+        let peer = spatial[(cells + 1 + member) as usize];
+        let source = parameters.sort_source;
+        let mut start = 0u32;
+        let mut end = orders;
+        while start < end {
+            let middle = start + (end - start) / 2;
+            let smaller = scratch[(source + middle) as usize] < peer;
+            start = select(smaller, middle + 1, start);
+            end = select(smaller, end, middle);
+        }
+        if start < orders && scratch[(source + start) as usize] == peer {
+            let mut after = start + 1;
+            end = orders;
+            while after < end {
+                let middle = after + (end - after) / 2;
+                let same = scratch[(source + middle) as usize] == peer;
+                after = select(same, middle + 1, after);
+                end = select(same, end, middle);
+            }
+            let slot = control[RANGE_SLOTS_WORD].fetch_add(1);
+            let count = parameters.count;
+            scratch[(5 * count + slot) as usize] = start;
+            scratch[(6 * count + slot) as usize] = after - start;
+            scratch[(7 * count + peer) as usize] = after;
+        }
     }
 }
 

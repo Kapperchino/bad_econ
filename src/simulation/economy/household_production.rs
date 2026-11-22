@@ -99,6 +99,22 @@ pub(super) fn offers(
 }
 
 #[cube]
+pub(super) fn grain_dealer(
+    state: &mut [u32],
+    actors: &[u32],
+    config: &EconomyConfig,
+    buyer: u32,
+) -> bool {
+    kind(actors, buyer).output() == comptime!(Good::Grain as u32)
+        && number(
+            state,
+            config,
+            comptime!(Field::EnterpriseModel as u32),
+            buyer,
+        ) == comptime!(EnterpriseModel::Distributor as u32)
+}
+
+#[cube]
 pub(super) fn grain_counterparty(
     state: &mut [u32],
     actors: &[u32],
@@ -106,13 +122,7 @@ pub(super) fn grain_counterparty(
     buyer: u32,
     seller: u32,
 ) -> bool {
-    let buyer_is_dealer = kind(actors, buyer).output() == comptime!(Good::Grain as u32)
-        && number(
-            state,
-            config,
-            comptime!(Field::EnterpriseModel as u32),
-            buyer,
-        ) == comptime!(EnterpriseModel::Distributor as u32);
+    let buyer_is_dealer = grain_dealer(state, actors, config, buyer);
     let seller_is_dealer = number(
         state,
         config,

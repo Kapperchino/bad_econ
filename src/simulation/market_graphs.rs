@@ -34,7 +34,14 @@ enum Recording {
 }
 
 #[derive(Clone, Copy, PartialEq, Eq)]
+pub(super) enum GraphScope {
+    PrepareOrders,
+    FullMarket,
+}
+
+#[derive(Clone, Copy, PartialEq, Eq)]
 pub(super) struct MarketKey {
+    pub scope: GraphScope,
     pub market: MarketProgram,
     pub phase: crate::domain::Phase,
     pub preparation: Preparation,
@@ -306,6 +313,7 @@ mod tests {
                 parameters.clock = MarketClock::Scalars;
                 parameters.good = Good::Bread as u32;
                 let key = MarketKey {
+                    scope: GraphScope::FullMarket,
                     market: market.into(),
                     phase: Phase::ProvisionPurchase,
                     preparation: Preparation::First,
@@ -347,6 +355,7 @@ mod tests {
         let counter = device.tensor(&[0]);
         let mut graphs = MarketGraphs::default();
         let key = MarketKey {
+            scope: GraphScope::FullMarket,
             market: MarketProgram::Household,
             phase: Phase::ProvisionPurchase,
             preparation: Preparation::First,

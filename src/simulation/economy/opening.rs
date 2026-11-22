@@ -120,15 +120,17 @@ fn opening(
                 let inventory = coordinate(config, good + 1, actor);
                 let transit = coordinate(config, TRANSIT_FIELDS as u32 + good, actor);
                 let delivery = state[slot];
-                let received = plus(state[inventory], delivery);
-                received.faults.record(control);
-                state[inventory] = received.value;
-                let available = state[transit];
-                if lt(available, delivery) {
-                    KernelFaults::new(comptime!(FaultFlags::TRANSIT_UNDERFLOW)).record(control);
+                if !equal(delivery, zero()) {
+                    let received = plus(state[inventory], delivery);
+                    received.faults.record(control);
+                    state[inventory] = received.value;
+                    let available = state[transit];
+                    if lt(available, delivery) {
+                        KernelFaults::new(comptime!(FaultFlags::TRANSIT_UNDERFLOW)).record(control);
+                    }
+                    state[transit] = minus(available, delivery);
+                    state[slot] = zero();
                 }
-                state[transit] = minus(available, delivery);
-                state[slot] = zero();
             }
         }
     }

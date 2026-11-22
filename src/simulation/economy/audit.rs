@@ -883,22 +883,15 @@ fn validate_ring(
                 actor,
             );
         }
-        let block = (field * config.state_stride + actor) * 2
-            / crate::simulation::tensor::SNAPSHOT_BLOCK_WORDS as u32;
-        match comptime!(ring_tracking) {
-            RingTracking::ObservedPlane => {
-                let present = plane_any(!equal(amount, zero()));
-                if present && UNIT_POS % 32 == 0 {
-                    ring_mask[block as usize].store(1);
-                }
-            }
-            RingTracking::Observed => {
-                if !equal(amount, zero()) {
-                    ring_mask[block as usize].store(1);
-                }
-            }
-            RingTracking::Untracked => (),
-        }
+        mark_transit(config, ring_mask, actor, field, amount, ring_tracking);
+        mark_transit(
+            config,
+            ring_mask,
+            actor,
+            field + Good::COUNT as u32 * config.ring,
+            waiting,
+            ring_tracking,
+        );
         in_ring = checked_sum(
             checked_sum(in_ring, native(amount), control),
             native(waiting),
@@ -907,6 +900,33 @@ fn validate_ring(
     }
     if in_ring != held {
         KernelFaults::new(comptime!(FaultFlags::TRANSIT_MISMATCH)).record(control);
+    }
+}
+
+#[cube]
+fn mark_transit(
+    config: &EconomyConfig,
+    ring_mask: &[Atomic<u32>],
+    actor: u32,
+    field: u32,
+    amount: Ticks,
+    #[comptime] ring_tracking: RingTracking,
+) {
+    let block = (field * config.state_stride + actor) * 2
+        / crate::simulation::tensor::SNAPSHOT_BLOCK_WORDS as u32;
+    match comptime!(ring_tracking) {
+        RingTracking::ObservedPlane => {
+            let present = plane_any(!equal(amount, zero()));
+            if present && UNIT_POS % 32 == 0 {
+                ring_mask[block as usize].store(1);
+            }
+        }
+        RingTracking::Observed => {
+            if !equal(amount, zero()) {
+                ring_mask[block as usize].store(1);
+            }
+        }
+        RingTracking::Untracked => (),
     }
 }
 
@@ -1057,7 +1077,11 @@ mod tests {
             let field = BASE_FIELDS + good * scenario.ring() + scenario.ring() - 1;
             for actor in [0, 31, 32, count - 1] {
                 let amount = actor as u64 + 1;
-                state.values[field * count + actor] = amount;
+                let transit_field = match actor % 2 {
+                    0 => field,
+                    _ => field + Good::COUNT * scenario.ring(),
+                };
+                state.values[transit_field * count + actor] = amount;
                 state.values[(TRANSIT_FIELDS + good) * count + actor] = amount;
                 state.set(Field::Transit, actor, amount);
             }
@@ -1128,7 +1152,14 @@ mod tests {
                 },
             );
             assert_eq!(coalesced, simulation.device.read(mask)?);
-            assert!(coalesced.iter().any(|&value| value > 0));
+            for actor in [0, 31] {
+                let field = field + actor % 2 * Good::COUNT * scenario.ring();
+                let word = (field * simulation.config.state_stride as usize + actor) * TICK_WORDS;
+                assert_eq!(
+                    coalesced[word / crate::simulation::tensor::SNAPSHOT_BLOCK_WORDS],
+                    1
+                );
+            }
             assert_eq!(
                 FaultFlags::read(&simulation.device.read(&simulation.control)?)?,
                 FaultFlags::empty()

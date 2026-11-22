@@ -238,9 +238,27 @@ impl Device {
             DType::U32,
         )
     }
+    pub(super) fn resize_scratch(&self, previous: &CubeTensor, words: usize) -> CubeTensor {
+        let bytes = (words * WORD_BYTES) as u64;
+        let mut handle = match previous.handle.size() >= bytes {
+            true => previous.handle.clone(),
+            false => {
+                let capacity = words + words / 32;
+                self.empty(capacity).handle
+            }
+        };
+        handle.offset_end = Some(handle.size() - bytes);
+        CubeTensor::new_contiguous(
+            self.client.clone(),
+            self.cube.clone(),
+            Shape::new([words]),
+            handle,
+            DType::U32,
+        )
+    }
     pub(super) fn state_buffer(&self, words: usize) -> CubeTensor {
         match words * WORD_BYTES {
-            bytes if bytes >= STATE_BUFFER_BYTES => {
+            bytes if (STATE_BUFFER_BYTES..256 * 1024 * 1024).contains(&bytes) => {
                 let granularity = (bytes / 16).next_power_of_two().max(STATE_BUFFER_BYTES);
                 let memory = &self.client.properties().memory;
                 let limit = memory.max_page_size / memory.alignment * memory.alignment;

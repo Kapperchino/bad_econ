@@ -8,6 +8,25 @@ pub(in crate::simulation) fn state_capacity(count: usize) -> usize {
     (count + growth).next_multiple_of(growth)
 }
 
+pub(in crate::simulation) fn registry_stride(
+    scenario: &Scenario,
+    actors: &crate::domain::ActorRows,
+    spare_bytes: u64,
+) -> usize {
+    let count = actors.len();
+    let row_words = scenario.fields() * TICK_WORDS;
+    let spare_rows = spare_bytes / (row_words * size_of::<u32>() * 2) as u64;
+    let households = count - actors.firms();
+    let expected_entries =
+        households * scenario.config().entrepreneurship.interested_per_mille as usize / 1000;
+    let preferred =
+        state_capacity(count).max((count + expected_entries.min(count / 8)).next_multiple_of(256));
+    preferred
+        .min(count.saturating_add(spare_rows as usize))
+        .min(u32::MAX as usize / row_words)
+        .max(count)
+}
+
 pub(in crate::simulation) struct EntryRequests {
     pub transitions: Vec<PendingRecord>,
     entries: Vec<PendingRecord>,
@@ -105,7 +124,8 @@ impl EntryBatch {
             .collect::<BTreeSet<_>>()
             .into_iter()
             .collect::<Vec<_>>();
-        let required = selected.len() as u64 * scenario.fields() as u64 * 16;
+        let fields = crate::domain::BASE_FIELDS;
+        let required = selected.len() as u64 * fields as u64 * 16;
         match device
             .reclaim_memory(required)?
             .bytes_reserved
@@ -123,7 +143,7 @@ impl EntryBatch {
                 .map(|&index| index as u32)
                 .collect::<Vec<_>>(),
         );
-        let values = device.empty(selected.len() * scenario.fields() * TICK_WORDS);
+        let values = device.empty(selected.len() * fields * TICK_WORDS);
         transfer(
             device,
             state,
@@ -243,7 +263,7 @@ impl EntryBatch {
             .collect::<Vec<_>>();
         let compact_values = &compact.values;
         let compact_count = compact.actors.len();
-        let values = (0..scenario.fields())
+        let values = (0..fields)
             .flat_map(|field| {
                 patches
                     .iter()
@@ -259,32 +279,45 @@ impl EntryBatch {
         })
     }
 
-    pub fn stride(&self, previous: usize) -> usize {
-        let count = self.metadata.actors.len();
-        match count <= previous {
-            true => previous,
-            false => state_capacity(count),
-        }
-    }
-
     pub fn indices(&self) -> &CubeTensor {
         &self.indices
     }
 
-    pub fn grow(&self, device: &Device, previous: &CubeTensor, fields: usize) -> CubeTensor {
+    pub fn grow(
+        &self,
+        device: &Device,
+        previous: &CubeTensor,
+        fields: usize,
+        stride: usize,
+    ) -> CubeTensor {
         let before = previous.meta.num_elements() / (fields * TICK_WORDS);
-        let stride = self.stride(before);
         let grown = match stride == before {
             true => previous.clone(),
             false => {
                 let grown = device.state_buffer(stride * fields * TICK_WORDS);
-                transfer(
-                    device,
-                    previous,
-                    &grown,
-                    &self.indices,
-                    before,
-                    Transfer::Grow,
+                let width = if before.is_multiple_of(2) && stride.is_multiple_of(2) {
+                    4
+                } else {
+                    2
+                };
+                let old_width = before * TICK_WORDS / width;
+                let new_width = stride * TICK_WORDS / width;
+                let groups = new_width.div_ceil(device.workgroup as usize * 4);
+                let grid = CubeCount::Static(
+                    groups.min(65535) as u32,
+                    fields.min(65535) as u32,
+                    groups.div_ceil(65535) as u32,
+                );
+                let dimensions = CubeDim::new_1d(device.workgroup);
+                grow_fields::launch(
+                    &device.client,
+                    grid,
+                    dimensions,
+                    width,
+                    previous.buffer_arg(),
+                    grown.buffer_arg(),
+                    old_width as u32,
+                    new_width as u32,
                 );
                 grown
             }
@@ -301,10 +334,35 @@ impl EntryBatch {
     }
 }
 
+#[cube(launch)]
+fn grow_fields<N: Size>(
+    source: &[Vector<u32, N>],
+    target: &mut [Vector<u32, N>],
+    old_width: u32,
+    new_width: u32,
+) {
+    let mut field = CUBE_POS_Y;
+    let fields = target.len() / new_width as usize;
+    let block = CUBE_POS_X + CUBE_POS_Z * CUBE_COUNT_X;
+    while (field as usize) < fields {
+        #[unroll]
+        for part in 0..4u32 {
+            let column = (block * 4 + part) * CUBE_DIM + UNIT_POS;
+            if column < new_width {
+                let mut value = Vector::<u32, N>::new(0);
+                if column < old_width {
+                    value = source[(field * old_width + column) as usize];
+                }
+                target[(field * new_width + column) as usize] = value;
+            }
+        }
+        field += CUBE_COUNT_Y;
+    }
+}
+
 #[derive(Clone, Copy, Debug, Hash, PartialEq, Eq)]
 pub(super) enum Transfer {
     Gather,
-    Grow,
     Scatter,
 }
 
@@ -356,19 +414,6 @@ fn transfer_rows(
                 let field = id / indices.len();
                 let actor = indices[id % indices.len()] as usize;
                 target[id] = source[field * actors as usize + actor];
-            }
-        }
-        Transfer::Grow => {
-            if id < target.len() {
-                let fields = source.len() / actors as usize;
-                let count = target.len() / fields;
-                let actor = id % count;
-                let field = id / count;
-                let mut value = Ticks::new(0);
-                if actor < actors as usize {
-                    value = source[field * actors as usize + actor];
-                }
-                target[id] = value;
             }
         }
         Transfer::Scatter => {

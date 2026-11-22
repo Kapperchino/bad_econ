@@ -270,8 +270,17 @@ struct DispatchInput {
     control: Box<[Atomic<u32>]>,
     dispatches: Box<[u32]>,
     workgroup: u32,
-    resources: u32,
-    good: u32,
+    config: EconomyConfig,
+    parameters: crate::simulation::parameters::EconomyParameters,
+    spatial: Box<[u32]>,
+    #[cube(comptime)]
+    resource_selection: ResourceSelection,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+pub enum ResourceSelection {
+    AllFirms,
+    MarketSuppliers,
 }
 
 struct FreightDispatch;
@@ -287,13 +296,16 @@ impl GpuPass<DispatchInput> for PrepareDispatch {
     type Output = ();
 
     fn execute(mut input: DispatchInput) {
+        input.parameters.refresh(&mut input.config);
         let active = input.control[CONSTRUCTED_EVENTS_WORD].load();
-        let mut resources = input.resources;
-        if input.good == comptime!(Good::Bread as u32)
-            || input.good == comptime!(Good::Grain as u32)
-        {
-            resources += active;
-        }
+        let layout = FreightParticipants::new(
+            &input.config,
+            &input.spatial,
+            &input.parameters,
+            active,
+            comptime!(input.resource_selection),
+        );
+        let resources = layout.sellers + layout.carriers + input.config.railway.region_count;
         markets::store_dispatch(
             &mut input.dispatches,
             RESOURCE_DISPATCH,
@@ -372,6 +384,8 @@ struct Input {
     #[cube(comptime)]
     stage: Stage,
     #[cube(comptime)]
+    resource_selection: ResourceSelection,
+    #[cube(comptime)]
     execution: Execution,
 }
 
@@ -408,6 +422,7 @@ pub fn launch(
         parameters,
         stage,
         Execution::Immediate(Wave::Initial),
+        ResourceSelection::AllFirms,
     );
 }
 
@@ -423,6 +438,7 @@ pub fn launch_buffered(
     parameters: &crate::simulation::parameters::EconomyParameters,
     stage: Stage,
     execution: Execution,
+    resource_selection: ResourceSelection,
 ) -> usize {
     let buffers = &config.railway.freight;
     if let Stage::Snapshot = stage {
@@ -432,8 +448,10 @@ pub fn launch_buffered(
                 control: control.buffer_arg(),
                 dispatches: buffers.dispatches.buffer_arg(),
                 workgroup: device.workgroup,
-                resources: config.railway.firms + config.railway.region_count,
-                good: parameters.good,
+                config: config.launch(),
+                parameters: parameters.launch(),
+                spatial: spatial.buffer_arg(),
+                resource_selection,
             },
         );
     }
@@ -457,31 +475,46 @@ pub fn launch_buffered(
             1
         }
         _ => {
-            FreightSettlement::launch(
-                device,
-                settlement_dispatch(device, config, parameters, stage, execution),
-                CubeDim::new_1d(device.workgroup),
-                InputLaunch {
-                    state: state.buffer_arg(),
-                    actors: actors.buffer_arg(),
-                    spatial: spatial.buffer_arg(),
-                    config: config.launch(),
-                    proposals: proposals.buffer_arg(),
-                    scratch: scratch.buffer_arg(),
-                    control: control.buffer_arg(),
-                    resources: buffers.resources.buffer_arg(),
-                    accounts: buffers.accounts.buffer_arg(),
-                    bookings: buffers.bookings.buffer_arg(),
-                    queue: buffers.queue.buffer_arg(),
-                    claims: buffers.claims.buffer_arg(),
-                    claim_source: claims::settlement_source(buffers),
-                    claim_offsets: claims::offsets_start(buffers.claim_capacity),
-                    progress: buffers.progress.buffer_arg(),
-                    parameters: parameters.launch(),
-                    stage,
-                    execution,
-                },
-            );
+            let input = InputLaunch {
+                state: state.buffer_arg(),
+                actors: actors.buffer_arg(),
+                spatial: spatial.buffer_arg(),
+                config: config.launch(),
+                proposals: proposals.buffer_arg(),
+                scratch: scratch.buffer_arg(),
+                control: control.buffer_arg(),
+                resources: buffers.resources.buffer_arg(),
+                accounts: buffers.accounts.buffer_arg(),
+                bookings: buffers.bookings.buffer_arg(),
+                queue: buffers.queue.buffer_arg(),
+                claims: buffers.claims.buffer_arg(),
+                claim_source: claims::settlement_source(buffers),
+                claim_offsets: claims::offsets_start(buffers.claim_capacity),
+                progress: buffers.progress.buffer_arg(),
+                parameters: parameters.launch(),
+                stage,
+                resource_selection,
+                execution,
+            };
+            let dimensions = CubeDim::new_1d(device.workgroup);
+            match settlement_dispatch(device, config, parameters, stage, execution) {
+                crate::simulation::system::Dispatch::Bounded {
+                    counts,
+                    offset,
+                    max_groups,
+                } => {
+                    let groups = max_groups.clamp(1, 512);
+                    strided_freight::launch(
+                        &device.client,
+                        CubeCount::Static(groups, 1, 1),
+                        dimensions,
+                        input,
+                        counts,
+                        offset,
+                    );
+                }
+                grid => FreightSettlement::launch(device, grid, dimensions, input),
+            }
             1 + usize::from(stage == Stage::Snapshot)
         }
     }
@@ -535,31 +568,75 @@ fn settlement_dispatch(
     }
 }
 
+#[derive(CubeType)]
+struct FreightParticipants {
+    indexed: bool,
+    sellers: u32,
+    carriers: u32,
+}
+
+#[cube]
+impl FreightParticipants {
+    fn new(
+        config: &EconomyConfig,
+        spatial: &[u32],
+        parameters: &crate::simulation::parameters::EconomyParameters,
+        active: u32,
+        #[comptime] selection: ResourceSelection,
+    ) -> Self {
+        let cells = config.spatial_side * config.spatial_side;
+        let base = 2 * (cells + 1 + config.actors);
+        let firms = spatial[(base + cells) as usize];
+        let good = parameters.traded_good();
+        let home = good == comptime!(Good::Bread as u32) || good == comptime!(Good::Grain as u32);
+        let suppliers = spatial[cells as usize];
+        let indexed = comptime!(selection == ResourceSelection::MarketSuppliers)
+            && !home
+            && good != comptime!(Good::Railway as u32)
+            && suppliers + config.railway.company_count < firms;
+        FreightParticipants {
+            indexed,
+            sellers: select(indexed, suppliers, firms),
+            carriers: select(
+                indexed,
+                config.railway.company_count,
+                select(home, active, 0),
+            ),
+        }
+    }
+}
+
 #[cube]
 fn resource(input: &Input, index: u32) -> u32 {
     let cells = input.config.spatial_side * input.config.spatial_side;
     let base = 2 * (cells + 1 + input.config.actors);
-    let firms = input.spatial[(base + cells) as usize];
-    let mut sellers = 0u32;
-    let good = input.parameters.traded_good();
-    if good == comptime!(Good::Bread as u32) || good == comptime!(Good::Grain as u32) {
-        sellers = markets::active(&input.control, &input.parameters);
-    }
+    let active = markets::active(&input.control, &input.parameters);
+    let layout = FreightParticipants::new(
+        &input.config,
+        &input.spatial,
+        &input.parameters,
+        active,
+        comptime!(input.resource_selection),
+    );
     let mut resource = u32::new(comptime!(i64::from(u32::MAX)));
-    if index < firms {
-        resource = input.spatial[(base + cells + 1 + index) as usize];
-    } else if index < firms + sellers {
-        let slot = index - firms;
-        let seller = input.scratch[(input.parameters.sort_source + slot) as usize];
-        let mut first = true;
-        if slot > 0 {
-            first = input.scratch[(input.parameters.sort_source + slot - 1) as usize] != seller;
-        }
-        if first && kind(&input.actors, seller).is(comptime!(ActorKind::Household)) {
-            resource = seller;
+    if index < layout.sellers {
+        resource = input.spatial[(select(layout.indexed, 0, base) + cells + 1 + index) as usize];
+    } else if index < layout.sellers + layout.carriers {
+        let slot = index - layout.sellers;
+        if layout.indexed {
+            resource = input.config.railway.companies[slot as usize * COMPANY_WORDS];
+        } else {
+            let seller = input.scratch[(input.parameters.sort_source + slot) as usize];
+            let mut first = true;
+            if slot > 0 {
+                first = input.scratch[(input.parameters.sort_source + slot - 1) as usize] != seller;
+            }
+            if first && kind(&input.actors, seller).is(comptime!(ActorKind::Household)) {
+                resource = seller;
+            }
         }
     } else {
-        resource = input.config.actors + index - firms - sellers;
+        resource = input.config.actors + index - layout.sellers - layout.carriers;
     }
     resource
 }
@@ -623,26 +700,61 @@ fn claim_work(
     })
 }
 
+pub fn reserve_active_market(device: &Device, config: &mut Configuration) -> anyhow::Result<()> {
+    let records = u64::from(config.actors) / 8;
+    if records > config.railway.freight.sorting.tile() as u64
+        && config.railway.freight.claim_capacity == 0
+    {
+        let allocation = ClaimAllocation::new(records, config)?;
+        if device
+            .memory_usage()
+            .bytes_reserved
+            .saturating_add(allocation.bytes())
+            <= device.memory_budget.bytes()
+        {
+            claim_work(device, config, records)?;
+        }
+    }
+    Ok(())
+}
+
 pub fn reserve_claims_for_replay(
     device: &Device,
     config: &mut Configuration,
     count: u64,
 ) -> anyhow::Result<()> {
-    let tile = config.railway.freight.sorting.tile() as u64;
-    let records = match ClaimAllocation::new(tile, config) {
+    let reserve = config.railway.freight.sorting.tile() as u64;
+    let records = match ClaimAllocation::new(reserve, config) {
         Ok(allocation)
-            if (1..tile).contains(&count)
+            if (1..reserve).contains(&count)
                 && device
                     .memory_usage()
                     .bytes_reserved
                     .saturating_add(allocation.bytes())
                     <= device.memory_budget.bytes() =>
         {
-            tile
+            reserve
         }
         _ => count,
     };
     claim_work(device, config, records).map(|_| ())
+}
+
+pub fn reserve_market_claims(
+    device: &Device,
+    config: &mut Configuration,
+    control: &CubeTensor,
+) -> anyhow::Result<()> {
+    let values = device.client.read(vec![
+        word_range(&config.railway.freight.progress, CLAIM_COUNT, 2),
+        word_range(control, crate::simulation::flags::FAULT_WORD, 1),
+    ])?;
+    let count = u64::from_le_bytes(values[0][..8].try_into()?);
+    let faults = u32::from_le_bytes(values[1][..4].try_into()?);
+    if count > 0 && faults == 0 {
+        reserve_claims_for_replay(device, config, count)?;
+    }
+    Ok(())
 }
 
 fn word_range(tensor: &CubeTensor, start: usize, words: usize) -> cubecl::server::Handle {
@@ -848,12 +960,8 @@ impl RegionCursor {
                     self.entry += 1;
                 }
                 1 => {
-                    let nodes = config.railway.nodes;
-                    self.edge = config.railway.routes[((self.carrier * nodes + self.origin) * nodes
-                        + self.node)
-                        as usize
-                        * ROUTE_WORDS
-                        + 1];
+                    self.edge = config.railway.routes
+                        [route_cell(config, self.carrier, self.origin, self.node) + 1];
                     self.steps += 1;
                     if self.edge < config.railway.segment_count {
                         let base = self.edge as usize * SEGMENT_WORDS;
@@ -972,8 +1080,7 @@ fn fits(input: &Input, path: &FreightRoute, quantity: Ticks, sender: u32) -> boo
             multiply(&input.control, quantity, path.fee),
         );
         let original_upper = multiply(&input.control, quantity, nodes);
-        let base = ((path.carrier * nodes + path.origin) * nodes + path.destination) as usize
-            * ROUTE_WORDS;
+        let base = route_cell(&input.config, path.carrier, path.origin, path.destination);
         let visits = input.config.railway.routes[base + 4];
         let upper = minimum(original_upper, multiply(&input.control, quantity, visits));
         state = select(
@@ -1131,7 +1238,8 @@ fn propose(input: &mut Input, invocation: u32) {
             let amount = quantity(&*input, buyer);
             let request = FreightRequest::new(&input.actors, &input.config, buyer, seller);
             let mut selected = request.animal();
-            let preferred = request.preferred(&input.config);
+            let quoted = request.quoted_carrier(&input.config);
+            let preferred = request.candidate(&input.config, quoted);
             if preferred.carrier < input.config.railway.company_count {
                 let mut cursor = RegionCursor::new(&preferred);
                 let mut record = cursor.next(&input.config);
@@ -1149,7 +1257,10 @@ fn propose(input: &mut Input, invocation: u32) {
             let origin = input.config.railway.access[seller as usize * 2];
             let mut start = 0u32;
             let mut end = 0u32;
-            if origin < input.config.railway.nodes {
+            if (quoted < input.config.railway.company_count
+                || request.animal_days > input.config.ring)
+                && origin < input.config.railway.nodes
+            {
                 start = input.config.railway.station_companies[origin as usize];
                 end = input.config.railway.station_companies[origin as usize + 1];
             }
@@ -1234,11 +1345,7 @@ fn credit_tolls(input: &Input, path: &FreightRoute, quantity: Ticks) {
     let mut units = 0u32;
     let mut steps = 0u32;
     while node != path.origin && steps < config.railway.nodes {
-        let edge = config.railway.routes[((path.carrier * config.railway.nodes + path.origin)
-            * config.railway.nodes
-            + node) as usize
-            * ROUTE_WORDS
-            + 1];
+        let edge = config.railway.routes[route_cell(config, path.carrier, path.origin, node) + 1];
         if edge < config.railway.segment_count {
             let base = edge as usize * SEGMENT_WORDS;
             let next_owner = config.railway.segments[base + 2];
@@ -1608,100 +1715,117 @@ impl GpuPass<Input> for SettleFreight {
     fn execute(mut input: Input) {
         input.parameters.refresh(&mut input.config);
         if execution_enabled(&input.progress, &input.control, comptime!(input.execution)) {
-            let invocation = ABSOLUTE_POS as u32;
-            match comptime!(input.stage) {
-                Stage::Snapshot => {
-                    let id = resource(&input, invocation);
-                    let actors = input.config.actors;
-                    let base = id as usize * RESOURCE_WORDS;
-                    if invocation == 0 {
-                        input.progress[comptime!(Wave::Initial as usize)].store(0);
-                        input.progress[comptime!(Wave::Retry as usize)].store(0);
-                    }
-                    if id < actors {
-                        atomic_store(
-                            &input.resources,
-                            base,
-                            value(
-                                &mut input.state,
-                                &input.config,
-                                comptime!(Field::Cash as u32),
-                                id,
-                            ),
-                        );
-                    }
-                }
-                Stage::Initialize => {
-                    let id = resource(&input, invocation);
-                    let actors = input.config.actors;
-                    let resources = actors + input.config.railway.region_count;
-                    let base = id as usize * RESOURCE_WORDS;
-                    reset_resource(&input, id);
-                    if id < actors {
-                        let cash = value(
-                            &mut input.state,
-                            &input.config,
-                            comptime!(Field::Cash as u32),
-                            id,
-                        );
-                        let available = minimum(cash, budget(&input, id));
-                        atomic_store(&input.resources, base, available);
-                        for field in 0..ACCOUNT_WORDS {
-                            input.accounts[id as usize * ACCOUNT_WORDS + field].store(0);
-                        }
-                    }
-                    initialize_booking(&mut input, invocation);
-                    if id >= actors && id < resources {
-                        let stock = regional_value(
-                            &mut input.state,
-                            &input.config,
-                            id - actors,
-                            comptime!(RailCapacityField::Available),
-                        );
-                        atomic_store(&input.resources, base, stock);
-                    }
-                }
-                Stage::Queue | Stage::SortClaims => (),
-                Stage::Reset => reset_resource(&input, resource(&input, invocation)),
-                Stage::Propose => propose(&mut input, invocation),
-                Stage::CountClaims => {
-                    let id = resource(&input, invocation);
-                    let resources = input.config.actors + input.config.railway.region_count;
-                    let base = id as usize * RESOURCE_WORDS;
-                    if id < resources {
-                        let count = select(
-                            claims::contested(&input, id),
-                            input.resources[base + RESOURCE_CLAIMS].load(),
-                            0,
-                        );
-                        atomic_add(
-                            &input.progress,
-                            CLAIM_COUNT,
-                            ticks(count, 0),
-                            &input.control,
-                        );
-                    }
-                }
-                Stage::AdmitClaims => (),
-                Stage::EmitClaims => claims::emit(&mut input, invocation),
-                Stage::ClaimOffsets => claims::offset(&mut input, invocation),
-                Stage::Resolve => {
-                    let id = resource(&input, invocation);
-                    let resources = input.config.actors + input.config.railway.region_count;
-                    if id < resources {
-                        claims::resolve(&mut input, id);
-                    }
-                }
-                Stage::Commit => commit(&mut input, invocation),
-                Stage::Release => {
-                    let id = resource(&input, invocation);
-                    release_resource(&mut input, id);
-                }
-                Stage::Accounts => {
-                    let id = resource(&input, invocation);
-                    settle_account(&mut input, id);
+            settle_freight(&mut input, ABSOLUTE_POS as u32);
+        }
+    }
+}
+
+#[cube(launch)]
+fn strided_freight(mut input: Input, counts: &[u32], offset: u32) {
+    input.parameters.refresh(&mut input.config);
+    let groups = counts[offset as usize] * counts[offset as usize + 1];
+    let mut group = CUBE_POS as u32;
+    if execution_enabled(&input.progress, &input.control, comptime!(input.execution)) {
+        while group < groups {
+            settle_freight(&mut input, group * CUBE_DIM + UNIT_POS);
+            group += CUBE_COUNT as u32;
+        }
+    }
+}
+
+#[cube]
+fn settle_freight(input: &mut Input, invocation: u32) {
+    match comptime!(input.stage) {
+        Stage::Snapshot => {
+            let id = resource(&*input, invocation);
+            let actors = input.config.actors;
+            let base = id as usize * RESOURCE_WORDS;
+            if invocation == 0 {
+                input.progress[comptime!(Wave::Initial as usize)].store(0);
+                input.progress[comptime!(Wave::Retry as usize)].store(0);
+            }
+            if id < actors {
+                atomic_store(
+                    &input.resources,
+                    base,
+                    value(
+                        &mut input.state,
+                        &input.config,
+                        comptime!(Field::Cash as u32),
+                        id,
+                    ),
+                );
+            }
+        }
+        Stage::Initialize => {
+            let id = resource(&*input, invocation);
+            let actors = input.config.actors;
+            let resources = actors + input.config.railway.region_count;
+            let base = id as usize * RESOURCE_WORDS;
+            reset_resource(&*input, id);
+            if id < actors {
+                let cash = value(
+                    &mut input.state,
+                    &input.config,
+                    comptime!(Field::Cash as u32),
+                    id,
+                );
+                let available = minimum(cash, budget(&*input, id));
+                atomic_store(&input.resources, base, available);
+                for field in 0..ACCOUNT_WORDS {
+                    input.accounts[id as usize * ACCOUNT_WORDS + field].store(0);
                 }
             }
+            initialize_booking(input, invocation);
+            if id >= actors && id < resources {
+                let stock = regional_value(
+                    &mut input.state,
+                    &input.config,
+                    id - actors,
+                    comptime!(RailCapacityField::Available),
+                );
+                atomic_store(&input.resources, base, stock);
+            }
+        }
+        Stage::Queue | Stage::SortClaims => (),
+        Stage::Reset => reset_resource(&*input, resource(&*input, invocation)),
+        Stage::Propose => propose(input, invocation),
+        Stage::CountClaims => {
+            let id = resource(&*input, invocation);
+            let resources = input.config.actors + input.config.railway.region_count;
+            let base = id as usize * RESOURCE_WORDS;
+            if id < resources {
+                let count = select(
+                    claims::contested(&*input, id),
+                    input.resources[base + RESOURCE_CLAIMS].load(),
+                    0,
+                );
+                atomic_add(
+                    &input.progress,
+                    CLAIM_COUNT,
+                    ticks(count, 0),
+                    &input.control,
+                );
+            }
+        }
+        Stage::AdmitClaims => (),
+        Stage::EmitClaims => claims::emit(input, invocation),
+        Stage::ClaimOffsets => claims::offset(input, invocation),
+        Stage::Resolve => {
+            let id = resource(&*input, invocation);
+            let resources = input.config.actors + input.config.railway.region_count;
+            if id < resources {
+                claims::resolve(input, id);
+            }
+        }
+        Stage::Commit => commit(input, invocation),
+        Stage::Release => {
+            let id = resource(&*input, invocation);
+            release_resource(input, id);
+        }
+        Stage::Accounts => {
+            let id = resource(&*input, invocation);
+            settle_account(input, id);
         }
     }
 }

@@ -435,6 +435,7 @@ impl FitFixture {
                     progress: buffers.progress.buffer_arg(),
                     parameters: self.parameters.launch(),
                     stage: Stage::Propose,
+                    resource_selection: ResourceSelection::AllFirms,
                     execution: Execution::Immediate(Wave::Initial),
                 },
                 quantity_low: quantity as u32,
@@ -888,6 +889,7 @@ fn freight_execution(
             &parameters,
             stage,
             wave.get(),
+            ResourceSelection::AllFirms,
         );
     };
     advance(Stage::Snapshot);
@@ -1270,6 +1272,7 @@ fn buffered_claim_admission_preserves_zero_wide_counts_and_prior_faults_on_gpu()
             &parameters,
             Stage::AdmitClaims,
             Execution::Buffered(Wave::Initial),
+            ResourceSelection::AllFirms,
         );
         let actual_control = device.read(&simulation.control)?;
         let actual_progress = device.read(&buffers.progress)?;
@@ -1409,6 +1412,7 @@ fn disabled_buffered_freight_retry_preserves_all_settlement_buffers_on_gpu() -> 
                 &parameters,
                 stage,
                 Execution::Buffered(Wave::Retry),
+                ResourceSelection::AllFirms,
             );
         }
         for (tensor, expected) in tensors.iter().zip(expected) {
@@ -1456,6 +1460,7 @@ fn disabled_buffered_freight_retry_preserves_all_settlement_buffers_on_gpu() -> 
         &parameters,
         Stage::Queue,
         Execution::Buffered(Wave::Retry),
+        ResourceSelection::AllFirms,
     );
     let actual = device.read(&buffers.dispatches)?;
     assert_eq!(actual[..BOOKING_DISPATCH], dispatches[..BOOKING_DISPATCH]);

@@ -18,6 +18,11 @@ pub(crate) const FREIGHT_CLAIM_SORT_WORDS: usize = 2;
 pub(crate) const FREIGHT_DISPATCH_WORDS: usize = 24;
 pub(crate) const FREIGHT_PROGRESS_WORDS: usize = 5;
 
+pub(crate) enum RouteStorage {
+    Dense,
+    Indexed,
+}
+
 #[derive(Clone, Copy, Debug, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(deny_unknown_fields)]
 pub struct RailMaterials {
@@ -275,6 +280,27 @@ impl RailwayConfig {
                 "invalid railway companies, track endpoints, rates, materials, or network bounds"
             )),
         }
+    }
+
+    pub(crate) fn route_storage(&self, stations: usize) -> RouteStorage {
+        let dense = self.companies.len() * stations;
+        match dense >= 4096 && self.segments.len() * 4 < dense {
+            true => RouteStorage::Indexed,
+            false => RouteStorage::Dense,
+        }
+    }
+
+    pub(crate) fn route_origins(&self) -> usize {
+        self.segments
+            .iter()
+            .flat_map(|segment| {
+                [
+                    (segment.company, segment.from),
+                    (segment.company, segment.to),
+                ]
+            })
+            .collect::<BTreeSet<_>>()
+            .len()
     }
 
     pub fn stations(&self) -> Vec<Position> {
