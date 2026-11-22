@@ -67,21 +67,15 @@ struct QuantityBalances {
 
 #[cube]
 impl QuantityBalances {
-    fn new(
-        state: &mut [u32],
-        actors: &[u32],
-        config: &EconomyConfig,
-        peer: u32,
-        good: u32,
-    ) -> Self {
-        let terms = household_production::TradeFields::new(actors, peer, good);
+    fn new(economy: &mut EconomyView<'_>, peer: u32, good: u32) -> Self {
+        let terms = household_production::TradeFields::new(&economy.actors, peer, good);
         QuantityBalances {
-            cash: value(state, config, comptime!(Field::Cash as u32), peer),
-            stock: value(state, config, good, peer),
-            sales: value(state, config, terms.sales, peer),
+            cash: economy.ledger.value(Field::Cash, peer),
+            stock: economy.ledger.value_at(good, peer),
+            sales: economy.ledger.value_at(terms.sales, peer),
             sales_field: terms.sales,
-            reserve: household_production::reserve(state, actors, config, peer, good),
-            quote: number(state, config, terms.price, peer),
+            reserve: household_production::reserve(&*economy, peer, good),
+            quote: economy.ledger.number_at(terms.price, peer),
         }
     }
 
@@ -140,16 +134,10 @@ impl QuantityBalances {
         status
     }
 
-    fn store(&self, state: &mut [u32], config: &EconomyConfig, peer: u32, good: u32) {
-        set(
-            state,
-            config,
-            comptime!(Field::Cash as u32),
-            peer,
-            self.cash,
-        );
-        set(state, config, good, peer, self.stock);
-        set(state, config, self.sales_field, peer, self.sales);
+    fn store(&self, ledger: &mut Ledger<'_>, peer: u32, good: u32) {
+        ledger.set(Field::Cash, peer, self.cash);
+        ledger.set_at(good, peer, self.stock);
+        ledger.set_at(self.sales_field, peer, self.sales);
     }
 }
 
@@ -178,6 +166,7 @@ impl GpuPass<QuantityInput> for SettleQuantities {
 
     fn execute(mut input: QuantityInput) {
         input.parameters.refresh(&mut input.config);
+        let mut economy = EconomyView::new(&mut input.state, &input.actors, &input.config);
         let jobs = markets::job_count(&input.control, RANGE_SLOTS_WORD);
         let mut job = CUBE_POS as u32;
         while job < jobs {
@@ -188,8 +177,7 @@ impl GpuPass<QuantityInput> for SettleQuantities {
             let end = start + length;
             let peer = input.scratch[(source + start) as usize];
             let good = input.parameters.traded_good();
-            let mut balances =
-                QuantityBalances::new(&mut input.state, &input.actors, &input.config, peer, good);
+            let mut balances = QuantityBalances::new(&mut economy, peer, good);
             let mut shared = Shared::<[Ticks]>::new_slice(3usize);
             let mut cursor = start;
             let deferred = comptime!(input.parameters.discovery == Discovery::Indexed);
@@ -266,7 +254,7 @@ impl GpuPass<QuantityInput> for SettleQuantities {
                 if deferred {
                     input.scratch[(7 * count + peer) as usize] = min(cursor, end);
                 }
-                balances.store(&mut input.state, &input.config, peer, good);
+                balances.store(&mut economy.ledger, peer, good);
                 input.control[PROGRESS_WORD].fetch_max(length);
                 input.control[COMPLETED_WORD].fetch_add(length);
             }

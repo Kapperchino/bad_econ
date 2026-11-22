@@ -123,7 +123,7 @@ pub(super) fn emit(input: &mut Input, invocation: u32) {
             let seller =
                 input.proposals[buyer as usize * ProposalLayout::WORDS + ProposalLayout::ACTOR];
             let path = candidate(
-                &input.actors,
+                &ActorTable::new(&input.actors),
                 &input.config,
                 buyer,
                 seller,

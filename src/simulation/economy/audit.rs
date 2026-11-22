@@ -405,16 +405,6 @@ impl AuditBuffers {
 }
 
 #[cube]
-fn value(state: &[Ticks], config: &EconomyConfig, field: u32, actor: u32) -> Ticks {
-    state[(field * config.state_stride + actor) as usize]
-}
-
-#[cube]
-fn number(state: &[Ticks], config: &EconomyConfig, field: u32, actor: u32) -> u32 {
-    value(state, config, field, actor).extract(LOW_WORD)
-}
-
-#[cube]
 fn native(value: Ticks) -> u64 {
     u64::cast_from(value.extract(LOW_WORD)) | (u64::cast_from(value.extract(HIGH_WORD)) << 32)
 }
@@ -453,8 +443,8 @@ impl GpuPass<SummaryInput> for SummarizeMetrics {
 
 #[cube]
 fn summarize_metrics(input: &mut SummaryInput) {
-    let state = &input.state;
-    let actors = &input.actors;
+    let ledger = TickLedger::new(&input.state, &input.config);
+    let actors = ActorTable::new(&input.actors);
     let config = &input.config;
     let control = &input.control;
     let index = CUBE_POS_Y;
@@ -485,12 +475,12 @@ fn summarize_metrics(input: &mut SummaryInput) {
                 };
                 let mut selected = true;
                 if selected_kind != NO_ACTOR {
-                    let actor_kind = kind(actors, actor).bits();
+                    let actor_kind = actors.kind(actor).bits();
                     selected = selected_kind == actor_kind
                         || (selected_kind == Good::COUNT as u32 + 1 && actor_kind > 0);
                 }
                 if selected {
-                    total = checked_sum(total, native(value(state, config, field, actor)), control);
+                    total = checked_sum(total, native(ledger.value_at(field, actor)), control);
                 }
                 member += CUBE_DIM;
             }
@@ -510,18 +500,13 @@ fn summarize_metrics(input: &mut SummaryInput) {
                     input.spatial[(firm_segment + cells + 1 + member) as usize]
                 }
             };
-            let actor_kind = kind(actors, actor).bits();
+            let actor_kind = actors.kind(actor).bits();
             let selected_kind = selected_kind == NO_ACTOR
                 || selected_kind == actor_kind
                 || (selected_kind == Good::COUNT as u32 + 1 && actor_kind > 0);
             let mut selected = selected_kind;
             if quoted && selected {
-                let status = number(
-                    state,
-                    config,
-                    comptime!(Field::EnterpriseStatus as u32),
-                    actor,
-                );
+                let status = ledger.number(Field::EnterpriseStatus, actor);
                 selected = status
                     > comptime!(crate::domain::enterprise::EnterpriseState::Forming as u32)
                     && status
@@ -530,10 +515,10 @@ fn summarize_metrics(input: &mut SummaryInput) {
             if priced && selected {
                 selected = actor_kind == comptime!(Good::Housing as u32)
                     || actor_kind == comptime!(Good::Railway as u32)
-                    || native(value(state, config, actor_kind, actor)) > 0;
+                    || native(ledger.value_at(actor_kind, actor)) > 0;
             }
             if selected {
-                let mut amount = native(value(state, config, field, actor));
+                let mut amount = native(ledger.value_at(field, actor));
                 match source {
                     1 => {
                         for coordinate in [
@@ -545,7 +530,7 @@ fn summarize_metrics(input: &mut SummaryInput) {
                         ] {
                             amount = checked_sum(
                                 amount,
-                                native(value(state, config, coordinate, actor)),
+                                native(ledger.value_at(coordinate, actor)),
                                 control,
                             );
                         }
@@ -554,12 +539,7 @@ fn summarize_metrics(input: &mut SummaryInput) {
                         if actor_kind == field {
                             amount = checked_sum(
                                 amount,
-                                native(value(
-                                    state,
-                                    config,
-                                    comptime!(Field::Pipeline as u32),
-                                    actor,
-                                )),
+                                native(ledger.value(Field::Pipeline, actor)),
                                 control,
                             );
                         }
@@ -568,12 +548,7 @@ fn summarize_metrics(input: &mut SummaryInput) {
                         if actor_kind == field - PRODUCTION_FIELDS as u32 + 1 {
                             amount = checked_sum(
                                 amount,
-                                native(value(
-                                    state,
-                                    config,
-                                    comptime!(Field::Produced as u32),
-                                    actor,
-                                )),
+                                native(ledger.value(Field::Produced, actor)),
                                 control,
                             );
                         }
@@ -581,63 +556,31 @@ fn summarize_metrics(input: &mut SummaryInput) {
                     4 | 16 => amount = 1,
                     5 => {
                         amount = u64::cast_from(
-                            number(
-                                state,
-                                config,
-                                comptime!(Field::EnterpriseModel as u32),
-                                actor,
-                            ) == 1
-                                && number(
-                                    state,
-                                    config,
-                                    comptime!(Field::EnterpriseStatus as u32),
-                                    actor,
-                                ) != comptime!(
-                                    crate::domain::enterprise::EnterpriseState::Closed as u32
-                                ),
+                            ledger.number(Field::EnterpriseModel, actor) == 1
+                                && ledger.number(Field::EnterpriseStatus, actor)
+                                    != comptime!(
+                                        crate::domain::enterprise::EnterpriseState::Closed as u32
+                                    ),
                         )
                     }
                     6 => {
-                        amount = u64::cast_from(
-                            number(
-                                state,
-                                config,
-                                comptime!(Field::EnterpriseStatus as u32),
-                                actor,
-                            ) == 4,
-                        )
+                        amount = u64::cast_from(ledger.number(Field::EnterpriseStatus, actor) == 4)
                     }
                     7 | 15 => {
                         amount &= 0xffff_ffff;
                         amount *= amount;
                     }
                     9 => {
-                        let working = number(state, config, comptime!(Field::Worker as u32), actor)
-                            != NO_ACTOR
-                            && number(state, config, comptime!(Field::LivingMembers as u32), actor)
-                                > 0;
+                        let working = ledger.number(Field::Worker, actor) != NO_ACTOR
+                            && ledger.number(Field::LivingMembers, actor) > 0;
                         let subsistence =
                             comptime!(config.economy == crate::domain::Economy::Industrial)
-                                && number(state, config, comptime!(Field::LandPlots as u32), actor)
-                                    > 0;
+                                && ledger.number(Field::LandPlots, actor) > 0;
                         let category = select(working, select(subsistence, 1u32, 0u32), 2u32);
                         amount = u64::cast_from(category == field);
                         if comptime!(config.cohorts == Feature::Enabled) {
-                            let living = number(
-                                state,
-                                config,
-                                comptime!(Field::LivingMembers as u32),
-                                actor,
-                            );
-                            let workers = min(
-                                living,
-                                number(
-                                    state,
-                                    config,
-                                    comptime!(Field::EligibleWorkers as u32),
-                                    actor,
-                                ),
-                            );
+                            let living = ledger.number(Field::LivingMembers, actor);
+                            let workers = min(living, ledger.number(Field::EligibleWorkers, actor));
                             amount = u64::cast_from(select(
                                 field == 2,
                                 living - workers,
@@ -646,73 +589,42 @@ fn summarize_metrics(input: &mut SummaryInput) {
                         }
                     }
                     18 => {
-                        let employer =
-                            number(state, config, comptime!(Field::Employer as u32), actor);
+                        let employer = ledger.number(Field::Employer, actor);
                         amount *= u64::cast_from(
                             employer > 0
                                 && employer <= config.actors
-                                && kind(actors, min(max(employer, 1), config.actors) - 1).bits()
+                                && actors.kind(min(max(employer, 1), config.actors) - 1).bits()
                                     == comptime!(Good::Railway as u32),
                         );
                     }
                     17 => {
                         amount *= u64::cast_from(
                             comptime!(config.economy == crate::domain::Economy::Industrial)
-                                && number(state, config, comptime!(Field::LandPlots as u32), actor)
-                                    > 0,
+                                && ledger.number(Field::LandPlots, actor) > 0,
                         );
                     }
                     10 => {
-                        amount = u64::cast_from(
-                            number(
-                                state,
-                                config,
-                                comptime!(Field::EnterpriseStatus as u32),
-                                actor,
-                            ) < 4,
-                        );
+                        amount = u64::cast_from(ledger.number(Field::EnterpriseStatus, actor) < 4);
                     }
                     11 => {
                         let category = select(
                             actor_kind == comptime!(Good::Housing as u32),
                             2u32,
-                            number(
-                                state,
-                                config,
-                                comptime!(Field::EnterpriseModel as u32),
-                                actor,
-                            ),
+                            ledger.number(Field::EnterpriseModel, actor),
                         );
                         amount = u64::cast_from(
-                            category == field
-                                && number(
-                                    state,
-                                    config,
-                                    comptime!(Field::EnterpriseStatus as u32),
-                                    actor,
-                                ) < 4,
+                            category == field && ledger.number(Field::EnterpriseStatus, actor) < 4,
                         );
                     }
                     12 => {
-                        amount = u64::cast_from(
-                            number(
-                                state,
-                                config,
-                                comptime!(Field::EnterpriseStatus as u32),
-                                actor,
-                            ) == field,
-                        );
+                        amount =
+                            u64::cast_from(ledger.number(Field::EnterpriseStatus, actor) == field);
                     }
                     8 => {
                         amount = u64::cast_from(
-                            number(state, config, comptime!(Field::LivingMembers as u32), actor)
-                                > 0
-                                && number(
-                                    state,
-                                    config,
-                                    comptime!(Field::HousingStatus as u32),
-                                    actor,
-                                ) == comptime!(crate::domain::HousingState::Homeless as u32),
+                            ledger.number(Field::LivingMembers, actor) > 0
+                                && ledger.number(Field::HousingStatus, actor)
+                                    == comptime!(crate::domain::HousingState::Homeless as u32),
                         );
                     }
                     _ => (),
@@ -777,8 +689,7 @@ impl GpuPass<SelectedValidationInput> for ValidateSelected {
         let index = (CUBE_POS_X + CUBE_POS_Z * CUBE_COUNT_X) * CUBE_DIM + UNIT_POS;
         if index < input.indices.len() as u32 {
             validate_ring(
-                &input.state,
-                &input.config,
+                &TickLedger::new(&input.state, &input.config),
                 &input.control,
                 &input.ring_mask,
                 input.indices[index as usize],
@@ -799,10 +710,10 @@ impl GpuPass<ValidationInput> for ValidateActors {
     type Output = ();
 
     fn execute(input: ValidationInput) {
+        let actors = ActorTable::new(&input.actors);
         validate_actors(
-            &input.state,
-            &input.actors,
-            &input.config,
+            &TickLedger::new(&input.state, &input.config),
+            &actors,
             &input.control,
             &input.ring_mask,
             comptime!(input.ring_tracking),
@@ -812,43 +723,27 @@ impl GpuPass<ValidationInput> for ValidateActors {
 
 #[cube]
 fn validate_actors(
-    state: &[Ticks],
-    actors: &[u32],
-    config: &EconomyConfig,
+    ledger: &TickLedger<'_>,
+    actors: &ActorTable<'_>,
     control: &[Atomic<u32>],
     ring_mask: &[Atomic<u32>],
     #[comptime] ring_tracking: RingTracking,
 ) {
+    let config = ledger.config;
     let actor = (CUBE_POS_X + CUBE_POS_Z * CUBE_COUNT_X) * CUBE_DIM + UNIT_POS;
     let task = CUBE_POS_Y;
     match task {
         0 => {
-            validate_actor(state, actors, config, control, actor);
-            household_histograms(state, actors, config, control, actor);
+            validate_actor(ledger, actors, control, actor);
+            household_histograms(ledger, actors, control, actor);
         }
         _ => match comptime!(ring_tracking) {
             RingTracking::ObservedPlane => {
-                validate_ring(
-                    state,
-                    config,
-                    control,
-                    ring_mask,
-                    actor,
-                    task - 1,
-                    ring_tracking,
-                );
+                validate_ring(ledger, control, ring_mask, actor, task - 1, ring_tracking);
             }
             _ => {
                 if actor < config.actors {
-                    validate_ring(
-                        state,
-                        config,
-                        control,
-                        ring_mask,
-                        actor,
-                        task - 1,
-                        ring_tracking,
-                    );
+                    validate_ring(ledger, control, ring_mask, actor, task - 1, ring_tracking);
                 }
             }
         },
@@ -857,17 +752,17 @@ fn validate_actors(
 
 #[cube]
 fn validate_ring(
-    state: &[Ticks],
-    config: &EconomyConfig,
+    ledger: &TickLedger<'_>,
     control: &[Atomic<u32>],
     ring_mask: &[Atomic<u32>],
     actor: u32,
     good: u32,
     #[comptime] ring_tracking: RingTracking,
 ) {
+    let config = ledger.config;
     let mut held = 0u64;
     if comptime!(ring_tracking != RingTracking::ObservedPlane) || actor < config.actors {
-        held = native(value(state, config, TRANSIT_FIELDS as u32 + good, actor));
+        held = native(ledger.value_at(TRANSIT_FIELDS as u32 + good, actor));
     }
     let mut in_ring = 0u64;
     for slot in 0u32..config.ring {
@@ -875,13 +770,8 @@ fn validate_ring(
         let mut waiting = zero();
         let mut amount = zero();
         if comptime!(ring_tracking != RingTracking::ObservedPlane) || actor < config.actors {
-            amount = value(state, config, field, actor);
-            waiting = value(
-                state,
-                config,
-                field + Good::COUNT as u32 * config.ring,
-                actor,
-            );
+            amount = ledger.value_at(field, actor);
+            waiting = ledger.value_at(field + Good::COUNT as u32 * config.ring, actor);
         }
         mark_transit(config, ring_mask, actor, field, amount, ring_tracking);
         mark_transit(
@@ -932,29 +822,19 @@ fn mark_transit(
 
 #[cube]
 fn validate_actor(
-    state: &[Ticks],
-    actors: &[u32],
-    config: &EconomyConfig,
+    ledger: &TickLedger<'_>,
+    actors: &ActorTable<'_>,
     control: &[Atomic<u32>],
     actor: u32,
 ) {
+    let config = ledger.config;
     if actor < config.actors {
-        let payroll_reserve = value(
-            state,
-            config,
-            comptime!(Field::PayrollReserve as u32),
-            actor,
-        );
-        let tax = value(state, config, comptime!(Field::TaxTreasury as u32), actor);
-        let charge = value(
-            state,
-            config,
-            comptime!(Field::ChargeTreasury as u32),
-            actor,
-        );
+        let payroll_reserve = ledger.value(Field::PayrollReserve, actor);
+        let tax = ledger.value(Field::TaxTreasury, actor);
+        let charge = ledger.value(Field::ChargeTreasury, actor);
         if comptime!(config.payroll == Feature::Enabled) {
             let accrued = PayrollAccrual::new(
-                value(state, config, comptime!(Field::GrossIncome as u32), actor),
+                ledger.value(Field::GrossIncome, actor),
                 employment::payroll_members(actors, config, actor),
                 config,
                 control,
@@ -966,31 +846,18 @@ fn validate_actor(
                 KernelFaults::new(comptime!(FaultFlags::PAYROLL_MISMATCH)).record(control);
             }
         }
-        if !equal(
-            value(state, config, comptime!(Field::Escrow as u32), actor),
-            zero(),
-        ) || !equal(
-            value(state, config, comptime!(Field::Pipeline as u32), actor),
-            zero(),
-        ) || !equal(
-            value(state, config, comptime!(Field::Due as u32), actor),
-            zero(),
-        ) {
+        if !equal(ledger.value(Field::Escrow, actor), zero())
+            || !equal(ledger.value(Field::Pipeline, actor), zero())
+            || !equal(ledger.value(Field::Due, actor), zero())
+        {
             KernelFaults::new(comptime!(FaultFlags::UNSETTLED_COMMITMENTS)).record(control);
         }
         let mut transit = 0u64;
         for good in 0u32..Good::COUNT as u32 {
-            let held = value(state, config, TRANSIT_FIELDS as u32 + good, actor);
+            let held = ledger.value_at(TRANSIT_FIELDS as u32 + good, actor);
             transit = checked_sum(transit, native(held), control);
         }
-        if transit
-            != native(value(
-                state,
-                config,
-                comptime!(Field::Transit as u32),
-                actor,
-            ))
-        {
+        if transit != native(ledger.value(Field::Transit, actor)) {
             KernelFaults::new(comptime!(FaultFlags::TRANSIT_MISMATCH)).record(control);
         }
     }
@@ -998,12 +865,12 @@ fn validate_actor(
 
 #[cube]
 fn household_histograms(
-    state: &[Ticks],
-    actors: &[u32],
-    config: &EconomyConfig,
+    ledger: &TickLedger<'_>,
+    actors: &ActorTable<'_>,
     control: &[Atomic<u32>],
     actor: u32,
 ) {
+    let config = ledger.config;
     let histograms = Shared::<[Atomic<u32>]>::new_slice(comptime!(
         SummaryLayout::WEALTH_BINS + SummaryLayout::REGIONS
     ));
@@ -1013,29 +880,22 @@ fn household_histograms(
         index += CUBE_DIM;
     }
     sync_cube();
-    if actor < config.actors && kind(actors, actor).is(comptime!(ActorKind::Household)) {
+    if actor < config.actors && actors.kind(actor).is(comptime!(ActorKind::Household)) {
         let members = select(
             comptime!(config.cohorts == Feature::Enabled),
-            number(state, config, comptime!(Field::LivingMembers as u32), actor),
+            ledger.number(Field::LivingMembers, actor),
             1,
         );
-        let cash = divide(
-            value(state, config, comptime!(Field::Cash as u32), actor),
-            max(members, 1),
-        );
+        let cash = divide(ledger.value(Field::Cash, actor), max(members, 1));
         let mut bin = WORD_BITS - cash.extract(LOW_WORD).leading_zeros();
         if cash.extract(HIGH_WORD) > 0u32 {
             bin = TICK_BITS - cash.extract(HIGH_WORD).leading_zeros();
         }
         histograms[min(bin, SummaryLayout::WEALTH_BINS as u32 - 1) as usize].fetch_add(members);
-        let shortage = number(state, config, comptime!(Field::Shortage as u32), actor);
+        let shortage = ledger.number(Field::Shortage, actor);
         if shortage > 0 {
-            let x = actors[ActorLayout::X * (actors.len() / ActorLayout::WORDS) + actor as usize]
-                * SummaryLayout::REGION_SIDE as u32
-                / config.map_size;
-            let y = actors[ActorLayout::Y * (actors.len() / ActorLayout::WORDS) + actor as usize]
-                * SummaryLayout::REGION_SIDE as u32
-                / config.map_size;
+            let x = actors.x(actor) * SummaryLayout::REGION_SIDE as u32 / config.map_size;
+            let y = actors.y(actor) * SummaryLayout::REGION_SIDE as u32 / config.map_size;
             histograms[(SummaryLayout::WEALTH_BINS as u32
                 + y * SummaryLayout::REGION_SIDE as u32
                 + x) as usize]

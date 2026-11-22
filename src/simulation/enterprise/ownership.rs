@@ -1,10 +1,14 @@
 use crate::domain::{Field, Good, State, enterprise::EstateStatus};
 use crate::simulation::configuration::{Configuration, EconomyConfig};
+#[cfg(test)]
 use crate::simulation::layout::ActorLayout;
 use crate::simulation::{
     Device,
     flags::FaultFlags,
     pass::GpuPass,
+    state::{
+        ActorMetadata, ActorMetadataExpand, ActorTable, ReadLedger, ReadLedgerExpand, TickLedger,
+    },
     system::{AsBufferArg, System, gpu_passes},
     words::*,
 };
@@ -207,9 +211,8 @@ impl GpuPass<PaymentInput> for CalculatePayments {
 
     fn execute(mut input: PaymentInput) {
         payments(
-            &input.state,
-            &input.actors,
-            &input.config,
+            &TickLedger::new(&input.state, &input.config),
+            &ActorTable::with_stride(&input.actors, input.config.actors as usize),
             &input.shares,
             &input.beneficiaries,
             &mut input.payments,
@@ -237,9 +240,8 @@ impl GpuPass<DistributionInput> for DistributePayments {
 
 #[cube]
 fn payments(
-    state: &[Ticks],
-    actor_rows: &[u32],
-    config: &EconomyConfig,
+    ledger: &TickLedger<'_>,
+    actors: &ActorTable<'_>,
     shares: &[Vector<u32, Const<2>>],
     beneficiaries: &[u32],
     payments: &mut [Ticks],
@@ -250,12 +252,11 @@ fn payments(
         let share = shares[index];
         let firm = share.extract(0usize);
         let units = share.extract(1usize);
-        let actors = config.actors;
-        let cash = state[(comptime!(Field::Cash as u32) * config.state_stride + firm) as usize];
-        let kind = actor_rows[comptime!(ActorLayout::KIND) * actors as usize + firm as usize];
+        let config = ledger.config;
+        let cash = ledger.value(Field::Cash, firm);
+        let kind = actors.kind(firm).bits();
         let reserve = maximum(
-            state
-                [(comptime!(Field::OperatingReserve as u32) * config.state_stride + firm) as usize],
+            ledger.value(Field::OperatingReserve, firm),
             select(
                 kind == comptime!(Good::Housing as u32),
                 zero(),
@@ -267,8 +268,7 @@ fn payments(
         let payment = ratio(amount.value, units, 1_000_000);
         payment.faults.record(control);
         let beneficiary = beneficiaries[index];
-        let estate = state
-            [(comptime!(Field::EstateSettled as u32) * config.state_stride + beneficiary) as usize];
+        let estate = ledger.value(Field::EstateSettled, beneficiary);
         payments[index] = select(
             estate.extract(0usize) == comptime!(EstateStatus::Unclaimed as u32),
             zero(),

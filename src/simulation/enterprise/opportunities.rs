@@ -1,7 +1,8 @@
 use super::acquisitions::PURCHASE;
 use crate::domain::{Field, Good, enterprise::EnterpriseState};
 use crate::simulation::configuration::EconomyConfig;
-use crate::simulation::{layout::ActorLayout as A, words::*};
+use crate::simulation::state::*;
+use crate::simulation::words::*;
 use cubecl::prelude::*;
 
 pub(in crate::simulation) const PRODUCER_ENTRY: u32 = 8 << 24;
@@ -144,21 +145,6 @@ impl EntryPlan {
 }
 
 #[cube]
-fn number(state: &mut [u32], config: &EconomyConfig, actor: u32, field: u32) -> u32 {
-    load(state, field * config.state_stride + actor).extract(0usize)
-}
-
-#[cube]
-fn distance(actors: &[u32], first: u32, second: u32) -> u32 {
-    let count = actors.len() / A::WORDS;
-    let ax = actors[A::X * count + first as usize];
-    let ay = actors[A::Y * count + first as usize];
-    let bx = actors[A::X * count + second as usize];
-    let by = actors[A::Y * count + second as usize];
-    max(ax, bx) - min(ax, bx) + max(ay, by) - min(ay, by)
-}
-
-#[cube]
 fn firms(spatial: &[u32], config: &EconomyConfig) -> u32 {
     let cells = config.spatial_side * config.spatial_side;
     spatial[(2 * (cells + 1 + config.actors) + cells) as usize]
@@ -173,54 +159,34 @@ fn firm_at(spatial: &[u32], config: &EconomyConfig, offset: u32) -> u32 {
 
 #[cube]
 pub(super) fn purchase(
-    state: &mut [u32],
-    actors: &[u32],
-    config: &EconomyConfig,
+    economy: &EconomyView<'_>,
     spatial: &[u32],
     buyer: u32,
     day: u32,
     available: Ticks,
 ) -> u32 {
-    let stride = actors.len() / A::WORDS;
-    let owner = actors[A::OWNER * stride + buyer as usize];
-    let draw = actors[A::EXPANSION_DRAW * stride + buyer as usize];
-    let product = actors[A::KIND * stride + buyer as usize];
-    let model = number(
-        state,
-        config,
-        buyer,
-        comptime!(Field::EnterpriseModel as u32),
-    );
+    let config = economy.ledger.config;
+    let owner = economy.actors.owner(buyer);
+    let draw = economy.actors.expansion_draw(buyer);
+    let product = economy.actors.kind(buyer).bits();
+    let model = economy.ledger.number(Field::EnterpriseModel, buyer);
     let mut related = 0u32;
     let mut fallback = 0u32;
     let start = buyer + draw + (day / 30) * 17;
     for sample in 0..min(32u32, firms(spatial, config)) {
         let site = firm_at(spatial, config, start + sample);
-        let status = number(
-            state,
-            config,
-            site,
-            comptime!(Field::EnterpriseStatus as u32),
-        );
-        let cash = load(
-            state,
-            comptime!(Field::Cash as u32) * config.state_stride + site,
-        );
+        let status = economy.ledger.number(Field::EnterpriseStatus, site);
+        let cash = economy.ledger.value(Field::Cash, site);
         if related == 0
             && site < 0x00ff_ffff
-            && actors[A::OWNER * stride + site as usize] != owner
+            && economy.actors.owner(site) != owner
             && (status == comptime!(EnterpriseState::Operating as u32)
                 || status == comptime!(EnterpriseState::Dormant as u32))
             && !lt(available, maximum(ticks(1, 0), divide(cash, 2)))
         {
             let request = comptime!(PURCHASE << 24) + site + 1;
-            let similar = actors[A::KIND * stride + site as usize] == product
-                && number(
-                    state,
-                    config,
-                    site,
-                    comptime!(Field::EnterpriseModel as u32),
-                ) == model;
+            let similar = economy.actors.kind(site).bits() == product
+                && economy.ledger.number(Field::EnterpriseModel, site) == model;
             related = select(similar, request, related);
             fallback = select(fallback == 0, request, fallback);
         }
@@ -230,15 +196,14 @@ pub(super) fn purchase(
 
 #[cube]
 fn input_price(
-    state: &mut [u32],
-    actors: &[u32],
-    config: &EconomyConfig,
+    economy: &EconomyView<'_>,
     spatial: &[u32],
     site: u32,
     good: u32,
     quantity: u32,
     day: u32,
 ) -> u32 {
+    let config = economy.ledger.config;
     let mut price = u32::new(comptime!(i64::from(u32::MAX)));
     if good == 0 {
         price = 0;
@@ -246,28 +211,16 @@ fn input_price(
     if good > 0 {
         for sample in 0..min(32u32, firms(spatial, config)) {
             let supplier = firm_at(spatial, config, site + day * 17 + sample);
-            let kind = actors[A::KIND * (actors.len() / A::WORDS) + supplier as usize];
-            let stock = load(state, good * config.state_stride + supplier);
+            let kind = economy.actors.kind(supplier).bits();
+            let stock = economy.ledger.value_at(good, supplier);
             if kind == good
-                && number(
-                    state,
-                    config,
-                    supplier,
-                    comptime!(Field::EnterpriseModel as u32),
-                ) == 0
-                && number(
-                    state,
-                    config,
-                    supplier,
-                    comptime!(Field::EnterpriseStatus as u32),
-                ) == comptime!(EnterpriseState::Operating as u32)
+                && economy.ledger.number(Field::EnterpriseModel, supplier) == 0
+                && economy.ledger.number(Field::EnterpriseStatus, supplier)
+                    == comptime!(EnterpriseState::Operating as u32)
                 && !lt(stock, ticks(quantity, 0))
-                && distance(actors, site, supplier) <= config.search_radius
+                && economy.actors.distance(site, supplier) <= config.search_radius
             {
-                price = min(
-                    price,
-                    number(state, config, supplier, comptime!(Field::Price as u32)),
-                );
+                price = min(price, economy.ledger.number(Field::Price, supplier));
             }
         }
     }
@@ -276,52 +229,39 @@ fn input_price(
 
 #[cube]
 pub(super) fn prepare_quotes(
-    state: &mut [u32],
-    actors: &[u32],
-    config: &EconomyConfig,
+    economy: &EconomyView<'_>,
     spatial: &[u32],
     quotes: &mut [u32],
     day: u32,
 ) {
+    let config = economy.ledger.config;
     let member = ABSOLUTE_POS as u32;
     if member < firms(spatial, config) {
         let source = firm_at(spatial, config, member);
-        let inputs = number(
-            state,
-            config,
-            source,
-            comptime!(Field::BasicInputTicks as u32),
-        );
+        let inputs = economy.ledger.number(Field::BasicInputTicks, source);
         #[unroll]
         for slot in 0..2u32 {
-            let good = number(
-                state,
-                config,
-                source,
-                comptime!(Field::BasicFirstInput as u32) + slot,
-            );
+            let good = economy
+                .ledger
+                .number_at(comptime!(Field::BasicFirstInput as u32) + slot, source);
             quotes[(2 * config.actors + 2 * source + slot) as usize] =
-                input_price(state, actors, config, spatial, source, good, inputs, day);
+                input_price(economy, spatial, source, good, inputs, day);
         }
     }
 }
 
 #[cube]
 pub(in crate::simulation) fn discover(
-    state: &mut [u32],
-    actors: &[u32],
-    config: &EconomyConfig,
+    economy: &mut EconomyView<'_>,
     spatial: &[u32],
     quotes: &[u32],
     owner: u32,
     day: u32,
     #[comptime] quote_mode: EntryQuoteMode,
 ) -> u32 {
-    let cash = load(
-        state,
-        comptime!(Field::Cash as u32) * config.state_stride + owner,
-    );
-    let members = crate::simulation::enterprise::founder_shares(state, actors, config, owner);
+    let config = economy.ledger.config;
+    let cash = economy.ledger.value(Field::Cash, owner);
+    let members = crate::simulation::enterprise::founder_shares(&*economy, owner);
     let investment = divide(divide(cash, members), 2);
     let wage = config.starting_wage;
     let mut selected = 0;
@@ -330,48 +270,27 @@ pub(in crate::simulation) fn discover(
     let mut second_cost = 0;
     for sample in 0..min(32u32, firms(spatial, config)) {
         let source = firm_at(spatial, config, owner + day * 17 + sample);
-        let kind = actors[A::KIND * (actors.len() / A::WORDS) + source as usize];
-        let active = number(
-            state,
-            config,
-            source,
-            comptime!(Field::EnterpriseStatus as u32),
-        ) == comptime!(EnterpriseState::Operating as u32);
-        let producer = number(
-            state,
-            config,
-            source,
-            comptime!(Field::EnterpriseModel as u32),
-        ) == 0;
-        if kind > 0 && active && producer && distance(actors, owner, source) <= config.search_radius
+        let kind = economy.actors.kind(source).bits();
+        let active = economy.ledger.number(Field::EnterpriseStatus, source)
+            == comptime!(EnterpriseState::Operating as u32);
+        let producer = economy.ledger.number(Field::EnterpriseModel, source) == 0;
+        if kind > 0
+            && active
+            && producer
+            && economy.actors.distance(owner, source) <= config.search_radius
         {
-            let price = number(state, config, source, comptime!(Field::Price as u32));
-            if actors[A::GEOGRAPHIC_CAPACITY * (actors.len() / A::WORDS) + source as usize] > 0 {
-                let inputs = number(
-                    state,
-                    config,
-                    source,
-                    comptime!(Field::BasicInputTicks as u32),
-                );
+            let price = economy.ledger.number(Field::Price, source);
+            if economy.actors.geographic_capacity(source) > 0 {
+                let inputs = economy.ledger.number(Field::BasicInputTicks, source);
                 let first = entry_quote(
-                    state, actors, config, spatial, quotes, source, inputs, day, 0, quote_mode,
+                    &*economy, spatial, quotes, source, inputs, day, 0, quote_mode,
                 );
                 let second = entry_quote(
-                    state, actors, config, spatial, quotes, source, inputs, day, 1, quote_mode,
+                    &*economy, spatial, quotes, source, inputs, day, 1, quote_mode,
                 );
                 if first < u32::MAX && second < u32::MAX {
-                    let labor = number(
-                        state,
-                        config,
-                        source,
-                        comptime!(Field::BasicLaborMinutes as u32),
-                    );
-                    let output = number(
-                        state,
-                        config,
-                        source,
-                        comptime!(Field::BasicOutputTicks as u32),
-                    );
+                    let labor = economy.ledger.number(Field::BasicLaborMinutes, source);
+                    let output = economy.ledger.number(Field::BasicOutputTicks, source);
                     let seasonal = config.home.harvest_days < 365
                         && (kind == comptime!(Good::Grain as u32)
                             || kind == comptime!(Good::Flax as u32)
@@ -403,7 +322,7 @@ pub(in crate::simulation) fn discover(
                     }
                 }
             }
-            let stock = load(state, kind * config.state_stride + source);
+            let stock = economy.ledger.value_at(kind, source);
             let traded = kind == comptime!(Good::Grain as u32)
                 || kind == comptime!(Good::Bread as u32)
                 || kind == comptime!(Good::Wood as u32)
@@ -434,25 +353,19 @@ pub(in crate::simulation) fn discover(
         }
     }
     if selected > 0 {
-        store(
-            state,
-            comptime!(Field::ReplacementCost as u32) * config.state_stride + owner,
-            ticks(first_cost, 0),
-        );
-        store(
-            state,
-            comptime!(Field::SecondInputCost as u32) * config.state_stride + owner,
-            ticks(second_cost, 0),
-        );
+        economy
+            .ledger
+            .set(Field::ReplacementCost, owner, ticks(first_cost, 0));
+        economy
+            .ledger
+            .set(Field::SecondInputCost, owner, ticks(second_cost, 0));
     }
     selected
 }
 
 #[cube]
 fn entry_quote(
-    state: &mut [u32],
-    actors: &[u32],
-    config: &EconomyConfig,
+    economy: &EconomyView<'_>,
     spatial: &[u32],
     quotes: &[u32],
     source: u32,
@@ -461,16 +374,14 @@ fn entry_quote(
     slot: u32,
     #[comptime] mode: EntryQuoteMode,
 ) -> u32 {
+    let config = economy.ledger.config;
     match comptime!(mode) {
         EntryQuoteMode::Cached => quotes[(2 * config.actors + 2 * source + slot) as usize],
         EntryQuoteMode::Sampled => {
-            let good = number(
-                state,
-                config,
-                source,
-                comptime!(Field::BasicFirstInput as u32) + slot,
-            );
-            input_price(state, actors, config, spatial, source, good, quantity, day)
+            let good = economy
+                .ledger
+                .number_at(comptime!(Field::BasicFirstInput as u32) + slot, source);
+            input_price(economy, spatial, source, good, quantity, day)
         }
     }
 }

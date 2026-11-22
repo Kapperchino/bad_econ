@@ -1,5 +1,6 @@
 use super::*;
 use crate::simulation::layout::{DISCOVERY_BLOCK, SpatialIndex};
+use crate::simulation::state::ActorTable;
 
 #[derive(CubeType, CubeLaunch)]
 struct SpatialGrowth {
@@ -68,10 +69,14 @@ pub(in crate::simulation) fn extend(
 }
 
 #[cube]
-fn cell(actors: &[u32], growth: &SpatialGrowth, actor: u32, #[comptime] kind: CellKind) -> u32 {
-    let count = growth.before + growth.added;
-    let x = actors[A::X * count as usize + actor as usize];
-    let y = actors[A::Y * count as usize + actor as usize];
+fn cell(
+    actors: &ActorTable<'_>,
+    growth: &SpatialGrowth,
+    actor: u32,
+    #[comptime] kind: CellKind,
+) -> u32 {
+    let x = actors.x(actor);
+    let y = actors.y(actor);
     match kind {
         CellKind::Market => y / growth.radius * growth.side + x / growth.radius,
         CellKind::Query => y / growth.query_tile * growth.query_side + x / growth.query_tile,
@@ -81,7 +86,7 @@ fn cell(actors: &[u32], growth: &SpatialGrowth, actor: u32, #[comptime] kind: Ce
 #[cube]
 fn query_offset(
     spatial: &[u32],
-    actors: &[u32],
+    actors: &ActorTable<'_>,
     growth: &SpatialGrowth,
     base: u32,
     count: u32,
@@ -146,7 +151,10 @@ impl GpuPass<SpatialGrowthInput> for MergeSpatialRows {
         merge(
             &input.prior,
             &input.additions,
-            &input.actors,
+            &ActorTable::with_stride(
+                &input.actors,
+                (input.growth.before + input.growth.added) as usize,
+            ),
             &mut input.output,
             &input.growth,
         );
@@ -164,7 +172,7 @@ fn clear(output: &mut [u32]) {
 fn merge(
     prior: &[u32],
     additions: &[u32],
-    actors: &[u32],
+    actors: &ActorTable<'_>,
     output: &mut [u32],
     growth: &SpatialGrowth,
 ) {
@@ -408,7 +416,7 @@ impl GpuPass<SpatialMigrationInput> for MigrateSpatialRows {
     fn execute(mut input: SpatialMigrationInput) {
         migrate_rows(
             &input.prior,
-            &input.actors,
+            &ActorTable::with_stride(&input.actors, input.parameters.before as usize),
             &input.changes,
             &mut input.output,
             &input.parameters,
@@ -436,7 +444,7 @@ fn changed_offset(changes: &[u32], start: u32, count: u32, cell: u32, actor: u32
 #[cube]
 fn prior_offset(
     prior: &[u32],
-    actors: &[u32],
+    actors: &ActorTable<'_>,
     parameters: &SpatialMigrationParameters,
     cell: u32,
     actor: u32,
@@ -455,16 +463,20 @@ fn prior_offset(
 }
 
 #[cube]
-fn previous_cell(actors: &[u32], parameters: &SpatialMigrationParameters, actor: u32) -> u32 {
-    let x = actors[(A::X as u32 * parameters.before + actor) as usize];
-    let y = actors[(A::Y as u32 * parameters.before + actor) as usize];
+fn previous_cell(
+    actors: &ActorTable<'_>,
+    parameters: &SpatialMigrationParameters,
+    actor: u32,
+) -> u32 {
+    let x = actors.x(actor);
+    let y = actors.y(actor);
     y / parameters.radius * parameters.side + x / parameters.radius
 }
 
 #[cube]
 fn migrate_rows(
     prior: &[u32],
-    actors: &[u32],
+    actors: &ActorTable<'_>,
     changes: &[u32],
     output: &mut [u32],
     parameters: &SpatialMigrationParameters,

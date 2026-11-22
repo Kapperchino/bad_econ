@@ -36,7 +36,7 @@ pub(in crate::simulation) fn launch(
 
 #[cube]
 fn coordinate(config: &EconomyConfig, field: u32, actor: u32) -> usize {
-    (field * config.state_stride + actor) as usize
+    config.coordinate(field, actor) as usize
 }
 
 #[derive(CubeType, CubeLaunch)]

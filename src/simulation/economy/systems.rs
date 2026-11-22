@@ -47,10 +47,9 @@ impl GpuPass<EconomyInput> for AdvanceEconomy {
             input.config.consumption_intervals[crate::domain::Good::COUNT + 4usize] =
                 input.parameters.matching_round;
         }
-        economy(
-            &mut input.state,
-            &input.actors,
-            &input.config,
+        let mut economy = EconomyView::new(&mut input.state, &input.actors, &input.config);
+        run_stage(
+            &mut economy,
             &mut input.spatial,
             &mut input.proposals,
             &mut input.bundles,

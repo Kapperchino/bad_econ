@@ -597,22 +597,26 @@ impl System for RailSystem {
 impl GpuPass<RailInput> for AdvanceRailways {
     type Output = ();
     fn execute(mut input: RailInput) {
+        let levels = LedgerColumn::new(&input.state, &input.config, Field::RailOperating);
         match comptime!(input.stage) {
             RailPass::Infrastructure => infrastructure(
-                &mut input.state,
-                &input.actors,
-                &input.config,
+                &mut EconomyView::new(&mut input.state, &input.actors, &input.config),
                 &input.control,
             ),
-            RailPass::DormantDemand => dormant_demand(&mut input.state, &input.config),
-            RailPass::Access => access(&input.actors, &mut input.config),
-            RailPass::DirtyCarriers => dirty_carriers(&mut input.state, &mut input.config),
-            RailPass::PrepareRoutes => prepare_routes(&mut input.state, &mut input.config),
-            RailPass::Routes => routes(&mut input.state, &mut input.config),
+            RailPass::DormantDemand => {
+                dormant_demand(&mut Ledger::new(&mut input.state, &input.config))
+            }
+            RailPass::Access => access(&ActorTable::new(&input.actors), &mut input.config),
+            RailPass::DirtyCarriers => dirty_carriers(&levels, &mut input.config.railway),
+            RailPass::PrepareRoutes => prepare_routes(&levels, &mut input.config.railway),
+            RailPass::Routes => routes(&levels, &mut input.config),
             RailPass::Quotes => quotes(&mut input.config),
             RailPass::Inbound => inbound(&mut input.config),
             RailPass::CompleteQuotes => complete_quotes(&mut input.config),
-            RailPass::Close => close(&mut input.state, &input.config, &input.control),
+            RailPass::Close => close(
+                &mut Ledger::new(&mut input.state, &input.config),
+                &input.control,
+            ),
         }
     }
 }
@@ -682,99 +686,67 @@ fn material(index: u32) -> u32 {
 }
 
 #[cube]
-fn supplied(state: &mut [u32], config: &EconomyConfig, firm: u32, units: u32, offset: u32) -> bool {
+fn supplied(ledger: &Ledger<'_>, firm: u32, units: u32, offset: u32) -> bool {
+    let config = ledger.config;
     let mut funded = true;
     for index in 0..3u32 {
         let required = times32(units, config.railway.materials[(offset + index) as usize]);
-        funded = funded && !lt(value(state, config, material(index), firm), required);
+        funded = funded && !lt(ledger.value_at(material(index), firm), required);
     }
     funded
 }
 
 #[cube]
-fn consume(
-    state: &mut [u32],
-    config: &EconomyConfig,
-    control: &[Atomic<u32>],
-    firm: u32,
-    units: u32,
-    offset: u32,
-) {
+fn consume(ledger: &mut Ledger<'_>, control: &[Atomic<u32>], firm: u32, units: u32, offset: u32) {
+    let config = ledger.config;
     for index in 0..3u32 {
         let good = material(index);
         let required = times32(units, config.railway.materials[(offset + index) as usize]);
-        let remaining = minus(value(state, config, good, firm), required);
-        set(state, config, good, firm, remaining);
-        increase(
-            state,
-            config,
-            control,
-            USED_FIELDS as u32 + good - 1,
-            firm,
-            required,
-        );
-        increase(
-            state,
-            config,
-            control,
-            comptime!(Field::Used as u32),
-            firm,
-            required,
-        );
+        let remaining = minus(ledger.value_at(good, firm), required);
+        ledger.set_at(good, firm, remaining);
+        ledger.increase_at(control, USED_FIELDS as u32 + good - 1, firm, required);
+        ledger.increase(control, Field::Used, firm, required);
     }
 }
 
 #[cube]
-pub(super) fn offer_crew_jobs(
-    state: &mut [u32],
-    actors: &[u32],
-    config: &EconomyConfig,
-    control: &[Atomic<u32>],
-    firm: u32,
-) {
-    let built = number(state, config, comptime!(Field::RailBuilt as u32), firm);
+pub(super) fn offer_crew_jobs(economy: &mut EconomyView<'_>, control: &[Atomic<u32>], firm: u32) {
+    let config = economy.ledger.config;
+    let built = economy.ledger.number(Field::RailBuilt, firm);
     let mut segments = 0;
     for index in 0..config.railway.segment_count {
         let company = config.railway.segments[index as usize * SEGMENT_WORDS + 2];
         segments +=
             u32::cast_from(config.railway.companies[company as usize * COMPANY_WORDS] == firm);
     }
-    let minutes = number(state, config, comptime!(Field::LaborMinutes as u32), firm);
+    let minutes = economy.ledger.number(Field::LaborMinutes, firm);
     let cart_crews = 1 + ceildiv(
-        number(state, config, comptime!(Field::CartageMinutes as u32), firm),
+        economy.ledger.number(Field::CartageMinutes, firm),
         max(minutes, 1),
     );
     let requested = cart_crews
         + ceildiv(built, comptime!(crate::domain::railway::SEGMENTS_PER_CREW))
         + u32::cast_from(segments > built);
-    let limit = actors[ActorLayout::CAPACITY * (actors.len() / ActorLayout::WORDS) + firm as usize];
-    let budget = employment::ShiftBudget::new(state, config, control, firm);
+    let limit = economy.actors.capacity(firm);
+    let budget = employment::ShiftBudget::new(&economy.ledger, control, firm);
     let funded = divide(budget.cash, max(budget.pay, 1));
-    let operating = number(
-        state,
-        config,
-        comptime!(Field::EnterpriseStatus as u32),
-        firm,
-    ) == comptime!(crate::domain::enterprise::EnterpriseState::Operating as u32);
+    let operating = economy.ledger.number(Field::EnterpriseStatus, firm)
+        == comptime!(crate::domain::enterprise::EnterpriseState::Operating as u32);
     let jobs = minimum(
         funded,
         ticks(select(operating, min(requested, limit), 0), 0),
     );
-    set(state, config, comptime!(Field::Plan as u32), firm, jobs);
-    set(state, config, comptime!(Field::Slots as u32), firm, jobs);
+    economy.ledger.set(Field::Plan, firm, jobs);
+    economy.ledger.set(Field::Slots, firm, jobs);
 }
 
 #[cube]
-fn infrastructure(
-    state: &mut [u32],
-    actors: &[u32],
-    config: &EconomyConfig,
-    control: &[Atomic<u32>],
-) {
+fn infrastructure(economy: &mut EconomyView<'_>, control: &[Atomic<u32>]) {
+    let config = economy.ledger.config;
     let company = CUBE_POS as u32;
     if company < config.railway.company_count {
         let firm = config.railway.companies[company as usize * COMPANY_WORDS];
-        let built = number(state, config, comptime!(Field::RailBuilt as u32), firm);
+        let built = economy.ledger.number(Field::RailBuilt, firm);
         let mut units = 0u32;
         let mut next = 0u32;
         let mut edge = UNIT_POS;
@@ -794,7 +766,7 @@ fn infrastructure(
         while region < config.railway.region_count {
             if config.railway.regions[region as usize * REGION_WORDS] == company {
                 let level =
-                    regional_number(state, config, region, comptime!(RailCapacityField::Level));
+                    regional_number(&economy.ledger, region, comptime!(RailCapacityField::Level));
                 units += max(level, 1) - 1;
             }
             region += CUBE_DIM;
@@ -805,37 +777,28 @@ fn infrastructure(
         let mut service = Shared::<u32>::new();
         let mut budget = Shared::<u32>::new();
         if UNIT_POS == 0 {
-            let active =
-                number(
-                    state,
-                    config,
-                    comptime!(Field::EnterpriseStatus as u32),
-                    firm,
-                ) == comptime!(crate::domain::enterprise::EnterpriseState::Operating as u32);
-            let crew = number(state, config, comptime!(Field::Plan as u32), firm)
-                - number(state, config, comptime!(Field::Slots as u32), firm);
+            let active = economy.ledger.number(Field::EnterpriseStatus, firm)
+                == comptime!(crate::domain::enterprise::EnterpriseState::Operating as u32);
+            let crew = economy.ledger.number(Field::Plan, firm)
+                - economy.ledger.number(Field::Slots, firm);
             let upkeep_crew = ceildiv(built, comptime!(crate::domain::railway::SEGMENTS_PER_CREW));
             let maintained =
-                active && crew >= max(upkeep_crew, 1) && supplied(state, config, firm, units, 3);
+                active && crew >= max(upkeep_crew, 1) && supplied(&economy.ledger, firm, units, 3);
             if maintained {
-                consume(state, config, control, firm, units, 3);
+                consume(&mut economy.ledger, control, firm, units, 3);
             }
             let build = maintained
                 && crew > upkeep_crew
                 && next > 0
-                && supplied(state, config, firm, next, 0);
+                && supplied(&economy.ledger, firm, next, 0);
             if build {
-                consume(state, config, control, firm, next, 0);
+                consume(&mut economy.ledger, control, firm, next, 0);
             }
             let rail_crews = select(maintained, upkeep_crew, 0) + u32::cast_from(build);
-            let shift = number(state, config, comptime!(Field::LaborMinutes as u32), firm);
-            set32(
-                state,
-                config,
-                comptime!(Field::CartageCapacity as u32),
-                firm,
-                (crew - rail_crews) * shift,
-            );
+            let shift = economy.ledger.number(Field::LaborMinutes, firm);
+            economy
+                .ledger
+                .set_number(Field::CartageCapacity, firm, (crew - rail_crews) * shift);
             *built_count = built + u32::cast_from(build);
             *service = u32::cast_from(maintained);
             let mut affordable = ticks(config.railway.region_count, 0);
@@ -843,31 +806,25 @@ fn infrastructure(
                 affordable = minimum(
                     affordable,
                     divide(
-                        value(state, config, material(index), firm),
+                        economy.ledger.value_at(material(index), firm),
                         config.railway.materials[index as usize],
                     ),
                 );
             }
             *budget = affordable.extract(LOW_WORD);
-            set32(
-                state,
-                config,
-                comptime!(Field::RailBuilt as u32),
-                firm,
-                *built_count,
-            );
-            set32(
-                state,
-                config,
-                comptime!(Field::RailOperating as u32),
+            economy
+                .ledger
+                .set_number(Field::RailBuilt, firm, *built_count);
+            economy.ledger.set_number(
+                Field::RailOperating,
                 firm,
                 select(maintained, *built_count, 0),
             );
-            let expired = value(state, config, comptime!(Field::Railway as u32), firm);
-            record_use(state, config, control, firm, expired);
+            let expired = economy.ledger.value(Field::Railway, firm);
+            record_use(&mut economy.ledger, control, firm, expired);
         }
         sync_storage();
-        let expanding = enterprises::expands(state, actors, config, firm);
+        let expanding = enterprises::expands(&*economy, firm);
         let maintained = *service != 0;
         let mut remaining = *budget;
         let mut upgrades = 0u32;
@@ -883,11 +840,18 @@ fn infrastructure(
                 own = config.railway.regions[base] == company;
                 if own {
                     level = max(
-                        regional_number(state, config, region, comptime!(RailCapacityField::Level)),
+                        regional_number(
+                            &economy.ledger,
+                            region,
+                            comptime!(RailCapacityField::Level),
+                        ),
                         u32::cast_from(config.railway.regions[base + 2] < *built_count),
                     );
-                    let demand =
-                        regional_value(state, config, region, comptime!(RailCapacityField::Demand));
+                    let demand = regional_value(
+                        &economy.ledger,
+                        region,
+                        comptime!(RailCapacityField::Demand),
+                    );
                     requested = u32::cast_from(
                         maintained
                             && expanding
@@ -905,15 +869,13 @@ fn infrastructure(
             if own {
                 let units = level * config.railway.units_per_level;
                 regional_set(
-                    state,
-                    config,
+                    &mut economy.ledger,
                     region,
                     ticks(level, 0),
                     comptime!(RailCapacityField::Level),
                 );
                 regional_set(
-                    state,
-                    config,
+                    &mut economy.ledger,
                     region,
                     ticks(select(maintained, units, 0), 0),
                     comptime!(RailCapacityField::Available),
@@ -924,66 +886,39 @@ fn infrastructure(
         }
         let total = parallel::sum_wide(capacity);
         if UNIT_POS == 0 {
-            consume(state, config, control, firm, upgrades, 0);
+            consume(&mut economy.ledger, control, firm, upgrades, 0);
             let capacity = ticks(
                 u32::cast_from(total.value),
                 u32::cast_from(total.value >> 32),
             );
             let production = select(maintained, capacity, zero());
-            set(
-                state,
-                config,
-                comptime!(Field::RailCapacity as u32),
-                firm,
-                capacity,
-            );
-            set(
-                state,
-                config,
-                comptime!(Field::Railway as u32),
-                firm,
-                production,
-            );
-            increase(
-                state,
-                config,
-                control,
-                comptime!(Field::Produced as u32),
-                firm,
-                production,
-            );
-            increase(
-                state,
-                config,
-                control,
-                comptime!(Field::UnscaledProduced as u32),
-                firm,
-                production,
-            );
-            set32(state, config, comptime!(Field::RailRevenue as u32), firm, 0);
+            economy.ledger.set(Field::RailCapacity, firm, capacity);
+            economy.ledger.set(Field::Railway, firm, production);
+            economy
+                .ledger
+                .increase(control, Field::Produced, firm, production);
+            economy
+                .ledger
+                .increase(control, Field::UnscaledProduced, firm, production);
+            economy.ledger.set_number(Field::RailRevenue, firm, 0);
         }
     }
 }
 
 #[cube]
-pub(super) fn demand(
-    state: &mut [u32],
-    actors: &[u32],
-    config: &EconomyConfig,
-    firm: u32,
-    good: u32,
-) -> Ticks {
+pub(super) fn demand(economy: &mut EconomyView<'_>, firm: u32, good: u32) -> Ticks {
+    let config = economy.ledger.config;
     let mut wanted = zero();
     let requested_material = good == comptime!(Good::Coal as u32)
         || good == comptime!(Good::Steel as u32)
         || good == comptime!(Good::Locomotives as u32);
     if comptime!(config.railway.enabled == Feature::Enabled)
         && requested_material
-        && kind(actors, firm).bits() == comptime!(Good::Railway as u32)
+        && economy.actors.kind(firm).bits() == comptime!(Good::Railway as u32)
     {
         for company in 0..config.railway.company_count {
             if config.railway.companies[company as usize * COMPANY_WORDS] == firm {
-                let built = number(state, config, comptime!(Field::RailBuilt as u32), firm);
+                let built = economy.ledger.number(Field::RailBuilt, firm);
                 let mut units = 0;
                 let mut next = 0;
                 for edge in 0..config.railway.segment_count {
@@ -997,18 +932,16 @@ pub(super) fn demand(
                     units += select(own && ordinal < built, length, 0);
                     next += select(own && ordinal == built, length, 0);
                 }
-                let expanding = enterprises::expands(state, actors, config, firm);
+                let expanding = enterprises::expands(&*economy, firm);
                 for region in 0..config.railway.region_count {
                     if config.railway.regions[region as usize * REGION_WORDS] == company {
                         let level = regional_number(
-                            state,
-                            config,
+                            &economy.ledger,
                             region,
                             comptime!(RailCapacityField::Level),
                         );
                         let demand = regional_value(
-                            state,
-                            config,
+                            &economy.ledger,
                             region,
                             comptime!(RailCapacityField::Demand),
                         );
@@ -1038,23 +971,18 @@ pub(super) fn demand(
 }
 
 #[cube]
-fn dormant_demand(state: &mut [u32], config: &EconomyConfig) {
+fn dormant_demand(ledger: &mut Ledger<'_>) {
+    let config = ledger.config;
     let region = ABSOLUTE_POS as u32;
     if region < config.railway.region_count {
         let units = times32(
-            regional_number(state, config, region, comptime!(RailCapacityField::Level)),
+            regional_number(&*ledger, region, comptime!(RailCapacityField::Level)),
             config.railway.units_per_level,
         );
-        let available = regional_value(
-            state,
-            config,
-            region,
-            comptime!(RailCapacityField::Available),
-        );
-        let demand = regional_value(state, config, region, comptime!(RailCapacityField::Demand));
+        let available = regional_value(&*ledger, region, comptime!(RailCapacityField::Available));
+        let demand = regional_value(&*ledger, region, comptime!(RailCapacityField::Demand));
         regional_set(
-            state,
-            config,
+            ledger,
             region,
             maximum(demand, minus(units, available)),
             comptime!(RailCapacityField::Demand),
@@ -1063,28 +991,23 @@ fn dormant_demand(state: &mut [u32], config: &EconomyConfig) {
 }
 
 #[cube]
-fn dirty_carriers(state: &mut [u32], config: &mut EconomyConfig) {
-    let companies = config.railway.company_count;
+fn dirty_carriers(levels: &LedgerColumn<'_>, railway: &mut RailNetwork) {
+    let companies = railway.company_count;
     let base = companies as usize * COMPANY_WORDS;
     let carrier = CUBE_POS as u32;
-    let mut affected = config.railway.companies[base] == comptime!(RouteCacheState::Unknown as u32);
+    let mut affected = railway.companies[base] == comptime!(RouteCacheState::Unknown as u32);
     let mut owner = UNIT_POS;
     while owner < companies && !affected {
-        let firm = config.railway.companies[owner as usize * COMPANY_WORDS];
-        let operating = number(
-            state,
-            &*config,
-            comptime!(Field::RailOperating as u32),
-            firm,
-        );
-        let cached = config.railway.companies[base + 2 + owner as usize];
+        let firm = railway.companies[owner as usize * COMPANY_WORDS];
+        let operating = levels.number(firm);
+        let cached = railway.companies[base + 2 + owner as usize];
         affected = cached != operating
-            && config.railway.access_rights[(carrier * companies + owner) as usize] > 0;
+            && railway.access_rights[(carrier * companies + owner) as usize] > 0;
         owner += CUBE_DIM;
     }
     let changed = parallel::reduce::<u32>(u32::cast_from(affected), comptime!(Reduction::Maximum));
     if UNIT_POS == 0 && carrier < companies {
-        config.railway.companies[base + 2 + companies as usize + carrier as usize] = select(
+        railway.companies[base + 2 + companies as usize + carrier as usize] = select(
             changed > 0,
             comptime!(RouteCacheState::Dirty as u32),
             comptime!(RouteCacheState::Clean as u32),
@@ -1093,34 +1016,29 @@ fn dirty_carriers(state: &mut [u32], config: &mut EconomyConfig) {
 }
 
 #[cube]
-fn prepare_routes(state: &mut [u32], config: &mut EconomyConfig) {
-    let companies = config.railway.company_count;
+fn prepare_routes(levels: &LedgerColumn<'_>, railway: &mut RailNetwork) {
+    let companies = railway.company_count;
     let base = companies as usize * COMPANY_WORDS;
     let mut changed = 0u32;
     let mut owner = UNIT_POS;
     while owner < companies {
-        let firm = config.railway.companies[owner as usize * COMPANY_WORDS];
-        config.railway.companies[base + 2 + owner as usize] = number(
-            state,
-            &*config,
-            comptime!(Field::RailOperating as u32),
-            firm,
-        );
+        let firm = railway.companies[owner as usize * COMPANY_WORDS];
+        railway.companies[base + 2 + owner as usize] = levels.number(firm);
         changed |= u32::cast_from(
-            config.railway.companies[base + 2 + companies as usize + owner as usize]
+            railway.companies[base + 2 + companies as usize + owner as usize]
                 == comptime!(RouteCacheState::Dirty as u32),
         );
         owner += CUBE_DIM;
     }
     let any = parallel::reduce::<u32>(changed, comptime!(Reduction::Maximum));
     if UNIT_POS == 0 {
-        config.railway.companies[base] = select(
+        railway.companies[base] = select(
             any > 0,
             comptime!(RouteCacheState::Dirty as u32),
             comptime!(RouteCacheState::Clean as u32),
         );
         if any > 0 {
-            config.railway.companies[base + 1] = comptime!(RouteCacheState::Dirty as u32);
+            railway.companies[base + 1] = comptime!(RouteCacheState::Dirty as u32);
         }
     }
 }
@@ -1144,7 +1062,7 @@ fn route_cell(config: &EconomyConfig, carrier: u32, origin: u32, destination: u3
 }
 
 #[cube]
-fn routes(state: &mut [u32], config: &mut EconomyConfig) {
+fn routes(levels: &LedgerColumn<'_>, config: &mut EconomyConfig) {
     let invocation = ABSOLUTE_POS as u32;
     let nodes = config.railway.nodes;
     let mut pair = invocation;
@@ -1199,11 +1117,7 @@ fn routes(state: &mut [u32], config: &mut EconomyConfig) {
                     let to = config.railway.segments[base + 1];
                     let owner = config.railway.segments[base + 2];
                     let firm = config.railway.companies[owner as usize * COMPANY_WORDS];
-                    let operating = load(
-                        state,
-                        comptime!(Field::RailOperating as u32) * config.state_stride + firm,
-                    )
-                    .extract(0usize);
+                    let operating = levels.number(firm);
                     let connected = config.railway.access_rights
                         [(carrier * config.railway.company_count + owner) as usize]
                         > 0
@@ -1264,10 +1178,9 @@ pub(super) struct FreightRoute {
 }
 
 #[cube]
-fn station(actors: &[u32], config: &EconomyConfig, actor: u32) -> u32 {
-    let stride = actors.len() / ActorLayout::WORDS;
-    let x = actors[ActorLayout::X * stride + actor as usize];
-    let y = actors[ActorLayout::Y * stride + actor as usize];
+fn station(actors: &ActorTable<'_>, config: &EconomyConfig, actor: u32) -> u32 {
+    let x = actors.x(actor);
+    let y = actors.y(actor);
     let mut chosen = 0;
     let mut distance = u32::new(comptime!(i64::from(u32::MAX)));
     for node in 0..config.railway.nodes {
@@ -1281,12 +1194,11 @@ fn station(actors: &[u32], config: &EconomyConfig, actor: u32) -> u32 {
 }
 
 #[cube]
-fn access(actors: &[u32], config: &mut EconomyConfig) {
+fn access(actors: &ActorTable<'_>, config: &mut EconomyConfig) {
     let actor = ABSOLUTE_POS as u32;
     if actor < config.actors && config.railway.nodes > 0 {
-        let stride = actors.len() / ActorLayout::WORDS;
-        let x = actors[ActorLayout::X * stride + actor as usize];
-        let y = actors[ActorLayout::Y * stride + actor as usize];
+        let x = actors.x(actor);
+        let y = actors.y(actor);
         let position = config.railway.access.len() / 2 + actor as usize * 2;
         if config.railway.access[position] != x + 1 || config.railway.access[position + 1] != y {
             let node = station(actors, &*config, actor);
@@ -1300,10 +1212,9 @@ fn access(actors: &[u32], config: &mut EconomyConfig) {
 }
 
 #[cube]
-fn access_distance(actors: &[u32], config: &EconomyConfig, actor: u32, node: u32) -> u32 {
-    let stride = actors.len() / ActorLayout::WORDS;
-    let x = actors[ActorLayout::X * stride + actor as usize];
-    let y = actors[ActorLayout::Y * stride + actor as usize];
+fn access_distance(actors: &ActorTable<'_>, config: &EconomyConfig, actor: u32, node: u32) -> u32 {
+    let x = actors.x(actor);
+    let y = actors.y(actor);
     let nx = config.railway.stations[node as usize * 2];
     let ny = config.railway.stations[node as usize * 2 + 1];
     max(x, nx) - min(x, nx) + max(y, ny) - min(y, ny)
@@ -1311,14 +1222,14 @@ fn access_distance(actors: &[u32], config: &EconomyConfig, actor: u32, node: u32
 
 #[cube]
 pub(super) fn animal_route(
-    actors: &[u32],
+    actors: &ActorTable<'_>,
     config: &EconomyConfig,
     buyer: u32,
     seller: u32,
 ) -> FreightRoute {
     FreightRoute {
         days: max(
-            ceildiv(distance(actors, buyer, seller), config.shipment_speed),
+            ceildiv(actors.distance(buyer, seller), config.shipment_speed),
             1,
         ),
         fee: 0,
@@ -1351,7 +1262,7 @@ impl FreightRoute {
 
 #[cube]
 fn candidate(
-    actors: &[u32],
+    actors: &ActorTable<'_>,
     config: &EconomyConfig,
     buyer: u32,
     seller: u32,
@@ -1370,9 +1281,9 @@ struct FreightRequest {
 
 #[cube]
 impl FreightRequest {
-    fn new(actors: &[u32], config: &EconomyConfig, buyer: u32, seller: u32) -> Self {
+    fn new(actors: &ActorTable<'_>, config: &EconomyConfig, buyer: u32, seller: u32) -> Self {
         let animal_days = max(
-            ceildiv(distance(actors, buyer, seller), config.shipment_speed),
+            ceildiv(actors.distance(buyer, seller), config.shipment_speed),
             1,
         );
         let mut origin = 0u32;
@@ -1539,7 +1450,7 @@ fn quotes(config: &mut EconomyConfig) {
 
 #[cube]
 pub(super) fn route(
-    actors: &[u32],
+    actors: &ActorTable<'_>,
     config: &EconomyConfig,
     buyer: u32,
     seller: u32,
@@ -1613,44 +1524,41 @@ pub(super) fn delivery_days(config: &EconomyConfig, request: DeliveryRequest) ->
 }
 
 #[cube]
-fn regional_cell(config: &EconomyConfig, region: u32, #[comptime] field: RailCapacityField) -> u32 {
-    let row = config.railway.region_base
-        + comptime!(field as u32) * config.railway.region_blocks
-        + region / config.railway.initial_actors;
-    row * config.state_stride + region % config.railway.initial_actors
-}
-
-#[cube]
-fn regional_value(
-    state: &mut [u32],
-    config: &EconomyConfig,
-    region: u32,
-    #[comptime] field: RailCapacityField,
-) -> Ticks {
-    load(state, regional_cell(config, region, comptime!(field)))
-}
-
-#[cube]
-fn regional_number(
-    state: &mut [u32],
+fn regional_field(
     config: &EconomyConfig,
     region: u32,
     #[comptime] field: RailCapacityField,
 ) -> u32 {
-    regional_value(state, config, region, comptime!(field)).extract(LOW_WORD)
+    config.railway.region_base
+        + comptime!(field as u32) * config.railway.region_blocks
+        + region / config.railway.initial_actors
+}
+
+#[cube]
+fn regional_value(ledger: &Ledger<'_>, region: u32, #[comptime] field: RailCapacityField) -> Ticks {
+    let config = ledger.config;
+    ledger.value_at(
+        regional_field(config, region, comptime!(field)),
+        region % config.railway.initial_actors,
+    )
+}
+
+#[cube]
+fn regional_number(ledger: &Ledger<'_>, region: u32, #[comptime] field: RailCapacityField) -> u32 {
+    regional_value(ledger, region, comptime!(field)).extract(LOW_WORD)
 }
 
 #[cube]
 fn regional_set(
-    state: &mut [u32],
-    config: &EconomyConfig,
+    ledger: &mut Ledger<'_>,
     region: u32,
     amount: Ticks,
     #[comptime] field: RailCapacityField,
 ) {
-    store(
-        state,
-        regional_cell(config, region, comptime!(field)),
+    let config = ledger.config;
+    ledger.set_at(
+        regional_field(config, region, comptime!(field)),
+        region % config.railway.initial_actors,
         amount,
     );
 }
@@ -1738,58 +1646,32 @@ fn traverse(config: &EconomyConfig, path: &FreightRoute) -> RouteTraversal {
 }
 
 #[cube]
-fn record_use(
-    state: &mut [u32],
-    config: &EconomyConfig,
-    control: &[Atomic<u32>],
-    actor: u32,
-    units: Ticks,
-) {
-    increase(
-        state,
-        config,
+fn record_use(ledger: &mut Ledger<'_>, control: &[Atomic<u32>], actor: u32, units: Ticks) {
+    ledger.increase_at(
         control,
         USED_FIELDS as u32 + comptime!(Good::Railway as u32) - 1,
         actor,
         units,
     );
-    increase(
-        state,
-        config,
-        control,
-        comptime!(Field::Used as u32),
-        actor,
-        units,
-    );
+    ledger.increase(control, Field::Used, actor, units);
 }
 
 #[cube]
-fn close(state: &mut [u32], config: &EconomyConfig, control: &[Atomic<u32>]) {
+fn close(ledger: &mut Ledger<'_>, control: &[Atomic<u32>]) {
+    let config = ledger.config;
     let company = ABSOLUTE_POS as u32;
     if company < config.railway.company_count {
         let firm = config.railway.companies[company as usize * COMPANY_WORDS];
-        let status = number(
-            state,
-            config,
-            comptime!(Field::EnterpriseStatus as u32),
-            firm,
-        );
+        let status = ledger.number(Field::EnterpriseStatus, firm);
         if status >= comptime!(crate::domain::enterprise::EnterpriseState::Liquidating as u32) {
-            let expired = value(state, config, comptime!(Field::Railway as u32), firm);
-            record_use(state, config, control, firm, expired);
-            set32(state, config, comptime!(Field::Railway as u32), firm, 0);
-            set32(
-                state,
-                config,
-                comptime!(Field::RailOperating as u32),
-                firm,
-                0,
-            );
+            let expired = ledger.value(Field::Railway, firm);
+            record_use(ledger, control, firm, expired);
+            ledger.set_number(Field::Railway, firm, 0);
+            ledger.set_number(Field::RailOperating, firm, 0);
             for region in 0..config.railway.region_count {
                 if config.railway.regions[region as usize * REGION_WORDS] == company {
                     regional_set(
-                        state,
-                        config,
+                        ledger,
                         region,
                         zero(),
                         comptime!(RailCapacityField::Available),

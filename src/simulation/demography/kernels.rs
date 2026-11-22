@@ -2,25 +2,15 @@ use super::{
     DemographyPolicy, OBSERVATION_METRICS, OBSERVATION_SHARDS, PersonLayout as P, PopulationModel,
     Stage, WorkerRemapping,
 };
-use crate::simulation::configuration::{EconomyConfig, Feature};
+use crate::simulation::configuration::Feature;
 use crate::{
     domain::{
         Field,
         demography::{DAYS_PER_YEAR, PROBABILITY_SCALE},
     },
-    simulation::{layout::ActorLayout as A, words::*},
+    simulation::{state::*, words::*},
 };
 use cubecl::prelude::*;
-
-#[cube]
-pub(super) fn get(state: &mut [u32], config: &EconomyConfig, field: u32, actor: u32) -> u32 {
-    load(state, field * config.state_stride + actor).extract(0usize)
-}
-
-#[cube]
-pub(super) fn put(state: &mut [u32], config: &EconomyConfig, field: u32, actor: u32, value: u32) {
-    store(state, field * config.state_stride + actor, ticks(value, 0));
-}
 
 #[cube]
 fn band(age: u32) -> u32 {
@@ -63,19 +53,12 @@ enum FamilySupport {
 }
 
 #[cube]
-pub(super) fn family_support(
-    state: &mut [u32],
-    config: &EconomyConfig,
-    household: u32,
-    food: u32,
-) -> u32 {
+pub(super) fn family_support(ledger: &Ledger<'_>, household: u32, food: u32) -> u32 {
+    let config = ledger.config;
     let mut support = u32::new(comptime!(FamilySupport::Secure as i64));
     if comptime!(config.economy == crate::domain::Economy::Industrial) {
-        let plots = get(state, config, comptime!(Field::LandPlots as u32), household);
-        let tools = load(
-            state,
-            comptime!(Field::Tools as u32) * config.state_stride + household,
-        );
+        let plots = ledger.number(Field::LandPlots, household);
+        let tools = ledger.value(Field::Tools, household);
         let grain = times32(plots, config.home.annual_yield_per_plot);
         let bread = select(
             config.wheat_kg_per_hectare > 0,
@@ -83,26 +66,18 @@ pub(super) fn family_support(
             grain,
         );
         let grown = select(equal(tools, zero()), zero(), divide(bread, DAYS_PER_YEAR));
-        let bread_stock = load(
-            state,
-            comptime!(Field::Bread as u32) * config.state_stride + household,
-        );
-        let bread_delivery = load(
-            state,
-            (comptime!(crate::domain::TRANSIT_FIELDS as u32)
+        let bread_stock = ledger.value(Field::Bread, household);
+        let bread_delivery = ledger.value_at(
+            comptime!(crate::domain::TRANSIT_FIELDS as u32)
                 + comptime!(crate::domain::Good::Bread as u32)
-                - 1)
-                * config.state_stride
-                + household,
+                - 1,
+            household,
         );
         let reserves = divide(plus(bread_stock, bread_delivery).value, 90);
         let purchased = positive(ticks(food, 0), plus(grown, reserves).value);
         let food_cost = times(
             purchased,
-            max(
-                get(state, config, comptime!(Field::FoodPrice as u32), household),
-                1,
-            ),
+            max(ledger.number(Field::FoodPrice, household), 1),
         )
         .value;
         let cost = plus(
@@ -111,47 +86,22 @@ pub(super) fn family_support(
                 select(plots > 0, 0, config.household_rent),
                 select(
                     comptime!(config.cohorts == Feature::Enabled),
-                    get(
-                        state,
-                        config,
-                        comptime!(Field::LivingMembers as u32),
-                        household,
-                    ),
+                    ledger.number(Field::LivingMembers, household),
                     1,
                 ),
             ),
         )
         .value;
-        let income = divide(
-            load(
-                state,
-                comptime!(Field::IncomeForecast as u32) * config.state_stride + household,
-            ),
-            1000,
-        );
-        let savings = divide(
-            load(
-                state,
-                comptime!(Field::Cash as u32) * config.state_stride + household,
-            ),
-            90,
-        );
+        let income = divide(ledger.value(Field::IncomeForecast, household), 1000);
+        let savings = divide(ledger.value(Field::Cash, household), 90);
         let available = plus(income, savings).value;
         support = select(
             lt(available, cost),
             comptime!(FamilySupport::Unfunded as u32),
             support,
         );
-        let arrears = load(
-            state,
-            comptime!(Field::RentArrears as u32) * config.state_stride + household,
-        );
-        let housing = get(
-            state,
-            config,
-            comptime!(Field::HousingStatus as u32),
-            household,
-        );
+        let arrears = ledger.value(Field::RentArrears, household);
+        let housing = ledger.number(Field::HousingStatus, household);
         let unsettled = !equal(arrears, zero())
             || housing == comptime!(crate::domain::HousingState::Homeless as u32);
         support = select(
@@ -264,9 +214,7 @@ fn death_cause(
 )]
 #[cube]
 pub fn step(
-    state: &mut [u32],
-    actors: &[u32],
-    config: &EconomyConfig,
+    economy: &mut EconomyView<'_>,
     people: &mut [u32],
     ranges: &[u32],
     policy: &DemographyPolicy,
@@ -276,6 +224,7 @@ pub fn step(
     #[comptime] stage: Stage,
     #[comptime] model: PopulationModel,
 ) {
+    let config = economy.ledger.config;
     let household = ABSOLUTE_POS as u32;
     if household < config.actors {
         let start = ranges[household as usize * 2];
@@ -289,45 +238,22 @@ pub fn step(
         let mut household_time = 0;
         if comptime!(stage == Stage::Observation) {
             births[household as usize] = 0;
-            put(
-                state,
-                config,
-                comptime!(Field::SplitPerson as u32),
-                household,
-                0,
-            );
+            economy.ledger.set_number(Field::SplitPerson, household, 0);
         }
         if comptime!(model == PopulationModel::Cohorts) {
-            living = get(
-                state,
-                config,
-                comptime!(Field::LivingMembers as u32),
-                household,
-            );
+            living = economy.ledger.number(Field::LivingMembers, household);
             for band in 0..5u32 {
-                demand += u64::cast_from(get(
-                    state,
-                    config,
-                    comptime!(Field::Infants as u32) + band,
-                    household,
-                )) * u64::cast_from(policy.food[band as usize]);
+                demand += u64::cast_from(
+                    economy
+                        .ledger
+                        .number_at(comptime!(Field::Infants as u32) + band, household),
+                ) * u64::cast_from(policy.food[band as usize]);
             }
             demand *= u64::cast_from(config.household_need);
-            workers = get(
-                state,
-                config,
-                comptime!(Field::YoungAdults as u32),
-                household,
-            ) + get(
-                state,
-                config,
-                comptime!(Field::OlderAdults as u32),
-                household,
-            );
+            workers = economy.ledger.number(Field::YoungAdults, household)
+                + economy.ledger.number(Field::OlderAdults, household);
             shortest_day = min(
-                config.work_cap
-                    * (1000 - get(state, config, comptime!(Field::Fatigue as u32), household))
-                    / 1000,
+                config.work_cap * (1000 - economy.ledger.number(Field::Fatigue, household)) / 1000,
                 1440 - config.reserved_minutes,
             );
             household_time = workers * shortest_day;
@@ -370,108 +296,60 @@ pub fn step(
             }
         }
         if comptime!(stage == Stage::Observation) {
-            put(
-                state,
-                config,
-                comptime!(Field::LivingMembers as u32),
-                household,
-                living,
-            );
-            put(
-                state,
-                config,
-                comptime!(Field::HeatingNeed as u32),
+            economy
+                .ledger
+                .set_number(Field::LivingMembers, household, living);
+            economy.ledger.set_number(
+                Field::HeatingNeed,
                 household,
                 living * config.heating_per_person,
             );
-            put(
-                state,
-                config,
-                comptime!(Field::HeatingServed as u32),
-                household,
-                0,
-            );
-            put(
-                state,
-                config,
-                comptime!(Field::Worker as u32),
-                household,
-                worker,
-            );
+            economy
+                .ledger
+                .set_number(Field::HeatingServed, household, 0);
+            economy.ledger.set_number(Field::Worker, household, worker);
             if comptime!(config.cohorts == Feature::Enabled) {
                 available = shortest_day * workers;
-                put(
-                    state,
-                    config,
-                    comptime!(Field::EligibleWorkers as u32),
-                    household,
-                    workers,
-                );
+                economy
+                    .ledger
+                    .set_number(Field::EligibleWorkers, household, workers);
             }
-            let moving = get(state, config, comptime!(Field::MoveDue as u32), household) > 0;
-            put(
-                state,
-                config,
-                comptime!(Field::HouseholdBudget as u32),
+            let moving = economy.ledger.number(Field::MoveDue, household) > 0;
+            economy.ledger.set_number(
+                Field::HouseholdBudget,
                 household,
                 select(moving, 0, household_time),
             );
-            put(
-                state,
-                config,
-                comptime!(Field::Time as u32),
-                household,
-                select(moving, 0, available),
-            );
-            put(
-                state,
-                config,
-                comptime!(Field::HomeTime as u32),
+            economy
+                .ledger
+                .set_number(Field::Time, household, select(moving, 0, available));
+            economy.ledger.set_number(
+                Field::HomeTime,
                 household,
                 select(moving, 0, household_time - available),
             );
-            let gross = load(
-                state,
-                comptime!(Field::GrossIncome as u32) * config.state_stride + household,
-            );
-            let previous = load(
-                state,
-                comptime!(Field::OpeningGrossIncome as u32) * config.state_stride + household,
-            );
+            let gross = economy.ledger.value(Field::GrossIncome, household);
+            let previous = economy.ledger.value(Field::OpeningGrossIncome, household);
             let salary = positive(gross, previous);
-            store(
-                state,
-                comptime!(Field::OpeningGrossIncome as u32) * config.state_stride + household,
-                gross,
-            );
+            economy
+                .ledger
+                .set(Field::OpeningGrossIncome, household, gross);
             let target = crate::simulation::economy::food::bread_target(
                 config,
                 crate::simulation::economy::food::BreadDemand {
                     gross_income: salary,
-                    savings: load(
-                        state,
-                        comptime!(Field::Cash as u32) * config.state_stride + household,
-                    ),
-                    expected_income: load(
-                        state,
-                        comptime!(Field::IncomeForecast as u32) * config.state_stride + household,
-                    ),
+                    savings: economy.ledger.value(Field::Cash, household),
+                    expected_income: economy.ledger.value(Field::IncomeForecast, household),
                     minimum: ((demand + 999u64) / 1000u64) as u32,
                     members: living,
-                    price: get(state, config, comptime!(Field::FoodPrice as u32), household),
+                    price: economy.ledger.number(Field::FoodPrice, household),
                 },
             );
-            put(
-                state,
-                config,
-                comptime!(Field::FoodNeed as u32),
-                household,
-                target,
-            );
-            put(
-                state,
-                config,
-                comptime!(Field::NutritionNeed as u32),
+            economy
+                .ledger
+                .set_number(Field::FoodNeed, household, target);
+            economy.ledger.set_number(
+                Field::NutritionNeed,
                 household,
                 select(
                     config.food_medium_salary > 0,
@@ -481,103 +359,54 @@ pub fn step(
             );
         }
         if comptime!(stage == Stage::Diet) {
-            let gross = load(
-                state,
-                comptime!(Field::GrossIncome as u32) * config.state_stride + household,
-            );
-            let opening = load(
-                state,
-                comptime!(Field::OpeningGrossIncome as u32) * config.state_stride + household,
-            );
+            let gross = economy.ledger.value(Field::GrossIncome, household);
+            let opening = economy.ledger.value(Field::OpeningGrossIncome, household);
             let salary = positive(gross, opening);
             let target = crate::simulation::economy::food::bread_target(
                 config,
                 crate::simulation::economy::food::BreadDemand {
                     gross_income: salary,
-                    savings: load(
-                        state,
-                        comptime!(Field::Cash as u32) * config.state_stride + household,
-                    ),
-                    expected_income: load(
-                        state,
-                        comptime!(Field::IncomeForecast as u32) * config.state_stride + household,
-                    ),
+                    savings: economy.ledger.value(Field::Cash, household),
+                    expected_income: economy.ledger.value(Field::IncomeForecast, household),
                     minimum: living * config.household_need,
                     members: living,
-                    price: get(state, config, comptime!(Field::FoodPrice as u32), household),
+                    price: economy.ledger.number(Field::FoodPrice, household),
                 },
             );
-            put(
-                state,
-                config,
-                comptime!(Field::FoodNeed as u32),
-                household,
-                target,
-            );
+            economy
+                .ledger
+                .set_number(Field::FoodNeed, household, target);
         }
         if comptime!(stage == Stage::Requirements) {
-            let work = get(state, config, comptime!(Field::Hours as u32), household)
-                + get(
-                    state,
-                    config,
-                    comptime!(Field::CartageMinutes as u32),
-                    household,
-                )
-                + get(
-                    state,
-                    config,
-                    comptime!(Field::HomeMinutes as u32),
-                    household,
-                );
+            let work = economy.ledger.number(Field::Hours, household)
+                + economy.ledger.number(Field::CartageMinutes, household)
+                + economy.ledger.number(Field::HomeMinutes, household);
             let additional = u64::cast_from(work)
                 * u64::cast_from(policy.parameters.work_food)
                 * u64::cast_from(config.household_need)
                 / 480u64;
             let total = demand
                 + additional
-                + u64::cast_from(get(
-                    state,
-                    config,
-                    comptime!(Field::FoodFraction as u32),
-                    household,
-                ));
-            let gross = load(
-                state,
-                comptime!(Field::GrossIncome as u32) * config.state_stride + household,
-            );
-            let opening = load(
-                state,
-                comptime!(Field::OpeningGrossIncome as u32) * config.state_stride + household,
-            );
+                + u64::cast_from(economy.ledger.number(Field::FoodFraction, household));
+            let gross = economy.ledger.value(Field::GrossIncome, household);
+            let opening = economy.ledger.value(Field::OpeningGrossIncome, household);
             let salary = positive(gross, opening);
             let target = crate::simulation::economy::food::bread_target(
                 config,
                 crate::simulation::economy::food::BreadDemand {
                     gross_income: salary,
-                    savings: load(
-                        state,
-                        comptime!(Field::Cash as u32) * config.state_stride + household,
-                    ),
-                    expected_income: load(
-                        state,
-                        comptime!(Field::IncomeForecast as u32) * config.state_stride + household,
-                    ),
+                    savings: economy.ledger.value(Field::Cash, household),
+                    expected_income: economy.ledger.value(Field::IncomeForecast, household),
                     minimum: (total / 1000u64) as u32,
                     members: living,
-                    price: get(state, config, comptime!(Field::FoodPrice as u32), household),
+                    price: economy.ledger.number(Field::FoodPrice, household),
                 },
             );
-            put(
-                state,
-                config,
-                comptime!(Field::FoodNeed as u32),
-                household,
-                target,
-            );
-            put(
-                state,
-                config,
-                comptime!(Field::NutritionNeed as u32),
+            economy
+                .ledger
+                .set_number(Field::FoodNeed, household, target);
+            economy.ledger.set_number(
+                Field::NutritionNeed,
                 household,
                 select(
                     config.food_medium_salary > 0,
@@ -585,42 +414,21 @@ pub fn step(
                     (total / 1000u64) as u32,
                 ),
             );
-            put(
-                state,
-                config,
-                comptime!(Field::FoodFraction as u32),
-                household,
-                (total % 1000u64) as u32,
-            );
+            economy
+                .ledger
+                .set_number(Field::FoodFraction, household, (total % 1000u64) as u32);
         }
         if comptime!(stage == Stage::Mortality && model == PopulationModel::Cohorts) {
-            crate::simulation::demography::cohorts::advance(
-                state, actors, config, policy, samples, household,
-            );
+            crate::simulation::demography::cohorts::advance(economy, policy, samples, household);
         }
         if comptime!(stage == Stage::Mortality && model == PopulationModel::Individuals) {
-            let target = get(state, config, comptime!(Field::FoodNeed as u32), household);
-            let consumed =
-                target - get(state, config, comptime!(Field::Shortage as u32), household);
-            let need = get(
-                state,
-                config,
-                comptime!(Field::NutritionNeed as u32),
-                household,
-            );
+            let target = economy.ledger.number(Field::FoodNeed, household);
+            let consumed = target - economy.ledger.number(Field::Shortage, household);
+            let need = economy.ledger.number(Field::NutritionNeed, household);
             let deficit = (need - min(need, consumed)) * 1000 / max(need, 1);
-            let freezing_need = get(
-                state,
-                config,
-                comptime!(Field::LivingMembers as u32),
-                household,
-            ) * (max(config.heating_per_person, 2) - 2);
-            let served = get(
-                state,
-                config,
-                comptime!(Field::HeatingServed as u32),
-                household,
-            );
+            let freezing_need = economy.ledger.number(Field::LivingMembers, household)
+                * (max(config.heating_per_person, 2) - 2);
+            let served = economy.ledger.number(Field::HeatingServed, household);
             let cold_deficit =
                 (freezing_need - min(freezing_need, served)) * 1000 / max(freezing_need, 1);
             let mut supported_births = zero();
@@ -630,7 +438,7 @@ pub fn step(
                     config.household_need,
                     (policy.food[0usize] * config.household_need + 999) / 1000,
                 );
-                let support = family_support(state, config, household, need + infant_food);
+                let support = family_support(&economy.ledger, household, need + infant_food);
                 let support = select(
                     comptime!(config.economy == crate::domain::Economy::Industrial)
                         && max(deficit, cold_deficit) > 0,
@@ -643,23 +451,13 @@ pub fn step(
                     zero(),
                 );
             }
-            let selected = get(state, config, comptime!(Field::Worker as u32), household);
-            let employer = get(state, config, comptime!(Field::Employer as u32), household);
-            let minutes = get(state, config, comptime!(Field::Hours as u32), household);
-            let home = get(
-                state,
-                config,
-                comptime!(Field::HomeMinutes as u32),
-                household,
-            );
+            let selected = economy.ledger.number(Field::Worker, household);
+            let employer = economy.ledger.number(Field::Employer, household);
+            let minutes = economy.ledger.number(Field::Hours, household);
+            let home = economy.ledger.number(Field::HomeMinutes, household);
             let mut home_remaining = home;
-            let mut cartage_remaining = get(
-                state,
-                config,
-                comptime!(Field::CartageMinutes as u32),
-                household,
-            );
-            let mut paid_workers = get(state, config, comptime!(Field::Employed as u32), household);
+            let mut cartage_remaining = economy.ledger.number(Field::CartageMinutes, household);
+            let mut paid_workers = economy.ledger.number(Field::Employed, household);
             let shift = minutes / max(paid_workers, 1);
             let mut delegate = zero();
             for offset in 0..count {
@@ -707,25 +505,15 @@ pub fn step(
                     let mut occupational = zero();
                     if employer > 0 && work > 0 {
                         let firm = employer - 1;
-                        let good = actors[A::KIND * (actors.len() / A::WORDS) + firm as usize];
+                        let good = economy.actors.kind(firm).bits();
                         occupational = occupation(
                             policy.occupational[good as usize - 1],
                             work,
                             policy.parameters.reference_minutes,
-                            get(
-                                state,
-                                config,
-                                comptime!(Field::EquipmentCondition as u32),
-                                firm,
-                            ),
-                            get(
-                                state,
-                                config,
-                                comptime!(Field::SafetyProvision as u32),
-                                firm,
-                            ),
+                            economy.ledger.number(Field::EquipmentCondition, firm),
+                            economy.ledger.number(Field::SafetyProvision, firm),
                             people[base + P::FATIGUE],
-                            get(state, config, comptime!(Field::ActiveMethod as u32), firm),
+                            economy.ledger.number(Field::ActiveMethod, firm),
                         );
                     }
                     if home_work > 0 {
@@ -782,9 +570,9 @@ pub fn step(
                         && index != selected
                         && cause == 0;
                     if independent && (day + people[base + P::IDENTITY]) % 365 == 0 && living > 1 {
-                        store(
-                            state,
-                            comptime!(Field::SplitPerson as u32) * config.state_stride + household,
+                        economy.ledger.set(
+                            Field::SplitPerson,
+                            household,
                             ticks(people[base + P::IDENTITY], people[base + P::IDENTITY + 1]),
                         );
                     }
@@ -821,19 +609,13 @@ pub fn step(
                 }
             }
             if comptime!(config.cohorts == Feature::Enabled) {
-                store(
-                    state,
-                    comptime!(Field::CohortDelegate as u32) * config.state_stride + household,
-                    delegate,
-                );
+                economy
+                    .ledger
+                    .set(Field::CohortDelegate, household, delegate);
             }
-            put(
-                state,
-                config,
-                comptime!(Field::LivingMembers as u32),
-                household,
-                living,
-            );
+            economy
+                .ledger
+                .set_number(Field::LivingMembers, household, living);
         }
     }
 }
@@ -841,12 +623,12 @@ pub fn step(
 #[cube]
 pub fn observe(
     people: &[u32],
-    state: &mut [u32],
-    config: &EconomyConfig,
+    ledger: &Ledger<'_>,
     policy: &DemographyPolicy,
     output: &[Atomic<u32>],
     count: u32,
 ) {
+    let config = ledger.config;
     let index = ABSOLUTE_POS;
     if index < count as usize {
         let base = index * P::WORDS;
@@ -856,22 +638,10 @@ pub fn observe(
             output[shard].fetch_add(1);
             let age = people[base + P::AGE];
             let household = people[base + P::HOUSEHOLD];
-            let selected =
-                get(state, config, comptime!(Field::Worker as u32), household) == index as u32;
-            let firm = get(
-                state,
-                config,
-                comptime!(Field::InvestmentFirm as u32),
-                household,
-            );
-            let owner = firm > 0
-                && get(
-                    state,
-                    config,
-                    comptime!(Field::EnterpriseStatus as u32),
-                    max(firm, 1) - 1,
-                ) < 4;
-            let farmer = get(state, config, comptime!(Field::LandPlots as u32), household) > 0;
+            let selected = ledger.number(Field::Worker, household) == index as u32;
+            let firm = ledger.number(Field::InvestmentFirm, household);
+            let owner = firm > 0 && ledger.number(Field::EnterpriseStatus, max(firm, 1) - 1) < 4;
+            let farmer = ledger.number(Field::LandPlots, household) > 0;
             let dependent =
                 age < policy.parameters.minimum_age || age >= policy.parameters.retirement_age;
             let participant = selected || comptime!(config.cohorts == Feature::Enabled);

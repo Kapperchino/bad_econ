@@ -6,22 +6,25 @@ const OFFERS: u32 = 8;
 
 #[cube]
 pub(super) fn collect_firms(
-    state: &mut [u32],
-    actors: &[u32],
-    config: &EconomyConfig,
+    economy: &EconomyView<'_>,
     spatial: &[u32],
     searches: &mut [u32],
     control: &[Atomic<u32>],
 ) {
+    let config = economy.ledger.config;
     let member = ABSOLUTE_POS as u32;
     let mut firm = u32::new(comptime!(i64::from(u32::MAX)));
     let mut household_quote = u32::new(comptime!(i64::from(u32::MAX)));
     if member < spatial[1usize] {
         let actor = spatial[(2 + member) as usize];
-        if !kind(actors, actor).is(comptime!(ActorKind::Household)) {
+        if !economy
+            .actors
+            .kind(actor)
+            .is(comptime!(ActorKind::Household))
+        {
             firm = actor;
         } else {
-            household_quote = number(state, config, comptime!(Field::GrainQuote as u32), actor);
+            household_quote = economy.ledger.number(Field::GrainQuote, actor);
         }
     }
     let minimum = plane_min(household_quote);
@@ -39,7 +42,7 @@ pub(super) fn collect_firms(
     if active > 0 {
         searches[(comptime!(MEMBERS) * config.actors + slot) as usize] = member;
         searches[(comptime!(SELLERS) * config.actors + slot) as usize] = firm;
-        let supply = index::Supply::new(state, actors, config, firm, comptime!(Good::Grain as u32));
+        let supply = index::Supply::new(economy, firm, comptime!(Good::Grain as u32));
         supply.store(
             &mut searches[(comptime!(OFFERS) * config.actors) as usize..],
             slot,
@@ -78,9 +81,7 @@ pub(super) struct Trade {
 
 #[cube]
 pub(super) fn search(
-    state: &mut [u32],
-    actors: &[u32],
-    config: &EconomyConfig,
+    economy: &EconomyView<'_>,
     spatial: &[u32],
     searches: &[u32],
     control: &[Atomic<u32>],
@@ -90,8 +91,9 @@ pub(super) fn search(
     cash: Ticks,
     access: u32,
 ) -> Trade {
+    let config = economy.ledger.config;
     let length = max(spatial[1usize], 1);
-    let stride = supplier_stride(actors, parameters, buyer, length);
+    let stride = supplier_stride(&economy.actors, parameters, buyer, length);
     let inverse = inverse_stride(length, stride);
     let start = (parameters.settlement_rotation + buyer) % length;
     let mut first = Array::<u64>::new(DISCOVERY_CANDIDATES as usize);
@@ -111,10 +113,10 @@ pub(super) fn search(
             slot,
         );
         if !lt(cash, ticks(max(supply.quote, 1), 0)) {
-            let distance = distance(actors, buyer, seller);
+            let distance = economy.actors.distance(buyer, seller);
             let offer = candidate_supply(
-                state, actors, config, control, parameters, buyer, seller, distance, access,
-                wanted, cash, &supply,
+                economy, control, parameters, buyer, seller, distance, access, wanted, cash,
+                &supply,
             );
             if offer.empty || offer.eligible {
                 let member = searches[(comptime!(MEMBERS) * config.actors + slot) as usize];
@@ -194,12 +196,10 @@ pub(super) fn search(
                 % u64::cast_from(length),
         );
         let seller = spatial[(2 + member) as usize];
-        let supply =
-            index::Supply::new(state, actors, config, seller, comptime!(Good::Grain as u32));
-        let trip = distance(actors, buyer, seller);
+        let supply = index::Supply::new(economy, seller, comptime!(Good::Grain as u32));
+        let trip = economy.actors.distance(buyer, seller);
         let offer = candidate_supply(
-            state, actors, config, control, parameters, buyer, seller, trip, access, wanted, cash,
-            &supply,
+            economy, control, parameters, buyer, seller, trip, access, wanted, cash, &supply,
         );
         trade.seller = seller;
         trade.quantity = offer.quantity;
@@ -213,9 +213,7 @@ const TILE: u32 = 256;
 
 #[cube]
 pub(super) fn tiled_dealer(
-    state: &mut [u32],
-    actors: &[u32],
-    config: &EconomyConfig,
+    economy: &EconomyView<'_>,
     spatial: &[u32],
     control: &[Atomic<u32>],
     jobs: u32,
@@ -228,7 +226,7 @@ pub(super) fn tiled_dealer(
         && cash.extract(HIGH_WORD) == 0
         && cash.extract(LOW_WORD) >= quote
         && cash.extract(LOW_WORD) / 8 <= quote
-        && household_production::grain_dealer(state, actors, config, buyer)
+        && household_production::grain_dealer(economy, buyer)
 }
 
 #[derive(CubeType)]
@@ -245,7 +243,7 @@ struct DealerQuery {
 #[cube]
 impl DealerQuery {
     fn new(
-        actors: &[u32],
+        actors: &ActorTable<'_>,
         parameters: &EconomyParameters,
         buyer: u32,
         wanted: Ticks,
@@ -273,26 +271,21 @@ impl DealerQuery {
 
     fn offer(
         &self,
-        state: &mut [u32],
-        actors: &[u32],
-        config: &EconomyConfig,
+        economy: &EconomyView<'_>,
         spatial: &[u32],
         control: &[Atomic<u32>],
         parameters: &EconomyParameters,
         rank: u32,
     ) -> Candidate {
         let seller = self.seller(spatial, rank);
-        let supply =
-            index::Supply::new(state, actors, config, seller, comptime!(Good::Grain as u32));
+        let supply = index::Supply::new(economy, seller, comptime!(Good::Grain as u32));
         candidate_supply(
-            state,
-            actors,
-            config,
+            economy,
             control,
             parameters,
             self.buyer,
             seller,
-            distance(actors, self.buyer, seller),
+            economy.actors.distance(self.buyer, seller),
             self.access,
             self.wanted,
             self.cash,
@@ -308,14 +301,13 @@ fn tile_record(config: &EconomyConfig, job: u32, tile: u32, tiles: u32) -> usize
 
 #[cube]
 pub(super) fn dealer_tiles(
-    state: &mut [u32],
-    actors: &[u32],
-    config: &EconomyConfig,
+    economy: &EconomyView<'_>,
     spatial: &[u32],
     searches: &mut [u32],
     control: &[Atomic<u32>],
     parameters: &EconomyParameters,
 ) {
+    let config = economy.ledger.config;
     let jobs = markets::job_count(control, SEARCHES_WORD);
     let job = CUBE_POS_Y;
     if jobs <= comptime!(DEALERS) && job < jobs {
@@ -324,7 +316,7 @@ pub(super) fn dealer_tiles(
             searches[(3 * config.actors + buyer) as usize],
             searches[(4 * config.actors + buyer) as usize],
         );
-        if tiled_dealer(state, actors, config, spatial, control, jobs, buyer, cash) {
+        if tiled_dealer(economy, spatial, control, jobs, buyer, cash) {
             let wanted = ticks(
                 searches[(config.actors + buyer) as usize],
                 searches[(2 * config.actors + buyer) as usize],
@@ -336,7 +328,7 @@ pub(super) fn dealer_tiles(
                 access = config.railway.access[buyer as usize * 2 + 1];
             }
             let query = DealerQuery::new(
-                actors,
+                &economy.actors,
                 parameters,
                 buyer,
                 wanted,
@@ -352,8 +344,7 @@ pub(super) fn dealer_tiles(
                 let mut empty = false;
                 let mut score = ticks(u32::MAX, u32::MAX);
                 if rank < query.length {
-                    let offer =
-                        query.offer(state, actors, config, spatial, control, parameters, rank);
+                    let offer = query.offer(economy, spatial, control, parameters, rank);
                     eligible = offer.eligible;
                     empty = offer.empty;
                     score = offer.score;
@@ -391,9 +382,7 @@ pub(super) fn dealer_tiles(
 
 #[cube]
 pub(super) fn dealer_trade(
-    state: &mut [u32],
-    actors: &[u32],
-    config: &EconomyConfig,
+    economy: &EconomyView<'_>,
     spatial: &[u32],
     searches: &[u32],
     control: &[Atomic<u32>],
@@ -404,8 +393,9 @@ pub(super) fn dealer_trade(
     cash: Ticks,
     access: u32,
 ) -> Trade {
+    let config = economy.ledger.config;
     let query = DealerQuery::new(
-        actors,
+        &economy.actors,
         parameters,
         buyer,
         wanted,
@@ -440,7 +430,7 @@ pub(super) fn dealer_trade(
             }
         }
         while rank < end && seen < included {
-            let offer = query.offer(state, actors, config, spatial, control, parameters, rank);
+            let offer = query.offer(economy, spatial, control, parameters, rank);
             let class = select(offer.eligible, 0u32, select(offer.empty, 1u32, 2u32));
             let score = u64::cast_from(offer.score.extract(HIGH_WORD)) << 32
                 | u64::cast_from(offer.score.extract(LOW_WORD));
@@ -480,7 +470,7 @@ pub(super) fn dealer_trade(
         trip: 0,
     };
     if rank != NO_ACTOR {
-        let offer = query.offer(state, actors, config, spatial, control, parameters, rank);
+        let offer = query.offer(economy, spatial, control, parameters, rank);
         trade.seller = query.seller(spatial, rank);
         trade.quantity = offer.quantity;
         trade.trip = offer.trip;

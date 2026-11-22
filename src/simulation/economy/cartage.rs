@@ -74,10 +74,11 @@ impl System for Cartage {
 
 #[cube(launch)]
 fn index_pickups(state: &mut [u32], config: &EconomyConfig, manifest: &mut [u32]) {
+    let ledger = Ledger::new(state, config);
     let client = ABSOLUTE_POS as u32;
     if client < config.actors {
-        let waiting = value(state, config, comptime!(Field::RoadFreight as u32), client);
-        let cash = value(state, config, comptime!(Field::Cash as u32), client);
+        let waiting = ledger.value(Field::RoadFreight, client);
+        let cash = ledger.value(Field::Cash, client);
         let mut days = 1u32;
         while days < config.ring
             && !equal(waiting, zero())
@@ -85,7 +86,7 @@ fn index_pickups(state: &mut [u32], config: &EconomyConfig, manifest: &mut [u32]
         {
             let mut goods = 0u32;
             for good in 1..Good::COUNT as u32 + 1 {
-                let amount = value(state, config, waiting_field(config, good, days), client);
+                let amount = ledger.value_at(waiting_field(config, good, days), client);
                 goods |= u32::cast_from(!equal(amount, zero())) << (good - 1);
             }
             manifest[((days - 1) * config.actors + client) as usize] = goods;
@@ -96,9 +97,7 @@ fn index_pickups(state: &mut [u32], config: &EconomyConfig, manifest: &mut [u32]
 
 #[cube]
 fn collect(
-    state: &mut [u32],
-    actors: &[u32],
-    config: &EconomyConfig,
+    economy: &mut EconomyView<'_>,
     control: &[Atomic<u32>],
     manifest: &[u32],
     #[comptime] manifest_mode: Feature,
@@ -107,15 +106,19 @@ fn collect(
     day: u32,
     #[comptime] time_field: Field,
 ) {
-    let mut waiting = value(state, config, comptime!(Field::RoadFreight as u32), client);
-    let time = number(state, config, comptime!(time_field as u32), driver);
-    let travel = ceildiv(distance(actors, driver, client), config.commute_speed) * COMMUTE_LEGS;
+    let config = economy.ledger.config;
+    let mut waiting = economy.ledger.value(Field::RoadFreight, client);
+    let time = economy.ledger.number(comptime!(time_field), driver);
+    let travel = ceildiv(
+        economy.actors.distance(driver, client),
+        config.commute_speed,
+    ) * COMMUTE_LEGS;
     if !equal(waiting, zero())
         && time > travel
         && (comptime!(time_field == Field::CartageCapacity)
-            || number(state, config, comptime!(Field::Worker as u32), driver) != NO_ACTOR)
+            || economy.ledger.number(Field::Worker, driver) != NO_ACTOR)
     {
-        let mut cash = value(state, config, comptime!(Field::Cash as u32), client);
+        let mut cash = economy.ledger.value(Field::Cash, client);
         let mut minutes = time - travel;
         let mut income = zero();
         let mut days = 1u32;
@@ -137,15 +140,15 @@ fn collect(
             {
                 let good = goods.trailing_zeros() + 1;
                 let field = waiting_field(config, good, days);
-                let order = value(state, config, field, client);
+                let order = economy.ledger.value_at(field, client);
                 if !equal(order, zero()) {
                     let affordable = minimum(divide(cash, rate), ticks(minutes / effort, 0));
                     let load = minimum(order, affordable);
                     let fee = multiply(control, load, rate);
                     let slot =
                         BASE_FIELDS as u32 + (good - 1) * config.ring + (day + days) % config.ring;
-                    increase(state, config, control, slot, client, load);
-                    set(state, config, field, client, minus(order, load));
+                    economy.ledger.increase_at(control, slot, client, load);
+                    economy.ledger.set_at(field, client, minus(order, load));
                     waiting = minus(waiting, load);
                     minutes -= load.extract(LOW_WORD) * effort;
                     cash = minus(cash, fee);
@@ -156,44 +159,24 @@ fn collect(
             days += 1;
         }
         if !equal(income, zero()) {
-            let payable = value(
-                state,
-                config,
-                comptime!(Field::CartagePayable as u32),
-                client,
-            );
-            set(
-                state,
-                config,
-                comptime!(Field::CartagePayable as u32),
-                client,
-                minus(payable, income),
-            );
-            set(state, config, comptime!(Field::Cash as u32), client, cash);
-            set(
-                state,
-                config,
-                comptime!(Field::RoadFreight as u32),
-                client,
-                waiting,
-            );
-            set32(state, config, comptime!(time_field as u32), driver, minutes);
-            increase(
-                state,
-                config,
+            let payable = economy.ledger.value(Field::CartagePayable, client);
+            economy
+                .ledger
+                .set(Field::CartagePayable, client, minus(payable, income));
+            economy.ledger.set(Field::Cash, client, cash);
+            economy.ledger.set(Field::RoadFreight, client, waiting);
+            economy
+                .ledger
+                .set_number(comptime!(time_field), driver, minutes);
+            economy.ledger.increase(
                 control,
-                comptime!(Field::CartageMinutes as u32),
+                Field::CartageMinutes,
                 driver,
                 ticks(time - minutes, 0),
             );
-            increase(
-                state,
-                config,
-                control,
-                comptime!(Field::FreightEscrow as u32),
-                driver,
-                income,
-            );
+            economy
+                .ledger
+                .increase(control, Field::FreightEscrow, driver, income);
         }
     }
 }
@@ -203,6 +186,7 @@ impl GpuPass<CartageInput> for HaulGoods {
     type Output = ();
 
     fn execute(mut input: CartageInput) {
+        let mut economy = EconomyView::new(&mut input.state, &input.actors, &input.config);
         let index = ABSOLUTE_POS as u32;
         let start = match comptime!(input.stage) {
             CartageStage::Household => input.firms,
@@ -223,20 +207,11 @@ impl GpuPass<CartageInput> for HaulGoods {
                     let slots = ceildiv(input.config.actors, count);
                     let first = (index + input.offset) % count;
                     let mut slot = 0;
-                    while slot < slots
-                        && number(
-                            &mut input.state,
-                            &input.config,
-                            comptime!(time_field as u32),
-                            driver,
-                        ) > 0
-                    {
+                    while slot < slots && economy.ledger.number(comptime!(time_field), driver) > 0 {
                         let client = first + ((slot + input.day % slots) % slots) * count;
                         if client < input.config.actors && (client != driver || count == 1) {
                             collect(
-                                &mut input.state,
-                                &input.actors,
-                                &input.config,
+                                &mut economy,
                                 &input.control,
                                 &input.manifest,
                                 comptime!(input.manifest_mode),
@@ -250,34 +225,12 @@ impl GpuPass<CartageInput> for HaulGoods {
                     }
                 }
                 CartageStage::Pay => {
-                    let fee = value(
-                        &mut input.state,
-                        &input.config,
-                        comptime!(Field::FreightEscrow as u32),
-                        driver,
-                    );
-                    increase(
-                        &mut input.state,
-                        &input.config,
-                        &input.control,
-                        comptime!(Field::Cash as u32),
-                        driver,
-                        fee,
-                    );
-                    set(
-                        &mut input.state,
-                        &input.config,
-                        comptime!(Field::CartageIncome as u32),
-                        driver,
-                        fee,
-                    );
-                    set32(
-                        &mut input.state,
-                        &input.config,
-                        comptime!(Field::FreightEscrow as u32),
-                        driver,
-                        0,
-                    );
+                    let fee = economy.ledger.value(Field::FreightEscrow, driver);
+                    economy
+                        .ledger
+                        .increase(&input.control, Field::Cash, driver, fee);
+                    economy.ledger.set(Field::CartageIncome, driver, fee);
+                    economy.ledger.set_number(Field::FreightEscrow, driver, 0);
                 }
             }
         }

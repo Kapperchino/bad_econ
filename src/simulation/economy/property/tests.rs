@@ -35,20 +35,14 @@ impl GpuPass<ConsolidationInput> for SelectPlots {
     type Output = ();
 
     fn execute(mut input: ConsolidationInput) {
+        let mut economy = EconomyView::new(&mut input.state, &input.actors, &input.config);
         match comptime!(input.selection) {
-            Selection::Serial => consolidate_serial(
-                &mut input.state,
-                &input.actors,
-                &input.config,
-                &input.control,
-                input.farm,
-                input.required,
-            ),
+            Selection::Serial => {
+                consolidate_serial(&mut economy, &input.control, input.farm, input.required)
+            }
             Selection::Bulk => consolidate_farm(
-                &mut input.state,
-                &input.actors,
+                &mut economy,
                 &input.spatial,
-                &input.config,
                 &input.control,
                 input.farm,
                 input.required,
@@ -136,51 +130,28 @@ fn bulk_consolidation_preserves_nearest_whole_grants_and_ties_on_gpu() -> Result
 }
 #[cube]
 fn consolidate_serial(
-    state: &mut [u32],
-    actors: &[u32],
-    config: &EconomyConfig,
+    economy: &mut EconomyView<'_>,
     control: &[Atomic<u32>],
     farm: u32,
     required: u32,
 ) {
+    let config = economy.ledger.config;
     let mut remaining = required;
     while remaining > 0 {
-        let selected = nearest_farmer(state, actors, config, farm);
+        let selected = nearest_farmer(&*economy, farm);
         if selected < config.actors {
-            let plots = value(state, config, comptime!(Field::LandPlots as u32), selected);
+            let plots = economy.ledger.value(Field::LandPlots, selected);
             sync_storage();
             if UNIT_POS == 0 {
-                increase(
-                    state,
-                    config,
-                    control,
-                    comptime!(Field::OccupiedPlots as u32),
-                    farm,
-                    plots,
-                );
-                increase(
-                    state,
-                    config,
-                    control,
-                    comptime!(Field::DisplacedPlots as u32),
-                    selected,
-                    plots,
-                );
-                set32(
-                    state,
-                    config,
-                    comptime!(Field::LandPlots as u32),
-                    selected,
-                    0,
-                );
-                set32(
-                    state,
-                    config,
-                    comptime!(Field::CropWork as u32),
-                    selected,
-                    0,
-                );
-                discard_grain(state, config, control, selected);
+                economy
+                    .ledger
+                    .increase(control, Field::OccupiedPlots, farm, plots);
+                economy
+                    .ledger
+                    .increase(control, Field::DisplacedPlots, selected, plots);
+                economy.ledger.set_number(Field::LandPlots, selected, 0);
+                economy.ledger.set_number(Field::CropWork, selected, 0);
+                discard_grain(&mut economy.ledger, control, selected);
             }
             remaining = max(remaining, plots.extract(LOW_WORD)) - plots.extract(LOW_WORD);
         } else {
@@ -191,13 +162,17 @@ fn consolidate_serial(
 }
 
 #[cube]
-fn nearest_farmer(state: &mut [u32], actors: &[u32], config: &EconomyConfig, farm: u32) -> u32 {
+fn nearest_farmer(economy: &EconomyView<'_>, farm: u32) -> u32 {
+    let config = economy.ledger.config;
     let mut nearest = u64::new(comptime!(u64::MAX as i64));
     let mut household = UNIT_POS;
     while household < config.actors {
-        let plots = number(state, config, comptime!(Field::LandPlots as u32), household);
-        let trip = distance(actors, farm, household);
-        let eligible = kind(actors, household).is(comptime!(ActorKind::Household))
+        let plots = economy.ledger.number(Field::LandPlots, household);
+        let trip = economy.actors.distance(farm, household);
+        let eligible = economy
+            .actors
+            .kind(household)
+            .is(comptime!(ActorKind::Household))
             && plots > 0
             && trip <= config.search_radius;
         let rank = (u64::cast_from(trip) << 32) | u64::cast_from(household);

@@ -25,7 +25,7 @@ fn base(config: &EconomyConfig, tile: u32) -> u32 {
 
 #[cube]
 pub(super) fn prepare(
-    actors: &[u32],
+    actors: &ActorTable<'_>,
     config: &EconomyConfig,
     spatial: &[u32],
     scratch: &[u32],
@@ -48,7 +48,6 @@ pub(super) fn prepare(
         let y = (tile / comptime!(SIDE)) * span;
         let last_x = min(x + span - 1, config.map_size - 1);
         let last_y = min(y + span - 1, config.map_size - 1);
-        let stride = actors.len() / ActorLayout::WORDS;
         let max_days = max(ceildiv(config.search_radius, config.shipment_speed), 1);
         let surcharge = u64::cast_from(max_days)
             * (u64::cast_from(config.delivery_penalty)
@@ -96,9 +95,9 @@ pub(super) fn prepare(
         while member < count {
             let supply = index::Supply::load(scratch, member);
             if supply.producer && !supply.offered && supply.quote > 0 {
-                let seller = spatial[(2 + member) as usize] as usize;
-                let sx = actors[ActorLayout::X * stride + seller];
-                let sy = actors[ActorLayout::Y * stride + seller];
+                let seller = spatial[(2 + member) as usize];
+                let sx = actors.x(seller);
+                let sy = actors.y(seller);
                 let far = farthest_axis(x, last_x, sx) + farthest_axis(y, last_y, sy);
                 if far <= config.search_radius {
                     let days = max(ceildiv(far, config.shipment_speed), 1);
@@ -120,9 +119,9 @@ pub(super) fn prepare(
             if member < count {
                 let supply = index::Supply::load(scratch, member);
                 if supply.producer && !supply.offered && supply.quote > 0 {
-                    let seller = spatial[(2 + member) as usize] as usize;
-                    let sx = actors[ActorLayout::X * stride + seller];
-                    let sy = actors[ActorLayout::Y * stride + seller];
+                    let seller = spatial[(2 + member) as usize];
+                    let sx = actors.x(seller);
+                    let sy = actors.y(seller);
                     let near = nearest(x, last_x, sx) + nearest(y, last_y, sy);
                     let mut days = max(ceildiv(near, config.shipment_speed), 1);
                     let mut price = cartage::delivered_price(config, supply.quote, near, days);
@@ -130,11 +129,11 @@ pub(super) fn prepare(
                         && config.railway.nodes > 0
                         && config.railway.nodes <= comptime!(STATIONS as u32)
                     {
-                        let origin = config.railway.access[seller * 2];
+                        let origin = config.railway.access[seller as usize * 2];
                         let access = station_floor[origin as usize];
                         if access < u32::MAX {
                             let floor = ceildiv(
-                                access + config.railway.access[seller * 2 + 1],
+                                access + config.railway.access[seller as usize * 2 + 1],
                                 config.shipment_speed,
                             ) + 1;
                             let far = farthest_axis(x, last_x, sx) + farthest_axis(y, last_y, sy);
@@ -184,7 +183,7 @@ pub(super) fn available(config: &EconomyConfig, searches: &[u32], start: u32, bu
 
 #[cube]
 pub(super) fn query(
-    actors: &[u32],
+    actors: &ActorTable<'_>,
     config: &EconomyConfig,
     spatial: &[u32],
     scratch: &[u32],
@@ -204,7 +203,7 @@ pub(super) fn query(
     for slot in 0..searches[start as usize] {
         let member = searches[(start + 1 + slot) as usize];
         let seller = spatial[(2 + member) as usize];
-        let distance = distance(actors, buyer, seller);
+        let distance = actors.distance(buyer, seller);
         let mut days = max(ceildiv(distance, config.shipment_speed), 1);
         if inbound {
             days = railway::delivery_days(

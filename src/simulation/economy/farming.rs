@@ -63,29 +63,20 @@ pub(super) fn fieldwork(config: &EconomyConfig, day: u32, good: u32) -> bool {
 }
 
 #[cube]
-fn hectares(
-    state: &mut [u32],
-    config: &EconomyConfig,
-    control: &[Atomic<u32>],
-    actor: u32,
-) -> Ticks {
+fn hectares(ledger: &Ledger<'_>, control: &[Atomic<u32>], actor: u32) -> Ticks {
     add_checked(
         control,
-        value(state, config, comptime!(Field::FarmHectares as u32), actor),
-        value(state, config, comptime!(Field::OccupiedPlots as u32), actor),
+        ledger.value(Field::FarmHectares, actor),
+        ledger.value(Field::OccupiedPlots, actor),
     )
 }
 
 #[cube]
-fn rotation_yield(
-    state: &mut [u32],
-    config: &EconomyConfig,
-    control: &[Atomic<u32>],
-    actor: u32,
-) -> Ticks {
+fn rotation_yield(ledger: &Ledger<'_>, control: &[Atomic<u32>], actor: u32) -> Ticks {
+    let config = ledger.config;
     scaled(
         control,
-        hectares(state, config, control, actor),
+        hectares(ledger, control, actor),
         config.wheat_kg_per_hectare * comptime!(WheatHusbandry::MARKETABLE_PARTS),
         comptime!(WheatHusbandry::GROSS_PARTS * WheatHusbandry::ROTATION_FIELDS),
     )
@@ -125,24 +116,24 @@ pub(super) fn cultivating(config: &EconomyConfig, day: u32) -> bool {
 
 #[cube]
 pub(super) fn funded_shifts(
-    state: &mut [u32],
-    config: &EconomyConfig,
+    ledger: &Ledger<'_>,
     control: &[Atomic<u32>],
     firm: u32,
     good: u32,
     day: u32,
     budget: &employment::ShiftBudget,
 ) -> Ticks {
+    let config = ledger.config;
     let mut funded = divide(budget.cash, budget.pay);
     if rotated_wheat(config, good)
         && config.home.harvest_days < 365
         && cultivating(config, day)
-        && farm(state, config, firm, good)
+        && farm(ledger, firm, good)
     {
         let rent = times32(config.firm_rent, 365 - elapsed(config, day));
         let shifts = divide(positive(budget.cash, rent), budget.pay);
-        let units = number(state, config, comptime!(Field::OutputTicks as u32), firm);
-        let standing = value(state, config, comptime!(Field::CropWork as u32), firm);
+        let units = ledger.number(Field::OutputTicks, firm);
+        let standing = ledger.value(Field::CropWork, firm);
         let pace = comptime!(WheatHusbandry::HARVEST_WORK_PER_PACKET);
         let harvest_batch = units * pace;
         let committed = divide(standing, harvest_batch);
@@ -168,32 +159,23 @@ pub(super) fn year(config: &EconomyConfig, day: u32) -> u32 {
 }
 
 #[cube]
-fn harvested(state: &mut [u32], config: &EconomyConfig, actor: u32, day: u32) -> Ticks {
-    let previous_year = number(state, config, comptime!(Field::HarvestYear as u32), actor);
+fn harvested(ledger: &Ledger<'_>, actor: u32, day: u32) -> Ticks {
+    let config = ledger.config;
+    let previous_year = ledger.number(Field::HarvestYear, actor);
     select(
         previous_year == year(config, day),
-        value(
-            state,
-            config,
-            comptime!(Field::HarvestedThisYear as u32),
-            actor,
-        ),
+        ledger.value(Field::HarvestedThisYear, actor),
         zero(),
     )
 }
 
 #[cube]
-pub(super) fn farm(state: &mut [u32], config: &EconomyConfig, actor: u32, good: u32) -> bool {
+pub(super) fn farm(ledger: &Ledger<'_>, actor: u32, good: u32) -> bool {
     let crop = good == comptime!(Good::Grain as u32)
         || good == comptime!(Good::Flax as u32)
         || good == comptime!(Good::Cotton as u32)
         || good == comptime!(Good::Dye as u32);
-    crop && number(
-        state,
-        config,
-        comptime!(Field::EnterpriseModel as u32),
-        actor,
-    ) == 0
+    crop && ledger.number(Field::EnterpriseModel, actor) == 0
 }
 
 #[cube]
@@ -206,38 +188,35 @@ pub(super) fn production_target(control: &[Atomic<u32>], demand: Ticks) -> Ticks
 
 #[cube]
 pub(super) fn starts(
-    state: &mut [u32],
-    config: &EconomyConfig,
+    ledger: &Ledger<'_>,
     control: &[Atomic<u32>],
     actor: u32,
     good: u32,
     day: u32,
 ) -> Ticks {
-    let demand = value(state, config, comptime!(Field::Demand as u32), actor);
+    let config = ledger.config;
+    let demand = ledger.value(Field::Demand, actor);
     let buffered = production_target(control, demand);
     let days = 365 - elapsed(config, day);
     let target = multiply(control, buffered, days + 365);
-    let standing = value(state, config, comptime!(Field::CropWork as u32), actor);
+    let standing = ledger.value(Field::CropWork, actor);
     let pending = HarvestYield::new(config).quantity(control, standing);
-    let available = add_checked(control, value(state, config, good, actor), pending);
+    let available = add_checked(control, ledger.value_at(good, actor), pending);
     let mut required = positive(target, available);
     let mut recurring = proposed_starts(
         KernelStarts {
             coverage: u32::cast_from(config.coverage),
             demand: buffered,
-            finished: value(state, config, good, actor),
-            pipeline: value(state, config, comptime!(Field::Pipeline as u32), actor),
+            finished: ledger.value_at(good, actor),
+            pipeline: ledger.value(Field::Pipeline, actor),
         },
         control,
     );
     if rotated_wheat(config, good) {
-        let maximum = rotation_yield(state, config, control, actor);
+        let maximum = rotation_yield(ledger, control, actor);
         required = minimum(required, positive(maximum, pending));
         if config.home.harvest_days == 365 {
-            recurring = minimum(
-                recurring,
-                positive(maximum, harvested(state, config, actor, day)),
-            );
+            recurring = minimum(recurring, positive(maximum, harvested(ledger, actor, day)));
         }
     }
     let work = divide(
@@ -282,44 +261,34 @@ pub(super) fn inventory_target(
 
 #[cube]
 fn harvest(
-    state: &mut [u32],
-    config: &EconomyConfig,
+    ledger: &mut Ledger<'_>,
     control: &[Atomic<u32>],
     actor: u32,
     day: u32,
     completed: Ticks,
 ) -> Ticks {
-    let pending = add_checked(
-        control,
-        value(state, config, comptime!(Field::CropWork as u32), actor),
-        completed,
-    );
+    let config = ledger.config;
+    let pending = add_checked(control, ledger.value(Field::CropWork, actor), completed);
     let ready = harvesting(config, day);
     let yield_ticks = if ready {
         HarvestYield::new(config).quantity(control, pending)
     } else {
         zero()
     };
-    set(
-        state,
-        config,
-        comptime!(Field::CropWork as u32),
-        actor,
-        select(ready, zero(), pending),
-    );
+    ledger.set(Field::CropWork, actor, select(ready, zero(), pending));
     yield_ticks
 }
 
 #[cube]
 fn reap(
-    state: &mut [u32],
-    config: &EconomyConfig,
+    ledger: &mut Ledger<'_>,
     control: &[Atomic<u32>],
     actor: u32,
     day: u32,
     completed: Ticks,
 ) -> Ticks {
-    let standing = value(state, config, comptime!(Field::CropWork as u32), actor);
+    let config = ledger.config;
+    let standing = ledger.value(Field::CropWork, actor);
     let reaped = multiply(
         control,
         completed,
@@ -332,13 +301,7 @@ fn reap(
         wheat.quantity(control, left),
     );
     let last_day = elapsed(config, day) + 1 == config.home.harvest_days;
-    set(
-        state,
-        config,
-        comptime!(Field::CropWork as u32),
-        actor,
-        select(last_day, zero(), left),
-    );
+    ledger.set(Field::CropWork, actor, select(last_day, zero(), left));
     recovered
 }
 
@@ -350,22 +313,22 @@ pub(super) struct FarmOutput {
 
 #[cube]
 pub(super) fn finish(
-    state: &mut [u32],
-    config: &EconomyConfig,
+    ledger: &mut Ledger<'_>,
     control: &[Atomic<u32>],
     actor: u32,
     day: u32,
     good: u32,
     completed: Ticks,
 ) -> FarmOutput {
-    let crop = farm(state, config, actor, good);
+    let config = ledger.config;
+    let crop = farm(&*ledger, actor, good);
     let ready = harvesting(config, day);
     let mut available = completed;
     if crop {
         available = if rotated_wheat(config, good) && ready && config.home.harvest_days < 365 {
-            reap(state, config, control, actor, day, completed)
+            reap(ledger, control, actor, day, completed)
         } else {
-            harvest(state, config, control, actor, day, completed)
+            harvest(ledger, control, actor, day, completed)
         };
     }
     let mut unscaled = available;
@@ -374,51 +337,39 @@ pub(super) fn finish(
         && config.wheat_kg_per_hectare > 0
         && good == comptime!(Good::Grain as u32)
     {
-        let previous = harvested(state, config, actor, day);
+        let previous = harvested(&*ledger, actor, day);
         let maximum = if rotated_wheat(config, good) {
-            rotation_yield(state, config, control, actor)
+            rotation_yield(&*ledger, control, actor)
         } else {
-            let method = number(state, config, comptime!(Field::ActiveMethod as u32), actor);
+            let method = ledger.number(Field::ActiveMethod, actor);
             let yield_per_hectare = config.wheat_kg_per_hectare * select(method > 0, 2u32, 1u32);
             multiply(
                 control,
-                hectares(state, config, control, actor),
+                hectares(&*ledger, control, actor),
                 yield_per_hectare,
             )
         };
         let remaining = positive(maximum, previous);
         unscaled = minimum(available, remaining);
-        let scaled = property::scaled_output(state, config, control, actor, unscaled);
+        let scaled = property::scaled_output(ledger, control, actor, unscaled);
         let finished = select(
             rotated_wheat(config, good),
             minimum(scaled, remaining),
             scaled,
         );
         if rotated_wheat(config, good) && equal(finished, remaining) {
-            set32(state, config, comptime!(Field::CropWork as u32), actor, 0);
+            ledger.set_number(Field::CropWork, actor, 0);
         }
-        set32(
-            state,
-            config,
-            comptime!(Field::HarvestYear as u32),
-            actor,
-            year(config, day),
-        );
+        ledger.set_number(Field::HarvestYear, actor, year(config, day));
         let total = add_checked(
             control,
             previous,
             select(rotated_wheat(config, good), finished, unscaled),
         );
-        set(
-            state,
-            config,
-            comptime!(Field::HarvestedThisYear as u32),
-            actor,
-            total,
-        );
+        ledger.set(Field::HarvestedThisYear, actor, total);
         finished
     } else {
-        property::scaled_output(state, config, control, actor, available)
+        property::scaled_output(ledger, control, actor, available)
     };
     FarmOutput { unscaled, finished }
 }

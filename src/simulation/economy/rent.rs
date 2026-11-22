@@ -8,18 +8,14 @@ pub(super) enum Tenants {
 }
 
 #[cube]
-pub(super) fn obligation(
-    state: &mut [u32],
-    config: &EconomyConfig,
-    control: &[Atomic<u32>],
-    firm: u32,
-) -> Ticks {
+pub(super) fn obligation(ledger: &Ledger<'_>, control: &[Atomic<u32>], firm: u32) -> Ticks {
+    let config = ledger.config;
     add_checked(
         control,
-        value(state, config, comptime!(Field::RentArrears as u32), firm),
+        ledger.value(Field::RentArrears, firm),
         ticks(
             select(
-                number(state, config, comptime!(Field::LaborMinutes as u32), firm) == 0,
+                ledger.number(Field::LaborMinutes, firm) == 0,
                 0,
                 config.firm_rent,
             ),
@@ -30,49 +26,42 @@ pub(super) fn obligation(
 
 #[cube]
 pub(super) fn collect(
-    state: &mut [u32],
-    actors: &[u32],
-    config: &EconomyConfig,
+    economy: &mut EconomyView<'_>,
     control: &[Atomic<u32>],
     actor: u32,
     #[comptime] tenants: Tenants,
 ) {
+    let config = economy.ledger.config;
     if actor < config.actors {
-        let household = kind(actors, actor).is(comptime!(ActorKind::Household));
+        let household = economy
+            .actors
+            .kind(actor)
+            .is(comptime!(ActorKind::Household));
         let selected = match tenants {
             Tenants::Households => household,
             Tenants::Firms => !household,
         };
         if selected {
-            let assigned = config.rental_businesses == 0
-                || number(state, config, comptime!(Field::Landlord as u32), actor) > 0;
-            let mut daily = match kind(actors, actor).bits() {
+            let assigned =
+                config.rental_businesses == 0 || economy.ledger.number(Field::Landlord, actor) > 0;
+            let mut daily = match economy.actors.kind(actor).bits() {
                 ActorKind::HOUSEHOLD_BITS => select(
-                    number(state, config, comptime!(Field::LivingMembers as u32), actor) > 0
-                        && number(state, config, comptime!(Field::LandPlots as u32), actor) == 0,
+                    economy.ledger.number(Field::LivingMembers, actor) > 0
+                        && economy.ledger.number(Field::LandPlots, actor) == 0,
                     config.household_rent
                         * select(
                             config.rental_businesses > 0
                                 && comptime!(config.cohorts == Feature::Enabled),
-                            number(
-                                state,
-                                config,
-                                comptime!(Field::HousingAvailable as u32),
-                                actor,
-                            ),
-                            consumption::consumers(state, config, actor),
+                            economy.ledger.number(Field::HousingAvailable, actor),
+                            consumption::consumers(&economy.ledger, actor),
                         ),
                     0,
                 ),
                 _ => select(
-                    number(
-                        state,
-                        config,
-                        comptime!(Field::EnterpriseStatus as u32),
-                        actor,
-                    ) < comptime!(EnterpriseState::Liquidating as u32),
+                    economy.ledger.number(Field::EnterpriseStatus, actor)
+                        < comptime!(EnterpriseState::Liquidating as u32),
                     select(
-                        kind(actors, actor).bits() == comptime!(Good::Housing as u32),
+                        economy.actors.kind(actor).bits() == comptime!(Good::Housing as u32),
                         0,
                         config.firm_rent,
                     ),
@@ -80,21 +69,19 @@ pub(super) fn collect(
                 ),
             };
             daily = select(assigned, daily, 0);
-            let arrears = value(state, config, comptime!(Field::RentArrears as u32), actor);
+            let arrears = economy.ledger.value(Field::RentArrears, actor);
             let obligation = add_checked(control, arrears, ticks(daily, 0));
-            let cash = value(state, config, comptime!(Field::Cash as u32), actor);
+            let cash = economy.ledger.value(Field::Cash, actor);
             let mut available = cash;
             if comptime!(tenants == Tenants::Households) {
                 let reserve = times32(
-                    food::reserve_daily(state, config, actor),
+                    food::reserve_daily(&economy.ledger, actor),
                     config.coverage + config.ring - 1,
                 );
                 let food = add_checked(
                     control,
-                    value(state, config, comptime!(Field::Bread as u32), actor),
-                    value(
-                        state,
-                        config,
+                    economy.ledger.value(Field::Bread, actor),
+                    economy.ledger.value_at(
                         TRANSIT_FIELDS as u32 + comptime!(Good::Bread as u32) - 1,
                         actor,
                     ),
@@ -104,17 +91,12 @@ pub(super) fn collect(
             available = select(assigned, available, zero());
             let mut housing = 0u32;
             if comptime!(tenants == Tenants::Households) {
-                let previous = number(state, config, comptime!(Field::HousingStatus as u32), actor);
+                let previous = economy.ledger.number(Field::HousingStatus, actor);
                 let supplied = config.rental_businesses == 0
-                    || number(
-                        state,
-                        config,
-                        comptime!(Field::HousingAvailable as u32),
-                        actor,
-                    ) > 0;
+                    || economy.ledger.number(Field::HousingAvailable, actor) > 0;
                 let exempt = config.household_rent == 0
-                    || number(state, config, comptime!(Field::LandPlots as u32), actor) > 0
-                    || number(state, config, comptime!(Field::LivingMembers as u32), actor) == 0;
+                    || economy.ledger.number(Field::LandPlots, actor) > 0
+                    || economy.ledger.number(Field::LivingMembers, actor) == 0;
                 let sheltered = exempt
                     || (assigned
                         && supplied
@@ -135,94 +117,47 @@ pub(super) fn collect(
                     let partial = comptime!(config.cohorts == Feature::Enabled)
                         && daily > 0
                         && config.rental_businesses > 0
-                        && number(
-                            state,
-                            config,
-                            comptime!(Field::HousingAvailable as u32),
-                            actor,
-                        ) < consumption::consumers(state, config, actor);
+                        && economy.ledger.number(Field::HousingAvailable, actor)
+                            < consumption::consumers(&economy.ledger, actor);
                     let evicted = partial || (daily > 0 && !equal(remaining, zero()));
-                    set32(
-                        state,
-                        config,
-                        comptime!(Field::HousingStatus as u32),
+                    economy.ledger.set_number(
+                        Field::HousingStatus,
                         actor,
                         select(evicted, comptime!(HousingState::Homeless as u32), housing),
                     );
                 }
                 Tenants::Firms => {
-                    let previous = number(
-                        state,
-                        config,
-                        comptime!(Field::RentOverdueDays as u32),
-                        actor,
-                    );
+                    let previous = economy.ledger.number(Field::RentOverdueDays, actor);
                     let days = select(
                         equal(remaining, zero()),
                         0,
                         min(previous + 1, FIRM_RENT_GRACE_DAYS),
                     );
-                    let status = number(
-                        state,
-                        config,
-                        comptime!(Field::EnterpriseStatus as u32),
-                        actor,
-                    );
+                    let status = economy.ledger.number(Field::EnterpriseStatus, actor);
                     let next = select(
                         days == FIRM_RENT_GRACE_DAYS,
                         max(status, comptime!(EnterpriseState::Liquidating as u32)),
                         status,
                     );
-                    set32(
-                        state,
-                        config,
-                        comptime!(Field::RentOverdueDays as u32),
-                        actor,
-                        days,
-                    );
-                    set32(
-                        state,
-                        config,
-                        comptime!(Field::EnterpriseStatus as u32),
-                        actor,
-                        next,
-                    );
+                    economy
+                        .ledger
+                        .set_number(Field::RentOverdueDays, actor, days);
+                    economy
+                        .ledger
+                        .set_number(Field::EnterpriseStatus, actor, next);
                 }
             }
             let treasury = add_checked(
                 control,
-                value(state, config, comptime!(Field::RentTreasury as u32), actor),
+                economy.ledger.value(Field::RentTreasury, actor),
                 paid,
             );
-            increase(
-                state,
-                config,
-                control,
-                comptime!(Field::RentPending as u32),
-                actor,
-                paid,
-            );
-            set(
-                state,
-                config,
-                comptime!(Field::Cash as u32),
-                actor,
-                minus(cash, paid),
-            );
-            set(
-                state,
-                config,
-                comptime!(Field::RentArrears as u32),
-                actor,
-                remaining,
-            );
-            set(
-                state,
-                config,
-                comptime!(Field::RentTreasury as u32),
-                actor,
-                treasury,
-            );
+            economy
+                .ledger
+                .increase(control, Field::RentPending, actor, paid);
+            economy.ledger.set(Field::Cash, actor, minus(cash, paid));
+            economy.ledger.set(Field::RentArrears, actor, remaining);
+            economy.ledger.set(Field::RentTreasury, actor, treasury);
         }
     }
 }
@@ -241,18 +176,10 @@ mod tests {
         config: &EconomyConfig,
         control: &[Atomic<u32>],
     ) {
+        let mut economy = EconomyView::new(state, actors, config);
+        collect(&mut economy, control, ABSOLUTE_POS as u32, Tenants::Firms);
         collect(
-            state,
-            actors,
-            config,
-            control,
-            ABSOLUTE_POS as u32,
-            Tenants::Firms,
-        );
-        collect(
-            state,
-            actors,
-            config,
+            &mut economy,
             control,
             ABSOLUTE_POS as u32,
             Tenants::Households,

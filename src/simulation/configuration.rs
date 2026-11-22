@@ -180,6 +180,13 @@ impl CartageAccounts {
     }
 }
 
+#[cube]
+impl EconomyConfig {
+    pub fn coordinate(&self, field: u32, actor: u32) -> u32 {
+        field * self.state_stride + actor
+    }
+}
+
 pub struct Configuration {
     pub heating_per_person: u32,
     rentals: crate::domain::landlords::RentalRegistry,

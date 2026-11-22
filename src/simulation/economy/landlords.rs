@@ -40,6 +40,7 @@ impl GpuPass<RentalInput> for AdvanceRentals {
     type Output = ();
 
     fn execute(mut input: RentalInput) {
+        let mut economy = EconomyView::new(&mut input.state, &input.actors, &input.config);
         let group = match comptime!(input.stage) {
             RentalStage::Allocate | RentalStage::Accounts => CUBE_POS as u32,
             _ => ABSOLUTE_POS as u32,
@@ -51,37 +52,12 @@ impl GpuPass<RentalInput> for AdvanceRentals {
         if group < count {
             match comptime!(input.stage) {
                 RentalStage::Reset => {
-                    set32(
-                        &mut input.state,
-                        &input.config,
-                        comptime!(Field::HousingAvailable as u32),
-                        group,
-                        0,
-                    );
-                    set32(
-                        &mut input.state,
-                        &input.config,
-                        comptime!(Field::Landlord as u32),
-                        group,
-                        0,
-                    );
+                    economy.ledger.set_number(Field::HousingAvailable, group, 0);
+                    economy.ledger.set_number(Field::Landlord, group, 0);
                 }
-                RentalStage::Supply => open(&mut input.state, &input.config, &input.control, group),
-                RentalStage::Allocate => allocate(
-                    &mut input.state,
-                    &input.actors,
-                    &input.config,
-                    &input.control,
-                    group,
-                    input.scan,
-                ),
-                RentalStage::Accounts => settle(
-                    &mut input.state,
-                    &input.actors,
-                    &input.config,
-                    &input.control,
-                    group,
-                ),
+                RentalStage::Supply => open(&mut economy.ledger, &input.control, group),
+                RentalStage::Allocate => allocate(&mut economy, &input.control, group, input.scan),
+                RentalStage::Accounts => settle(&mut economy, &input.control, group),
             }
         }
     }
@@ -129,77 +105,40 @@ pub(in crate::simulation) fn launch(
 }
 
 #[cube]
-fn consume(
-    state: &mut [u32],
-    config: &EconomyConfig,
-    control: &[Atomic<u32>],
-    actor: u32,
-    good: u32,
-    amount: Ticks,
-) {
-    let stock = value(state, config, good, actor);
-    set(state, config, good, actor, minus(stock, amount));
-    increase(
-        state,
-        config,
-        control,
-        USED_FIELDS as u32 + good - 1,
-        actor,
-        amount,
-    );
-    increase(
-        state,
-        config,
-        control,
-        comptime!(Field::Used as u32),
-        actor,
-        amount,
-    );
+fn consume(ledger: &mut Ledger<'_>, control: &[Atomic<u32>], actor: u32, good: u32, amount: Ticks) {
+    let stock = ledger.value_at(good, actor);
+    ledger.set_at(good, actor, minus(stock, amount));
+    ledger.increase_at(control, USED_FIELDS as u32 + good - 1, actor, amount);
+    ledger.increase(control, Field::Used, actor, amount);
 }
 
 #[cube]
-pub(super) fn maintenance(state: &mut [u32], config: &EconomyConfig, firm: u32) -> Ticks {
+pub(super) fn maintenance(ledger: &Ledger<'_>, firm: u32) -> Ticks {
     times32(
-        number(state, config, comptime!(Field::OccupiedPlots as u32), firm),
-        number(state, config, comptime!(Field::InputTicks as u32), firm),
+        ledger.number(Field::OccupiedPlots, firm),
+        ledger.number(Field::InputTicks, firm),
     )
 }
 
 #[cube]
-fn open(state: &mut [u32], config: &EconomyConfig, control: &[Atomic<u32>], group: u32) {
+fn open(ledger: &mut Ledger<'_>, control: &[Atomic<u32>], group: u32) {
+    let config = ledger.config;
     let firm = config.rental_accounts[(group * 3) as usize];
-    let expired = value(state, config, comptime!(Field::Housing as u32), firm);
+    let expired = ledger.value(Field::Housing, firm);
     consume(
-        state,
-        config,
+        ledger,
         control,
         firm,
         comptime!(Good::Housing as u32),
         expired,
     );
-    let mut days = number(
-        state,
-        config,
-        comptime!(Field::MaintenanceDays as u32),
-        firm,
-    );
-    let upkeep = maintenance(state, config, firm);
-    let operating = number(
-        state,
-        config,
-        comptime!(Field::EnterpriseStatus as u32),
-        firm,
-    ) == comptime!(EnterpriseState::Operating as u32);
-    if operating
-        && days == 0
-        && !lt(
-            value(state, config, comptime!(Field::Construction as u32), firm),
-            upkeep,
-        )
-    {
+    let mut days = ledger.number(Field::MaintenanceDays, firm);
+    let upkeep = maintenance(&*ledger, firm);
+    let operating = ledger.number(Field::EnterpriseStatus, firm)
+        == comptime!(EnterpriseState::Operating as u32);
+    if operating && days == 0 && !lt(ledger.value(Field::Construction, firm), upkeep) {
         consume(
-            state,
-            config,
+            ledger,
             control,
             firm,
             comptime!(Good::Construction as u32),
@@ -208,68 +147,43 @@ fn open(state: &mut [u32], config: &EconomyConfig, control: &[Atomic<u32>], grou
         days = MAINTENANCE_DAYS;
     }
     let capacity = times32(
-        number(state, config, comptime!(Field::OccupiedPlots as u32), firm),
-        number(state, config, comptime!(Field::OutputTicks as u32), firm),
+        ledger.number(Field::OccupiedPlots, firm),
+        ledger.number(Field::OutputTicks, firm),
     );
     let supply = select(operating && days > 0, capacity, zero());
-    set32(
-        state,
-        config,
-        comptime!(Field::MaintenanceDays as u32),
+    ledger.set_number(
+        Field::MaintenanceDays,
         firm,
         select(operating && days > 0, max(days, 1) - 1, days),
     );
-    set(
-        state,
-        config,
-        comptime!(Field::Housing as u32),
-        firm,
-        supply,
-    );
-    increase(
-        state,
-        config,
-        control,
-        comptime!(Field::Produced as u32),
-        firm,
-        supply,
-    );
-    increase(
-        state,
-        config,
-        control,
-        comptime!(Field::UnscaledProduced as u32),
-        firm,
-        supply,
-    );
+    ledger.set(Field::Housing, firm, supply);
+    ledger.increase(control, Field::Produced, firm, supply);
+    ledger.increase(control, Field::UnscaledProduced, firm, supply);
 }
 
 #[cube]
-fn rental_units(state: &mut [u32], actors: &[u32], config: &EconomyConfig, tenant: u32) -> u32 {
-    let renter = kind(actors, tenant).is(comptime!(ActorKind::Household))
-        && number(state, config, comptime!(Field::LandPlots as u32), tenant) == 0
-        && number(
-            state,
-            config,
-            comptime!(Field::LivingMembers as u32),
-            tenant,
-        ) > 0;
-    select(renter, consumption::consumers(state, config, tenant), 0)
+fn rental_units(economy: &EconomyView<'_>, tenant: u32) -> u32 {
+    let renter = economy
+        .actors
+        .kind(tenant)
+        .is(comptime!(ActorKind::Household))
+        && economy.ledger.number(Field::LandPlots, tenant) == 0
+        && economy.ledger.number(Field::LivingMembers, tenant) > 0;
+    select(renter, consumption::consumers(&economy.ledger, tenant), 0)
 }
 
 #[cube]
 fn allocate(
-    state: &mut [u32],
-    actors: &[u32],
-    config: &EconomyConfig,
+    economy: &mut EconomyView<'_>,
     control: &[Atomic<u32>],
     group: u32,
     #[comptime] scan: parallel::ScanMode,
 ) {
+    let config = economy.ledger.config;
     let firm = config.rental_accounts[(group * 3) as usize];
     let start = config.rental_accounts[(group * 3 + 1) as usize];
     let end = config.rental_accounts[(group * 3 + 2) as usize];
-    let supply = value(state, config, comptime!(Field::Housing as u32), firm);
+    let supply = economy.ledger.value(Field::Housing, firm);
     let mut households = 0u32;
     let mut offset = start;
     while offset < end {
@@ -278,27 +192,17 @@ fn allocate(
         let mut units = 0u32;
         if entry < end {
             tenant = config.rental_accounts[entry as usize];
-            units = rental_units(state, actors, config, tenant);
+            units = rental_units(&*economy, tenant);
         }
         let prefix = parallel::scan_prefix(units, scan);
         let preceding = households + prefix.inclusive - units;
         let housed =
             minimum(ticks(units, 0), positive(supply, ticks(preceding, 0))).extract(LOW_WORD);
         if entry < end {
-            set32(
-                state,
-                config,
-                comptime!(Field::HousingAvailable as u32),
-                tenant,
-                housed,
-            );
-            set32(
-                state,
-                config,
-                comptime!(Field::Landlord as u32),
-                tenant,
-                firm + 1,
-            );
+            economy
+                .ledger
+                .set_number(Field::HousingAvailable, tenant, housed);
+            economy.ledger.set_number(Field::Landlord, tenant, firm + 1);
         }
         households += prefix.total;
         offset += CUBE_DIM;
@@ -307,8 +211,7 @@ fn allocate(
     sync_cube();
     if UNIT_POS == 0 {
         consume(
-            state,
-            config,
+            &mut economy.ledger,
             control,
             firm,
             comptime!(Good::Housing as u32),
@@ -325,13 +228,8 @@ struct RentalReceipts {
 }
 
 #[cube]
-fn receipts(
-    state: &mut [u32],
-    actors: &[u32],
-    config: &EconomyConfig,
-    control: &[Atomic<u32>],
-    group: u32,
-) -> RentalReceipts {
+fn receipts(economy: &mut EconomyView<'_>, control: &[Atomic<u32>], group: u32) -> RentalReceipts {
+    let config = economy.ledger.config;
     let start = config.rental_accounts[(group * 3 + 1) as usize];
     let end = config.rental_accounts[(group * 3 + 2) as usize];
     let mut receipts = zero();
@@ -343,31 +241,16 @@ fn receipts(
         receipts = add_checked(
             control,
             receipts,
-            value(state, config, comptime!(Field::RentPending as u32), tenant),
+            economy.ledger.value(Field::RentPending, tenant),
         );
-        set32(
-            state,
-            config,
-            comptime!(Field::RentPending as u32),
-            tenant,
-            0,
-        );
-        let occupants = rental_units(state, actors, config, tenant);
-        let allocated = number(
-            state,
-            config,
-            comptime!(Field::HousingAvailable as u32),
-            tenant,
-        );
+        economy.ledger.set_number(Field::RentPending, tenant, 0);
+        let occupants = rental_units(&*economy, tenant);
+        let allocated = economy.ledger.number(Field::HousingAvailable, tenant);
         households += occupants;
         served += allocated;
-        set32(
-            state,
-            config,
-            comptime!(Field::HousingAvailable as u32),
-            tenant,
-            min(occupants, allocated),
-        );
+        economy
+            .ledger
+            .set_number(Field::HousingAvailable, tenant, min(occupants, allocated));
         entry += CUBE_DIM;
     }
     let mut cash = TickTree::new(receipts);
@@ -381,108 +264,56 @@ fn receipts(
 }
 
 #[cube]
-fn settle(
-    state: &mut [u32],
-    actors: &[u32],
-    config: &EconomyConfig,
-    control: &[Atomic<u32>],
-    group: u32,
-) {
-    let collected = receipts(state, actors, config, control, group);
+fn settle(economy: &mut EconomyView<'_>, control: &[Atomic<u32>], group: u32) {
+    let collected = receipts(economy, control, group);
     if UNIT_POS == 0 {
-        close(state, actors, config, control, group, collected);
+        close(economy, control, group, collected);
     }
 }
 
 #[cube]
 fn close(
-    state: &mut [u32],
-    actors: &[u32],
-    config: &EconomyConfig,
+    economy: &mut EconomyView<'_>,
     control: &[Atomic<u32>],
     group: u32,
     collected: RentalReceipts,
 ) {
+    let config = economy.ledger.config;
     let firm = config.rental_accounts[(group * 3) as usize];
-    increase(
-        state,
-        config,
-        control,
-        comptime!(Field::Cash as u32),
-        firm,
-        collected.cash,
-    );
-    increase(
-        state,
-        config,
-        control,
-        comptime!(Field::RentalIncome as u32),
-        firm,
-        collected.cash,
-    );
-    let cash = value(state, config, comptime!(Field::Cash as u32), firm);
+    economy
+        .ledger
+        .increase(control, Field::Cash, firm, collected.cash);
+    economy
+        .ledger
+        .increase(control, Field::RentalIncome, firm, collected.cash);
+    let cash = economy.ledger.value(Field::Cash, firm);
     let revenue = minus(
-        value(state, config, comptime!(Field::RentalIncome as u32), firm),
-        value(
-            state,
-            config,
-            comptime!(Field::BusinessOpeningRent as u32),
-            firm,
-        ),
+        economy.ledger.value(Field::RentalIncome, firm),
+        economy.ledger.value(Field::BusinessOpeningRent, firm),
     );
-    set(
-        state,
-        config,
-        comptime!(Field::BusinessClosingCash as u32),
-        firm,
-        cash,
-    );
-    set(
-        state,
-        config,
-        comptime!(Field::BusinessRevenue as u32),
-        firm,
-        revenue,
-    );
-    set32(
-        state,
-        config,
-        comptime!(Field::Sales as u32),
-        firm,
-        collected.served,
-    );
-    set32(
-        state,
-        config,
-        comptime!(Field::Demand as u32),
-        firm,
-        collected.households,
-    );
-    set32(
-        state,
-        config,
-        comptime!(Field::Unfilled as u32),
+    economy.ledger.set(Field::BusinessClosingCash, firm, cash);
+    economy.ledger.set(Field::BusinessRevenue, firm, revenue);
+    economy
+        .ledger
+        .set_number(Field::Sales, firm, collected.served);
+    economy
+        .ledger
+        .set_number(Field::Demand, firm, collected.households);
+    economy.ledger.set_number(
+        Field::Unfilled,
         firm,
         collected.households - min(collected.households, collected.served),
     );
     let upkeep = multiply(
         control,
-        maintenance(state, config, firm),
-        max(
-            number(state, config, comptime!(Field::FirstInputCost as u32), firm),
-            1,
-        ),
+        maintenance(&economy.ledger, firm),
+        max(economy.ledger.number(Field::FirstInputCost, firm), 1),
     );
-    develop(state, actors, config, firm, collected.households, upkeep);
-    let project = value(
-        state,
-        config,
-        comptime!(Field::ConstructionRemaining as u32),
-        firm,
-    );
-    let interested = enterprises::expands(state, actors, config, firm);
+    develop(economy, firm, collected.households, upkeep);
+    let project = economy.ledger.value(Field::ConstructionRemaining, firm);
+    let interested = enterprises::expands(&*economy, firm);
     let planned = select(
-        interested && expansion_demand(state, config, firm, collected.households),
+        interested && expansion_demand(&economy.ledger, firm, collected.households),
         maximum(project, ticks(CONSTRUCTION_WORK_PER_PLOT, 0)),
         project,
     );
@@ -492,26 +323,17 @@ fn close(
         multiply(
             control,
             planned,
-            max(
-                number(state, config, comptime!(Field::FirstInputCost as u32), firm),
-                1,
-            ),
+            max(economy.ledger.number(Field::FirstInputCost, firm), 1),
         ),
     );
-    set(
-        state,
-        config,
-        comptime!(Field::OperatingReserve as u32),
-        firm,
-        reserve,
-    );
+    economy.ledger.set(Field::OperatingReserve, firm, reserve);
 }
 
 #[cube]
-fn expansion_demand(state: &mut [u32], config: &EconomyConfig, firm: u32, demand: u32) -> bool {
+fn expansion_demand(ledger: &Ledger<'_>, firm: u32, demand: u32) -> bool {
     let capacity = times32(
-        number(state, config, comptime!(Field::OccupiedPlots as u32), firm),
-        number(state, config, comptime!(Field::OutputTicks as u32), firm),
+        ledger.number(Field::OccupiedPlots, firm),
+        ledger.number(Field::OutputTicks, firm),
     );
     !lt(
         divide(times32(demand, 100), EXPANSION_OCCUPANCY_PERCENT),
@@ -520,80 +342,46 @@ fn expansion_demand(state: &mut [u32], config: &EconomyConfig, firm: u32, demand
 }
 
 #[cube]
-fn develop(
-    state: &mut [u32],
-    actors: &[u32],
-    config: &EconomyConfig,
-    firm: u32,
-    demand: u32,
-    upkeep: Ticks,
-) {
-    let status = number(state, config, comptime!(Field::ProjectStatus as u32), firm);
+fn develop(economy: &mut EconomyView<'_>, firm: u32, demand: u32, upkeep: Ticks) {
+    let config = economy.ledger.config;
+    let status = economy.ledger.number(Field::ProjectStatus, firm);
     let ready = status == comptime!(ProjectStatus::None as u32)
         || status == comptime!(ProjectStatus::Completed as u32)
         || status == comptime!(ProjectStatus::Cancelled as u32);
     let cost = times32(
         CONSTRUCTION_WORK_PER_PLOT,
-        max(
-            number(state, config, comptime!(Field::FirstInputCost as u32), firm),
-            1,
-        ),
+        max(economy.ledger.number(Field::FirstInputCost, firm), 1),
     );
-    let available = positive(
-        value(state, config, comptime!(Field::Cash as u32), firm),
-        upkeep,
-    );
-    let owner = actors[ActorLayout::OWNER * (actors.len() / ActorLayout::WORDS) + firm as usize];
-    let interested = enterprises::expands(state, actors, config, firm);
-    let operating = number(
-        state,
-        config,
-        comptime!(Field::EnterpriseStatus as u32),
-        firm,
-    ) == comptime!(EnterpriseState::Operating as u32);
+    let available = positive(economy.ledger.value(Field::Cash, firm), upkeep);
+    let owner = economy.actors.owner(firm);
+    let interested = enterprises::expands(&*economy, firm);
+    let operating = economy.ledger.number(Field::EnterpriseStatus, firm)
+        == comptime!(EnterpriseState::Operating as u32);
     if ready
         && operating
         && interested
-        && expansion_demand(state, config, firm, demand)
+        && expansion_demand(&economy.ledger, firm, demand)
         && !lt(available, cost)
-        && property::authorized(state, config, firm, owner)
+        && property::authorized(&economy.ledger, firm, owner)
     {
-        set32(
-            state,
-            config,
-            comptime!(Field::ConstructionRemaining as u32),
+        economy.ledger.set_number(
+            Field::ConstructionRemaining,
             firm,
             CONSTRUCTION_WORK_PER_PLOT,
         );
         match comptime!(config.property_mode) {
             Feature::Enabled => {
-                set32(
-                    state,
-                    config,
-                    comptime!(Field::RequestedPlots as u32),
-                    firm,
-                    1,
-                );
-                set32(
-                    state,
-                    config,
-                    comptime!(Field::ProjectStatus as u32),
+                economy.ledger.set_number(Field::RequestedPlots, firm, 1);
+                economy.ledger.set_number(
+                    Field::ProjectStatus,
                     firm,
                     comptime!(ProjectStatus::Requested as u32),
                 );
             }
             Feature::Disabled => {
-                set32(
-                    state,
-                    config,
-                    comptime!(Field::ReservedPlots as u32),
-                    firm,
-                    1,
-                );
-                set32(
-                    state,
-                    config,
-                    comptime!(Field::ProjectStatus as u32),
+                economy.ledger.set_number(Field::ReservedPlots, firm, 1);
+                economy.ledger.set_number(
+                    Field::ProjectStatus,
                     firm,
                     comptime!(ProjectStatus::Building as u32),
                 );

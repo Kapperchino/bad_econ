@@ -8,15 +8,9 @@ struct UniformBalance {
 
 #[cube]
 impl UniformBalance {
-    fn new(
-        state: &mut [u32],
-        config: &EconomyConfig,
-        field: u32,
-        peer: u32,
-        amount: Ticks,
-    ) -> Self {
+    fn new(ledger: &Ledger<'_>, field: u32, peer: u32, amount: Ticks) -> Self {
         UniformBalance {
-            initial: value(state, config, field, peer),
+            initial: ledger.value_at(field, peer),
             amount,
         }
     }
@@ -63,57 +57,39 @@ struct LaborBalances {
 
 #[cube]
 impl LaborBalances {
-    fn new(state: &mut [u32], config: &EconomyConfig, peer: u32) -> Self {
+    fn new(ledger: &Ledger<'_>, peer: u32) -> Self {
         let wage = times32(
-            number(state, config, comptime!(Field::Wage as u32), peer),
-            number(state, config, comptime!(Field::LaborMinutes as u32), peer),
+            ledger.number(Field::Wage, peer),
+            ledger.number(Field::LaborMinutes, peer),
         );
-        let output = ticks(
-            number(state, config, comptime!(Field::OutputTicks as u32), peer),
-            0,
-        );
-        let first = number(state, config, comptime!(Field::FirstInput as u32), peer);
-        let second = number(state, config, comptime!(Field::SecondInput as u32), peer);
-        let input = value(state, config, comptime!(Field::InputTicks as u32), peer);
+        let output = ticks(ledger.number(Field::OutputTicks, peer), 0);
+        let first = ledger.number(Field::FirstInput, peer);
+        let second = ledger.number(Field::SecondInput, peer);
+        let input = ledger.value(Field::InputTicks, peer);
         let first_input = select(first > 0, input, zero());
         let second_input = select(second > 0, input, zero());
         let total_input = plus(first_input, second_input);
         LaborBalances {
-            cash: UniformBalance::new(state, config, comptime!(Field::Cash as u32), peer, wage),
-            escrow: UniformBalance::new(state, config, comptime!(Field::Escrow as u32), peer, wage),
-            slots: UniformBalance::new(
-                state,
-                config,
-                comptime!(Field::Slots as u32),
-                peer,
-                ticks(1, 0),
-            ),
-            pipeline: UniformBalance::new(
-                state,
-                config,
-                comptime!(Field::Pipeline as u32),
-                peer,
-                output,
-            ),
-            stock: UniformBalance::new(state, config, first, peer, first_input),
-            second_stock: UniformBalance::new(state, config, second, peer, second_input),
+            cash: UniformBalance::new(ledger, comptime!(Field::Cash as u32), peer, wage),
+            escrow: UniformBalance::new(ledger, comptime!(Field::Escrow as u32), peer, wage),
+            slots: UniformBalance::new(ledger, comptime!(Field::Slots as u32), peer, ticks(1, 0)),
+            pipeline: UniformBalance::new(ledger, comptime!(Field::Pipeline as u32), peer, output),
+            stock: UniformBalance::new(ledger, first, peer, first_input),
+            second_stock: UniformBalance::new(ledger, second, peer, second_input),
             first_used: UniformBalance::new(
-                state,
-                config,
+                ledger,
                 USED_FIELDS as u32 + max(first, 1) - 1,
                 peer,
                 first_input,
             ),
             second_used: UniformBalance::new(
-                state,
-                config,
+                ledger,
                 USED_FIELDS as u32 + max(second, 1) - 1,
                 peer,
                 second_input,
             ),
             used: UniformBalance::new(
-                state,
-                config,
+                ledger,
                 comptime!(Field::Used as u32),
                 peer,
                 total_input.value,
@@ -152,69 +128,23 @@ impl LaborBalances {
         }
     }
 
-    fn store(&self, state: &mut [u32], config: &EconomyConfig, peer: u32, accepted: u32) {
-        set(
-            state,
-            config,
-            comptime!(Field::Cash as u32),
-            peer,
-            self.cash.debited(accepted),
-        );
-        set(
-            state,
-            config,
-            comptime!(Field::Escrow as u32),
-            peer,
-            self.escrow.credited(accepted),
-        );
-        set(
-            state,
-            config,
-            comptime!(Field::Slots as u32),
-            peer,
-            self.slots.debited(accepted),
-        );
-        set(
-            state,
-            config,
-            comptime!(Field::Pipeline as u32),
-            peer,
-            self.pipeline.credited(accepted),
-        );
-        set(
-            state,
-            config,
-            comptime!(Field::Used as u32),
-            peer,
-            self.used.credited(accepted),
-        );
+    fn store(&self, ledger: &mut Ledger<'_>, peer: u32, accepted: u32) {
+        ledger.set(Field::Cash, peer, self.cash.debited(accepted));
+        ledger.set(Field::Escrow, peer, self.escrow.credited(accepted));
+        ledger.set(Field::Slots, peer, self.slots.debited(accepted));
+        ledger.set(Field::Pipeline, peer, self.pipeline.credited(accepted));
+        ledger.set(Field::Used, peer, self.used.credited(accepted));
         if self.first > 0 {
-            set(
-                state,
-                config,
-                self.first,
-                peer,
-                self.stock.debited(accepted),
-            );
-            set(
-                state,
-                config,
+            ledger.set_at(self.first, peer, self.stock.debited(accepted));
+            ledger.set_at(
                 USED_FIELDS as u32 + self.first - 1,
                 peer,
                 self.first_used.credited(accepted),
             );
         }
         if self.second > 0 {
-            set(
-                state,
-                config,
-                self.second,
-                peer,
-                self.second_stock.debited(accepted),
-            );
-            set(
-                state,
-                config,
+            ledger.set_at(self.second, peer, self.second_stock.debited(accepted));
+            ledger.set_at(
                 USED_FIELDS as u32 + self.second - 1,
                 peer,
                 self.second_used.credited(accepted),
@@ -255,9 +185,9 @@ impl GpuPass<LaborInput> for SettleLabor {
 
     fn execute(mut input: LaborInput) {
         input.parameters.refresh(&mut input.config);
+        let mut ledger = Ledger::new(&mut input.state, &input.config);
         settle_labor(
-            &mut input.state,
-            &input.config,
+            &mut ledger,
             &mut input.proposals,
             &mut input.scratch,
             &input.control,
@@ -269,14 +199,14 @@ impl GpuPass<LaborInput> for SettleLabor {
 
 #[cube]
 fn settle_labor(
-    state: &mut [u32],
-    config: &EconomyConfig,
+    ledger: &mut Ledger<'_>,
     proposals: &mut [u32],
     scratch: &mut [u32],
     control: &[Atomic<u32>],
     parameters: &EconomyParameters,
     #[comptime] execution: LaborExecution,
 ) {
+    let config = ledger.config;
     let jobs = markets::job_count(control, RANGE_SLOTS_WORD);
     let mut job = CUBE_POS as u32;
     while job < jobs {
@@ -285,10 +215,10 @@ fn settle_labor(
         let length = scratch[(6 * count + job) as usize];
         let end = start + length;
         let peer = scratch[(parameters.sort_source + start) as usize];
-        let balances = LaborBalances::new(state, config, peer);
+        let balances = LaborBalances::new(&*ledger, peer);
         let limit = match comptime!(config.cohorts) {
             Feature::Disabled => length,
-            Feature::Enabled => number(state, config, comptime!(Field::Slots as u32), peer) + 1,
+            Feature::Enabled => ledger.number(Field::Slots, peer) + 1,
         };
         let capacity = balances.capacity(limit);
         let mut accepted = 0u32;
@@ -336,7 +266,7 @@ fn settle_labor(
                 scratch[(7 * count + peer) as usize] = min(cursor, end);
             }
             balances.faults.record(control);
-            balances.store(state, config, peer, accepted);
+            balances.store(ledger, peer, accepted);
             control[PROGRESS_WORD].fetch_max(length);
             control[COMPLETED_WORD].fetch_add(length);
         }

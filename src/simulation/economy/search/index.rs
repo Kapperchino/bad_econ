@@ -46,9 +46,7 @@ pub(super) struct Supply {
 #[cube]
 impl Supply {
     pub fn for_search(
-        state: &mut [u32],
-        actors: &[u32],
-        config: &EconomyConfig,
+        economy: &EconomyView<'_>,
         scratch: &[u32],
         parameters: &EconomyParameters,
         member: u32,
@@ -64,27 +62,21 @@ impl Supply {
         ) {
             Self::load(scratch, member)
         } else {
-            Self::new(state, actors, config, actor, parameters.traded_good())
+            Self::new(economy, actor, parameters.traded_good())
         }
     }
 
-    pub fn new(
-        state: &mut [u32],
-        actors: &[u32],
-        config: &EconomyConfig,
-        actor: u32,
-        good: u32,
-    ) -> Self {
-        let kind = kind(actors, actor);
+    pub fn new(economy: &EconomyView<'_>, actor: u32, good: u32) -> Self {
+        let kind = economy.actors.kind(actor);
         let producer = !kind.is(comptime!(ActorKind::Household)) && kind.output() == good;
-        let supplier = household_production::supplier(state, actors, config, actor, good);
-        let terms = household_production::TradeFields::new(actors, actor, good);
+        let supplier = household_production::supplier(economy, actor, good);
+        let terms = household_production::TradeFields::new(&economy.actors, actor, good);
         let available = positive(
-            value(state, config, good, actor),
-            household_production::reserve(state, actors, config, actor, good),
+            economy.ledger.value_at(good, actor),
+            household_production::reserve(economy, actor, good),
         );
         Supply {
-            quote: number(state, config, terms.price, actor),
+            quote: economy.ledger.number_at(terms.price, actor),
             available,
             offered: supplier && !equal(available, zero()),
             producer,
@@ -127,9 +119,7 @@ fn reduce_minimum(value: u32, #[comptime] reduction: parallel::ScanMode) -> u32 
 
 #[cube]
 pub(super) fn build(
-    state: &mut [u32],
-    actors: &[u32],
-    config: &EconomyConfig,
+    economy: &EconomyView<'_>,
     spatial: &mut [u32],
     scratch: &mut [u32],
     searches: &mut [u32],
@@ -138,6 +128,7 @@ pub(super) fn build(
     parameters: &EconomyParameters,
     #[comptime] collection: OrderCollection,
 ) {
+    let config = economy.ledger.config;
     let reduction = comptime!(parameters.scan);
     let cells = config.spatial_side * config.spatial_side;
     let count = spatial[cells as usize];
@@ -186,7 +177,7 @@ pub(super) fn build(
                     successes[slot + 1].store(0);
                 }
             }
-            let supply = Supply::new(state, actors, config, actor, good);
+            let supply = Supply::new(economy, actor, good);
             supply.store(scratch, member);
             let quote = supply.quote;
             if good == comptime!(Good::Bread as u32) {
@@ -214,9 +205,8 @@ pub(super) fn build(
             stocked_price = min(stocked_price, select(offered, price, u32::MAX));
             empty_price = min(empty_price, select(producer && !offered, price, u32::MAX));
             stocked = max(stocked, u32::cast_from(offered));
-            let stride = actors.len() / ActorLayout::WORDS;
-            let x = actors[ActorLayout::X * stride + actor as usize];
-            let y = actors[ActorLayout::Y * stride + actor as usize];
+            let x = economy.actors.x(actor);
+            let y = economy.actors.y(actor);
             if comptime!(parameters.market == MarketFlag::Household) {
                 searches[(HOUSEHOLD_X_FIELD * config.actors + member) as usize] = x;
                 searches[(HOUSEHOLD_Y_FIELD * config.actors + member) as usize] = y;

@@ -62,6 +62,7 @@ impl GpuPass<ParcelIndexInput> for IndexParcels {
     type Output = ();
 
     fn execute(mut input: ParcelIndexInput) {
+        let actors = ActorTable::with_stride(&input.actors, input.count as usize);
         let id = ABSOLUTE_POS as u32;
         let cells = input.side * input.side;
         if id < input.count {
@@ -73,8 +74,8 @@ impl GpuPass<ParcelIndexInput> for IndexParcels {
             while low < high {
                 let middle = low + (high - low) / 2;
                 let actor = input.spatial[(input.source + middle) as usize];
-                let x = input.actors[(ActorLayout::X as u32 * input.count + actor) as usize];
-                let y = input.actors[(ActorLayout::Y as u32 * input.count + actor) as usize];
+                let x = actors.x(actor);
+                let y = actors.y(actor);
                 let before = y / input.size * input.side + x / input.size < id;
                 low = select(before, middle + 1, low);
                 high = select(before, high, middle);
@@ -122,34 +123,14 @@ impl GpuPass<PropertyInput> for AllocateProperty {
     type Output = ();
 
     fn execute(mut input: PropertyInput) {
+        let mut economy = EconomyView::new(&mut input.state, &input.actors, &input.config);
         match comptime!(input.stage) {
-            PropertyStage::Initialize => initialize(
-                &mut input.state,
-                &input.actors,
-                &input.config,
-                ABSOLUTE_POS as u32,
-            ),
-            PropertyStage::Allocate => allocate(
-                &mut input.state,
-                &input.actors,
-                &input.config,
-                &input.control,
-                ABSOLUTE_POS as u32,
-            ),
-            PropertyStage::Construct => construct(
-                &mut input.state,
-                &input.actors,
-                &input.config,
-                &input.control,
-                ABSOLUTE_POS as u32,
-            ),
-            PropertyStage::Consolidate => consolidate(
-                &mut input.state,
-                &input.actors,
-                &input.spatial,
-                &input.config,
-                &input.control,
-            ),
+            PropertyStage::Initialize => initialize(&mut economy, ABSOLUTE_POS as u32),
+            PropertyStage::Allocate => allocate(&mut economy, &input.control, ABSOLUTE_POS as u32),
+            PropertyStage::Construct => {
+                construct(&mut economy, &input.control, ABSOLUTE_POS as u32)
+            }
+            PropertyStage::Consolidate => consolidate(&mut economy, &input.spatial, &input.control),
         }
     }
 }
@@ -216,41 +197,17 @@ pub(in crate::simulation) fn launch(
 }
 
 #[cube]
-fn consolidate(
-    state: &mut [u32],
-    actors: &[u32],
-    spatial: &[u32],
-    config: &EconomyConfig,
-    control: &[Atomic<u32>],
-) {
+fn consolidate(economy: &mut EconomyView<'_>, spatial: &[u32], control: &[Atomic<u32>]) {
+    let config = economy.ledger.config;
     for index in 0..config.grain_farms.len() - 1 {
         let farm = config.grain_farms[index];
-        let output = number(state, config, comptime!(Field::OutputTicks as u32), farm);
-        let labor = number(state, config, comptime!(Field::LaborMinutes as u32), farm);
-        let operating = number(
-            state,
-            config,
-            comptime!(Field::EnterpriseStatus as u32),
-            farm,
-        ) == comptime!(EnterpriseState::Operating as u32);
-        let producer = number(
-            state,
-            config,
-            comptime!(Field::EnterpriseModel as u32),
-            farm,
-        ) == 0;
-        let completed = number(
-            state,
-            config,
-            comptime!(Field::ConstructionRemaining as u32),
-            farm,
-        ) == 0;
-        let required = number(
-            state,
-            config,
-            comptime!(Field::PendingCapacity as u32),
-            farm,
-        );
+        let output = economy.ledger.number(Field::OutputTicks, farm);
+        let labor = economy.ledger.number(Field::LaborMinutes, farm);
+        let operating = economy.ledger.number(Field::EnterpriseStatus, farm)
+            == comptime!(EnterpriseState::Operating as u32);
+        let producer = economy.ledger.number(Field::EnterpriseModel, farm) == 0;
+        let completed = economy.ledger.number(Field::ConstructionRemaining, farm) == 0;
+        let required = economy.ledger.number(Field::PendingCapacity, farm);
         let labor_efficient = if comptime!(
             config.commercial_wheat == crate::domain::food::WheatHusbandry::NorfolkFourCourse
         ) && config.home.harvest_days < 365
@@ -282,10 +239,8 @@ fn consolidate(
                 config.home.annual_yield_per_plot,
             );
             consolidate_farm(
-                state,
-                actors,
+                economy,
                 spatial,
-                config,
                 control,
                 farm,
                 replacement.extract(LOW_WORD),
@@ -295,10 +250,13 @@ fn consolidate(
 }
 
 #[cube]
-fn local_plots(state: &mut [u32], actors: &[u32], config: &EconomyConfig, household: u32) -> u64 {
-    let plots = number(state, config, comptime!(Field::LandPlots as u32), household);
+fn local_plots(economy: &EconomyView<'_>, household: u32) -> u64 {
+    let plots = economy.ledger.number(Field::LandPlots, household);
     u64::cast_from(select(
-        kind(actors, household).is(comptime!(ActorKind::Household)),
+        economy
+            .actors
+            .kind(household)
+            .is(comptime!(ActorKind::Household)),
         plots,
         0,
     ))
@@ -315,10 +273,9 @@ struct LandNeighborhood {
 
 #[cube]
 impl LandNeighborhood {
-    fn new(actors: &[u32], config: &EconomyConfig, farm: u32, radius: u32) -> Self {
-        let stride = actors.len() / ActorLayout::WORDS;
-        let x = actors[ActorLayout::X * stride + farm as usize];
-        let y = actors[ActorLayout::Y * stride + farm as usize];
+    fn new(actors: &ActorTable<'_>, config: &EconomyConfig, farm: u32, radius: u32) -> Self {
+        let x = actors.x(farm);
+        let y = actors.y(farm);
         let size = ceildiv(config.map_size, 128);
         let side = ceildiv(config.map_size, size);
         let lower_x = (max(x, radius) - radius) / size;
@@ -356,15 +313,9 @@ impl LandNeighborhood {
 }
 
 #[cube]
-fn nearby_plots(
-    state: &mut [u32],
-    actors: &[u32],
-    spatial: &[u32],
-    config: &EconomyConfig,
-    farm: u32,
-    radius: u32,
-) -> u64 {
-    let neighborhood = LandNeighborhood::new(actors, config, farm, radius);
+fn nearby_plots(economy: &EconomyView<'_>, spatial: &[u32], farm: u32, radius: u32) -> u64 {
+    let config = economy.ledger.config;
+    let neighborhood = LandNeighborhood::new(&economy.actors, config, farm, radius);
     let mut plots = u64::new(0);
     for index in 0..neighborhood.width * neighborhood.height {
         let cell = neighborhood.cell(index);
@@ -372,9 +323,9 @@ fn nearby_plots(
         let end = spatial[cell as usize + 1];
         while member < end {
             let household = neighborhood.actor(spatial, member);
-            let grant = local_plots(state, actors, config, household);
+            let grant = local_plots(economy, household);
             plots += select(
-                distance(actors, farm, household) <= radius,
+                economy.actors.distance(farm, household) <= radius,
                 grant,
                 u64::new(0),
             );
@@ -386,32 +337,31 @@ fn nearby_plots(
 
 #[cube]
 fn consolidate_farm(
-    state: &mut [u32],
-    actors: &[u32],
+    economy: &mut EconomyView<'_>,
     spatial: &[u32],
-    config: &EconomyConfig,
     control: &[Atomic<u32>],
     farm: u32,
     required: u32,
 ) {
+    let config = economy.ledger.config;
     if required > 0 {
         let mut low = 0;
         let mut high = min(1u32, config.search_radius);
-        let mut available = nearby_plots(state, actors, spatial, config, farm, high);
+        let mut available = nearby_plots(&*economy, spatial, farm, high);
         while high < config.search_radius && available < u64::cast_from(required) {
             low = high + 1;
             high = min(high * 2, config.search_radius);
-            available = nearby_plots(state, actors, spatial, config, farm, high);
+            available = nearby_plots(&*economy, spatial, farm, high);
         }
         while low < high {
             let radius = low + (high - low) / 2;
-            let plots = nearby_plots(state, actors, spatial, config, farm, radius);
+            let plots = nearby_plots(&*economy, spatial, farm, radius);
             let short = plots < u64::cast_from(required);
             low = select(short, radius + 1, low);
             high = select(short, high, radius);
         }
         let radius = low;
-        let neighborhood = LandNeighborhood::new(actors, config, farm, radius);
+        let neighborhood = LandNeighborhood::new(&economy.actors, config, farm, radius);
         let block = ceildiv(config.actors, CUBE_DIM);
         let start = UNIT_POS * block;
         let end = min(start + block, config.actors);
@@ -423,8 +373,8 @@ fn consolidate_farm(
             let last = neighborhood.lower_bound(spatial, cell, end);
             for member in first..last {
                 let household = neighborhood.actor(spatial, member);
-                let plots = local_plots(state, actors, config, household);
-                let trip = distance(actors, farm, household);
+                let plots = local_plots(&*economy, household);
+                let trip = economy.actors.distance(farm, household);
                 closer += select(trip < radius, plots, u64::new(0));
                 boundary += select(trip == radius, plots, u64::new(0));
             }
@@ -451,8 +401,8 @@ fn consolidate_farm(
                     for member in first..last {
                         let household = neighborhood.actor(spatial, member);
                         plots += select(
-                            distance(actors, farm, household) == radius,
-                            local_plots(state, actors, config, household),
+                            economy.actors.distance(farm, household) == radius,
+                            local_plots(&*economy, household),
                             u64::new(0),
                         );
                     }
@@ -471,34 +421,20 @@ fn consolidate_farm(
             let end = spatial[cell as usize + 1];
             while member < end {
                 let household = neighborhood.actor(spatial, member);
-                let plots = local_plots(state, actors, config, household);
-                let trip = distance(actors, farm, household);
+                let plots = local_plots(&*economy, household);
+                let trip = economy.actors.distance(farm, household);
                 let selected = plots > u64::new(0)
                     && (trip < radius || trip == radius && household <= cutoff[0]);
                 if selected {
-                    increase(
-                        state,
-                        config,
+                    economy.ledger.increase(
                         control,
-                        comptime!(Field::DisplacedPlots as u32),
+                        Field::DisplacedPlots,
                         household,
                         ticks(u32::cast_from(plots), 0),
                     );
-                    set32(
-                        state,
-                        config,
-                        comptime!(Field::LandPlots as u32),
-                        household,
-                        0,
-                    );
-                    set32(
-                        state,
-                        config,
-                        comptime!(Field::CropWork as u32),
-                        household,
-                        0,
-                    );
-                    discard_grain(state, config, control, household);
+                    economy.ledger.set_number(Field::LandPlots, household, 0);
+                    economy.ledger.set_number(Field::CropWork, household, 0);
+                    discard_grain(&mut economy.ledger, control, household);
                     acquired += plots;
                 }
                 member += CUBE_DIM;
@@ -507,11 +443,9 @@ fn consolidate_farm(
         let total = parallel::reduce::<u64>(acquired, comptime!(Reduction::Sum));
         sync_storage();
         if UNIT_POS == 0 {
-            increase(
-                state,
-                config,
+            economy.ledger.increase(
                 control,
-                comptime!(Field::OccupiedPlots as u32),
+                Field::OccupiedPlots,
                 farm,
                 ticks(u32::cast_from(total), u32::cast_from(total >> 32)),
             );
@@ -521,10 +455,10 @@ fn consolidate_farm(
 }
 
 #[cube]
-fn contains(actors: &[u32], config: &EconomyConfig, region: u32, actor: u32) -> bool {
+fn contains(actors: &ActorTable<'_>, config: &EconomyConfig, region: u32, actor: u32) -> bool {
     let base = region as usize * 6;
-    let x = actors[ActorLayout::X * (actors.len() / ActorLayout::WORDS) + actor as usize];
-    let y = actors[ActorLayout::Y * (actors.len() / ActorLayout::WORDS) + actor as usize];
+    let x = actors.x(actor);
+    let y = actors.y(actor);
     x >= config.property_regions[base]
         && y >= config.property_regions[base + 1]
         && x < config.property_regions[base + 2]
@@ -533,13 +467,12 @@ fn contains(actors: &[u32], config: &EconomyConfig, region: u32, actor: u32) -> 
 
 #[cube]
 pub(super) fn scaled_output(
-    state: &mut [u32],
-    config: &EconomyConfig,
+    ledger: &mut Ledger<'_>,
     control: &[Atomic<u32>],
     actor: u32,
     output: Ticks,
 ) -> Ticks {
-    let plots = number(state, config, comptime!(Field::OccupiedPlots as u32), actor);
+    let plots = ledger.number(Field::OccupiedPlots, actor);
     if plots > 1 {
         let mut bonus = 0u32;
         #[unroll]
@@ -552,12 +485,7 @@ pub(super) fn scaled_output(
         }
         let whole = divide(output, 1000);
         let fraction = minus(output, multiply(control, whole, 1000));
-        let carried = number(
-            state,
-            config,
-            comptime!(Field::ScaleRemainder as u32),
-            actor,
-        );
+        let carried = ledger.number(Field::ScaleRemainder, actor);
         let fractional = fraction.extract(LOW_WORD) * bonus + carried;
         let extra = add_checked(
             control,
@@ -565,13 +493,7 @@ pub(super) fn scaled_output(
             ticks(fractional / 1000, 0),
         );
         let scaled = add_checked(control, output, extra);
-        set32(
-            state,
-            config,
-            comptime!(Field::ScaleRemainder as u32),
-            actor,
-            fractional % 1000,
-        );
+        ledger.set_number(Field::ScaleRemainder, actor, fractional % 1000);
         scaled
     } else {
         output
@@ -579,30 +501,22 @@ pub(super) fn scaled_output(
 }
 
 #[cube]
-fn initialize(state: &mut [u32], actors: &[u32], config: &EconomyConfig, actor: u32) {
+fn initialize(economy: &mut EconomyView<'_>, actor: u32) {
+    let config = economy.ledger.config;
     if actor < config.actors {
-        let current = number(
-            state,
-            config,
-            comptime!(Field::PropertyRegion as u32),
-            actor,
-        );
+        let current = economy.ledger.number(Field::PropertyRegion, actor);
         let mut selected = current;
         for region in 0..config.property_regions.len() / 6 {
             selected = select(
-                current == 0 && contains(actors, config, region as u32, actor),
+                current == 0 && contains(&economy.actors, config, region as u32, actor),
                 region as u32 + 1,
                 selected,
             );
         }
-        set32(
-            state,
-            config,
-            comptime!(Field::PropertyRegion as u32),
-            actor,
-            selected,
-        );
-        let kind = kind(actors, actor).bits();
+        economy
+            .ledger
+            .set_number(Field::PropertyRegion, actor, selected);
+        let kind = economy.actors.kind(actor).bits();
         let mut usage = u32::new(comptime!(PropertyUse::Factory as i64));
         let natural = comptime!(
             Good::ALL
@@ -621,64 +535,29 @@ fn initialize(state: &mut [u32], actors: &[u32], config: &EconomyConfig, actor: 
             usage,
         );
         usage = select(
-            kind > 0
-                && number(
-                    state,
-                    config,
-                    comptime!(Field::EnterpriseModel as u32),
-                    actor,
-                ) == 1,
+            kind > 0 && economy.ledger.number(Field::EnterpriseModel, actor) == 1,
             comptime!(PropertyUse::Store as u32),
             usage,
         );
-        set32(
-            state,
-            config,
-            comptime!(Field::PropertyUse as u32),
-            actor,
-            usage,
-        );
-        let project = number(state, config, comptime!(Field::ProjectStatus as u32), actor);
-        let status = number(
-            state,
-            config,
-            comptime!(Field::EnterpriseStatus as u32),
-            actor,
-        );
+        economy.ledger.set_number(Field::PropertyUse, actor, usage);
+        let project = economy.ledger.number(Field::ProjectStatus, actor);
+        let status = economy.ledger.number(Field::EnterpriseStatus, actor);
         let abandoned = select(
             kind == 0,
-            number(state, config, comptime!(Field::EstateSettled as u32), actor) > 0,
+            economy.ledger.number(Field::EstateSettled, actor) > 0,
             status >= comptime!(EnterpriseState::Liquidating as u32),
         );
         if abandoned
             && (project == comptime!(ProjectStatus::Requested as u32)
                 || project == comptime!(ProjectStatus::Building as u32))
         {
-            set32(
-                state,
-                config,
-                comptime!(Field::RequestedPlots as u32),
-                actor,
-                0,
-            );
-            set32(
-                state,
-                config,
-                comptime!(Field::ReservedPlots as u32),
-                actor,
-                0,
-            );
-            set32(
-                state,
-                config,
-                comptime!(Field::ConstructionRemaining as u32),
-                actor,
-                0,
-            );
-            set32(
-                state,
-                config,
-                comptime!(Field::ProjectStatus as u32),
+            economy.ledger.set_number(Field::RequestedPlots, actor, 0);
+            economy.ledger.set_number(Field::ReservedPlots, actor, 0);
+            economy
+                .ledger
+                .set_number(Field::ConstructionRemaining, actor, 0);
+            economy.ledger.set_number(
+                Field::ProjectStatus,
                 actor,
                 comptime!(ProjectStatus::Cancelled as u32),
             );
@@ -687,15 +566,11 @@ fn initialize(state: &mut [u32], actors: &[u32], config: &EconomyConfig, actor: 
 }
 
 #[cube]
-pub(in crate::simulation) fn authorized(
-    state: &mut [u32],
-    config: &EconomyConfig,
-    site: u32,
-    owner: u32,
-) -> bool {
+pub(in crate::simulation) fn authorized(ledger: &Ledger<'_>, site: u32, owner: u32) -> bool {
+    let config = ledger.config;
     let mut allowed = true;
     if comptime!(config.property_mode == Feature::Enabled) {
-        let region = number(state, config, comptime!(Field::PropertyRegion as u32), site);
+        let region = ledger.number(Field::PropertyRegion, site);
         allowed = false;
         if region > 0 {
             allowed = config.property_regions[(region as usize - 1) * 6 + 5] == owner;
@@ -705,33 +580,22 @@ pub(in crate::simulation) fn authorized(
 }
 
 #[cube]
-fn allocate(
-    state: &mut [u32],
-    actors: &[u32],
-    config: &EconomyConfig,
-    control: &[Atomic<u32>],
-    region: u32,
-) {
+fn allocate(economy: &mut EconomyView<'_>, control: &[Atomic<u32>], region: u32) {
+    let config = economy.ledger.config;
     if region < config.property_regions.len() as u32 / 6 {
         let capacity = ticks(config.property_regions[region as usize * 6 + 4], 0);
         let mut occupied = zero();
         for actor in 0..config.actors {
-            if number(
-                state,
-                config,
-                comptime!(Field::PropertyRegion as u32),
-                actor,
-            ) == region + 1
-            {
+            if economy.ledger.number(Field::PropertyRegion, actor) == region + 1 {
                 occupied = add_checked(
                     control,
                     occupied,
-                    value(state, config, comptime!(Field::OccupiedPlots as u32), actor),
+                    economy.ledger.value(Field::OccupiedPlots, actor),
                 );
                 occupied = add_checked(
                     control,
                     occupied,
-                    value(state, config, comptime!(Field::ReservedPlots as u32), actor),
+                    economy.ledger.value(Field::ReservedPlots, actor),
                 );
             }
         }
@@ -740,56 +604,34 @@ fn allocate(
         }
         let mut free = positive(capacity, occupied);
         for actor in 0..config.actors {
-            if number(
-                state,
-                config,
-                comptime!(Field::PropertyRegion as u32),
-                actor,
-            ) == region + 1
-            {
-                free = reserve_site(state, config, actor, free);
+            if economy.ledger.number(Field::PropertyRegion, actor) == region + 1 {
+                free = reserve_site(&mut economy.ledger, actor, free);
             }
         }
         for actor in 0..config.actors {
-            if kind(actors, actor).is(comptime!(ActorKind::Household))
-                && contains(actors, config, region, actor)
+            if economy
+                .actors
+                .kind(actor)
+                .is(comptime!(ActorKind::Household))
+                && contains(&economy.actors, config, region, actor)
             {
-                free = allocate_plots(state, config, control, actor, free);
+                free = allocate_plots(&mut economy.ledger, control, actor, free);
             }
         }
     }
 }
 
 #[cube]
-fn reserve_site(state: &mut [u32], config: &EconomyConfig, actor: u32, available: Ticks) -> Ticks {
+fn reserve_site(ledger: &mut Ledger<'_>, actor: u32, available: Ticks) -> Ticks {
     let mut free = available;
-    let status = number(state, config, comptime!(Field::ProjectStatus as u32), actor);
-    let requested = value(
-        state,
-        config,
-        comptime!(Field::RequestedPlots as u32),
-        actor,
-    );
+    let status = ledger.number(Field::ProjectStatus, actor);
+    let requested = ledger.value(Field::RequestedPlots, actor);
     if status == comptime!(ProjectStatus::Requested as u32) && !lt(free, requested) {
         free = minus(free, requested);
-        set(
-            state,
-            config,
-            comptime!(Field::ReservedPlots as u32),
-            actor,
-            requested,
-        );
-        set32(
-            state,
-            config,
-            comptime!(Field::RequestedPlots as u32),
-            actor,
-            0,
-        );
-        set32(
-            state,
-            config,
-            comptime!(Field::ProjectStatus as u32),
+        ledger.set(Field::ReservedPlots, actor, requested);
+        ledger.set_number(Field::RequestedPlots, actor, 0);
+        ledger.set_number(
+            Field::ProjectStatus,
             actor,
             comptime!(ProjectStatus::Building as u32),
         );
@@ -798,179 +640,97 @@ fn reserve_site(state: &mut [u32], config: &EconomyConfig, actor: u32, available
 }
 
 #[cube]
-fn discard_grain(state: &mut [u32], config: &EconomyConfig, control: &[Atomic<u32>], actor: u32) {
-    let grain = value(state, config, comptime!(Field::Grain as u32), actor);
-    set(state, config, comptime!(Field::Grain as u32), actor, zero());
-    increase(
-        state,
-        config,
+fn discard_grain(ledger: &mut Ledger<'_>, control: &[Atomic<u32>], actor: u32) {
+    let grain = ledger.value(Field::Grain, actor);
+    ledger.set(Field::Grain, actor, zero());
+    ledger.increase_at(
         control,
         USED_FIELDS as u32 + comptime!(Good::Grain as u32) - 1,
         actor,
         grain,
     );
-    increase(
-        state,
-        config,
-        control,
-        comptime!(Field::Used as u32),
-        actor,
-        grain,
-    );
+    ledger.increase(control, Field::Used, actor, grain);
 }
 
 #[cube]
 fn allocate_plots(
-    state: &mut [u32],
-    config: &EconomyConfig,
+    ledger: &mut Ledger<'_>,
     control: &[Atomic<u32>],
     actor: u32,
     free: Ticks,
 ) -> Ticks {
-    let plots = value(state, config, comptime!(Field::LandPlots as u32), actor);
-    let settled = number(state, config, comptime!(Field::EstateSettled as u32), actor);
+    let plots = ledger.value(Field::LandPlots, actor);
+    let settled = ledger.number(Field::EstateSettled, actor);
     let retained = select(!lt(free, plots) && settled == 0, plots, zero());
     let lost = select(settled == 0, minus(plots, retained), zero());
-    set(
-        state,
-        config,
-        comptime!(Field::LandPlots as u32),
-        actor,
-        retained,
-    );
-    increase(
-        state,
-        config,
-        control,
-        comptime!(Field::DisplacedPlots as u32),
-        actor,
-        lost,
-    );
-    let work = value(state, config, comptime!(Field::CropWork as u32), actor);
-    set(
-        state,
-        config,
-        comptime!(Field::CropWork as u32),
+    ledger.set(Field::LandPlots, actor, retained);
+    ledger.increase(control, Field::DisplacedPlots, actor, lost);
+    let work = ledger.value(Field::CropWork, actor);
+    ledger.set(
+        Field::CropWork,
         actor,
         select(equal(retained, zero()), zero(), work),
     );
     if !equal(lost, zero()) {
-        discard_grain(state, config, control, actor);
+        discard_grain(ledger, control, actor);
     }
     minus(free, retained)
 }
 
 #[cube]
-fn construct(
-    state: &mut [u32],
-    actors: &[u32],
-    config: &EconomyConfig,
-    control: &[Atomic<u32>],
-    actor: u32,
-) {
+fn construct(economy: &mut EconomyView<'_>, control: &[Atomic<u32>], actor: u32) {
+    let config = economy.ledger.config;
     if actor < config.actors {
-        let status = number(state, config, comptime!(Field::ProjectStatus as u32), actor);
-        let remaining = value(
-            state,
-            config,
-            comptime!(Field::ConstructionRemaining as u32),
-            actor,
-        );
-        let stock = value(state, config, comptime!(Field::Construction as u32), actor);
+        let status = economy.ledger.number(Field::ProjectStatus, actor);
+        let remaining = economy.ledger.value(Field::ConstructionRemaining, actor);
+        let stock = economy.ledger.value(Field::Construction, actor);
         let work = minimum(stock, remaining);
         if status == comptime!(ProjectStatus::Building as u32) {
-            set(
-                state,
-                config,
-                comptime!(Field::Construction as u32),
-                actor,
-                minus(stock, work),
-            );
-            set(
-                state,
-                config,
-                comptime!(Field::ConstructionRemaining as u32),
-                actor,
-                minus(remaining, work),
-            );
-            increase(
-                state,
-                config,
+            economy
+                .ledger
+                .set(Field::Construction, actor, minus(stock, work));
+            economy
+                .ledger
+                .set(Field::ConstructionRemaining, actor, minus(remaining, work));
+            economy.ledger.increase_at(
                 control,
                 USED_FIELDS as u32 + comptime!(Good::Construction as u32) - 1,
                 actor,
                 work,
             );
-            increase(
-                state,
-                config,
-                control,
-                comptime!(Field::Used as u32),
-                actor,
-                work,
-            );
-            increase(
-                state,
-                config,
-                control,
-                comptime!(Field::InstalledCapital as u32),
-                actor,
-                work,
-            );
+            economy.ledger.increase(control, Field::Used, actor, work);
+            economy
+                .ledger
+                .increase(control, Field::InstalledCapital, actor, work);
             if equal(work, remaining) {
-                let plots = value(state, config, comptime!(Field::OccupiedPlots as u32), actor);
-                let built = value(state, config, comptime!(Field::ReservedPlots as u32), actor);
-                let firm = !kind(actors, actor).is(comptime!(ActorKind::Household));
-                let workers = number(
-                    state,
-                    config,
-                    comptime!(Field::WorkersPerPlot as u32),
-                    actor,
-                );
+                let plots = economy.ledger.value(Field::OccupiedPlots, actor);
+                let built = economy.ledger.value(Field::ReservedPlots, actor);
+                let firm = !economy
+                    .actors
+                    .kind(actor)
+                    .is(comptime!(ActorKind::Household));
+                let workers = economy.ledger.number(Field::WorkersPerPlot, actor);
                 let developed = add_checked(control, plots, built);
                 let target = multiply(control, developed, workers);
-                let capacity = actors
-                    [ActorLayout::CAPACITY * (actors.len() / ActorLayout::WORDS) + actor as usize];
+                let capacity = economy.actors.capacity(actor);
                 let expansion = select(firm, positive(target, ticks(capacity, 0)), zero());
-                increase(
-                    state,
-                    config,
-                    control,
-                    comptime!(Field::PendingCapacity as u32),
-                    actor,
-                    expansion,
-                );
-                set(
-                    state,
-                    config,
-                    comptime!(Field::OccupiedPlots as u32),
+                economy
+                    .ledger
+                    .increase(control, Field::PendingCapacity, actor, expansion);
+                economy.ledger.set(
+                    Field::OccupiedPlots,
                     actor,
                     add_checked(control, plots, built),
                 );
-                set32(
-                    state,
-                    config,
-                    comptime!(Field::ReservedPlots as u32),
-                    actor,
-                    0,
-                );
-                set32(
-                    state,
-                    config,
-                    comptime!(Field::ProjectStatus as u32),
+                economy.ledger.set_number(Field::ReservedPlots, actor, 0);
+                economy.ledger.set_number(
+                    Field::ProjectStatus,
                     actor,
                     comptime!(ProjectStatus::Completed as u32),
                 );
-                let enterprise = number(
-                    state,
-                    config,
-                    comptime!(Field::EnterpriseStatus as u32),
-                    actor,
-                );
-                set32(
-                    state,
-                    config,
-                    comptime!(Field::EnterpriseStatus as u32),
+                let enterprise = economy.ledger.number(Field::EnterpriseStatus, actor);
+                economy.ledger.set_number(
+                    Field::EnterpriseStatus,
                     actor,
                     select(
                         firm && enterprise == comptime!(EnterpriseState::Forming as u32),

@@ -26,6 +26,7 @@ impl GpuPass<PayrollInput> for SettlePayroll {
 
     fn execute(mut input: PayrollInput) {
         input.parameters.refresh(&mut input.config);
+        let mut economy = EconomyView::new(&mut input.state, &input.actors, &input.config);
         let jobs = markets::job_count(&input.control, RANGE_SLOTS_WORD);
         let mut job = CUBE_POS as u32;
         while job < jobs {
@@ -34,12 +35,7 @@ impl GpuPass<PayrollInput> for SettlePayroll {
             let start = input.scratch[(5 * count + job) as usize];
             let length = input.scratch[(6 * count + job) as usize];
             let peer = input.scratch[(source + start) as usize];
-            let balance = value(
-                &mut input.state,
-                &input.config,
-                comptime!(Field::Escrow as u32),
-                peer,
-            );
+            let balance = economy.ledger.value(Field::Escrow, peer);
             let mut escrow = Shared::<[u64]>::new_slice(1usize);
             if UNIT_POS == 0 {
                 escrow[0usize] = u64::cast_from(balance.extract(LOW_WORD))
@@ -56,9 +52,7 @@ impl GpuPass<PayrollInput> for SettlePayroll {
                 if index < start + length {
                     actor = input.scratch[(source + count + index) as usize];
                     construct(
-                        &mut input.state,
-                        &input.actors,
-                        &input.config,
+                        &mut economy,
                         &mut input.proposals,
                         &mut event[..],
                         &input.control,
@@ -67,7 +61,7 @@ impl GpuPass<PayrollInput> for SettlePayroll {
                         comptime!(EventStorage::Local),
                     );
                     status.replace(settle(
-                        &mut input.state,
+                        economy.ledger.words,
                         &event[..],
                         &input.control,
                         0,
@@ -102,7 +96,7 @@ impl GpuPass<PayrollInput> for SettlePayroll {
                 }
                 if status.contains(comptime!(EventStatus::Accepted)) {
                     status.replace(settle(
-                        &mut input.state,
+                        economy.ledger.words,
                         &event[..],
                         &input.control,
                         0,
@@ -118,10 +112,8 @@ impl GpuPass<PayrollInput> for SettlePayroll {
                 cursor += CUBE_DIM;
             }
             if UNIT_POS == 0 {
-                set(
-                    &mut input.state,
-                    &input.config,
-                    comptime!(Field::Escrow as u32),
+                economy.ledger.set(
+                    Field::Escrow,
                     peer,
                     ticks(
                         u32::cast_from(escrow[0usize]),

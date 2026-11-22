@@ -36,39 +36,33 @@ pub(in crate::simulation) struct BreadDemand {
 }
 
 #[cube]
-pub(super) fn minimum_daily(state: &mut [u32], config: &EconomyConfig, household: u32) -> u32 {
-    let minimum = number(
-        state,
-        config,
-        comptime!(Field::NutritionNeed as u32),
-        household,
-    );
+pub(super) fn minimum_daily(ledger: &Ledger<'_>, household: u32) -> u32 {
+    let minimum = ledger.number(Field::NutritionNeed, household);
     select(
         minimum > 0,
         minimum,
-        number(state, config, comptime!(Field::FoodNeed as u32), household),
+        ledger.number(Field::FoodNeed, household),
     )
 }
 
 #[cube]
-pub(super) fn reserve_daily(state: &mut [u32], config: &EconomyConfig, household: u32) -> u32 {
+pub(super) fn reserve_daily(ledger: &Ledger<'_>, household: u32) -> u32 {
+    let config = ledger.config;
     match comptime!(config.food_income) {
-        crate::domain::food::FoodIncome::PurchasingPower => minimum_daily(state, config, household),
-        crate::domain::food::FoodIncome::Nominal => {
-            number(state, config, comptime!(Field::FoodNeed as u32), household)
-        }
+        crate::domain::food::FoodIncome::PurchasingPower => minimum_daily(ledger, household),
+        crate::domain::food::FoodIncome::Nominal => ledger.number(Field::FoodNeed, household),
     }
 }
 
 #[cube]
 pub(super) fn purchase_daily(
-    state: &mut [u32],
-    config: &EconomyConfig,
+    ledger: &Ledger<'_>,
     parameters: &EconomyParameters,
     household: u32,
 ) -> u32 {
-    let desired = number(state, config, comptime!(Field::FoodNeed as u32), household);
-    let minimum = minimum_daily(state, config, household);
+    let config = ledger.config;
+    let desired = ledger.number(Field::FoodNeed, household);
+    let minimum = minimum_daily(ledger, household);
     select(
         comptime!(config.food_income == crate::domain::food::FoodIncome::PurchasingPower)
             && parameters.matching_round + 1 < MATCHING_ROUNDS as u32,
@@ -79,55 +73,34 @@ pub(super) fn purchase_daily(
 
 #[cube]
 pub(super) fn consumption_reserve(
-    state: &mut [u32],
-    config: &EconomyConfig,
+    ledger: &Ledger<'_>,
     control: &[Atomic<u32>],
     household: u32,
     day: u32,
 ) -> Ticks {
-    let ration = number(
-        state,
-        config,
-        comptime!(Field::NutritionNeed as u32),
-        household,
-    );
+    let config = ledger.config;
+    let ration = ledger.number(Field::NutritionNeed, household);
     let mut reserve = times32(ration, config.coverage + config.ring - 2);
     if comptime!(config.food_income == crate::domain::food::FoodIncome::PurchasingPower)
-        && number(state, config, comptime!(Field::LandPlots as u32), household) > 0
+        && ledger.number(Field::LandPlots, household) > 0
     {
         let days = 364 - (day % 365 + 365 - config.home.harvest_start) % 365;
         let requirement = times32(ration, days);
-        let grain = minimum(
-            value(state, config, comptime!(Field::Grain as u32), household),
-            requirement,
-        );
+        let grain = minimum(ledger.value(Field::Grain, household), requirement);
         let milling = Conversion::milling(config).process(
             control,
             grain,
-            number(
-                state,
-                config,
-                comptime!(Field::MillingRemainder as u32),
-                household,
-            ),
+            ledger.number(Field::MillingRemainder, household),
         );
         let flour = add_checked(
             control,
             milling.quantity,
-            minimum(
-                value(state, config, comptime!(Field::Flour as u32), household),
-                requirement,
-            ),
+            minimum(ledger.value(Field::Flour, household), requirement),
         );
         let baking = Conversion::baking(config).process(
             control,
             flour,
-            number(
-                state,
-                config,
-                comptime!(Field::BakingRemainder as u32),
-                household,
-            ),
+            ledger.number(Field::BakingRemainder, household),
         );
         reserve = maximum(reserve, positive(requirement, baking.quantity));
     }
@@ -136,31 +109,21 @@ pub(super) fn consumption_reserve(
 
 #[cube]
 pub(super) fn household_work(
-    state: &mut [u32],
-    config: &EconomyConfig,
+    ledger: &Ledger<'_>,
     control: &[Atomic<u32>],
     household: u32,
     missing: u32,
 ) -> HomeFoodWork {
+    let config = ledger.config;
     let flour = Conversion::baking(config).required(
         control,
         ticks(missing, 0),
-        number(
-            state,
-            config,
-            comptime!(Field::BakingRemainder as u32),
-            household,
-        ),
+        ledger.number(Field::BakingRemainder, household),
     );
     let grain = Conversion::milling(config).required(
         control,
         flour,
-        number(
-            state,
-            config,
-            comptime!(Field::MillingRemainder as u32),
-            household,
-        ),
+        ledger.number(Field::MillingRemainder, household),
     );
     HomeFoodWork {
         grain,

@@ -15,9 +15,7 @@ enum ScanPopulation {
 
 #[cube]
 pub(super) fn search(
-    state: &mut [u32],
-    actors: &[u32],
-    config: &EconomyConfig,
+    economy: &mut EconomyView<'_>,
     spatial: &[u32],
     proposals: &mut [u32],
     searches: &mut [u32],
@@ -29,6 +27,7 @@ pub(super) fn search(
     #[comptime] collection: OrderCollection,
     #[comptime] order: SearchOrder,
 ) {
+    let config = economy.ledger.config;
     let job = ABSOLUTE_POS as u32;
     let jobs = control[SEARCHES_WORD].load();
     let spatial_order = comptime!(order == SearchOrder::Spatial) && jobs > config.actors / 8;
@@ -64,8 +63,8 @@ pub(super) fn search(
             {
                 buyer_access = config.railway.access[id as usize * 2 + 1];
             }
-            let px = actors[ActorLayout::X * (actors.len() / ActorLayout::WORDS) + id as usize];
-            let py = actors[ActorLayout::Y * (actors.len() / ActorLayout::WORDS) + id as usize];
+            let px = economy.actors.x(id);
+            let py = economy.actors.y(id);
             let radius = config.search_radius;
             let whole_map = comptime!(matches!(suppliers, SupplierSearch::SingleCell { .. }));
             let cx = if comptime!(whole_map) {
@@ -218,7 +217,7 @@ pub(super) fn search(
                                         max(px, seller_x) - min(px, seller_x) + max(py, seller_y)
                                             - min(py, seller_y)
                                     } else {
-                                        distance(actors, id, firm)
+                                        economy.actors.distance(id, firm)
                                     };
                                 if comptime!(parameters.market == MarketFlag::Household) {
                                     seen_supply =
@@ -310,7 +309,7 @@ pub(super) fn search(
                 }
                 if local {
                     let selected = road::query(
-                        actors,
+                        &economy.actors,
                         config,
                         spatial,
                         scratch,
@@ -325,7 +324,7 @@ pub(super) fn search(
                     offer.trip = selected.trip;
                 } else if cacheable {
                     let cached = empty::cached_query(
-                        actors,
+                        &economy.actors,
                         config,
                         spatial,
                         scratch,
@@ -341,7 +340,7 @@ pub(super) fn search(
                     offer.trip = cached.trip;
                 } else {
                     let queried = empty::query(
-                        actors,
+                        &economy.actors,
                         config,
                         spatial,
                         scratch,
@@ -370,11 +369,11 @@ pub(super) fn search(
                     price = empty_price;
                     if indexed {
                         let terms = household_production::TradeFields::new(
-                            actors,
+                            &economy.actors,
                             chosen,
                             parameters.traded_good(),
                         );
-                        let quote = number(state, config, terms.price, chosen);
+                        let quote = economy.ledger.number_at(terms.price, chosen);
                         let mut days = max(ceildiv(trip, config.shipment_speed), 1);
                         if inbound {
                             days = railway::delivery_days(
@@ -394,7 +393,12 @@ pub(super) fn search(
                 quantity = select(missing_supply, affordable, minimum(affordable, available));
                 if comptime!(collection == OrderCollection::ConsumerMask) && !missing_supply {
                     filter::sample_order(
-                        state, config, successes, parameters, id, chosen, quantity,
+                        &economy.ledger,
+                        successes,
+                        parameters,
+                        id,
+                        chosen,
+                        quantity,
                     );
                 }
             }
@@ -403,13 +407,7 @@ pub(super) fn search(
                 if !equal(wanted, zero()) && chosen == NO_ACTOR {
                     failure = select(seen_supply || equal(purchasing_power, zero()), 2u32, 1u32);
                 }
-                set32(
-                    state,
-                    config,
-                    comptime!(Field::FoodAccess as u32),
-                    id,
-                    failure,
-                );
+                economy.ledger.set_number(Field::FoodAccess, id, failure);
             }
             proposals[id as usize * ProposalLayout::WORDS + ProposalLayout::ACTOR] = chosen;
             proposals[id as usize * ProposalLayout::WORDS + ProposalLayout::QUANTITY_LOW] =

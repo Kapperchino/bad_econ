@@ -9,28 +9,19 @@ pub(super) struct ShiftBudget {
 
 #[cube]
 impl ShiftBudget {
-    pub fn new(
-        state: &mut [u32],
-        config: &EconomyConfig,
-        control: &[Atomic<u32>],
-        firm: u32,
-    ) -> Self {
+    pub fn new(ledger: &Ledger<'_>, control: &[Atomic<u32>], firm: u32) -> Self {
+        let config = ledger.config;
         let cash = positive(
-            value(
-                state,
-                config,
-                comptime!(Field::BusinessOpeningCash as u32),
-                firm,
-            ),
-            rent::obligation(state, config, control, firm),
+            ledger.value(Field::BusinessOpeningCash, firm),
+            rent::obligation(ledger, control, firm),
         );
         let wage = match comptime!(config.bargaining.enabled) {
             Feature::Enabled => legal_grid_rate(config),
-            Feature::Disabled => number(state, config, comptime!(Field::Wage as u32), firm),
+            Feature::Disabled => ledger.number(Field::Wage, firm),
         };
         ShiftBudget {
             cash,
-            pay: wage * number(state, config, comptime!(Field::LaborMinutes as u32), firm),
+            pay: wage * ledger.number(Field::LaborMinutes, firm),
         }
     }
 }
@@ -51,20 +42,10 @@ enum OutsideWork {
 
 #[cube]
 impl StandingJob {
-    fn load(state: &mut [u32], config: &EconomyConfig, worker: u32) -> Self {
-        let employer = number(state, config, comptime!(Field::Job as u32), worker);
-        let days = number(
-            state,
-            config,
-            comptime!(Field::JobDaysRemaining as u32),
-            worker,
-        );
-        let status = number(
-            state,
-            config,
-            comptime!(Field::EnterpriseStatus as u32),
-            max(employer, 1) - 1,
-        );
+    fn load(ledger: &Ledger<'_>, worker: u32) -> Self {
+        let employer = ledger.number(Field::Job, worker);
+        let days = ledger.number(Field::JobDaysRemaining, worker);
+        let status = ledger.number(Field::EnterpriseStatus, max(employer, 1) - 1);
         StandingJob {
             employer,
             days,
@@ -74,19 +55,14 @@ impl StandingJob {
         }
     }
 
-    fn outside_work(
-        &self,
-        state: &mut [u32],
-        actors: &[u32],
-        config: &EconomyConfig,
-        control: &[Atomic<u32>],
-    ) -> u32 {
+    fn outside_work(&self, economy: &EconomyView<'_>, control: &[Atomic<u32>]) -> u32 {
+        let config = economy.ledger.config;
         let firm = max(self.employer, 1) - 1;
         let mut work = u32::new(comptime!(OutsideWork::NewContract as i64));
-        if self.active && number(state, config, comptime!(Field::Plan as u32), firm) == 0 {
-            let budget = ShiftBudget::new(state, config, control, firm);
+        if self.active && economy.ledger.number(Field::Plan, firm) == 0 {
+            let budget = ShiftBudget::new(&economy.ledger, control, firm);
             let seasonal = config.home.harvest_days < 365
-                && farming::farm(state, config, firm, kind(actors, firm).output());
+                && farming::farm(&economy.ledger, firm, economy.actors.kind(firm).output());
             let funded = select(
                 seasonal,
                 comptime!(OutsideWork::Temporary as u32),
@@ -116,32 +92,33 @@ pub(super) enum LaborRound {
 #[cube]
 impl LaborSearch {
     pub fn new(
-        state: &mut [u32],
-        actors: &[u32],
-        config: &EconomyConfig,
+        economy: &EconomyView<'_>,
         control: &[Atomic<u32>],
         parameters: &EconomyParameters,
         actor: u32,
         #[comptime] round: LaborRound,
     ) -> Self {
+        let config = economy.ledger.config;
         let retained = match comptime!(round) {
             LaborRound::Retained => true,
             LaborRound::Vacancies => false,
             LaborRound::FromClock => parameters.matching_round == RETAINED_LABOR_ROUND as u32,
         };
-        let job = StandingJob::load(state, config, actor);
-        let available = kind(actors, actor).is(comptime!(ActorKind::Household))
-            && number(state, config, comptime!(Field::Employed as u32), actor) == 0
-            && number(state, config, comptime!(Field::Time as u32), actor) > 0;
-        let rural = number(state, config, comptime!(Field::LandPlots as u32), actor) > 0;
+        let job = StandingJob::load(&economy.ledger, actor);
+        let available = economy
+            .actors
+            .kind(actor)
+            .is(comptime!(ActorKind::Household))
+            && economy.ledger.number(Field::Employed, actor) == 0
+            && economy.ledger.number(Field::Time, actor) > 0;
+        let rural = economy.ledger.number(Field::LandPlots, actor) > 0;
         let industrial = comptime!(config.economy == crate::domain::Economy::Industrial);
         let open = available
             && !retained
             && (!industrial || !rural || parameters.matching_round + 1 == MATCHING_ROUNDS as u32);
         let firm = max(job.employer, 1) - 1;
         let vacancies = if open {
-            job.outside_work(state, actors, config, control)
-                != comptime!(OutsideWork::Unavailable as u32)
+            job.outside_work(economy, control) != comptime!(OutsideWork::Unavailable as u32)
         } else {
             false
         };
@@ -151,22 +128,9 @@ impl LaborSearch {
             trip: 0,
             vacancies,
         };
-        if retained
-            && available
-            && job.active
-            && number(state, config, comptime!(Field::Slots as u32), firm) > 0
-        {
-            let offer = search::candidate(
-                state,
-                actors,
-                config,
-                control,
-                parameters,
-                actor,
-                firm,
-                zero(),
-                zero(),
-            );
+        if retained && available && job.active && economy.ledger.number(Field::Slots, firm) > 0 {
+            let offer =
+                search::candidate(economy, control, parameters, actor, firm, zero(), zero());
             result.peer = select(offer.eligible, firm, result.peer);
             result.quantity = offer.quantity;
             result.trip = offer.trip;
@@ -176,33 +140,21 @@ impl LaborSearch {
 }
 
 #[cube]
-pub(super) fn finish_day(
-    state: &mut [u32],
-    config: &EconomyConfig,
-    actors: &[u32],
-    control: &[Atomic<u32>],
-    actor: u32,
-) {
-    let employer = number(state, config, comptime!(Field::Employer as u32), actor);
-    let job = StandingJob::load(state, config, actor);
-    let living = number(state, config, comptime!(Field::LivingMembers as u32), actor) > 0;
+pub(super) fn finish_day(economy: &mut EconomyView<'_>, control: &[Atomic<u32>], actor: u32) {
+    let employer = economy.ledger.number(Field::Employer, actor);
+    let job = StandingJob::load(&economy.ledger, actor);
+    let living = economy.ledger.number(Field::LivingMembers, actor) > 0;
     let continuing = job.active
         && (employer == 0
             || employer == job.employer
-            || job.outside_work(state, actors, config, control)
-                == comptime!(OutsideWork::Temporary as u32));
+            || job.outside_work(&*economy, control) == comptime!(OutsideWork::Temporary as u32));
     let mut days = select(continuing, job.days, 0);
     if employer > 0 && !continuing {
         let firm = employer - 1;
-        let good = kind(actors, firm).output();
-        let producer = number(
-            state,
-            config,
-            comptime!(Field::EnterpriseModel as u32),
-            firm,
-        ) == 0;
+        let good = economy.actors.kind(firm).output();
+        let producer = economy.ledger.number(Field::EnterpriseModel, firm) == 0;
         let farm_term = select(
-            number(state, config, comptime!(Field::LandPlots as u32), actor) > 0,
+            economy.ledger.number(Field::LandPlots, actor) > 0,
             comptime!(HiringTerm::Day as u32),
             comptime!(HiringTerm::Year as u32),
         );
@@ -212,7 +164,7 @@ pub(super) fn finish_day(
             comptime!(HiringTerm::Fortnight as u32),
         );
         days = select(
-            farming::farm(state, config, firm, good),
+            farming::farm(&economy.ledger, firm, good),
             farm_term,
             regular_term,
         );
@@ -220,34 +172,21 @@ pub(super) fn finish_day(
     let remaining = select(living, max(days, 1) - 1, 0);
     let renewal = living && continuing;
     let current = select(continuing, job.employer, employer);
-    set32(
-        state,
-        config,
-        comptime!(Field::Job as u32),
+    economy.ledger.set_number(
+        Field::Job,
         actor,
         select(remaining > 0 || renewal, current, 0),
     );
-    set32(
-        state,
-        config,
-        comptime!(Field::JobDaysRemaining as u32),
-        actor,
-        remaining,
-    );
+    economy
+        .ledger
+        .set_number(Field::JobDaysRemaining, actor, remaining);
 }
 
 #[cube]
-pub(super) fn team(state: &mut [u32], config: &EconomyConfig, actor: u32) -> u32 {
+pub(super) fn team(ledger: &Ledger<'_>, actor: u32) -> u32 {
+    let config = ledger.config;
     match comptime!(config.cohorts) {
-        Feature::Enabled => max(
-            number(
-                state,
-                config,
-                comptime!(Field::EligibleWorkers as u32),
-                actor,
-            ),
-            1,
-        ),
+        Feature::Enabled => max(ledger.number(Field::EligibleWorkers, actor), 1),
         Feature::Disabled => u32::new(1),
     }
 }
@@ -261,41 +200,34 @@ pub(super) fn shifts(config: &EconomyConfig, quantity: Ticks) -> u32 {
 }
 
 #[cube]
-pub(super) fn payroll_members(actors: &[u32], config: &EconomyConfig, actor: u32) -> u32 {
+pub(super) fn payroll_members(actors: &ActorTable<'_>, config: &EconomyConfig, actor: u32) -> u32 {
     match comptime!(config.cohorts) {
-        Feature::Enabled => max(
-            actors[ActorLayout::CAPACITY * (actors.len() / ActorLayout::WORDS) + actor as usize],
-            1,
-        ),
+        Feature::Enabled => max(actors.capacity(actor), 1),
         Feature::Disabled => u32::new(1),
     }
 }
 
 #[cube]
-pub(super) fn adjust_wage(state: &mut [u32], config: &EconomyConfig, firm: u32) {
+pub(super) fn adjust_wage(ledger: &mut Ledger<'_>, firm: u32) {
+    let config = ledger.config;
     let increment = config.wage_increment;
     if increment > 0 {
         let cap = divide(
             divide(
-                value(state, config, comptime!(Field::Cash as u32), firm),
-                number(state, config, comptime!(Field::LaborMinutes as u32), firm),
+                ledger.value(Field::Cash, firm),
+                ledger.number(Field::LaborMinutes, firm),
             ),
-            max(
-                number(state, config, comptime!(Field::Plan as u32), firm),
-                1u32,
-            ),
+            max(ledger.number(Field::Plan, firm), 1u32),
         );
-        let wage = number(state, config, comptime!(Field::Wage as u32), firm);
-        let unstaffed = number(state, config, comptime!(Field::Slots as u32), firm) > 0;
+        let wage = ledger.number(Field::Wage, firm);
+        let unstaffed = ledger.number(Field::Slots, firm) > 0;
         let offered = select(
             unstaffed,
             wage + increment,
             max(wage, increment + MINIMUM_WAGE) - increment,
         );
-        set32(
-            state,
-            config,
-            comptime!(Field::Wage as u32),
+        ledger.set_number(
+            Field::Wage,
             firm,
             min(
                 max(

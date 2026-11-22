@@ -25,14 +25,8 @@ impl LocalNeeds {
         }
     }
 
-    fn new(
-        state: &mut [u32],
-        actors: &[u32],
-        config: &EconomyConfig,
-        spatial: &[u32],
-        destination: u32,
-        day: u32,
-    ) -> Self {
+    fn new(economy: &mut EconomyView<'_>, spatial: &[u32], destination: u32, day: u32) -> Self {
+        let config = economy.ledger.config;
         let cells = config.spatial_side * config.spatial_side;
         let segment = 2 * (cells + 1 + config.actors);
         let length = spatial[(segment + cells) as usize];
@@ -46,22 +40,17 @@ impl LocalNeeds {
             let offset = sample * (length / samples) + sample * (length % samples) / samples;
             let seller =
                 spatial[(segment + cells + 1 + (offset + day + destination) % length) as usize];
-            let good = kind(actors, seller).output();
+            let good = economy.actors.kind(seller).output();
             let relevant = good == comptime!(Good::Bread as u32)
                 || good == comptime!(Good::Coal as u32)
                 || good == comptime!(Good::Wood as u32);
             if relevant {
-                let trip = distance(actors, destination, seller);
-                let available = number(
-                    state,
-                    config,
-                    comptime!(Field::EnterpriseStatus as u32),
-                    seller,
-                ) < comptime!(
-                    crate::domain::enterprise::EnterpriseState::Liquidating as u32
-                ) && trip <= config.search_radius
-                    && household_production::offers(state, actors, config, seller, good);
-                let price = number(state, config, comptime!(Field::Price as u32), seller);
+                let trip = economy.actors.distance(destination, seller);
+                let available = economy.ledger.number(Field::EnterpriseStatus, seller)
+                    < comptime!(crate::domain::enterprise::EnterpriseState::Liquidating as u32)
+                    && trip <= config.search_radius
+                    && household_production::offers(&*economy, seller, good);
+                let price = economy.ledger.number(Field::Price, seller);
                 needs.bread = select(
                     available && price > 0 && good == comptime!(Good::Bread as u32),
                     min(needs.bread, price),
@@ -85,13 +74,12 @@ impl LocalNeeds {
 
 #[cube]
 pub(in crate::simulation) fn prepare_quotes(
-    state: &mut [u32],
-    actors: &[u32],
-    config: &EconomyConfig,
+    economy: &mut EconomyView<'_>,
     spatial: &[u32],
     quotes: &mut [u32],
     day: u32,
 ) {
+    let config = economy.ledger.config;
     let member = ABSOLUTE_POS as u32;
     let cells = config.spatial_side * config.spatial_side;
     let segment = 2 * (cells + 1 + config.actors);
@@ -99,7 +87,7 @@ pub(in crate::simulation) fn prepare_quotes(
         && member < spatial[(segment + cells) as usize]
     {
         let destination = spatial[(segment + cells + 1 + member) as usize];
-        let needs = LocalNeeds::new(state, actors, config, spatial, destination, day);
+        let needs = LocalNeeds::new(economy, spatial, destination, day);
         let base = 4 * config.actors + 3 * destination;
         quotes[base as usize] = needs.bread;
         quotes[base as usize + 1] = needs.coal;
@@ -109,62 +97,48 @@ pub(in crate::simulation) fn prepare_quotes(
 
 #[cube]
 pub(super) fn work_target(
-    state: &mut [u32],
-    actors: &[u32],
-    config: &EconomyConfig,
+    economy: &mut EconomyView<'_>,
     spatial: &[u32],
     quotes: &[u32],
     household: u32,
     day: u32,
     #[comptime] quote_mode: crate::simulation::enterprise::EntryQuoteMode,
 ) -> u32 {
+    let config = economy.ledger.config;
     let cells = config.spatial_side * config.spatial_side;
     let segment = 2 * (cells + 1 + config.actors);
     let length = spatial[(segment + cells) as usize];
     let samples = min(length, HOUSEHOLD_SEARCH_SAMPLES);
-    let employer = number(state, config, comptime!(Field::Employer as u32), household);
-    let rural = number(state, config, comptime!(Field::LandPlots as u32), household) > 0;
+    let employer = economy.ledger.number(Field::Employer, household);
+    let rural = economy.ledger.number(Field::LandPlots, household) > 0;
     let expected = divide(
-        value(
-            state,
-            config,
-            comptime!(Field::IncomeForecast as u32),
-            household,
-        ),
+        economy.ledger.value(Field::IncomeForecast, household),
         POLICY_SCALE,
     );
     let rent = times32(
         config.household_rent,
-        consumption::consumers(state, config, household),
+        consumption::consumers(&economy.ledger, household),
     );
     let bread_budget = select(
         rural,
-        number(state, config, comptime!(Field::FoodPrice as u32), household),
+        economy.ledger.number(Field::FoodPrice, household),
         config.minimum_price,
     );
     let minimum_daily = plus(
         times32(
-            number(
-                state,
-                config,
-                comptime!(Field::NutritionNeed as u32),
-                household,
-            ),
+            economy.ledger.number(Field::NutritionNeed, household),
             bread_budget,
         ),
         rent,
     )
     .value;
-    let nearby =
-        employer > 0 && distance(actors, household, max(employer, 1) - 1) <= config.commute_speed;
+    let nearby = employer > 0
+        && economy.actors.distance(household, max(employer, 1) - 1) <= config.commute_speed;
     let scheduled = (day + household) % 30 == 0;
     let needed = select(rural, scheduled, !nearby);
     let sustainable = !rural || (employer > 0 && lt(minimum_daily, expected));
     let fee = select(nearby, 0u32, 100u32);
-    let funded = !lt(
-        value(state, config, comptime!(Field::Cash as u32), household),
-        ticks(fee, 0),
-    );
+    let funded = !lt(economy.ledger.value(Field::Cash, household), ticks(fee, 0));
     let review = select(
         needed && sustainable && funded,
         select(
@@ -189,27 +163,27 @@ pub(super) fn work_target(
             max(employer, 1) - 1,
             spatial[(segment + cells + 1 + (offset + day + household) % length) as usize],
         );
-        let good = kind(actors, firm).output();
+        let good = economy.actors.kind(firm).output();
         let shifts = match comptime!(config.cohorts) {
             Feature::Enabled => select(
                 employer > 0,
-                number(state, config, comptime!(Field::Employed as u32), household),
+                economy.ledger.number(Field::Employed, household),
                 min(
-                    employment::team(state, config, household),
-                    number(state, config, comptime!(Field::Slots as u32), firm),
+                    employment::team(&economy.ledger, household),
+                    economy.ledger.number(Field::Slots, firm),
                 ),
             ),
             Feature::Disabled => u32::new(1),
         };
         let paid = times32(
-            number(state, config, comptime!(Field::Wage as u32), firm),
-            number(state, config, comptime!(Field::LaborMinutes as u32), firm) * shifts,
+            economy.ledger.number(Field::Wage, firm),
+            economy.ledger.number(Field::LaborMinutes, firm) * shifts,
         );
-        let trip = distance(actors, household, firm);
+        let trip = economy.actors.distance(household, firm);
         let hiring = select(
             employer > 0,
             employer == firm + 1,
-            number(state, config, comptime!(Field::Slots as u32), firm) > 0,
+            economy.ledger.number(Field::Slots, firm) > 0,
         );
         let urban = good > 0
             && good != comptime!(Good::Grain as u32)
@@ -221,16 +195,9 @@ pub(super) fn work_target(
         let available = hiring
             && urban
             && (trip > config.commute_speed || review == comptime!(WorkReview::Employer as u32))
-            && number(
-                state,
-                config,
-                comptime!(Field::EnterpriseStatus as u32),
-                firm,
-            ) == comptime!(crate::domain::enterprise::EnterpriseState::Operating as u32)
-            && !lt(
-                value(state, config, comptime!(Field::Cash as u32), firm),
-                paid,
-            );
+            && economy.ledger.number(Field::EnterpriseStatus, firm)
+                == comptime!(crate::domain::enterprise::EnterpriseState::Operating as u32)
+            && !lt(economy.ledger.value(Field::Cash, firm), paid);
         let preferable = lt(earnings, paid) || (equal(earnings, paid) && trip < nearest);
         if available && preferable {
             target = firm + 1;
@@ -244,22 +211,12 @@ pub(super) fn work_target(
                 LocalNeeds::cached(quotes, config, target - 1)
             }
             crate::simulation::enterprise::EntryQuoteMode::Sampled => {
-                LocalNeeds::new(state, actors, config, spatial, target - 1, day)
+                LocalNeeds::new(economy, spatial, target - 1, day)
             }
         };
-        let heat = number(
-            state,
-            config,
-            comptime!(Field::HeatingNeed as u32),
-            household,
-        );
+        let heat = economy.ledger.number(Field::HeatingNeed, household);
         let food = times32(
-            number(
-                state,
-                config,
-                comptime!(Field::NutritionNeed as u32),
-                household,
-            ),
+            economy.ledger.number(Field::NutritionNeed, household),
             max(bread_budget, needs.bread),
         );
         let fuel = minimum(
@@ -277,10 +234,7 @@ pub(super) fn work_target(
         let budget = plus(times(daily, days).value, ticks(fee, 0)).value;
         let supplied = needs.bread <= config.maximum_price
             && (heat == 0 || min(needs.coal, needs.wood) <= config.maximum_price);
-        let funded = !lt(
-            value(state, config, comptime!(Field::Cash as u32), household),
-            budget,
-        );
+        let funded = !lt(economy.ledger.value(Field::Cash, household), budget);
         let income = select(rural, minimum(earnings, expected), earnings);
         target = select(supplied && funded && lt(daily, income), target, 0);
     }

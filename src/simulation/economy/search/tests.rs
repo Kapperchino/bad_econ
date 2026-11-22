@@ -147,9 +147,10 @@ impl GpuPass<EmptyPreparationInput> for CheckEmptyPreparation {
     type Output = ();
 
     fn execute(mut input: EmptyPreparationInput) {
+        let actors = ActorTable::new(&input.actors);
         match comptime!(input.preparation) {
             EmptyPreparation::Bounds => empty::bounds(
-                &input.actors,
+                &actors,
                 &input.config,
                 &input.spatial,
                 &mut input.scratch,
@@ -2152,12 +2153,13 @@ impl GpuPass<DeliveryFloorInput> for CompareDeliveryFloor {
     type Output = ();
 
     fn execute(input: DeliveryFloorInput) {
+        let actors = ActorTable::new(&input.actors);
         let index = ABSOLUTE_POS as u32;
         let count = input.config.actors;
         if index < count * count {
             let buyer = index / count;
             let seller = index % count;
-            let trip = distance(&input.actors, buyer, seller);
+            let trip = actors.distance(buyer, seller);
             let mut access = 0u32;
             if comptime!(input.config.railway.routes_enabled == Feature::Enabled)
                 && input.config.railway.nodes > 0
@@ -2165,7 +2167,7 @@ impl GpuPass<DeliveryFloorInput> for CompareDeliveryFloor {
                 access = input.config.railway.access[buyer as usize * 2 + 1];
             }
             let floor = minimum_delivery_days(&input.config, access, seller, trip);
-            let route = railway::route(&input.actors, &input.config, buyer, seller);
+            let route = railway::route(&actors, &input.config, buyer, seller);
             let days = railway::delivery_days(
                 &input.config,
                 railway::DeliveryRequest {

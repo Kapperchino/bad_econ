@@ -26,9 +26,7 @@ impl GpuPass<TransitionInput> for ApplyTransition {
 
     fn execute(mut input: TransitionInput) {
         transition(
-            &mut input.state,
-            &input.actors,
-            &input.config,
+            &mut EconomyView::new(&mut input.state, &input.actors, &input.config),
             &input.requests,
             &input.incoming,
             input.day,

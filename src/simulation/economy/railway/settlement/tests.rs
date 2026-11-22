@@ -145,7 +145,13 @@ impl GpuPass<FitCheckInput> for CheckRouteFit {
         let worker = ABSOLUTE_POS as u32;
         if worker < input.workers {
             let seller = input.freight.config.actors - 9;
-            let path = candidate(&input.freight.actors, &input.freight.config, 0, seller, 0);
+            let path = candidate(
+                &ActorTable::new(&input.freight.actors),
+                &input.freight.config,
+                0,
+                seller,
+                0,
+            );
             let quantity = ticks(input.quantity_low, input.quantity_high);
             let allowed = match comptime!(input.method) {
                 FitMethod::Tracked => fits_tracked(&input.freight, &path, quantity, seller),

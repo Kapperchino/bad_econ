@@ -184,6 +184,11 @@ pub fn ceildiv(a: u32, b: u32) -> u32 {
 }
 #[cube]
 pub fn load(values: &mut [u32], coordinate: u32) -> Ticks {
+    read_ticks(&*values, coordinate)
+}
+
+#[cube]
+pub fn read_ticks(values: &[u32], coordinate: u32) -> Ticks {
     ticks(
         values[(coordinate * TICK_WORDS as u32) as usize],
         values[(coordinate * TICK_WORDS as u32 + HIGH_WORD as u32) as usize],

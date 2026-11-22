@@ -1,3 +1,4 @@
+use crate::simulation::state::*;
 pub(super) mod acquisitions;
 pub(super) mod management;
 mod opportunities;
@@ -6,7 +7,6 @@ pub(in crate::simulation) use opportunities::EntryQuoteMode;
 
 use super::{
     Device,
-    layout::ActorLayout,
     pass::GpuPass,
     registry::records::{
         CountRecords, ProposedRecord, RecordBuffers, RecordCountBuffers, RecordCountBuffersLaunch,
@@ -26,19 +26,11 @@ const FORM_HOUSEHOLD: u32 = 0x0100_0001;
 const SEPARATE_OWNER: u32 = 0x0100_0002;
 
 #[cube]
-pub(in crate::simulation) fn founder_shares(
-    state: &mut [u32],
-    actors: &[u32],
-    config: &EconomyConfig,
-    household: u32,
-) -> u32 {
-    let pooled = comptime!(config.cohorts == Feature::Enabled)
-        && actors[ActorLayout::CAPACITY * (actors.len() / ActorLayout::WORDS) + household as usize]
-            > 1;
-    let living = load(
-        state,
-        comptime!(Field::LivingMembers as u32) * config.state_stride + household,
-    );
+pub(in crate::simulation) fn founder_shares(economy: &EconomyView<'_>, household: u32) -> u32 {
+    let config = economy.ledger.config;
+    let pooled =
+        comptime!(config.cohorts == Feature::Enabled) && economy.actors.capacity(household) > 1;
+    let living = economy.ledger.value(Field::LivingMembers, household);
     select(pooled, max(living.extract(0usize), 1), 1)
 }
 
@@ -70,18 +62,15 @@ impl GpuPass<ProposalInput> for PrepareEntryQuotes {
     type Output = ();
 
     fn execute(mut input: ProposalInput) {
+        let mut economy = EconomyView::new(&mut input.state, &input.actors, &input.config);
         opportunities::prepare_quotes(
-            &mut input.state,
-            &input.actors,
-            &input.config,
+            &economy,
             &input.spatial,
             &mut input.records.scratch,
             input.day,
         );
         crate::simulation::economy::mobility::prepare_quotes(
-            &mut input.state,
-            &input.actors,
-            &input.config,
+            &mut economy,
             &input.spatial,
             &mut input.records.scratch,
             input.day,
@@ -99,10 +88,9 @@ impl GpuPass<ProposalInput> for ProposeEnterprises {
     type Output = ProposedRecord;
 
     fn execute(mut input: ProposalInput) -> ProposedRecord {
+        let mut economy = EconomyView::new(&mut input.state, &input.actors, &input.config);
         let request = requests(
-            &mut input.state,
-            &input.actors,
-            &input.config,
+            &mut economy,
             &input.spatial,
             &input.records.scratch,
             &mut input.output,
@@ -122,56 +110,32 @@ impl GpuPass<ProposalInput> for ProposeEnterprises {
 )]
 #[cube]
 fn requests(
-    state: &mut [u32],
-    actors: &[u32],
-    config: &EconomyConfig,
+    economy: &mut EconomyView<'_>,
     spatial: &[u32],
     quotes: &[u32],
     output: &mut [u32],
     day: u32,
     #[comptime] quote_mode: opportunities::EntryQuoteMode,
 ) -> u32 {
+    let config = economy.ledger.config;
     let actor = ABSOLUTE_POS as u32;
     let mut action = 0u32;
     if actor < config.actors {
-        if comptime!(config.home_mode == Feature::Enabled)
-            && actors[ActorLayout::KIND * (actors.len() / ActorLayout::WORDS) + actor as usize] == 0
+        if comptime!(config.home_mode == Feature::Enabled) && economy.actors.kind(actor).bits() == 0
         {
             crate::simulation::economy::enterprises::mobility(
-                state, actors, config, spatial, quotes, actor, day, quote_mode,
+                economy, spatial, quotes, actor, day, quote_mode,
             );
         }
-        let target = load(
-            state,
-            comptime!(Field::InvestmentGood as u32) * config.state_stride + actor,
-        );
-        let tools = load(
-            state,
-            comptime!(Field::Tools as u32) * config.state_stride + actor,
-        );
-        let wood = load(
-            state,
-            comptime!(Field::Wood as u32) * config.state_stride + actor,
-        );
-        let cash = load(
-            state,
-            comptime!(Field::Cash as u32) * config.state_stride + actor,
-        );
-        let arrears = load(
-            state,
-            comptime!(Field::RentArrears as u32) * config.state_stride + actor,
-        );
-        let household =
-            actors[ActorLayout::KIND * (actors.len() / ActorLayout::WORDS) + actor as usize] == 0;
-        let invested = load(
-            state,
-            comptime!(Field::InvestmentFirm as u32) * config.state_stride + actor,
-        );
-        let living = load(
-            state,
-            comptime!(Field::LivingMembers as u32) * config.state_stride + actor,
-        );
-        let people = founder_shares(state, actors, config, actor);
+        let target = economy.ledger.value(Field::InvestmentGood, actor);
+        let tools = economy.ledger.value(Field::Tools, actor);
+        let wood = economy.ledger.value(Field::Wood, actor);
+        let cash = economy.ledger.value(Field::Cash, actor);
+        let arrears = economy.ledger.value(Field::RentArrears, actor);
+        let household = economy.actors.kind(actor).bits() == 0;
+        let invested = economy.ledger.value(Field::InvestmentFirm, actor);
+        let living = economy.ledger.value(Field::LivingMembers, actor);
+        let people = founder_shares(&*economy, actor);
         let capital = divide(cash, people);
         let funded = !lt(capital, ticks(10_000, 0))
             && (comptime!(config.property_mode == Feature::Enabled)
@@ -182,9 +146,7 @@ fn requests(
         let eligible = !pending_investment
             && comptime!(config.home_mode == Feature::Enabled)
             && household
-            && (actors[ActorLayout::ENTREPRENEURIAL_INTEREST
-                * (actors.len() / ActorLayout::WORDS)
-                + actor as usize]
+            && (economy.actors.entrepreneurial_interest(actor)
                 == comptime!(EntrepreneurialInterest::Interested as u32)
                 || (comptime!(config.cohorts == Feature::Enabled) && !equal(target, zero())))
             && !equal(living, zero())
@@ -194,52 +156,25 @@ fn requests(
         let mut proposal = 0;
         let review = !equal(target, zero()) || (day + actor) % 30 == 0;
         if eligible && review {
-            proposal = opportunities::discover(
-                state, actors, config, spatial, quotes, actor, day, quote_mode,
-            );
+            proposal = opportunities::discover(economy, spatial, quotes, actor, day, quote_mode);
             let source = select(proposal >> 24 == 8, (proposal & 0x00ffffff) - 1, actor);
-            if !crate::simulation::economy::property::authorized(state, config, source, actor) {
+            if !crate::simulation::economy::property::authorized(&economy.ledger, source, actor) {
                 proposal = 0;
             }
             action = select(funded, proposal, 0);
         }
-        store(
-            state,
-            comptime!(Field::InvestmentGood as u32) * config.state_stride + actor,
-            ticks(proposal, 0),
-        );
-        let split = load(
-            state,
-            comptime!(Field::SplitPerson as u32) * config.state_stride + actor,
-        );
+        economy
+            .ledger
+            .set(Field::InvestmentGood, actor, ticks(proposal, 0));
+        let split = economy.ledger.value(Field::SplitPerson, actor);
         if !equal(split, zero()) && !lt(cash, ticks(5000, 0)) {
             action = FORM_HOUSEHOLD;
         }
-        let moving = load(
-            state,
-            comptime!(Field::MoveDue as u32) * config.state_stride + actor,
-        )
-        .extract(0usize);
-        let destination = load(
-            state,
-            comptime!(Field::MoveTarget as u32) * config.state_stride + actor,
-        )
-        .extract(0usize);
+        let moving = economy.ledger.number(Field::MoveDue, actor);
+        let destination = economy.ledger.number(Field::MoveTarget, actor);
         if destination > 0 && moving == 0 {
-            let stride = actors.len() / ActorLayout::WORDS;
-            let target = destination as usize - 1;
-            let x = actors[ActorLayout::X * stride + actor as usize];
-            let y = actors[ActorLayout::Y * stride + actor as usize];
-            let dx = actors[ActorLayout::X * stride + target];
-            let dy = actors[ActorLayout::Y * stride + target];
-            let distance = max(x, dx) - min(x, dx) + max(y, dy) - min(y, dy);
-            let rural = !equal(
-                load(
-                    state,
-                    comptime!(Field::LandPlots as u32) * config.state_stride + actor,
-                ),
-                zero(),
-            );
+            let distance = economy.actors.distance(actor, destination - 1);
+            let rural = !equal(economy.ledger.value(Field::LandPlots, actor), zero());
             let nearby = rural && distance <= config.commute_speed;
             let migration = select(!lt(cash, ticks(100, 0)), 0x02000000u32 + destination, 0);
             action = select(
@@ -251,25 +186,13 @@ fn requests(
         if moving > 0 && moving <= day {
             action = 0x03000000u32;
         }
-        let kind = actors[ActorLayout::KIND * (actors.len() / ActorLayout::WORDS) + actor as usize];
-        let status = load(
-            state,
-            comptime!(Field::EnterpriseStatus as u32) * config.state_stride + actor,
-        )
-        .extract(0usize);
-        let living = load(
-            state,
-            comptime!(Field::LivingMembers as u32) * config.state_stride + actor,
-        )
-        .extract(0usize);
+        let kind = economy.actors.kind(actor).bits();
+        let status = economy.ledger.number(Field::EnterpriseStatus, actor);
+        let living = economy.ledger.number(Field::LivingMembers, actor);
         if kind == 0 && living == 0 && (action <= Good::COUNT as u32 || action >> 24 >= 8) {
             action = 0;
         }
-        let estate = load(
-            state,
-            comptime!(Field::EstateSettled as u32) * config.state_stride + actor,
-        )
-        .extract(0usize);
+        let estate = economy.ledger.number(Field::EstateSettled, actor);
         if kind > 0 && status == comptime!(EnterpriseState::Liquidating as u32) {
             action = 0x04000000u32;
         }
@@ -281,16 +204,8 @@ fn requests(
         {
             action = 0x05000000u32;
         }
-        let pending = load(
-            state,
-            comptime!(Field::PendingCapacity as u32) * config.state_stride + actor,
-        )
-        .extract(0usize);
-        let construction = load(
-            state,
-            comptime!(Field::ConstructionRemaining as u32) * config.state_stride + actor,
-        )
-        .extract(0usize);
+        let pending = economy.ledger.number(Field::PendingCapacity, actor);
+        let construction = economy.ledger.number(Field::ConstructionRemaining, actor);
         if kind > 0
             && status == comptime!(EnterpriseState::Operating as u32)
             && pending > 0
@@ -298,10 +213,7 @@ fn requests(
         {
             action = 0x06000000u32 + pending;
         }
-        let invested = load(
-            state,
-            comptime!(Field::EquityInvested as u32) * config.state_stride + actor,
-        );
+        let invested = economy.ledger.value(Field::EquityInvested, actor);
         if action == 0
             && kind == 0
             && living > 0
@@ -316,80 +228,26 @@ fn requests(
                     (target.extract(0usize) & 0x00ff_ffff) - 1,
                     actor + day * 17 + sample * 31,
                 ) % config.actors;
-                let candidate_kind = actors
-                    [ActorLayout::KIND * (actors.len() / ActorLayout::WORDS) + candidate as usize];
-                let status = load(
-                    state,
-                    comptime!(Field::EnterpriseStatus as u32) * config.state_stride + candidate,
-                )
-                .extract(0usize);
-                let sales = load(
-                    state,
-                    comptime!(Field::Sales as u32) * config.state_stride + candidate,
-                );
-                let demand = load(
-                    state,
-                    comptime!(Field::Demand as u32) * config.state_stride + candidate,
-                );
-                let operating = load(
-                    state,
-                    comptime!(Field::OperatingReserve as u32) * config.state_stride + candidate,
-                );
-                let funds = load(
-                    state,
-                    comptime!(Field::Cash as u32) * config.state_stride + candidate,
-                );
-                let price = load(
-                    state,
-                    comptime!(Field::Price as u32) * config.state_stride + candidate,
-                )
-                .extract(0usize);
-                let wage = load(
-                    state,
-                    comptime!(Field::Wage as u32) * config.state_stride + candidate,
-                )
-                .extract(0usize);
-                let labor = load(
-                    state,
-                    comptime!(Field::LaborMinutes as u32) * config.state_stride + candidate,
-                )
-                .extract(0usize);
-                let output = load(
-                    state,
-                    comptime!(Field::OutputTicks as u32) * config.state_stride + candidate,
-                )
-                .extract(0usize);
-                let inputs = load(
-                    state,
-                    comptime!(Field::InputTicks as u32) * config.state_stride + candidate,
-                )
-                .extract(0usize);
-                let first_cost = load(
-                    state,
-                    comptime!(Field::FirstInputCost as u32) * config.state_stride + candidate,
-                )
-                .extract(0usize);
-                let second_cost = load(
-                    state,
-                    comptime!(Field::SecondInputCost as u32) * config.state_stride + candidate,
-                )
-                .extract(0usize);
+                let candidate_kind = economy.actors.kind(candidate).bits();
+                let status = economy.ledger.number(Field::EnterpriseStatus, candidate);
+                let sales = economy.ledger.value(Field::Sales, candidate);
+                let demand = economy.ledger.value(Field::Demand, candidate);
+                let operating = economy.ledger.value(Field::OperatingReserve, candidate);
+                let funds = economy.ledger.value(Field::Cash, candidate);
+                let price = economy.ledger.number(Field::Price, candidate);
+                let wage = economy.ledger.number(Field::Wage, candidate);
+                let labor = economy.ledger.number(Field::LaborMinutes, candidate);
+                let output = economy.ledger.number(Field::OutputTicks, candidate);
+                let inputs = economy.ledger.number(Field::InputTicks, candidate);
+                let first_cost = economy.ledger.number(Field::FirstInputCost, candidate);
+                let second_cost = economy.ledger.number(Field::SecondInputCost, candidate);
                 let packet_cost = plus(
                     times32(wage, labor),
                     times32(inputs, first_cost + second_cost),
                 )
                 .value;
                 let profitable = !equal(sales, zero()) && lt(packet_cost, times32(price, output));
-                let ax =
-                    actors[ActorLayout::X * (actors.len() / ActorLayout::WORDS) + actor as usize];
-                let ay =
-                    actors[ActorLayout::Y * (actors.len() / ActorLayout::WORDS) + actor as usize];
-                let bx = actors
-                    [ActorLayout::X * (actors.len() / ActorLayout::WORDS) + candidate as usize];
-                let by = actors
-                    [ActorLayout::Y * (actors.len() / ActorLayout::WORDS) + candidate as usize];
-                let nearby =
-                    max(ax, bx) - min(ax, bx) + max(ay, by) - min(ay, by) <= config.search_radius;
+                let nearby = economy.actors.distance(actor, candidate) <= config.search_radius;
                 if action == 0
                     && candidate_kind > 0
                     && status < comptime!(EnterpriseState::Liquidating as u32)
@@ -407,14 +265,9 @@ fn requests(
             && kind > 0
             && status == comptime!(EnterpriseState::Operating as u32)
         {
-            let reserve = load(
-                state,
-                comptime!(Field::OperatingReserve as u32) * config.state_stride + actor,
-            );
+            let reserve = economy.ledger.value(Field::OperatingReserve, actor);
             action = opportunities::purchase(
-                state,
-                actors,
-                config,
+                &*economy,
                 spatial,
                 actor,
                 day,
@@ -434,20 +287,11 @@ fn requests(
         let ownership_change = (action > 0 && action <= Good::COUNT as u32)
             || (action >> 24 >= 7 && action >> 24 <= 9);
         if people > 1 && ownership_change {
-            store(
-                state,
-                comptime!(Field::InvestmentGood as u32) * config.state_stride + actor,
-                ticks(action, 0),
-            );
-            let person = load(
-                state,
-                comptime!(Field::CohortDelegate as u32) * config.state_stride + actor,
-            );
-            store(
-                state,
-                comptime!(Field::SplitPerson as u32) * config.state_stride + actor,
-                person,
-            );
+            economy
+                .ledger
+                .set(Field::InvestmentGood, actor, ticks(action, 0));
+            let person = economy.ledger.value(Field::CohortDelegate, actor);
+            economy.ledger.set(Field::SplitPerson, actor, person);
             action = select(equal(person, zero()), 0, SEPARATE_OWNER);
         }
         output[actor as usize] = action;

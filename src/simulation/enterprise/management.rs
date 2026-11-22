@@ -3,6 +3,7 @@ use crate::simulation::configuration::{Configuration, EconomyConfig, Feature};
 use crate::simulation::{
     Device,
     pass::GpuPass,
+    state::{Ledger, ReadLedger, ReadLedgerExpand},
     system::{AsBufferArg, System, gpu_passes},
     words::*,
 };
@@ -37,8 +38,7 @@ impl GpuPass<AssignmentInput> for AssignOwners {
 
     fn execute(mut input: AssignmentInput) {
         assign(
-            &mut input.state,
-            &input.config,
+            &mut Ledger::new(&mut input.state, &input.config),
             &input.firms,
             input.groups,
             input.day,
@@ -85,7 +85,8 @@ impl EnterpriseManagement {
 }
 
 #[cube]
-fn assign(state: &mut [u32], config: &EconomyConfig, firms: &[u32], groups: u32, day: u32) {
+fn assign(ledger: &mut Ledger<'_>, firms: &[u32], groups: u32, day: u32) {
+    let config = ledger.config;
     let group = ABSOLUTE_POS as u32;
     if group < groups && comptime!(config.home_mode == Feature::Enabled) {
         let owner = firms[(group * 3) as usize];
@@ -95,49 +96,30 @@ fn assign(state: &mut [u32], config: &EconomyConfig, firms: &[u32], groups: u32,
         let mut construction = 0;
         for offset in 0..end - start {
             let firm = firms[(start + (offset + day) % (end - start)) as usize];
-            let status = load(
-                state,
-                comptime!(Field::EnterpriseStatus as u32) * config.state_stride + firm,
-            )
-            .extract(0usize);
+            let status = ledger.number(Field::EnterpriseStatus, firm);
             if status != comptime!(EnterpriseState::Closed as u32) && active == 0 {
                 active = firm + 1;
             }
-            let cash = load(
-                state,
-                comptime!(Field::Cash as u32) * config.state_stride + firm,
-            );
-            let reserve = load(
-                state,
-                comptime!(Field::OperatingReserve as u32) * config.state_stride + firm,
-            );
+            let cash = ledger.value(Field::Cash, firm);
+            let reserve = ledger.value(Field::OperatingReserve, firm);
             let available = select(
                 status == comptime!(EnterpriseState::Operating as u32),
                 positive(cash, reserve),
                 cash,
             );
-            let wage = load(
-                state,
-                comptime!(Field::Wage as u32) * config.state_stride + firm,
-            );
-            let remaining = load(
-                state,
-                comptime!(Field::ConstructionRemaining as u32) * config.state_stride + firm,
-            );
+            let wage = ledger.value(Field::Wage, firm);
+            let remaining = ledger.value(Field::ConstructionRemaining, firm);
             let building = status == comptime!(EnterpriseState::Forming as u32)
                 || status == comptime!(EnterpriseState::Operating as u32);
             if building && !equal(remaining, zero()) && !lt(available, wage) && construction == 0 {
                 construction = firm + 1;
             }
         }
-        let living = load(
-            state,
-            comptime!(Field::LivingMembers as u32) * config.state_stride + owner,
-        );
+        let living = ledger.value(Field::LivingMembers, owner);
         let selected = select(construction > 0, construction, active);
-        store(
-            state,
-            comptime!(Field::InvestmentFirm as u32) * config.state_stride + owner,
+        ledger.set(
+            Field::InvestmentFirm,
+            owner,
             ticks(select(equal(living, zero()), 0, selected), 0),
         );
     }

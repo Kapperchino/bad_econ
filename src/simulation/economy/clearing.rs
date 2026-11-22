@@ -7,9 +7,7 @@ mod tests;
 
 #[cube]
 pub(super) fn actor_settlement(
-    state: &mut [u32],
-    actors: &[u32],
-    config: &EconomyConfig,
+    economy: &mut EconomyView<'_>,
     proposals: &mut [u32],
     scratch: &mut [u32],
     control: &[Atomic<u32>],
@@ -37,13 +35,10 @@ pub(super) fn actor_settlement(
             let status = match comptime!(parameters.market) {
                 MarketFlag::Input(_) | MarketFlag::Consumer(_) | MarketFlag::Household => {
                     buyer_settlement(
-                        state, actors, config, proposals, control, parameters, actor, other,
-                        posting,
+                        economy, proposals, control, parameters, actor, other, posting,
                     )
                 }
-                _ => event_settlement(
-                    state, actors, config, proposals, control, parameters, id, posting,
-                ),
+                _ => event_settlement(economy, proposals, control, parameters, id, posting),
             };
             status.store(scratch, 4 * parameters.count + id);
         }
@@ -52,20 +47,17 @@ pub(super) fn actor_settlement(
 
 #[cube]
 fn event_settlement(
-    state: &mut [u32],
-    actors: &[u32],
-    config: &EconomyConfig,
+    economy: &mut EconomyView<'_>,
     proposals: &mut [u32],
     control: &[Atomic<u32>],
     parameters: &EconomyParameters,
     id: u32,
     #[comptime] posting: Posting,
 ) -> KernelEventStatus {
+    let config = economy.ledger.config;
     let mut event = Array::<u32>::new(EVENT_WORDS);
     construct(
-        state,
-        actors,
-        config,
+        economy,
         proposals,
         &mut event[..],
         control,
@@ -74,7 +66,7 @@ fn event_settlement(
         comptime!(EventStorage::Local),
     );
     settle(
-        state,
+        economy.ledger.words,
         &event[..],
         control,
         0,
@@ -86,9 +78,7 @@ fn event_settlement(
 
 #[cube]
 pub(super) fn buyer_settlement(
-    state: &mut [u32],
-    actors: &[u32],
-    config: &EconomyConfig,
+    economy: &mut EconomyView<'_>,
     proposals: &mut [u32],
     control: &[Atomic<u32>],
     parameters: &EconomyParameters,
@@ -96,33 +86,30 @@ pub(super) fn buyer_settlement(
     other: u32,
     #[comptime] posting: Posting,
 ) -> KernelEventStatus {
+    let config = economy.ledger.config;
     let good = parameters.traded_good();
     let quantity = ticks(
         proposals[actor as usize * ProposalLayout::WORDS + ProposalLayout::QUANTITY_LOW],
         proposals[actor as usize * ProposalLayout::WORDS + ProposalLayout::QUANTITY_HIGH],
     );
-    let terms = household_production::TradeFields::new(actors, other, good);
-    let price = value(state, config, terms.price, other);
+    let terms = household_production::TradeFields::new(&economy.actors, other, good);
+    let price = economy.ledger.value_at(terms.price, other);
     let cost = multiply(control, quantity, price.extract(LOW_WORD));
-    let retained = household_production::reserve(state, actors, config, other, good);
+    let retained = household_production::reserve(&*economy, other, good);
     let _ = add_checked(control, retained, quantity);
-    let route = railway::animal_route(actors, config, actor, other);
-    let trip = distance(actors, actor, other);
+    let route = railway::animal_route(&economy.actors, config, actor, other);
+    let trip = economy.actors.distance(actor, other);
     let slot = cartage::booking_field(config, good, parameters.day, route.days, trip);
-    let cash = value(state, config, comptime!(Field::Cash as u32), actor);
-    let incoming = plus(value(state, config, slot, actor), quantity);
+    let cash = economy.ledger.value(Field::Cash, actor);
+    let incoming = plus(economy.ledger.value_at(slot, actor), quantity);
     let transit_good = plus(
-        value(state, config, TRANSIT_FIELDS as u32 + good - 1, actor),
+        economy
+            .ledger
+            .value_at(TRANSIT_FIELDS as u32 + good - 1, actor),
         quantity,
     );
-    let transit = plus(
-        value(state, config, comptime!(Field::Transit as u32), actor),
-        quantity,
-    );
-    let purchased = plus(
-        value(state, config, comptime!(Field::Purchased as u32), actor),
-        quantity,
-    );
+    let transit = plus(economy.ledger.value(Field::Transit, actor), quantity);
+    let purchased = plus(economy.ledger.value(Field::Purchased, actor), quantity);
     let mut faults = incoming
         .faults
         .union(transit_good.faults)
@@ -132,19 +119,8 @@ pub(super) fn buyer_settlement(
     let mut payable = zero();
     if trip > 0 {
         let freight = multiply(control, quantity, cartage::rate(config, route.days));
-        let orders = plus(
-            value(state, config, comptime!(Field::RoadFreight as u32), actor),
-            quantity,
-        );
-        let fees = plus(
-            value(
-                state,
-                config,
-                comptime!(Field::CartagePayable as u32),
-                actor,
-            ),
-            freight,
-        );
+        let orders = plus(economy.ledger.value(Field::RoadFreight, actor), quantity);
+        let fees = plus(economy.ledger.value(Field::CartagePayable, actor), freight);
         faults.insert(orders.faults.union(fees.faults));
         waiting = orders.value;
         payable = fees.value;
@@ -160,94 +136,41 @@ pub(super) fn buyer_settlement(
     if comptime!(posting == Posting::ApplyActor)
         && status.contains(comptime!(EventStatus::Accepted))
     {
-        set(
-            state,
-            config,
-            comptime!(Field::Cash as u32),
-            actor,
-            minus(cash, cost),
-        );
-        set(state, config, slot, actor, incoming.value);
+        economy.ledger.set(Field::Cash, actor, minus(cash, cost));
+        economy.ledger.set_at(slot, actor, incoming.value);
         if trip > 0 {
-            set(
-                state,
-                config,
-                comptime!(Field::CartagePayable as u32),
-                actor,
-                payable,
-            );
-            set(
-                state,
-                config,
-                comptime!(Field::RoadFreight as u32),
-                actor,
-                waiting,
-            );
+            economy.ledger.set(Field::CartagePayable, actor, payable);
+            economy.ledger.set(Field::RoadFreight, actor, waiting);
         }
         if good == comptime!(Good::Bread as u32)
-            && kind(actors, actor).is(comptime!(ActorKind::Household))
+            && economy
+                .actors
+                .kind(actor)
+                .is(comptime!(ActorKind::Household))
         {
-            set(
-                state,
-                config,
-                comptime!(Field::FoodPrice as u32),
-                actor,
-                price,
-            );
+            economy.ledger.set(Field::FoodPrice, actor, price);
         }
         for input in 0u32..2 {
-            if number(
-                state,
-                config,
-                comptime!(Field::FirstInput as u32) + input,
-                actor,
-            ) == good
+            if economy
+                .ledger
+                .number_at(comptime!(Field::FirstInput as u32) + input, actor)
+                == good
             {
-                set(
-                    state,
-                    config,
+                economy.ledger.set_at(
                     comptime!(Field::FirstInputCost as u32) + input,
                     actor,
                     price,
                 );
             }
         }
-        if number(
-            state,
-            config,
-            comptime!(Field::EnterpriseModel as u32),
-            actor,
-        ) == 1
-        {
-            set(
-                state,
-                config,
-                comptime!(Field::ReplacementCost as u32),
-                actor,
-                price,
-            );
+        if economy.ledger.number(Field::EnterpriseModel, actor) == 1 {
+            economy.ledger.set(Field::ReplacementCost, actor, price);
         }
-        set(
-            state,
-            config,
-            TRANSIT_FIELDS as u32 + good - 1,
-            actor,
-            transit_good.value,
-        );
-        set(
-            state,
-            config,
-            comptime!(Field::Transit as u32),
-            actor,
-            transit.value,
-        );
-        set(
-            state,
-            config,
-            comptime!(Field::Purchased as u32),
-            actor,
-            purchased.value,
-        );
+        economy
+            .ledger
+            .set_at(TRANSIT_FIELDS as u32 + good - 1, actor, transit_good.value);
+        economy.ledger.set(Field::Transit, actor, transit.value);
+        economy.ledger.set(Field::Purchased, actor, purchased.value);
     }
     status
 }
@@ -282,26 +205,20 @@ fn empty_seller_quantity(
 
 #[cube]
 pub(super) fn empty_seller_safe(
-    state: &mut [u32],
-    config: &EconomyConfig,
+    ledger: &Ledger<'_>,
     parameters: &EconomyParameters,
     peer: u32,
 ) -> bool {
+    let config = ledger.config;
     let quantity = select(
         empty_seller_bulk(config, parameters),
         ticks(u32::MAX, 0),
         ticks(1, 0),
     );
-    let quote = number(state, config, comptime!(Field::Price as u32), peer);
+    let quote = ledger.number(Field::Price, peer);
     let cost = times(quantity, quote);
-    let cash = plus(
-        value(state, config, comptime!(Field::Cash as u32), peer),
-        cost.value,
-    );
-    let sales = plus(
-        value(state, config, comptime!(Field::Sales as u32), peer),
-        quantity,
-    );
+    let cash = plus(ledger.value(Field::Cash, peer), cost.value);
+    let sales = plus(ledger.value(Field::Sales, peer), quantity);
     cost.faults
         .union(cash.faults)
         .union(sales.faults)
@@ -310,9 +227,7 @@ pub(super) fn empty_seller_safe(
 
 #[cube]
 pub(super) fn empty_seller_settlement(
-    state: &mut [u32],
-    actors: &[u32],
-    config: &EconomyConfig,
+    economy: &mut EconomyView<'_>,
     proposals: &[u32],
     control: &[Atomic<u32>],
     parameters: &EconomyParameters,
@@ -320,15 +235,14 @@ pub(super) fn empty_seller_settlement(
     peer: u32,
     prior: &KernelEventStatus,
 ) -> KernelEventStatus {
+    let config = economy.ledger.config;
     let quantity = empty_seller_quantity(config, proposals, parameters, actor);
-    let terms = household_production::TradeFields::new(actors, peer, parameters.traded_good());
-    let quote = number(state, config, terms.price, peer);
+    let terms =
+        household_production::TradeFields::new(&economy.actors, peer, parameters.traded_good());
+    let quote = economy.ledger.number_at(terms.price, peer);
     let cost = multiply(control, quantity, quote);
-    let cash = plus(
-        value(state, config, comptime!(Field::Cash as u32), peer),
-        cost,
-    );
-    let sales = plus(value(state, config, terms.sales, peer), quantity);
+    let cash = plus(economy.ledger.value(Field::Cash, peer), cost);
+    let sales = plus(economy.ledger.value_at(terms.sales, peer), quantity);
     let faults = cash.faults.union(sales.faults);
     let mut status = KernelEventStatus::new(comptime!(EventStatus::Rejected));
     if !faults.is_empty() || prior.contains(comptime!(EventStatus::Faulted)) {
@@ -367,13 +281,7 @@ impl PeerBalances {
         lt(self.reserve, self.stock)
     }
 
-    pub fn new(
-        state: &mut [u32],
-        actors: &[u32],
-        config: &EconomyConfig,
-        parameters: &EconomyParameters,
-        peer: u32,
-    ) -> Self {
+    pub fn new(economy: &mut EconomyView<'_>, parameters: &EconomyParameters, peer: u32) -> Self {
         let mut balances = PeerBalances {
             cash: zero(),
             escrow: zero(),
@@ -390,34 +298,36 @@ impl PeerBalances {
         };
         match comptime!(parameters.market) {
             MarketFlag::Labor => {
-                balances.cash = value(state, config, comptime!(Field::Cash as u32), peer);
-                balances.escrow = value(state, config, comptime!(Field::Escrow as u32), peer);
-                balances.slots = value(state, config, comptime!(Field::Slots as u32), peer);
-                balances.pipeline = value(state, config, comptime!(Field::Pipeline as u32), peer);
-                balances.quote = number(state, config, comptime!(Field::Wage as u32), peer);
-                balances.used = value(state, config, comptime!(Field::Used as u32), peer);
-                let first = number(state, config, comptime!(Field::FirstInput as u32), peer);
-                let second = number(state, config, comptime!(Field::SecondInput as u32), peer);
+                balances.cash = economy.ledger.value(Field::Cash, peer);
+                balances.escrow = economy.ledger.value(Field::Escrow, peer);
+                balances.slots = economy.ledger.value(Field::Slots, peer);
+                balances.pipeline = economy.ledger.value(Field::Pipeline, peer);
+                balances.quote = economy.ledger.number(Field::Wage, peer);
+                balances.used = economy.ledger.value(Field::Used, peer);
+                let first = economy.ledger.number(Field::FirstInput, peer);
+                let second = economy.ledger.number(Field::SecondInput, peer);
                 if first > 0 {
-                    balances.stock = value(state, config, first, peer);
-                    balances.first_used =
-                        value(state, config, USED_FIELDS as u32 + first - 1, peer);
+                    balances.stock = economy.ledger.value_at(first, peer);
+                    balances.first_used = economy
+                        .ledger
+                        .value_at(USED_FIELDS as u32 + first - 1, peer);
                 }
                 if second > 0 {
-                    balances.second_stock = value(state, config, second, peer);
-                    balances.second_used =
-                        value(state, config, USED_FIELDS as u32 + second - 1, peer);
+                    balances.second_stock = economy.ledger.value_at(second, peer);
+                    balances.second_used = economy
+                        .ledger
+                        .value_at(USED_FIELDS as u32 + second - 1, peer);
                 }
             }
             MarketFlag::Payroll | MarketFlag::Distribution => (),
             _ => {
                 let good = parameters.traded_good();
-                balances.cash = value(state, config, comptime!(Field::Cash as u32), peer);
-                balances.stock = value(state, config, good, peer);
-                balances.reserve = household_production::reserve(state, actors, config, peer, good);
-                let terms = household_production::TradeFields::new(actors, peer, good);
-                balances.sales = value(state, config, terms.sales, peer);
-                balances.quote = number(state, config, terms.price, peer);
+                balances.cash = economy.ledger.value(Field::Cash, peer);
+                balances.stock = economy.ledger.value_at(good, peer);
+                balances.reserve = household_production::reserve(&*economy, peer, good);
+                let terms = household_production::TradeFields::new(&economy.actors, peer, good);
+                balances.sales = economy.ledger.value_at(terms.sales, peer);
+                balances.quote = economy.ledger.number_at(terms.price, peer);
             }
         }
         balances
@@ -425,13 +335,13 @@ impl PeerBalances {
 
     pub fn offer(
         &mut self,
-        state: &mut [u32],
-        config: &EconomyConfig,
+        ledger: &mut Ledger<'_>,
         proposals: &mut [u32],
         control: &[Atomic<u32>],
         parameters: &EconomyParameters,
         offer: PeerOffer,
     ) -> KernelEventStatus {
+        let config = ledger.config;
         let actor = offer.actor;
         let peer = offer.peer;
         let prior = offer.status;
@@ -458,10 +368,10 @@ impl PeerBalances {
                 if comptime!(config.bargaining.enabled == Feature::Enabled) {
                     rate = quantity.extract(LOW_WORD);
                 }
-                let labor = number(state, config, comptime!(Field::LaborMinutes as u32), peer);
-                let first = number(state, config, comptime!(Field::FirstInput as u32), peer);
-                let second = number(state, config, comptime!(Field::SecondInput as u32), peer);
-                let unit_input = value(state, config, comptime!(Field::InputTicks as u32), peer);
+                let labor = ledger.number(Field::LaborMinutes, peer);
+                let first = ledger.number(Field::FirstInput, peer);
+                let second = ledger.number(Field::SecondInput, peer);
+                let unit_input = ledger.value(Field::InputTicks, peer);
                 if comptime!(config.cohorts == Feature::Enabled) {
                     shifts = minimum(ticks(shifts, 0), self.slots).extract(LOW_WORD);
                     shifts = batch::bounded_capacity(self.cash, times32(rate, labor), shifts);
@@ -481,10 +391,7 @@ impl PeerBalances {
                     valid = valid && shifts > 0;
                 }
                 let wage = times32(rate, labor * shifts);
-                let output = times32(
-                    number(state, config, comptime!(Field::OutputTicks as u32), peer),
-                    shifts,
-                );
+                let output = times32(ledger.number(Field::OutputTicks, peer), shifts);
                 let escrow = plus(self.escrow, wage);
                 let pipeline = plus(self.pipeline, output);
                 faults.insert(escrow.faults.union(pipeline.faults));
@@ -552,89 +459,36 @@ impl PeerBalances {
         status
     }
 
-    pub fn store(
-        &self,
-        state: &mut [u32],
-        actors: &[u32],
-        config: &EconomyConfig,
-        parameters: &EconomyParameters,
-        peer: u32,
-    ) {
+    pub fn store(&self, economy: &mut EconomyView<'_>, parameters: &EconomyParameters, peer: u32) {
         match comptime!(parameters.market) {
             MarketFlag::Labor => {
-                set(
-                    state,
-                    config,
-                    comptime!(Field::Cash as u32),
-                    peer,
-                    self.cash,
-                );
-                set(
-                    state,
-                    config,
-                    comptime!(Field::Escrow as u32),
-                    peer,
-                    self.escrow,
-                );
-                set(
-                    state,
-                    config,
-                    comptime!(Field::Slots as u32),
-                    peer,
-                    self.slots,
-                );
-                set(
-                    state,
-                    config,
-                    comptime!(Field::Pipeline as u32),
-                    peer,
-                    self.pipeline,
-                );
-                let first = number(state, config, comptime!(Field::FirstInput as u32), peer);
-                let second = number(state, config, comptime!(Field::SecondInput as u32), peer);
-                set(
-                    state,
-                    config,
-                    comptime!(Field::Used as u32),
-                    peer,
-                    self.used,
-                );
+                economy.ledger.set(Field::Cash, peer, self.cash);
+                economy.ledger.set(Field::Escrow, peer, self.escrow);
+                economy.ledger.set(Field::Slots, peer, self.slots);
+                economy.ledger.set(Field::Pipeline, peer, self.pipeline);
+                let first = economy.ledger.number(Field::FirstInput, peer);
+                let second = economy.ledger.number(Field::SecondInput, peer);
+                economy.ledger.set(Field::Used, peer, self.used);
                 if first > 0 {
-                    set(state, config, first, peer, self.stock);
-                    set(
-                        state,
-                        config,
-                        USED_FIELDS as u32 + first - 1,
-                        peer,
-                        self.first_used,
-                    );
+                    economy.ledger.set_at(first, peer, self.stock);
+                    economy
+                        .ledger
+                        .set_at(USED_FIELDS as u32 + first - 1, peer, self.first_used);
                 }
                 if second > 0 {
-                    set(state, config, second, peer, self.second_stock);
-                    set(
-                        state,
-                        config,
-                        USED_FIELDS as u32 + second - 1,
-                        peer,
-                        self.second_used,
-                    );
+                    economy.ledger.set_at(second, peer, self.second_stock);
+                    economy
+                        .ledger
+                        .set_at(USED_FIELDS as u32 + second - 1, peer, self.second_used);
                 }
             }
             MarketFlag::Payroll | MarketFlag::Distribution => (),
             _ => {
                 let good = parameters.traded_good();
-                set(
-                    state,
-                    config,
-                    comptime!(Field::Cash as u32),
-                    peer,
-                    self.cash,
-                );
-                set(state, config, good, peer, self.stock);
-                set(
-                    state,
-                    config,
-                    household_production::TradeFields::new(actors, peer, good).sales,
+                economy.ledger.set(Field::Cash, peer, self.cash);
+                economy.ledger.set_at(good, peer, self.stock);
+                economy.ledger.set_at(
+                    household_production::TradeFields::new(&economy.actors, peer, good).sales,
                     peer,
                     self.sales,
                 );

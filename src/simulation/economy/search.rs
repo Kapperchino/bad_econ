@@ -42,9 +42,7 @@ pub(in crate::simulation) enum StatusReset {
 
 #[cube]
 fn prepare(
-    state: &mut [u32],
-    actors: &[u32],
-    config: &EconomyConfig,
+    economy: &mut EconomyView<'_>,
     spatial: &mut [u32],
     proposals: &mut [u32],
     control: &[Atomic<u32>],
@@ -56,6 +54,7 @@ fn prepare(
     #[comptime] round: PreparationRound,
     #[comptime] status_reset: StatusReset,
 ) {
+    let config = economy.ledger.config;
     let mut id = invocation;
     let mut searching = false;
     let mut eligible = false;
@@ -88,7 +87,7 @@ fn prepare(
             searches[(config.actors + id) as usize] = 0;
             searches[(2 * config.actors + id) as usize] = 0;
         }
-        let k = kind(actors, id);
+        let k = economy.actors.kind(id);
         let mut chosen = u32::new(comptime!(i64::from(NO_ACTOR)));
         let mut quantity = ticks(0u32, 0u32);
         let mut trip = 0u32;
@@ -100,18 +99,18 @@ fn prepare(
                 let grain = parameters.traded_good() == Good::Grain as u32
                     && comptime!(config.home_mode == Feature::Enabled)
                     && (comptime!(config.economy == crate::domain::Economy::Agrarian)
-                        || number(state, config, comptime!(Field::LandPlots as u32), id) > 0)
-                    && number(state, config, comptime!(Field::LivingMembers as u32), id) > 0;
+                        || economy.ledger.number(Field::LandPlots, id) > 0)
+                    && economy.ledger.number(Field::LivingMembers, id) > 0;
                 let investment = (parameters.traded_good() == Good::Tools as u32
                     || parameters.traded_good() == Good::Wood as u32)
                     && comptime!(
                         config.home_mode == Feature::Enabled
                             && config.property_mode == Feature::Disabled
                     )
-                    && number(state, config, comptime!(Field::InvestmentGood as u32), id) > 0
-                    && number(state, config, comptime!(Field::LivingMembers as u32), id) > 0;
+                    && economy.ledger.number(Field::InvestmentGood, id) > 0
+                    && economy.ledger.number(Field::LivingMembers, id) > 0;
                 let construction = parameters.traded_good() == Good::Construction as u32
-                    && number(state, config, comptime!(Field::ProjectStatus as u32), id)
+                    && economy.ledger.number(Field::ProjectStatus, id)
                         == comptime!(crate::domain::property::ProjectStatus::Building as u32);
                 u32::cast_from(grain || investment || construction)
             }
@@ -124,7 +123,7 @@ fn prepare(
             _ => select(
                 household_demand == 0
                     && k.is(comptime!(ActorKind::Household))
-                    && number(state, config, comptime!(Field::EnterpriseModel as u32), id) == 0,
+                    && economy.ledger.number(Field::EnterpriseModel, id) == 0,
                 comptime!(Preparation::Inventory as u32),
                 comptime!(Preparation::Demand as u32),
             ),
@@ -134,17 +133,14 @@ fn prepare(
         }
         match preparation {
             0 => {
-                let mut purchasing_power = value(state, config, comptime!(Field::Cash as u32), id);
+                let mut purchasing_power = economy.ledger.value(Field::Cash, id);
                 if comptime!(matches!(market, MarketFlag::Input(_))) {
-                    purchasing_power =
-                        enterprises::purchasing_power(state, actors, config, control, id);
+                    purchasing_power = enterprises::purchasing_power(&*economy, control, id);
                 }
                 match market {
                     MarketFlag::Labor => {
                         let labor = employment::LaborSearch::new(
-                            state,
-                            actors,
-                            config,
+                            &*economy,
                             control,
                             parameters,
                             id,
@@ -157,7 +153,7 @@ fn prepare(
                     }
                     MarketFlag::Input(_) => {
                         good = parameters.traded_good();
-                        let demand = InputDemand::new(state, actors, config, control, id, &k, good);
+                        let demand = InputDemand::new(economy, control, id, &k, good);
                         search = demand.search;
                         wanted = demand.wanted;
                     }
@@ -168,29 +164,30 @@ fn prepare(
                             MarketFlag::Consumer(Good::Coal | Good::Wood)
                         )) {
                             wanted = consumption::fuel_purchase_target(
-                                state, config, control, parameters, id, good,
+                                &economy.ledger,
+                                control,
+                                parameters,
+                                id,
+                                good,
                             );
                             let held = add_checked(
                                 control,
-                                value(state, config, good, id),
-                                value(state, config, TRANSIT_FIELDS as u32 + good - 1, id),
+                                economy.ledger.value_at(good, id),
+                                economy
+                                    .ledger
+                                    .value_at(TRANSIT_FIELDS as u32 + good - 1, id),
                             );
                             search = k.is(comptime!(ActorKind::Household))
-                                && number(
-                                    state,
-                                    config,
-                                    comptime!(Field::LivingMembers as u32),
-                                    id,
-                                ) > 0
+                                && economy.ledger.number(Field::LivingMembers, id) > 0
                                 && !lt(
-                                    value(state, config, comptime!(Field::Bread as u32), id),
-                                    ticks(food::minimum_daily(state, config, id), 0),
+                                    economy.ledger.value(Field::Bread, id),
+                                    ticks(food::minimum_daily(&economy.ledger, id), 0),
                                 )
                                 && lt(held, wanted)
                                 && !equal(purchasing_power, zero());
                             if search {
                                 search = consumption::preferred_fuel(
-                                    state, actors, config, &*spatial, parameters, id, good,
+                                    &*economy, &*spatial, parameters, id, good,
                                 ) == good;
                             }
                         } else {
@@ -198,12 +195,7 @@ fn prepare(
                             let until_due = (interval - (parameters.day + id) % max(interval, 1))
                                 % max(interval, 1);
                             search = k.is(comptime!(ActorKind::Household))
-                                && number(
-                                    state,
-                                    config,
-                                    comptime!(Field::LivingMembers as u32),
-                                    id,
-                                ) > 0
+                                && economy.ledger.number(Field::LivingMembers, id) > 0
                                 && (until_due <= config.coverage + config.ring
                                     || comptime!(
                                         matches!(
@@ -215,16 +207,14 @@ fn prepare(
                                             == crate::domain::food::FoodIncome::PurchasingPower
                                     ));
                             let reserve = ticks(
-                                food::reserve_daily(state, config, id)
+                                food::reserve_daily(&economy.ledger, id)
                                     * (config.coverage + config.ring - 1),
                                 0,
                             );
                             let food = add_checked(
                                 control,
-                                value(state, config, comptime!(Field::Bread as u32), id),
-                                value(
-                                    state,
-                                    config,
+                                economy.ledger.value(Field::Bread, id),
+                                economy.ledger.value_at(
                                     TRANSIT_FIELDS as u32 + comptime!(Good::Bread as u32) - 1,
                                     id,
                                 ),
@@ -232,32 +222,27 @@ fn prepare(
                             let cash_reserve = multiply(
                                 control,
                                 reserve,
-                                number(state, config, comptime!(Field::FoodPrice as u32), id),
+                                economy.ledger.number(Field::FoodPrice, id),
                             );
                             search = search
                                 && !lt(food, reserve)
-                                && lt(
-                                    cash_reserve,
-                                    value(state, config, comptime!(Field::Cash as u32), id),
-                                );
+                                && lt(cash_reserve, economy.ledger.value(Field::Cash, id));
                             if comptime!(matches!(
                                 market,
                                 MarketFlag::Consumer(Good::LuxuryClothes | Good::LuxuryFurniture)
                             )) {
                                 purchasing_power =
-                                    consumption::budget(state, config, control, id, good);
+                                    consumption::budget(&economy.ledger, control, id, good);
                             }
                             search = search && !equal(purchasing_power, zero());
-                            wanted = ticks(consumption::consumers(state, config, id), 0);
+                            wanted = ticks(consumption::consumers(&economy.ledger, id), 0);
                             if comptime!(matches!(
                                 market,
                                 MarketFlag::Consumer(Good::LuxuryClothes | Good::LuxuryFurniture)
                             )) && search
                             {
                                 wanted = consumption::durable_target(
-                                    state,
-                                    actors,
-                                    config,
+                                    &*economy,
                                     &*spatial,
                                     control,
                                     parameters,
@@ -272,16 +257,15 @@ fn prepare(
                         good = comptime!(Good::Bread as u32);
                         search = k.is(comptime!(ActorKind::Household));
                         wanted = ticks(
-                            food::purchase_daily(state, config, parameters, id)
+                            food::purchase_daily(&economy.ledger, parameters, id)
                                 * (config.coverage + config.ring - 1u32),
                             0u32,
                         );
                     }
                     MarketFlag::Payroll => {
-                        quantity = value(state, config, comptime!(Field::Due as u32), id);
+                        quantity = economy.ledger.value(Field::Due, id);
                         if !equal(quantity, ticks(0u32, 0u32)) {
-                            chosen =
-                                number(state, config, comptime!(Field::Employer as u32), id) - 1u32;
+                            chosen = economy.ledger.number(Field::Employer, id) - 1u32;
                         }
                     }
                     MarketFlag::Distribution => {
@@ -289,28 +273,21 @@ fn prepare(
                             quantity = scaled(
                                 control,
                                 positive(
-                                    value(state, config, comptime!(Field::Cash as u32), id),
+                                    economy.ledger.value(Field::Cash, id),
                                     maximum(
                                         select(
                                             k.bits() == comptime!(Good::Housing as u32),
                                             zero(),
                                             ticks(config.reserve_low, config.reserve_high),
                                         ),
-                                        value(
-                                            state,
-                                            config,
-                                            comptime!(Field::OperatingReserve as u32),
-                                            id,
-                                        ),
+                                        economy.ledger.value(Field::OperatingReserve, id),
                                     ),
                                 ),
                                 config.distribution_rate,
                                 POLICY_SCALE,
                             );
                             if !equal(quantity, ticks(0u32, 0u32)) {
-                                chosen = actors[ActorLayout::OWNER
-                                    * (actors.len() / ActorLayout::WORDS)
-                                    + id as usize];
+                                chosen = economy.actors.owner(id);
                             }
                         }
                     }
@@ -320,20 +297,22 @@ fn prepare(
                         wanted,
                         add_checked(
                             control,
-                            value(state, config, good, id),
-                            value(state, config, TRANSIT_FIELDS as u32 + good - 1, id),
+                            economy.ledger.value_at(good, id),
+                            economy
+                                .ledger
+                                .value_at(TRANSIT_FIELDS as u32 + good - 1, id),
                         ),
                     );
                 }
                 search = search
-                    && number(state, config, comptime!(Field::Time as u32), id)
+                    && economy.ledger.number(Field::Time, id)
                         >= select(comptime!(market == MarketFlag::Labor), 1u32, 0);
                 if parameters.traded_good() > 0 {
                     purchasing_power = minimum(
                         purchasing_power,
                         positive(
-                            value(state, config, comptime!(Field::Cash as u32), id),
-                            value(state, config, comptime!(Field::CartagePayable as u32), id),
+                            economy.ledger.value(Field::Cash, id),
+                            economy.ledger.value(Field::CartagePayable, id),
                         ),
                     );
                 }
@@ -359,17 +338,18 @@ fn prepare(
                 ) && !searching
                     && k.is(comptime!(ActorKind::Household))
                 {
-                    let comfort = consumption::fuel_target(state, config, control, id, good);
+                    let comfort = consumption::fuel_target(&economy.ledger, control, id, good);
                     let held = add_checked(
                         control,
-                        value(state, config, good, id),
-                        value(state, config, TRANSIT_FIELDS as u32 + good - 1, id),
+                        economy.ledger.value_at(good, id),
+                        economy
+                            .ledger
+                            .value_at(TRANSIT_FIELDS as u32 + good - 1, id),
                     );
-                    eligible = number(state, config, comptime!(Field::LivingMembers as u32), id)
-                        > 0
+                    eligible = economy.ledger.number(Field::LivingMembers, id) > 0
                         && !lt(
-                            value(state, config, comptime!(Field::Bread as u32), id),
-                            ticks(food::minimum_daily(state, config, id), 0),
+                            economy.ledger.value(Field::Bread, id),
+                            ticks(food::minimum_daily(&economy.ledger, id), 0),
                         )
                         && !equal(purchasing_power, zero())
                         && lt(held, comfort);
@@ -388,13 +368,7 @@ fn prepare(
                         0u32,
                         select(equal(purchasing_power, zero()), 2u32, 1u32),
                     );
-                    set32(
-                        state,
-                        config,
-                        comptime!(Field::FoodAccess as u32),
-                        id,
-                        failure,
-                    );
+                    economy.ledger.set_number(Field::FoodAccess, id, failure);
                 }
             }
             _ => {
@@ -405,8 +379,10 @@ fn prepare(
                     let inactive_good = parameters.traded_good();
                     add_checked(
                         control,
-                        value(state, config, inactive_good, id),
-                        value(state, config, TRANSIT_FIELDS as u32 + inactive_good - 1, id),
+                        economy.ledger.value_at(inactive_good, id),
+                        economy
+                            .ledger
+                            .value_at(TRANSIT_FIELDS as u32 + inactive_good - 1, id),
                     );
                 }
             }
@@ -528,7 +504,7 @@ fn minimum_delivery_days(config: &EconomyConfig, buyer_access: u32, seller: u32,
 
 #[cube]
 pub(super) fn supplier_stride(
-    actors: &[u32],
+    actors: &ActorTable<'_>,
     parameters: &EconomyParameters,
     buyer: u32,
     length: u32,
@@ -537,7 +513,7 @@ pub(super) fn supplier_stride(
     let sampled =
         comptime!(parameters.market == MarketFlag::Household) && length > HOUSEHOLD_SEARCH_SAMPLES;
     let industrial = comptime!(matches!(parameters.market, MarketFlag::Input(_)))
-        && !kind(actors, buyer).is(comptime!(ActorKind::Household));
+        && !actors.kind(buyer).is(comptime!(ActorKind::Household));
     if (sampled || industrial) && length > 1 {
         stride = coprime_stride(
             length,
@@ -574,9 +550,7 @@ pub(super) fn supplier_samples(parameters: &EconomyParameters, length: u32) -> u
 
 #[cube]
 pub(super) fn supply_score(
-    state: &mut [u32],
-    actors: &[u32],
-    config: &EconomyConfig,
+    economy: &EconomyView<'_>,
     parameters: &EconomyParameters,
     buyer: u32,
     wanted: Ticks,
@@ -585,14 +559,13 @@ pub(super) fn supply_score(
 ) -> Ticks {
     let mut score = price;
     if comptime!(matches!(parameters.market, MarketFlag::Input(_)))
-        && !kind(actors, buyer).is(comptime!(ActorKind::Household))
+        && !economy
+            .actors
+            .kind(buyer)
+            .is(comptime!(ActorKind::Household))
     {
-        let capacity =
-            actors[ActorLayout::CAPACITY * (actors.len() / ActorLayout::WORDS) + buyer as usize];
-        let daily = times32(
-            capacity,
-            number(state, config, comptime!(Field::InputTicks as u32), buyer),
-        );
+        let capacity = economy.actors.capacity(buyer);
+        let daily = times32(capacity, economy.ledger.number(Field::InputTicks, buyer));
         let missing = positive(minimum(wanted, daily), amount);
         score = ticks(price.extract(LOW_WORD), missing.extract(LOW_WORD));
     }
@@ -601,9 +574,7 @@ pub(super) fn supply_score(
 
 #[cube]
 pub(super) fn candidate(
-    state: &mut [u32],
-    actors: &[u32],
-    config: &EconomyConfig,
+    economy: &EconomyView<'_>,
     control: &[Atomic<u32>],
     parameters: &EconomyParameters,
     id: u32,
@@ -611,16 +582,15 @@ pub(super) fn candidate(
     wanted: Ticks,
     purchasing_power: Ticks,
 ) -> Candidate {
-    let supply = index::Supply::new(state, actors, config, firm, parameters.traded_good());
-    let trip = distance(actors, id, firm);
+    let config = economy.ledger.config;
+    let supply = index::Supply::new(economy, firm, parameters.traded_good());
+    let trip = economy.actors.distance(id, firm);
     let mut buyer_access = 0u32;
     if comptime!(config.railway.routes_enabled == Feature::Enabled) && config.railway.nodes > 0 {
         buyer_access = config.railway.access[id as usize * 2 + 1];
     }
     candidate_supply(
-        state,
-        actors,
-        config,
+        economy,
         control,
         parameters,
         id,
@@ -635,9 +605,7 @@ pub(super) fn candidate(
 
 #[cube]
 fn candidate_supply(
-    state: &mut [u32],
-    actors: &[u32],
-    config: &EconomyConfig,
+    economy: &EconomyView<'_>,
     control: &[Atomic<u32>],
     parameters: &EconomyParameters,
     id: u32,
@@ -648,6 +616,7 @@ fn candidate_supply(
     purchasing_power: Ticks,
     supply: &index::Supply,
 ) -> Candidate {
+    let config = economy.ledger.config;
     let market = comptime!(parameters.market);
     let mut eligible = false;
     let mut seen_supply = false;
@@ -658,11 +627,10 @@ fn candidate_supply(
     let mut amount = zero();
     let mut accessible = dist <= config.search_radius;
     if comptime!(market == MarketFlag::Input(InputMarket::Grain)) {
-        accessible =
-            accessible && household_production::grain_counterparty(state, actors, config, id, firm);
+        accessible = accessible && household_production::grain_counterparty(economy, id, firm);
     }
     if accessible {
-        let mut wage = number(state, config, comptime!(Field::Wage as u32), firm);
+        let mut wage = economy.ledger.number(Field::Wage, firm);
         let quote = supply.quote;
         let mut inspect = true;
         if comptime!(market != MarketFlag::Labor) {
@@ -694,31 +662,20 @@ fn candidate_supply(
             amount = ticks(1u32, 0u32);
             if comptime!(market == MarketFlag::Labor) {
                 if comptime!(config.bargaining.enabled == Feature::Enabled) {
-                    let members = employment::payroll_members(actors, config, id);
+                    let members = employment::payroll_members(&economy.actors, config, id);
                     let negotiation = negotiate(
                         NegotiationRequest {
                             prior_gross: divide(
-                                value(state, config, comptime!(Field::GrossIncome as u32), id),
+                                economy.ledger.value(Field::GrossIncome, id),
                                 members,
                             ),
-                            household_cash: divide(
-                                value(state, config, comptime!(Field::Cash as u32), id),
-                                members,
-                            ),
+                            household_cash: divide(economy.ledger.value(Field::Cash, id), members),
                             funded_per_packet: divide(
-                                value(state, config, comptime!(Field::Cash as u32), firm),
-                                max(
-                                    number(state, config, comptime!(Field::Slots as u32), firm),
-                                    1,
-                                ),
+                                economy.ledger.value(Field::Cash, firm),
+                                max(economy.ledger.number(Field::Slots, firm), 1),
                             ),
                             candidate_wage: wage,
-                            payable_minutes: number(
-                                state,
-                                config,
-                                comptime!(Field::LaborMinutes as u32),
-                                firm,
-                            ),
+                            payable_minutes: economy.ledger.number(Field::LaborMinutes, firm),
                         },
                         config,
                         control,
@@ -728,65 +685,49 @@ fn candidate_supply(
                     wage = negotiation.wage.extract(LOW_WORD);
                     amount = negotiation.wage;
                 }
-                let team = employment::team(state, config, id);
-                let slots = number(state, config, comptime!(Field::Slots as u32), firm);
+                let team = employment::team(&economy.ledger, id);
+                let slots = economy.ledger.number(Field::Slots, firm);
                 let shifts = min(slots, team);
                 if comptime!(config.cohorts == Feature::Enabled) {
                     amount = ticks(amount.extract(LOW_WORD), shifts);
                 }
-                let duration = number(state, config, comptime!(Field::LaborMinutes as u32), firm)
+                let duration = economy.ledger.number(Field::LaborMinutes, firm)
                     + ceildiv(dist, config.commute_speed) * COMMUTE_LEGS;
                 eligible = eligible
                     && slots > 0
-                    && number(state, config, comptime!(Field::Time as u32), id) / team >= duration;
+                    && economy.ledger.number(Field::Time, id) / team >= duration;
                 score = divide(
                     times32(
-                        wage * number(state, config, comptime!(Field::LaborMinutes as u32), firm),
+                        wage * economy.ledger.number(Field::LaborMinutes, firm),
                         POLICY_SCALE,
                     ),
                     duration,
                 );
                 if comptime!(config.home_mode == Feature::Enabled) {
                     let conditions = 500
-                        + number(
-                            state,
-                            config,
-                            comptime!(Field::EquipmentCondition as u32),
-                            firm,
-                        ) / 2
-                        + number(
-                            state,
-                            config,
-                            comptime!(Field::SafetyProvision as u32),
-                            firm,
-                        ) / 4;
+                        + economy.ledger.number(Field::EquipmentCondition, firm) / 2
+                        + economy.ledger.number(Field::SafetyProvision, firm) / 4;
                     score = scaled(control, score, conditions, 1000);
-                    let need = number(state, config, comptime!(Field::FoodNeed as u32), id);
-                    let bread = number(state, config, comptime!(Field::Bread as u32), id);
+                    let need = economy.ledger.number(Field::FoodNeed, id);
+                    let bread = economy.ledger.number(Field::Bread, id);
                     let missing = max(need, bread) - bread;
-                    let preparation = food::household_work(state, config, control, id, missing);
+                    let preparation = food::household_work(&economy.ledger, control, id, missing);
                     let minutes = preparation.minutes;
-                    let time = number(state, config, comptime!(Field::Time as u32), id);
+                    let time = economy.ledger.number(Field::Time, id);
                     let committed = duration * shifts;
                     let remaining = max(time, committed) - committed
-                        + number(state, config, comptime!(Field::HomeTime as u32), id);
+                        + economy.ledger.number(Field::HomeTime, id);
                     let self_provision = missing > 0
-                        && !lt(
-                            value(state, config, comptime!(Field::Grain as u32), id),
-                            preparation.grain,
-                        );
+                        && !lt(economy.ledger.value(Field::Grain, id), preparation.grain);
                     let paid = times32(
                         wage,
-                        number(state, config, comptime!(Field::LaborMinutes as u32), firm) * shifts,
+                        economy.ledger.number(Field::LaborMinutes, firm) * shifts,
                     );
-                    let food_cost = times32(
-                        missing,
-                        number(state, config, comptime!(Field::FoodPrice as u32), id),
-                    );
+                    let food_cost = times32(missing, economy.ledger.number(Field::FoodPrice, id));
                     eligible =
                         eligible && !(self_provision && remaining < minutes && lt(paid, food_cost));
                 }
-                let incumbent = number(state, config, comptime!(Field::Job as u32), id) == firm + 1;
+                let incumbent = economy.ledger.number(Field::Job, id) == firm + 1;
                 let doubled = add_checked(control, score, score);
                 score = ticks(
                     doubled.extract(LOW_WORD) | u32::cast_from(incumbent),
@@ -820,7 +761,7 @@ fn candidate_supply(
                     && offered
                     && quote > 0u32
                     && !equal(amount, ticks(0u32, 0u32));
-                score = supply_score(state, actors, config, parameters, id, wanted, amount, score);
+                score = supply_score(economy, parameters, id, wanted, amount, score);
             }
         }
     }
@@ -1017,12 +958,11 @@ impl GpuPass<SearchInput> for Search {
             SupplierSearch::Inactive => (),
         }
         input.parameters.refresh(&mut input.config);
+        let mut economy = EconomyView::new(&mut input.state, &input.actors, &input.config);
         if input.control[LATCH_WORD].load() == 0 {
             match comptime!(input.program.stage) {
                 SearchStage::Index => index::build(
-                    &mut input.state,
-                    &input.actors,
-                    &input.config,
+                    &economy,
                     &mut input.spatial,
                     &mut input.scratch,
                     &mut input.searches,
@@ -1039,7 +979,7 @@ impl GpuPass<SearchInput> for Search {
                     comptime!(input.parameters.scan),
                 ),
                 SearchStage::EmptyBounds => empty::bounds(
-                    &input.actors,
+                    &economy.actors,
                     &input.config,
                     &input.spatial,
                     &mut input.scratch,
@@ -1065,9 +1005,7 @@ impl GpuPass<SearchInput> for Search {
                     };
                     while group < groups {
                         prepare(
-                            &mut input.state,
-                            &input.actors,
-                            &input.config,
+                            &mut economy,
                             &mut input.spatial,
                             &mut input.proposals,
                             &input.control,
@@ -1088,27 +1026,21 @@ impl GpuPass<SearchInput> for Search {
                     }
                 }
                 SearchStage::GrainDealerTiles => grain::dealer_tiles(
-                    &mut input.state,
-                    &input.actors,
-                    &input.config,
+                    &economy,
                     &input.spatial,
                     &mut input.searches,
                     &input.control,
                     &input.parameters,
                 ),
                 SearchStage::GrainFirms => grain::collect_firms(
-                    &mut input.state,
-                    &input.actors,
-                    &input.config,
+                    &economy,
                     &input.spatial,
                     &mut input.searches,
                     &input.control,
                 ),
                 SearchStage::Search | SearchStage::SearchGrain | SearchStage::SearchIndexed => {
                     search(
-                        &mut input.state,
-                        &input.actors,
-                        &input.config,
+                        &mut economy,
                         &mut input.spatial,
                         &mut input.proposals,
                         &mut input.searches,
@@ -1128,9 +1060,7 @@ impl GpuPass<SearchInput> for Search {
                 SearchStage::SearchFuel
                 | SearchStage::SearchHousehold
                 | SearchStage::SearchSpatialFuel => fuel::search(
-                    &mut input.state,
-                    &input.actors,
-                    &input.config,
+                    &mut economy,
                     &input.spatial,
                     &mut input.proposals,
                     &mut input.searches,
@@ -1146,7 +1076,7 @@ impl GpuPass<SearchInput> for Search {
                     }),
                 ),
                 SearchStage::RoadCandidates => road::prepare(
-                    &input.actors,
+                    &economy.actors,
                     &input.config,
                     &input.spatial,
                     &input.scratch,
@@ -1154,16 +1084,13 @@ impl GpuPass<SearchInput> for Search {
                     &input.control,
                 ),
                 SearchStage::StockLimits => filter::stock_limits(
-                    &mut input.state,
-                    &input.config,
+                    &economy.ledger,
                     &input.spatial,
                     &input.scratch,
                     &input.successes,
                 ),
                 SearchStage::FilterBuyers => filter::buyers(
-                    &mut input.state,
-                    &input.actors,
-                    &input.config,
+                    &economy,
                     &input.proposals,
                     &input.searches,
                     &input.successes,
@@ -1171,9 +1098,7 @@ impl GpuPass<SearchInput> for Search {
                     &input.parameters,
                 ),
                 SearchStage::FilterEmpty => filter::orders(
-                    &mut input.state,
-                    &input.actors,
-                    &input.config,
+                    &economy,
                     &input.proposals,
                     &input.successes,
                     &input.control,
@@ -1209,9 +1134,7 @@ impl GpuPass<SearchInput> for Search {
                                     + ProposalLayout::ACTOR];
                                 if peer != NO_ACTOR {
                                     let mut status = super::clearing::buyer_settlement(
-                                        &mut input.state,
-                                        &input.actors,
-                                        &input.config,
+                                        &mut economy,
                                         &mut input.proposals,
                                         &input.control,
                                         &input.parameters,
@@ -1230,9 +1153,7 @@ impl GpuPass<SearchInput> for Search {
                                             & (1u32 << (position % 32));
                                         if kept == 0 {
                                             status.replace(super::clearing::empty_seller_settlement(
-                                                &mut input.state,
-                                                &input.actors,
-                                                &input.config,
+                                                &mut economy,
                                                 &input.proposals,
                                                 &input.control,
                                                 &input.parameters,
@@ -1258,9 +1179,7 @@ impl GpuPass<SearchInput> for Search {
 
 #[cube]
 fn search(
-    state: &mut [u32],
-    actors: &[u32],
-    config: &EconomyConfig,
+    economy: &mut EconomyView<'_>,
     spatial: &mut [u32],
     proposals: &mut [u32],
     searches: &mut [u32],
@@ -1272,6 +1191,7 @@ fn search(
     #[comptime] collection: OrderCollection,
     #[comptime] source: index::SupplySource,
 ) {
+    let config = economy.ledger.config;
     let jobs = markets::job_count(control, SEARCHES_WORD);
     let mut job = CUBE_POS as u32;
     while job < jobs {
@@ -1286,14 +1206,10 @@ fn search(
         );
         let mut input_target = zero();
         if comptime!(matches!(parameters.market, MarketFlag::Input(_))) {
-            let capacity =
-                actors[ActorLayout::CAPACITY * (actors.len() / ActorLayout::WORDS) + id as usize];
+            let capacity = economy.actors.capacity(id);
             input_target = minimum(
                 wanted,
-                times32(
-                    capacity,
-                    number(state, config, comptime!(Field::InputTicks as u32), id),
-                ),
+                times32(capacity, economy.ledger.number(Field::InputTicks, id)),
             );
         }
         let mut buyer_access = 0u32;
@@ -1301,8 +1217,8 @@ fn search(
         {
             buyer_access = config.railway.access[id as usize * 2 + 1];
         }
-        let px = actors[ActorLayout::X * (actors.len() / ActorLayout::WORDS) + id as usize];
-        let py = actors[ActorLayout::Y * (actors.len() / ActorLayout::WORDS) + id as usize];
+        let px = economy.actors.x(id);
+        let py = economy.actors.y(id);
         let radius = config.search_radius;
         let whole_map = comptime!(matches!(suppliers, SupplierSearch::SingleCell { .. }));
         let maximum_delivery_cost = times32(
@@ -1351,21 +1267,10 @@ fn search(
         let mut supply = Shared::<u32>::new();
         let mut y = max(cy, 1u32) - 1;
         if comptime!(source == index::SupplySource::Grain)
-            && grain::tiled_dealer(
-                state,
-                actors,
-                config,
-                &*spatial,
-                control,
-                jobs,
-                id,
-                purchasing_power,
-            )
+            && grain::tiled_dealer(&*economy, &*spatial, control, jobs, id, purchasing_power)
         {
             let trade = grain::dealer_trade(
-                state,
-                actors,
-                config,
+                &*economy,
                 &*spatial,
                 &*searches,
                 control,
@@ -1381,16 +1286,14 @@ fn search(
             trip = trade.trip;
             y = side;
         } else if comptime!(source == index::SupplySource::Grain)
-            && (!household_production::grain_dealer(state, actors, config, id)
+            && (!household_production::grain_dealer(&*economy, id)
                 || lt(
                     purchasing_power,
                     ticks(control[INPUT_MINIMUM_QUOTE_WORD].load(), 0),
                 ))
         {
             let trade = grain::search(
-                state,
-                actors,
-                config,
+                &*economy,
                 &*spatial,
                 &*searches,
                 control,
@@ -1424,7 +1327,7 @@ fn search(
                 let end = spatial[(cell + 1) as usize];
                 let length = end - begin;
                 let limit = begin + supplier_samples(parameters, length);
-                let stride = supplier_stride(actors, parameters, id, length);
+                let stride = supplier_stride(&economy.actors, parameters, id, length);
                 let mut cursor = (parameters.settlement_rotation + id) % max(length, 1);
                 let mut j = begin;
                 let nearest = if comptime!(whole_map) {
@@ -1521,9 +1424,7 @@ fn search(
                                 let seller = spatial
                                     [(side * side + 1 + rotated + offset + UNIT_POS) as usize];
                                 let supply = index::Supply::for_search(
-                                    state,
-                                    actors,
-                                    config,
+                                    &*economy,
                                     scratch,
                                     parameters,
                                     rotated + offset + UNIT_POS,
@@ -1531,7 +1432,7 @@ fn search(
                                     source,
                                 );
                                 offered = u32::cast_from(
-                                    distance(actors, id, seller) <= radius && supply.offered,
+                                    economy.actors.distance(id, seller) <= radius && supply.offered,
                                 );
                             }
                             seen_supply =
@@ -1570,7 +1471,7 @@ fn search(
                             let rotated = begin + (cursor + UNIT_POS * stride) % max(length, 1);
                             firm = spatial[(side * side + 1 + rotated) as usize];
                             let supply = index::Supply::for_search(
-                                state, actors, config, scratch, parameters, rotated, firm, source,
+                                &*economy, scratch, parameters, rotated, firm, source,
                             );
                             let mut relevant = true;
                             if comptime!(
@@ -1584,7 +1485,7 @@ fn search(
                             }
                             let mut trip = 0u32;
                             if relevant {
-                                trip = distance(actors, id, firm);
+                                trip = economy.actors.distance(id, firm);
                                 if comptime!(matches!(
                                     parameters.market,
                                     MarketFlag::Household | MarketFlag::Consumer(_)
@@ -1640,9 +1541,7 @@ fn search(
                                         &supply,
                                     ),
                                     _ => candidate_supply(
-                                        state,
-                                        actors,
-                                        config,
+                                        &*economy,
                                         &candidate_faults[fault_start..fault_start + fault_words],
                                         parameters,
                                         id,
@@ -1871,8 +1770,7 @@ fn search(
             }
             if comptime!(matches!(parameters.market, MarketFlag::Consumer(_))) && chosen != NO_ACTOR
             {
-                let supply =
-                    index::Supply::new(state, actors, config, chosen, parameters.traded_good());
+                let supply = index::Supply::new(&*economy, chosen, parameters.traded_good());
                 let days = railway::delivery_days(
                     config,
                     railway::DeliveryRequest {
@@ -1895,13 +1793,7 @@ fn search(
                 if !equal(wanted, zero()) && chosen == NO_ACTOR {
                     failure = select(seen_supply || equal(purchasing_power, zero()), 2u32, 1u32);
                 }
-                set32(
-                    state,
-                    config,
-                    comptime!(Field::FoodAccess as u32),
-                    id,
-                    failure,
-                );
+                economy.ledger.set_number(Field::FoodAccess, id, failure);
             }
             proposals[id as usize * ProposalLayout::WORDS + ProposalLayout::ACTOR] = chosen;
             proposals[id as usize * ProposalLayout::WORDS + ProposalLayout::QUANTITY_LOW] =

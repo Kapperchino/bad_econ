@@ -82,19 +82,12 @@ enum UnitSettlementExecution {
 
 #[cube]
 impl UnitBalances {
-    fn new(
-        state: &mut [u32],
-        actors: &[u32],
-        config: &EconomyConfig,
-        peer: u32,
-        good: u32,
-        length: u32,
-    ) -> Self {
-        let cash = value(state, config, comptime!(Field::Cash as u32), peer);
-        let stock = value(state, config, good, peer);
-        let terms = household_production::TradeFields::new(actors, peer, good);
-        let sales = value(state, config, terms.sales, peer);
-        let quote = number(state, config, terms.price, peer);
+    fn new(economy: &mut EconomyView<'_>, peer: u32, good: u32, length: u32) -> Self {
+        let cash = economy.ledger.value(Field::Cash, peer);
+        let stock = economy.ledger.value_at(good, peer);
+        let terms = household_production::TradeFields::new(&economy.actors, peer, good);
+        let sales = economy.ledger.value_at(terms.sales, peer);
+        let quote = economy.ledger.number_at(terms.price, peer);
         let cash_capacity = bounded_capacity(
             ticks(!cash.extract(LOW_WORD), !cash.extract(HIGH_WORD)),
             ticks(quote, 0),
@@ -106,10 +99,7 @@ impl UnitBalances {
             sales,
             sales_field: terms.sales,
             quote,
-            available: positive(
-                stock,
-                household_production::reserve(state, actors, config, peer, good),
-            ),
+            available: positive(stock, household_production::reserve(&*economy, peer, good)),
             cash_capacity: ticks(cash_capacity, 0),
             sales_capacity: ticks(!sales.extract(LOW_WORD), !sales.extract(HIGH_WORD)),
         }
@@ -147,16 +137,10 @@ impl UnitBalances {
         self.sales_capacity = minus(self.sales_capacity, applied);
     }
 
-    fn store(&self, state: &mut [u32], config: &EconomyConfig, peer: u32, good: u32) {
-        set(
-            state,
-            config,
-            comptime!(Field::Cash as u32),
-            peer,
-            self.cash,
-        );
-        set(state, config, good, peer, self.stock);
-        set(state, config, self.sales_field, peer, self.sales);
+    fn store(&self, ledger: &mut Ledger<'_>, peer: u32, good: u32) {
+        ledger.set(Field::Cash, peer, self.cash);
+        ledger.set_at(good, peer, self.stock);
+        ledger.set_at(self.sales_field, peer, self.sales);
     }
 }
 
@@ -188,10 +172,9 @@ impl GpuPass<SettlementInput> for SettleUnits {
 
     fn execute(mut input: SettlementInput) {
         input.parameters.refresh(&mut input.config);
+        let mut economy = EconomyView::new(&mut input.state, &input.actors, &input.config);
         settle_units(
-            &mut input.state,
-            &input.actors,
-            &input.config,
+            &mut economy,
             &mut input.scratch,
             &input.control,
             &input.parameters,
@@ -221,10 +204,9 @@ impl GpuPass<SettlementInput> for SettlePrefix {
 
     fn execute(mut input: SettlementInput) {
         input.parameters.refresh(&mut input.config);
+        let mut economy = EconomyView::new(&mut input.state, &input.actors, &input.config);
         settle_units(
-            &mut input.state,
-            &input.actors,
-            &input.config,
+            &mut economy,
             &mut input.scratch,
             &input.control,
             &input.parameters,
@@ -239,10 +221,9 @@ impl GpuPass<SettlementInput> for SettleTail {
 
     fn execute(mut input: SettlementInput) {
         input.parameters.refresh(&mut input.config);
+        let mut economy = EconomyView::new(&mut input.state, &input.actors, &input.config);
         settle_tail(
-            &mut input.state,
-            &input.actors,
-            &input.config,
+            &mut economy,
             &mut input.scratch,
             &input.control,
             &input.parameters,
@@ -292,9 +273,7 @@ pub(in crate::simulation) fn settle_consumers(
 
 #[cube]
 fn settle_units(
-    state: &mut [u32],
-    actors: &[u32],
-    config: &EconomyConfig,
+    economy: &mut EconomyView<'_>,
     scratch: &mut [u32],
     control: &[Atomic<u32>],
     parameters: &EconomyParameters,
@@ -309,7 +288,7 @@ fn settle_units(
         let end = start + length;
         let peer = scratch[(parameters.sort_source + start) as usize];
         let good = parameters.traded_good();
-        let mut balances = UnitBalances::new(state, actors, config, peer, good, length);
+        let mut balances = UnitBalances::new(economy, peer, good, length);
         let mut cursor = start;
         let mut tail_cursor = end;
         let mut faulted = 0u32;
@@ -368,7 +347,7 @@ fn settle_units(
             if comptime!(execution == UnitSettlementExecution::Prefix) {
                 scratch[(8 * count + peer) as usize] = tail_cursor;
             }
-            balances.store(state, config, peer, good);
+            balances.store(&mut economy.ledger, peer, good);
             control[PROGRESS_WORD].fetch_max(length);
             control[COMPLETED_WORD].fetch_add(length);
         }
@@ -379,9 +358,7 @@ fn settle_units(
 
 #[cube]
 fn settle_tail(
-    state: &mut [u32],
-    actors: &[u32],
-    config: &EconomyConfig,
+    economy: &mut EconomyView<'_>,
     scratch: &mut [u32],
     control: &[Atomic<u32>],
     parameters: &EconomyParameters,
@@ -394,13 +371,16 @@ fn settle_tail(
         if index >= cursor {
             let actor = scratch[(parameters.sort_source + count + index) as usize];
             let prior = KernelEventStatus::load(scratch, 4 * count + actor);
-            let terms =
-                household_production::TradeFields::new(actors, peer, parameters.traded_good());
-            let cash = plus(
-                value(state, config, comptime!(Field::Cash as u32), peer),
-                ticks(number(state, config, terms.price, peer), 0),
+            let terms = household_production::TradeFields::new(
+                &economy.actors,
+                peer,
+                parameters.traded_good(),
             );
-            let sales = plus(value(state, config, terms.sales, peer), ticks(1, 0));
+            let cash = plus(
+                economy.ledger.value(Field::Cash, peer),
+                ticks(economy.ledger.number_at(terms.price, peer), 0),
+            );
+            let sales = plus(economy.ledger.value_at(terms.sales, peer), ticks(1, 0));
             let overflow = !cash.faults.is_empty() || !sales.faults.is_empty();
             let mut status = KernelEventStatus::new(comptime!(EventStatus::Rejected));
             if overflow || prior.contains(comptime!(EventStatus::Faulted)) {

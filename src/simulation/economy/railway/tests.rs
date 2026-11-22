@@ -574,22 +574,23 @@ impl GpuPass<QuoteCheckInput> for CompareQuotes {
     type Output = ();
 
     fn execute(input: QuoteCheckInput) {
+        let actors = ActorTable::new(&input.actors);
         let index = ABSOLUTE_POS as u32;
         let count = input.config.actors;
         if index < count * count {
             let buyer = index / count;
             let seller = index % count;
-            if distance(&input.actors, buyer, seller) <= input.config.search_radius {
-                let mut expected = animal_route(&input.actors, &input.config, buyer, seller);
+            if actors.distance(buyer, seller) <= input.config.search_radius {
+                let mut expected = animal_route(&actors, &input.config, buyer, seller);
                 for company in 0..input.config.railway.company_count {
-                    let path = candidate(&input.actors, &input.config, buyer, seller, company);
+                    let path = candidate(&actors, &input.config, buyer, seller, company);
                     if path.preferred_to(&expected) {
                         expected.replace(&path);
                     }
                 }
-                let actual = route(&input.actors, &input.config, buyer, seller);
-                let node = station(&input.actors, &input.config, buyer);
-                let access = access_distance(&input.actors, &input.config, buyer, node);
+                let actual = route(&actors, &input.config, buyer, seller);
+                let node = station(&actors, &input.config, buyer);
+                let access = access_distance(&actors, &input.config, buyer, node);
                 let equal = actual.days == expected.days
                     && actual.fee == expected.fee
                     && actual.carrier == expected.carrier

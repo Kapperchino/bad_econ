@@ -1,351 +1,171 @@
 use super::*;
 use crate::domain::enterprise::{EnterpriseModel, EnterpriseState};
-use crate::simulation::configuration::{EconomyConfig, Feature};
+use crate::simulation::configuration::Feature;
 
 #[cube]
-pub(super) fn construct_home(
-    state: &mut [u32],
-    config: &EconomyConfig,
-    control: &[Atomic<u32>],
-    owner: u32,
-) {
-    let owned = number(
-        state,
-        config,
-        comptime!(Field::InvestmentFirm as u32),
-        owner,
-    );
+pub(super) fn construct_home(ledger: &mut Ledger<'_>, control: &[Atomic<u32>], owner: u32) {
+    let config = ledger.config;
+    let owned = ledger.number(Field::InvestmentFirm, owner);
     if owned > 0 {
         let firm = owned - 1;
-        let status = number(
-            state,
-            config,
-            comptime!(Field::EnterpriseStatus as u32),
-            firm,
-        );
+        let status = ledger.number(Field::EnterpriseStatus, firm);
         let constructing = status == comptime!(EnterpriseState::Forming as u32)
             || (status == comptime!(EnterpriseState::Operating as u32)
-                && number(
-                    state,
-                    config,
-                    comptime!(Field::PendingCapacity as u32),
-                    firm,
-                ) > 0);
-        let cash = value(state, config, comptime!(Field::Cash as u32), firm);
-        let reserve = value(
-            state,
-            config,
-            comptime!(Field::OperatingReserve as u32),
-            firm,
-        );
-        let rent = rent::obligation(state, config, control, firm);
+                && ledger.number(Field::PendingCapacity, firm) > 0);
+        let cash = ledger.value(Field::Cash, firm);
+        let reserve = ledger.value(Field::OperatingReserve, firm);
+        let rent = rent::obligation(&*ledger, control, firm);
         let protected = select(
             status == comptime!(EnterpriseState::Operating as u32),
             maximum(reserve, rent),
             rent,
         );
         let funds = positive(cash, protected);
-        let rate = number(state, config, comptime!(Field::Wage as u32), firm);
+        let rate = ledger.number(Field::Wage, firm);
         let available = min(
-            number(state, config, comptime!(Field::Time as u32), owner),
-            number(
-                state,
-                config,
-                comptime!(Field::ConstructionRemaining as u32),
-                firm,
-            ),
+            ledger.number(Field::Time, owner),
+            ledger.number(Field::ConstructionRemaining, firm),
         );
         let minutes = minimum(ticks(available, 0), divide(funds, max(rate, 1))).extract(LOW_WORD);
         let wage = times32(minutes, rate);
         if constructing && minutes > 0 {
-            let remaining = number(
-                state,
-                config,
-                comptime!(Field::ConstructionRemaining as u32),
-                firm,
-            ) - minutes;
-            let time = number(state, config, comptime!(Field::Time as u32), owner) - minutes;
-            set(
-                state,
-                config,
-                comptime!(Field::Cash as u32),
-                firm,
-                minus(cash, wage),
-            );
+            let remaining = ledger.number(Field::ConstructionRemaining, firm) - minutes;
+            let time = ledger.number(Field::Time, owner) - minutes;
+            ledger.set(Field::Cash, firm, minus(cash, wage));
             let mut net = wage;
-            let gross = value(state, config, comptime!(Field::GrossIncome as u32), owner);
+            let gross = ledger.value(Field::GrossIncome, owner);
             let accrued = add_checked(control, gross, wage);
-            set(
-                state,
-                config,
-                comptime!(Field::GrossIncome as u32),
-                owner,
-                accrued,
-            );
+            ledger.set(Field::GrossIncome, owner, accrued);
             if comptime!(config.payroll == Feature::Enabled) {
                 let before = PayrollAccrual::new(gross, 1, config, control);
                 let after = PayrollAccrual::new(accrued, 1, config, control);
                 net = minus(after.net, before.net);
-                set(
-                    state,
-                    config,
-                    comptime!(Field::PayrollReserve as u32),
-                    owner,
-                    after.reserve,
-                );
-                increase(
-                    state,
-                    config,
+                ledger.set(Field::PayrollReserve, owner, after.reserve);
+                ledger.increase(
                     control,
-                    comptime!(Field::TaxTreasury as u32),
+                    Field::TaxTreasury,
                     owner,
                     minus(after.tax, before.tax),
                 );
-                increase(
-                    state,
-                    config,
+                ledger.increase(
                     control,
-                    comptime!(Field::ChargeTreasury as u32),
+                    Field::ChargeTreasury,
                     owner,
                     minus(after.charge, before.charge),
                 );
             }
-            increase(
-                state,
-                config,
-                control,
-                comptime!(Field::Cash as u32),
-                owner,
-                net,
-            );
-            set32(state, config, comptime!(Field::Time as u32), owner, time);
-            set32(
-                state,
-                config,
-                comptime!(Field::HomeMinutes as u32),
-                owner,
-                minutes,
-            );
-            set32(
-                state,
-                config,
-                comptime!(Field::ConstructionRemaining as u32),
-                firm,
-                remaining,
-            );
+            ledger.increase(control, Field::Cash, owner, net);
+            ledger.set_number(Field::Time, owner, time);
+            ledger.set_number(Field::HomeMinutes, owner, minutes);
+            ledger.set_number(Field::ConstructionRemaining, firm, remaining);
             let next = select(
                 remaining == 0,
                 comptime!(EnterpriseState::Operating as u32),
                 status,
             );
-            set32(
-                state,
-                config,
-                comptime!(Field::EnterpriseStatus as u32),
-                firm,
-                next,
-            );
+            ledger.set_number(Field::EnterpriseStatus, firm, next);
         }
     }
 }
 
 #[cube]
-pub(super) fn maintain(
-    state: &mut [u32],
-    config: &EconomyConfig,
-    control: &[Atomic<u32>],
-    firm: u32,
-    packets: u32,
-) {
-    let status = number(
-        state,
-        config,
-        comptime!(Field::EnterpriseStatus as u32),
-        firm,
-    );
-    let condition = number(
-        state,
-        config,
-        comptime!(Field::EquipmentCondition as u32),
-        firm,
-    );
+pub(super) fn maintain(ledger: &mut Ledger<'_>, control: &[Atomic<u32>], firm: u32, packets: u32) {
+    let status = ledger.number(Field::EnterpriseStatus, firm);
+    let condition = ledger.number(Field::EquipmentCondition, firm);
     let worn = max(condition, min(packets, 1000)) - min(packets, 1000);
-    let tools = value(state, config, comptime!(Field::Tools as u32), firm);
+    let tools = ledger.value(Field::Tools, firm);
     let maintenance = worn < 700
         && !equal(tools, zero())
         && status == comptime!(EnterpriseState::Operating as u32);
     if maintenance {
-        set(
-            state,
-            config,
-            comptime!(Field::Tools as u32),
-            firm,
-            minus(tools, ticks(1, 0)),
-        );
-        increase(
-            state,
-            config,
+        ledger.set(Field::Tools, firm, minus(tools, ticks(1, 0)));
+        ledger.increase_at(
             control,
             USED_FIELDS as u32 + comptime!(Good::Tools as u32) - 1,
             firm,
             ticks(1, 0),
         );
-        increase(
-            state,
-            config,
-            control,
-            comptime!(Field::Used as u32),
-            firm,
-            ticks(1, 0),
-        );
+        ledger.increase(control, Field::Used, firm, ticks(1, 0));
     }
-    set32(
-        state,
-        config,
-        comptime!(Field::EquipmentCondition as u32),
+    ledger.set_number(
+        Field::EquipmentCondition,
         firm,
         select(maintenance, 1000, worn),
     );
-    let safety = number(
-        state,
-        config,
-        comptime!(Field::SafetyProvision as u32),
-        firm,
-    );
-    let spare = value(state, config, comptime!(Field::Tools as u32), firm);
-    let funded = !lt(
-        value(state, config, comptime!(Field::Cash as u32), firm),
-        ticks(5000, 0),
-    );
+    let safety = ledger.number(Field::SafetyProvision, firm);
+    let spare = ledger.value(Field::Tools, firm);
+    let funded = !lt(ledger.value(Field::Cash, firm), ticks(5000, 0));
     if safety == 0 && !equal(spare, zero()) && funded {
-        set(
-            state,
-            config,
-            comptime!(Field::Tools as u32),
-            firm,
-            minus(spare, ticks(1, 0)),
-        );
-        increase(
-            state,
-            config,
+        ledger.set(Field::Tools, firm, minus(spare, ticks(1, 0)));
+        ledger.increase_at(
             control,
             USED_FIELDS as u32 + comptime!(Good::Tools as u32) - 1,
             firm,
             ticks(1, 0),
         );
-        increase(
-            state,
-            config,
-            control,
-            comptime!(Field::Used as u32),
-            firm,
-            ticks(1, 0),
-        );
-        set32(
-            state,
-            config,
-            comptime!(Field::SafetyProvision as u32),
-            firm,
-            750,
-        );
+        ledger.increase(control, Field::Used, firm, ticks(1, 0));
+        ledger.set_number(Field::SafetyProvision, firm, 750);
     }
 }
 
 #[cube]
 pub(crate) fn mobility(
-    state: &mut [u32],
-    actors: &[u32],
-    config: &EconomyConfig,
+    economy: &mut EconomyView<'_>,
     spatial: &[u32],
     quotes: &[u32],
     household: u32,
     day: u32,
     #[comptime] quote_mode: crate::simulation::enterprise::EntryQuoteMode,
 ) {
-    let needs_food = number(state, config, comptime!(Field::Shortage as u32), household) > 0
-        && number(
-            state,
-            config,
-            comptime!(Field::FoodAccess as u32),
-            household,
-        ) == 1;
-    let idle = number(state, config, comptime!(Field::Employed as u32), household) == 0;
-    let landless = number(state, config, comptime!(Field::LandPlots as u32), household) == 0;
-    let settled = number(state, config, comptime!(Field::MoveDue as u32), household) == 0;
-    let alive = number(
-        state,
-        config,
-        comptime!(Field::LivingMembers as u32),
-        household,
-    ) > 0;
+    let config = economy.ledger.config;
+    let needs_food = economy.ledger.number(Field::Shortage, household) > 0
+        && economy.ledger.number(Field::FoodAccess, household) == 1;
+    let idle = economy.ledger.number(Field::Employed, household) == 0;
+    let landless = economy.ledger.number(Field::LandPlots, household) == 0;
+    let settled = economy.ledger.number(Field::MoveDue, household) == 0;
+    let alive = economy.ledger.number(Field::LivingMembers, household) > 0;
     let mut target = 0u32;
     if comptime!(config.economy == crate::domain::Economy::Industrial) && settled && alive {
         target = crate::simulation::economy::mobility::work_target(
-            state, actors, config, spatial, quotes, household, day, quote_mode,
+            economy, spatial, quotes, household, day, quote_mode,
         );
     }
     let mut nearest = u32::new(comptime!(i64::from(u32::MAX)));
     if target == 0 && needs_food && idle && landless && settled && alive {
         for sample in 0..16u32 {
             let candidate = (household + day * 17 + sample * 31) % config.actors;
-            let accessible = household_production::offers(
-                state,
-                actors,
-                config,
-                candidate,
-                comptime!(Good::Bread as u32),
-            );
-            let trip = distance(actors, household, candidate);
+            let accessible =
+                household_production::offers(&*economy, candidate, comptime!(Good::Bread as u32));
+            let trip = economy.actors.distance(household, candidate);
             let days = max(ceildiv(trip, config.shipment_speed), 1) + config.coverage;
             let food = times32(
-                number(state, config, comptime!(Field::FoodNeed as u32), household),
-                number(state, config, comptime!(Field::Price as u32), candidate),
+                economy.ledger.number(Field::FoodNeed, household),
+                economy.ledger.number(Field::Price, candidate),
             );
             let moving_budget = plus(ticks(100, 0), times(food, days).value).value;
-            let affordable = !lt(
-                value(state, config, comptime!(Field::Cash as u32), household),
-                moving_budget,
-            );
+            let affordable = !lt(economy.ledger.value(Field::Cash, household), moving_budget);
             if accessible && affordable && candidate != household && trip < nearest {
                 target = candidate + 1;
                 nearest = trip;
             }
         }
     }
-    set32(
-        state,
-        config,
-        comptime!(Field::MoveTarget as u32),
-        household,
-        target,
-    );
+    economy
+        .ledger
+        .set_number(Field::MoveTarget, household, target);
 }
 
 #[cube]
-fn retail_viable(
-    state: &mut [u32],
-    config: &EconomyConfig,
-    control: &[Atomic<u32>],
-    firm: u32,
-) -> bool {
-    let sales = value(state, config, comptime!(Field::Sales as u32), firm);
-    let replacement = multiply(
-        control,
-        sales,
-        number(
-            state,
-            config,
-            comptime!(Field::ReplacementCost as u32),
-            firm,
-        ),
-    );
-    let shifts = number(state, config, comptime!(Field::Plan as u32), firm)
-        - number(state, config, comptime!(Field::Slots as u32), firm);
+fn retail_viable(ledger: &Ledger<'_>, control: &[Atomic<u32>], firm: u32) -> bool {
+    let config = ledger.config;
+    let sales = ledger.value(Field::Sales, firm);
+    let replacement = multiply(control, sales, ledger.number(Field::ReplacementCost, firm));
+    let shifts = ledger.number(Field::Plan, firm) - ledger.number(Field::Slots, firm);
     let payroll = multiply(
         control,
         times32(
-            number(state, config, comptime!(Field::Wage as u32), firm),
-            number(state, config, comptime!(Field::LaborMinutes as u32), firm),
+            ledger.number(Field::Wage, firm),
+            ledger.number(Field::LaborMinutes, firm),
         ),
         shifts,
     );
@@ -354,73 +174,55 @@ fn retail_viable(
         add_checked(control, replacement, payroll),
         ticks(config.firm_rent, 0),
     );
-    let revenue = value(
-        state,
-        config,
-        comptime!(Field::BusinessRevenue as u32),
-        firm,
-    );
+    let revenue = ledger.value(Field::BusinessRevenue, firm);
     !equal(sales, zero()) && !lt(revenue, costs)
 }
 
 #[cube]
 pub(super) fn lifecycle(
-    state: &mut [u32],
-    actors: &[u32],
-    config: &EconomyConfig,
+    economy: &mut EconomyView<'_>,
     control: &[Atomic<u32>],
     firm: u32,
     day: u32,
 ) {
-    let status = number(
-        state,
-        config,
-        comptime!(Field::EnterpriseStatus as u32),
-        firm,
-    );
-    let cash = value(state, config, comptime!(Field::Cash as u32), firm);
+    let config = economy.ledger.config;
+    let status = economy.ledger.number(Field::EnterpriseStatus, firm);
+    let cash = economy.ledger.value(Field::Cash, firm);
     let payroll = times32(
-        number(state, config, comptime!(Field::Wage as u32), firm),
-        number(state, config, comptime!(Field::LaborMinutes as u32), firm),
+        economy.ledger.number(Field::Wage, firm),
+        economy.ledger.number(Field::LaborMinutes, firm),
     );
-    let good = kind(actors, firm).output();
-    let crop = farming::farm(state, config, firm, good);
+    let good = economy.actors.kind(firm).output();
+    let crop = farming::farm(&economy.ledger, firm, good);
     let payroll = select(
         crop && !farming::fieldwork(config, day, good),
         zero(),
         payroll,
     );
     let carrying = crop
-        && (!equal(
-            value(state, config, comptime!(Field::CropWork as u32), firm),
-            zero(),
-        ) || !equal(
-            value(state, config, kind(actors, firm).output(), firm),
-            zero(),
-        ));
-    let arrears = value(state, config, comptime!(Field::RentArrears as u32), firm);
+        && (!equal(economy.ledger.value(Field::CropWork, firm), zero())
+            || !equal(
+                economy
+                    .ledger
+                    .value_at(economy.actors.kind(firm).output(), firm),
+                zero(),
+            ));
+    let arrears = economy.ledger.value(Field::RentArrears, firm);
     let current = equal(arrears, zero());
     let funded = current && !lt(cash, plus(payroll, ticks(config.firm_rent, 0)).value);
-    let sales = !equal(
-        value(state, config, comptime!(Field::Sales as u32), firm),
-        zero(),
-    );
+    let sales = !equal(economy.ledger.value(Field::Sales, firm), zero());
     let viable = match u32::cast_from(
-        number(
-            state,
-            config,
-            comptime!(Field::EnterpriseModel as u32),
-            firm,
-        ) == comptime!(EnterpriseModel::Distributor as u32),
+        economy.ledger.number(Field::EnterpriseModel, firm)
+            == comptime!(EnterpriseModel::Distributor as u32),
     ) {
         1 => {
             status == comptime!(EnterpriseState::Forming as u32)
                 || (good == comptime!(Good::Grain as u32) && funded)
-                || retail_viable(state, config, control, firm)
+                || retail_viable(&economy.ledger, control, firm)
         }
         _ => sales || funded || carrying,
     };
-    let inactive = number(state, config, comptime!(Field::IdleDays as u32), firm);
+    let inactive = economy.ledger.number(Field::IdleDays, firm);
     let days = select(viable && current, 0, min(inactive + 1, 365));
     let funded_state = select(
         funded,
@@ -442,117 +244,87 @@ pub(super) fn lifecycle(
         status,
         next,
     );
-    set32(state, config, comptime!(Field::IdleDays as u32), firm, days);
-    set32(
-        state,
-        config,
-        comptime!(Field::EnterpriseStatus as u32),
-        firm,
-        next,
-    );
+    economy.ledger.set_number(Field::IdleDays, firm, days);
+    economy
+        .ledger
+        .set_number(Field::EnterpriseStatus, firm, next);
 }
 
 #[cube]
 fn method_output(
-    state: &mut [u32],
-    actors: &[u32],
-    config: &EconomyConfig,
+    economy: &EconomyView<'_>,
     control: &[Atomic<u32>],
     firm: u32,
     recipe: u32,
 ) -> Ticks {
-    let labor = number(state, config, recipe, firm);
-    let inputs = number(state, config, recipe + 1, firm);
-    let output = max(number(state, config, recipe + 2, firm), 1);
+    let config = economy.ledger.config;
+    let labor = economy.ledger.number_at(recipe, firm);
+    let inputs = economy.ledger.number_at(recipe + 1, firm);
+    let output = max(economy.ledger.number_at(recipe + 2, firm), 1);
     let desired = proposed_starts(
         KernelStarts {
             coverage: u32::cast_from(config.coverage),
-            demand: value(state, config, comptime!(Field::Demand as u32), firm),
-            finished: value(state, config, kind(actors, firm).output(), firm),
-            pipeline: value(state, config, comptime!(Field::Pipeline as u32), firm),
+            demand: economy.ledger.value(Field::Demand, firm),
+            finished: economy
+                .ledger
+                .value_at(economy.actors.kind(firm).output(), firm),
+            pipeline: economy.ledger.value(Field::Pipeline, firm),
         },
         control,
     );
     let mut packets = minimum(
         divide(add_checked(control, desired, ticks(output - 1, 0)), output),
-        ticks(
-            actors[ActorLayout::GEOGRAPHIC_CAPACITY * (actors.len() / ActorLayout::WORDS)
-                + firm as usize],
-            0,
-        ),
+        ticks(economy.actors.geographic_capacity(firm), 0),
     );
     #[unroll]
     for input in 0..2u32 {
-        let good = number(state, config, recipe + 3 + input, firm);
+        let good = economy.ledger.number_at(recipe + 3 + input, firm);
         if good > 0 {
             packets = minimum(
                 packets,
-                divide(value(state, config, good, firm), max(inputs, 1)),
+                divide(economy.ledger.value_at(good, firm), max(inputs, 1)),
             );
         }
     }
     packets = minimum(
         packets,
         divide(
-            value(state, config, comptime!(Field::Cash as u32), firm),
-            max(
-                labor * number(state, config, comptime!(Field::Wage as u32), firm),
-                1,
-            ),
+            economy.ledger.value(Field::Cash, firm),
+            max(labor * economy.ledger.number(Field::Wage, firm), 1),
         ),
     );
     minimum(multiply(control, packets, output), desired)
 }
 
 #[cube]
-pub(super) fn available_method(
-    state: &mut [u32],
-    actors: &[u32],
-    config: &EconomyConfig,
-    control: &[Atomic<u32>],
-    firm: u32,
-) {
-    let method = number(state, config, comptime!(Field::ActiveMethod as u32), firm);
+pub(super) fn available_method(economy: &mut EconomyView<'_>, control: &[Atomic<u32>], firm: u32) {
+    let method = economy.ledger.number(Field::ActiveMethod, firm);
     let mut available = true;
     #[unroll]
     for input in 0..2u32 {
-        let good = number(
-            state,
-            config,
-            comptime!(Field::FirstInput as u32) + input,
-            firm,
-        );
+        let good = economy
+            .ledger
+            .number_at(comptime!(Field::FirstInput as u32) + input, firm);
         if good > 0 {
             available = available
                 && !lt(
-                    value(state, config, good, firm),
-                    value(state, config, comptime!(Field::InputTicks as u32), firm),
+                    economy.ledger.value_at(good, firm),
+                    economy.ledger.value(Field::InputTicks, firm),
                 );
         }
     }
-    let equipped = !equal(
-        value(state, config, comptime!(Field::Tools as u32), firm),
-        zero(),
-    ) || number(
-        state,
-        config,
-        comptime!(Field::InstalledCapital as u32),
-        firm,
-    ) > 0;
+    let equipped = !equal(economy.ledger.value(Field::Tools, firm), zero())
+        || economy.ledger.number(Field::InstalledCapital, firm) > 0;
     let mut constrained = false;
     if method > 0 {
         let upgraded = method_output(
-            state,
-            actors,
-            config,
+            &*economy,
             control,
             firm,
             comptime!(Field::LaborMinutes as u32),
         );
         let basic = method_output(
-            state,
-            actors,
-            config,
+            &*economy,
             control,
             firm,
             comptime!(Field::BasicLaborMinutes as u32),
@@ -561,103 +333,64 @@ pub(super) fn available_method(
     }
     if method > 0 && (!available || !equipped || constrained) {
         for field in 0..5u32 {
-            let basic = value(
-                state,
-                config,
-                comptime!(Field::BasicLaborMinutes as u32) + field,
-                firm,
-            );
-            set(
-                state,
-                config,
-                comptime!(Field::LaborMinutes as u32) + field,
-                firm,
-                basic,
-            );
+            let basic = economy
+                .ledger
+                .value_at(comptime!(Field::BasicLaborMinutes as u32) + field, firm);
+            economy
+                .ledger
+                .set_at(comptime!(Field::LaborMinutes as u32) + field, firm, basic);
         }
-        set32(
-            state,
-            config,
-            comptime!(Field::ActiveMethod as u32),
-            firm,
-            0,
-        );
+        economy.ledger.set_number(Field::ActiveMethod, firm, 0);
     }
 }
 
 #[cube]
-pub(super) fn operating_plan(
-    state: &mut [u32],
-    actors: &[u32],
-    config: &EconomyConfig,
-    control: &[Atomic<u32>],
-    firm: u32,
-) {
-    let distributor = number(
-        state,
-        config,
-        comptime!(Field::EnterpriseModel as u32),
-        firm,
-    ) == 1;
+pub(super) fn operating_plan(economy: &mut EconomyView<'_>, control: &[Atomic<u32>], firm: u32) {
+    let config = economy.ledger.config;
+    let distributor = economy.ledger.number(Field::EnterpriseModel, firm) == 1;
     if comptime!(config.home_mode == Feature::Enabled) || distributor || config.firm_rent > 0 {
-        let labor = number(state, config, comptime!(Field::Wage as u32), firm)
-            * number(state, config, comptime!(Field::LaborMinutes as u32), firm);
-        let inputs = number(state, config, comptime!(Field::InputTicks as u32), firm);
+        let labor = economy.ledger.number(Field::Wage, firm)
+            * economy.ledger.number(Field::LaborMinutes, firm);
+        let inputs = economy.ledger.number(Field::InputTicks, firm);
         let mut input_cost = zero();
         for input in 0u32..2 {
-            if number(
-                state,
-                config,
-                comptime!(Field::FirstInput as u32) + input,
-                firm,
-            ) > 0
+            if economy
+                .ledger
+                .number_at(comptime!(Field::FirstInput as u32) + input, firm)
+                > 0
             {
                 input_cost = add_checked(
                     control,
                     input_cost,
                     times32(
                         inputs,
-                        number(
-                            state,
-                            config,
-                            comptime!(Field::FirstInputCost as u32) + input,
-                            firm,
-                        ),
+                        economy
+                            .ledger
+                            .number_at(comptime!(Field::FirstInputCost as u32) + input, firm),
                     ),
                 );
             }
         }
-        let output = max(
-            number(state, config, comptime!(Field::OutputTicks as u32), firm),
-            1,
-        );
+        let output = max(economy.ledger.number(Field::OutputTicks, firm), 1);
         if distributor {
-            input_cost = times32(
-                output,
-                number(
-                    state,
-                    config,
-                    comptime!(Field::ReplacementCost as u32),
-                    firm,
-                ),
-            );
+            input_cost = times32(output, economy.ledger.number(Field::ReplacementCost, firm));
         }
-        let demand = value(state, config, comptime!(Field::Demand as u32), firm);
+        let demand = economy.ledger.value(Field::Demand, firm);
         let packets = maximum(
             divide(add_checked(control, demand, ticks(output - 1, 0)), output),
             ticks(1, 0),
         );
         let coverage = select(
             distributor,
-            number(state, config, comptime!(Field::StockCoverage as u32), firm),
+            economy.ledger.number(Field::StockCoverage, firm),
             config.coverage,
         ) + config.ring;
         let replacement = multiply(control, input_cost, coverage);
         let payroll_days = select(
-            farming::farm(state, config, firm, kind(actors, firm).output()),
+            farming::farm(&economy.ledger, firm, economy.actors.kind(firm).output()),
             max(
                 coverage,
-                farming::paid_days(config, kind(actors, firm).output()),
+                farming::paid_days(config, economy.actors.kind(firm).output()),
             ),
             coverage,
         );
@@ -667,101 +400,71 @@ pub(super) fn operating_plan(
             packets.extract(LOW_WORD),
         );
         let construction = times32(
-            number(
-                state,
-                config,
-                comptime!(Field::ConstructionRemaining as u32),
-                firm,
-            ),
+            economy.ledger.number(Field::ConstructionRemaining, firm),
             select(
                 comptime!(config.property_mode == Feature::Enabled),
                 comptime!(Good::Construction.initial_price()),
-                number(state, config, comptime!(Field::Wage as u32), firm),
+                economy.ledger.number(Field::Wage, firm),
             ),
         );
         let reserve = add_checked(
             control,
             add_checked(control, reserve, construction),
-            rent::obligation(state, config, control, firm),
+            rent::obligation(&economy.ledger, control, firm),
         );
-        set(
-            state,
-            config,
-            comptime!(Field::OperatingReserve as u32),
-            firm,
-            reserve,
-        );
+        economy.ledger.set(Field::OperatingReserve, firm, reserve);
     }
 }
 
 #[cube]
 pub(super) fn purchasing_power(
-    state: &mut [u32],
-    actors: &[u32],
-    config: &EconomyConfig,
+    economy: &EconomyView<'_>,
     control: &[Atomic<u32>],
     actor: u32,
 ) -> Ticks {
-    let cash = value(state, config, comptime!(Field::Cash as u32), actor);
-    let distributor = number(
-        state,
-        config,
-        comptime!(Field::EnterpriseModel as u32),
-        actor,
-    ) == 1;
+    let config = economy.ledger.config;
+    let cash = economy.ledger.value(Field::Cash, actor);
+    let distributor = economy.ledger.number(Field::EnterpriseModel, actor) == 1;
     let mut available = cash;
-    if !kind(actors, actor).is(comptime!(ActorKind::Household))
+    if !economy
+        .actors
+        .kind(actor)
+        .is(comptime!(ActorKind::Household))
         && (comptime!(config.home_mode == Feature::Enabled) || distributor)
     {
         let labor = times32(
-            number(state, config, comptime!(Field::Wage as u32), actor),
-            number(state, config, comptime!(Field::LaborMinutes as u32), actor),
+            economy.ledger.number(Field::Wage, actor),
+            economy.ledger.number(Field::LaborMinutes, actor),
         );
-        let output = max(
-            number(state, config, comptime!(Field::OutputTicks as u32), actor),
-            1,
-        );
+        let output = max(economy.ledger.number(Field::OutputTicks, actor), 1);
         let mut replacement = zero();
         #[unroll]
         for input in 0..2u32 {
-            if number(
-                state,
-                config,
-                comptime!(Field::FirstInput as u32) + input,
-                actor,
-            ) > 0
+            if economy
+                .ledger
+                .number_at(comptime!(Field::FirstInput as u32) + input, actor)
+                > 0
             {
                 replacement = add_checked(
                     control,
                     replacement,
                     times32(
-                        number(state, config, comptime!(Field::InputTicks as u32), actor),
-                        number(
-                            state,
-                            config,
-                            comptime!(Field::FirstInputCost as u32) + input,
-                            actor,
-                        ),
+                        economy.ledger.number(Field::InputTicks, actor),
+                        economy
+                            .ledger
+                            .number_at(comptime!(Field::FirstInputCost as u32) + input, actor),
                     ),
                 );
             }
         }
         if distributor {
-            replacement = times32(
-                output,
-                number(
-                    state,
-                    config,
-                    comptime!(Field::ReplacementCost as u32),
-                    actor,
-                ),
-            );
+            replacement = times32(output, economy.ledger.number(Field::ReplacementCost, actor));
         }
         let packet_cost = add_checked(control, labor, replacement);
         if packet_cost.extract(HIGH_WORD) > 0 {
             KernelFaults::new(comptime!(FaultFlags::ARITHMETIC_OVERFLOW)).record(control);
         }
-        let demand = value(state, config, comptime!(Field::Demand as u32), actor);
+        let demand = economy.ledger.value(Field::Demand, actor);
         let forecast = maximum(
             divide(add_checked(control, demand, ticks(output - 1, 0)), output),
             ticks(1, 0),
@@ -770,36 +473,29 @@ pub(super) fn purchasing_power(
             divide(cash, max(packet_cost.extract(LOW_WORD), 1)),
             ticks(1, 0),
         );
-        let capacity = ticks(
-            actors[ActorLayout::CAPACITY * (actors.len() / ActorLayout::WORDS) + actor as usize],
-            0,
-        );
+        let capacity = ticks(economy.actors.capacity(actor), 0);
         let packets = minimum(minimum(forecast, funded), capacity);
         available = positive(cash, multiply(control, labor, packets.extract(LOW_WORD)));
     }
-    if !kind(actors, actor).is(comptime!(ActorKind::Household)) {
-        available = positive(available, rent::obligation(state, config, control, actor));
+    if !economy
+        .actors
+        .kind(actor)
+        .is(comptime!(ActorKind::Household))
+    {
+        available = positive(available, rent::obligation(&economy.ledger, control, actor));
     }
     available
 }
 
 #[cube]
-pub(super) fn household_quote(
-    state: &mut [u32],
-    config: &EconomyConfig,
-    control: &[Atomic<u32>],
-    household: u32,
-) {
+pub(super) fn household_quote(ledger: &mut Ledger<'_>, control: &[Atomic<u32>], household: u32) {
+    let config = ledger.config;
     let reserve = ticks(
-        number(state, config, comptime!(Field::FoodNeed as u32), household)
-            * (config.coverage + config.ring),
+        ledger.number(Field::FoodNeed, household) * (config.coverage + config.ring),
         0,
     );
-    let excess = positive(
-        value(state, config, comptime!(Field::Bread as u32), household),
-        reserve,
-    );
-    let sales = value(state, config, comptime!(Field::Sales as u32), household);
+    let excess = positive(ledger.value(Field::Bread, household), reserve);
+    let sales = ledger.value(Field::Sales, household);
     let multiplier = select(
         lt(excess, sales),
         PRICE_SCALE + PRICE_SCALE / 20,
@@ -809,58 +505,33 @@ pub(super) fn household_quote(
             PRICE_SCALE,
         ),
     );
-    pricing::adjust(state, config, control, household, multiplier);
+    pricing::adjust(ledger, control, household, multiplier);
 }
 
 #[cube]
-pub(super) fn expand(
-    state: &mut [u32],
-    actors: &[u32],
-    config: &EconomyConfig,
-    control: &[Atomic<u32>],
-    owner: u32,
-) {
-    let owned = number(
-        state,
-        config,
-        comptime!(Field::InvestmentFirm as u32),
-        owner,
-    );
+pub(super) fn expand(economy: &mut EconomyView<'_>, control: &[Atomic<u32>], owner: u32) {
+    let config = economy.ledger.config;
+    let owned = economy.ledger.number(Field::InvestmentFirm, owner);
     if owned > 0 {
         let firm = owned - 1;
-        let capacity =
-            actors[ActorLayout::CAPACITY * (actors.len() / ActorLayout::WORDS) + firm as usize];
-        let status = number(
-            state,
-            config,
-            comptime!(Field::EnterpriseStatus as u32),
-            firm,
-        );
+        let capacity = economy.actors.capacity(firm);
+        let status = economy.ledger.number(Field::EnterpriseStatus, firm);
         let operating = status == comptime!(EnterpriseState::Operating as u32);
-        let added_workers =
-            comptime!(match config.property_mode {
-                Feature::Disabled => 1u32,
-                Feature::Enabled => 0u32,
-            }) + number(state, config, comptime!(Field::WorkersPerPlot as u32), firm);
-        let busy = number(state, config, comptime!(Field::Slots as u32), firm) == 0
-            && number(state, config, comptime!(Field::Plan as u32), firm) >= capacity;
-        let target = times32(
-            capacity,
-            number(state, config, comptime!(Field::OutputTicks as u32), firm),
-        );
-        let demand = value(state, config, comptime!(Field::Demand as u32), firm);
-        let tools = value(state, config, comptime!(Field::Tools as u32), firm);
-        let wood = value(state, config, comptime!(Field::Wood as u32), firm);
+        let added_workers = comptime!(match config.property_mode {
+            Feature::Disabled => 1u32,
+            Feature::Enabled => 0u32,
+        }) + economy.ledger.number(Field::WorkersPerPlot, firm);
+        let busy = economy.ledger.number(Field::Slots, firm) == 0
+            && economy.ledger.number(Field::Plan, firm) >= capacity;
+        let target = times32(capacity, economy.ledger.number(Field::OutputTicks, firm));
+        let demand = economy.ledger.value(Field::Demand, firm);
+        let tools = economy.ledger.value(Field::Tools, firm);
+        let wood = economy.ledger.value(Field::Wood, firm);
         let funded = !lt(
-            value(state, config, comptime!(Field::Cash as u32), firm),
+            economy.ledger.value(Field::Cash, firm),
             add_checked(
                 control,
-                value(
-                    state,
-                    config,
-                    comptime!(Field::OperatingReserve as u32),
-                    firm,
-                ),
+                economy.ledger.value(Field::OperatingReserve, firm),
                 times32(
                     comptime!(match config.property_mode {
                         Feature::Disabled => 720u32,
@@ -871,114 +542,70 @@ pub(super) fn expand(
                     select(
                         comptime!(config.property_mode == Feature::Enabled),
                         1,
-                        number(state, config, comptime!(Field::Wage as u32), firm),
+                        economy.ledger.number(Field::Wage, firm),
                     ),
                 ),
             ),
         );
-        let interested = expands(state, actors, config, firm);
+        let interested = expands(&*economy, firm);
         if operating
             && interested
-            && kind(actors, firm).bits() != comptime!(Good::Housing as u32)
-            && kind(actors, firm).bits() != comptime!(Good::Railway as u32)
+            && economy.actors.kind(firm).bits() != comptime!(Good::Housing as u32)
+            && economy.actors.kind(firm).bits() != comptime!(Good::Railway as u32)
             && busy
             && lt(target, demand)
             && funded
             && capacity + added_workers <= 10_000
             && (comptime!(config.property_mode == Feature::Enabled)
                 || (!lt(tools, ticks(2, 0)) && !lt(wood, ticks(5, 0))))
-            && property::authorized(state, config, firm, owner)
-            && number(
-                state,
-                config,
-                comptime!(Field::ConstructionRemaining as u32),
-                firm,
-            ) == 0
-            && number(
-                state,
-                config,
-                comptime!(Field::PendingCapacity as u32),
-                firm,
-            ) == 0
+            && property::authorized(&economy.ledger, firm, owner)
+            && economy.ledger.number(Field::ConstructionRemaining, firm) == 0
+            && economy.ledger.number(Field::PendingCapacity, firm) == 0
         {
             if comptime!(config.property_mode == Feature::Disabled) {
-                set(
-                    state,
-                    config,
-                    comptime!(Field::Tools as u32),
-                    firm,
-                    minus(tools, ticks(2, 0)),
-                );
-                set(
-                    state,
-                    config,
-                    comptime!(Field::Wood as u32),
-                    firm,
-                    minus(wood, ticks(5, 0)),
-                );
-                increase(
-                    state,
-                    config,
+                economy
+                    .ledger
+                    .set(Field::Tools, firm, minus(tools, ticks(2, 0)));
+                economy
+                    .ledger
+                    .set(Field::Wood, firm, minus(wood, ticks(5, 0)));
+                economy.ledger.increase_at(
                     control,
                     USED_FIELDS as u32 + comptime!(Good::Tools as u32) - 1,
                     firm,
                     ticks(2, 0),
                 );
-                increase(
-                    state,
-                    config,
+                economy.ledger.increase_at(
                     control,
                     USED_FIELDS as u32 + comptime!(Good::Wood as u32) - 1,
                     firm,
                     ticks(5, 0),
                 );
-                increase(
-                    state,
-                    config,
-                    control,
-                    comptime!(Field::Used as u32),
-                    firm,
-                    ticks(7, 0),
-                );
-                increase(
-                    state,
-                    config,
-                    control,
-                    comptime!(Field::InstalledCapital as u32),
-                    firm,
-                    ticks(7, 0),
-                );
+                economy
+                    .ledger
+                    .increase(control, Field::Used, firm, ticks(7, 0));
+                economy
+                    .ledger
+                    .increase(control, Field::InstalledCapital, firm, ticks(7, 0));
             }
             if comptime!(config.property_mode == Feature::Enabled) {
-                set32(
-                    state,
-                    config,
-                    comptime!(Field::RequestedPlots as u32),
-                    firm,
-                    1,
-                );
-                set32(
-                    state,
-                    config,
-                    comptime!(Field::ProjectStatus as u32),
+                economy.ledger.set_number(Field::RequestedPlots, firm, 1);
+                economy.ledger.set_number(
+                    Field::ProjectStatus,
                     firm,
                     comptime!(crate::domain::property::ProjectStatus::Requested as u32),
                 );
             }
-            set32(
-                state,
-                config,
-                comptime!(Field::ConstructionRemaining as u32),
+            economy.ledger.set_number(
+                Field::ConstructionRemaining,
                 firm,
                 comptime!(match config.property_mode {
                     Feature::Disabled => 720u32,
                     Feature::Enabled => crate::domain::property::CONSTRUCTION_WORK_PER_PLOT,
                 }),
             );
-            set32(
-                state,
-                config,
-                comptime!(Field::PendingCapacity as u32),
+            economy.ledger.set_number(
+                Field::PendingCapacity,
                 firm,
                 comptime!(match config.property_mode {
                     Feature::Disabled => 1u32,
@@ -990,24 +617,19 @@ pub(super) fn expand(
 }
 
 #[cube]
-pub(super) fn expands(
-    state: &mut [u32],
-    actors: &[u32],
-    config: &EconomyConfig,
-    firm: u32,
-) -> bool {
-    let count = actors.len() / ActorLayout::WORDS;
-    let workers = actors[ActorLayout::CAPACITY * count + firm as usize];
+pub(super) fn expands(economy: &EconomyView<'_>, firm: u32) -> bool {
+    let config = economy.ledger.config;
+    let workers = economy.actors.capacity(firm);
     let homes = times32(
-        number(state, config, comptime!(Field::OccupiedPlots as u32), firm),
-        number(state, config, comptime!(Field::OutputTicks as u32), firm),
+        economy.ledger.number(Field::OccupiedPlots, firm),
+        economy.ledger.number(Field::OutputTicks, firm),
     );
     let capacity = select(
-        kind(actors, firm).bits() == comptime!(Good::Housing as u32),
+        economy.actors.kind(firm).bits() == comptime!(Good::Housing as u32),
         homes,
         ticks(workers, 0),
     );
-    let draw = actors[ActorLayout::EXPANSION_DRAW * count + firm as usize];
+    let draw = economy.actors.expansion_draw(firm);
     draw < select(
         !lt(capacity, ticks(20, 0)),
         config.industrial_expansion,

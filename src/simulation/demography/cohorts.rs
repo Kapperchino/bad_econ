@@ -6,7 +6,7 @@ use crate::domain::{
 use crate::simulation::{
     Device,
     configuration::{Configuration, EconomyConfig},
-    layout::ActorLayout,
+    state::*,
     system::AsBufferArg,
     words::*,
 };
@@ -44,93 +44,62 @@ fn share(amount: u32, subgroup: u32, population: u32, seed: u32, stream: u32) ->
 
 #[cube]
 pub(super) fn advance(
-    state: &mut [u32],
-    actors: &[u32],
-    config: &EconomyConfig,
+    economy: &mut EconomyView<'_>,
     policy: &DemographyPolicy,
     samples: &[f32],
     row: u32,
 ) {
-    let living = get(state, config, comptime!(Field::LivingMembers as u32), row);
+    let config = economy.ledger.config;
+    let living = economy.ledger.number(Field::LivingMembers, row);
     if living > 0 {
         let seed = u32::cast_from(samples[row as usize] * 16777216.0);
-        let food = get(state, config, comptime!(Field::NutritionNeed as u32), row);
-        let eaten = get(state, config, comptime!(Field::FoodNeed as u32), row)
-            - get(state, config, comptime!(Field::Shortage as u32), row);
+        let food = economy.ledger.number(Field::NutritionNeed, row);
+        let eaten = economy.ledger.number(Field::FoodNeed, row)
+            - economy.ledger.number(Field::Shortage, row);
         let deficit = (food - min(food, eaten)) * 1000 / max(food, 1);
         let heat = living * (max(config.heating_per_person, 2) - 2);
-        let supplied = get(state, config, comptime!(Field::HeatingServed as u32), row);
+        let supplied = economy.ledger.number(Field::HeatingServed, row);
         let freezing = (heat - min(heat, supplied)) * 1000 / max(heat, 1);
         let hunger = famine_exposure(
-            get(
-                state,
-                config,
-                comptime!(Field::CohortFamineExposure as u32),
-                row,
-            ),
+            economy.ledger.number(Field::CohortFamineExposure, row),
             deficit,
             policy.parameters.recovery,
         );
         let cold = cold_exposure(
-            get(
-                state,
-                config,
-                comptime!(Field::CohortColdExposure as u32),
-                row,
-            ),
+            economy.ledger.number(Field::CohortColdExposure, row),
             freezing,
             policy.parameters.recovery,
         );
-        put(
-            state,
-            config,
-            comptime!(Field::CohortFamineExposure as u32),
-            row,
-            hunger,
-        );
-        put(
-            state,
-            config,
-            comptime!(Field::CohortColdExposure as u32),
-            row,
-            cold,
-        );
+        economy
+            .ledger
+            .set_number(Field::CohortFamineExposure, row, hunger);
+        economy
+            .ledger
+            .set_number(Field::CohortColdExposure, row, cold);
 
-        let paid = get(state, config, comptime!(Field::Employed as u32), row);
-        let employer = get(state, config, comptime!(Field::Employer as u32), row);
-        let adults = get(state, config, comptime!(Field::YoungAdults as u32), row)
-            + get(state, config, comptime!(Field::OlderAdults as u32), row);
-        let fatigue = get(state, config, comptime!(Field::Fatigue as u32), row);
+        let paid = economy.ledger.number(Field::Employed, row);
+        let employer = economy.ledger.number(Field::Employer, row);
+        let adults = economy.ledger.number(Field::YoungAdults, row)
+            + economy.ledger.number(Field::OlderAdults, row);
+        let fatigue = economy.ledger.number(Field::Fatigue, row);
         let mut occupational = 0u64;
         if employer > 0 && paid > 0 {
             let firm = employer - 1;
-            let good =
-                actors[ActorLayout::KIND * (actors.len() / ActorLayout::WORDS) + firm as usize];
-            let shift = get(state, config, comptime!(Field::Hours as u32), row) / paid;
+            let good = economy.actors.kind(firm).bits();
+            let shift = economy.ledger.number(Field::Hours, row) / paid;
             occupational = wide(occupation(
                 policy.occupational[good as usize - 1],
                 shift,
                 policy.parameters.reference_minutes,
-                get(
-                    state,
-                    config,
-                    comptime!(Field::EquipmentCondition as u32),
-                    firm,
-                ),
-                get(
-                    state,
-                    config,
-                    comptime!(Field::SafetyProvision as u32),
-                    firm,
-                ),
+                economy.ledger.number(Field::EquipmentCondition, firm),
+                economy.ledger.number(Field::SafetyProvision, firm),
                 fatigue,
-                get(state, config, comptime!(Field::ActiveMethod as u32), firm),
+                economy.ledger.number(Field::ActiveMethod, firm),
             )) * u64::cast_from(paid)
                 / u64::cast_from(max(adults, 1));
         }
-        let home = get(state, config, comptime!(Field::HomeMinutes as u32), row) / max(adults, 1);
-        let cartage =
-            get(state, config, comptime!(Field::CartageMinutes as u32), row) / max(adults, 1);
+        let home = economy.ledger.number(Field::HomeMinutes, row) / max(adults, 1);
+        let cartage = economy.ledger.number(Field::CartageMinutes, row) / max(adults, 1);
         occupational += wide(occupation(
             policy.occupational[comptime!(crate::domain::Good::Railway as usize - 1)],
             cartage,
@@ -149,7 +118,7 @@ pub(super) fn advance(
             fatigue,
             0,
         ));
-        let supported = family_support(state, config, row, food + config.household_need) == 0
+        let supported = family_support(&economy.ledger, row, food + config.household_need) == 0
             && (comptime!(config.economy == crate::domain::Economy::Agrarian)
                 || max(hunger, cold) == 0);
         let mut survivors = 0u32;
@@ -161,7 +130,7 @@ pub(super) fn advance(
         let middle = min(45 * DAYS_PER_YEAR, retirement);
         for band in 0..5u32 {
             let field = comptime!(Field::Infants as u32) + band;
-            let count = get(state, config, field, row);
+            let count = economy.ledger.number_at(field, row);
             let mut remaining = count;
             let mut cumulative = 0u64;
             let mut allocated = 0u32;
@@ -184,14 +153,13 @@ pub(super) fn advance(
                 let total = events(count, cumulative, seed, band);
                 let died = total - allocated;
                 allocated = total;
-                let coordinate =
-                    (comptime!(Field::BackgroundDeaths as u32) + cause) * config.state_stride + row;
-                let deaths = plus(load(state, coordinate), ticks(died, 0)).value;
-                store(state, coordinate, deaths);
+                let field = comptime!(Field::BackgroundDeaths as u32) + cause;
+                let deaths = plus(economy.ledger.value_at(field, row), ticks(died, 0)).value;
+                economy.ledger.set_at(field, row, deaths);
                 remaining -= died;
             }
             let female_field = comptime!(Field::FemaleInfants as u32) + band;
-            let female = get(state, config, female_field, row);
+            let female = economy.ledger.number_at(female_field, row);
             let surviving_female = share(remaining, female, count, seed, band + 12);
             let duration = match band {
                 0 => DAYS_PER_YEAR,
@@ -213,12 +181,7 @@ pub(super) fn advance(
             let retained_female = surviving_female - aging_female;
             let female_occupants = retained_female + incoming_female;
             if band == 2 {
-                let recovering = get(
-                    state,
-                    config,
-                    comptime!(Field::RecoveringMothers as u32),
-                    row,
-                );
+                let recovering = economy.ledger.number(Field::RecoveringMothers, row);
                 let retained = share(retained_female, recovering, female, seed, 22);
                 let recovered = events(
                     retained,
@@ -235,64 +198,43 @@ pub(super) fn advance(
                     events(retained_female - waiting, fertility, seed, 11),
                     0,
                 );
-                put(
-                    state,
-                    config,
-                    comptime!(Field::RecoveringMothers as u32),
-                    row,
-                    waiting + births,
-                );
+                economy
+                    .ledger
+                    .set_number(Field::RecoveringMothers, row, waiting + births);
             }
             let occupants = remaining - aging + incoming;
             let bypass = band == 3 && retirement == middle;
-            put(state, config, field, row, select(bypass, 0, occupants));
-            put(
-                state,
-                config,
-                female_field,
-                row,
-                select(bypass, 0, female_occupants),
-            );
+            economy
+                .ledger
+                .set_number_at(field, row, select(bypass, 0, occupants));
+            economy
+                .ledger
+                .set_number_at(female_field, row, select(bypass, 0, female_occupants));
             incoming_female = select(bypass, aging_female + female_occupants, aging_female);
             incoming = select(bypass, aging + occupants, aging);
             survivors += remaining;
         }
-        let infants = get(state, config, comptime!(Field::Infants as u32), row) + births;
-        put(
-            state,
-            config,
-            comptime!(Field::Infants as u32),
-            row,
-            infants,
-        );
-        let female_infants = get(state, config, comptime!(Field::FemaleInfants as u32), row)
+        let infants = economy.ledger.number(Field::Infants, row) + births;
+        economy.ledger.set_number(Field::Infants, row, infants);
+        let female_infants = economy.ledger.number(Field::FemaleInfants, row)
             + events(births, comptime!(PROBABILITY_SCALE / 2), seed, 24);
-        put(
-            state,
-            config,
-            comptime!(Field::FemaleInfants as u32),
-            row,
-            female_infants,
-        );
-        let coordinate = comptime!(Field::CohortBirths as u32) * config.state_stride + row;
-        let born = plus(load(state, coordinate), ticks(births, 0)).value;
-        store(state, coordinate, born);
-        put(
-            state,
-            config,
-            comptime!(Field::LivingMembers as u32),
-            row,
-            survivors + births,
-        );
-        let workers = get(state, config, comptime!(Field::YoungAdults as u32), row)
-            + get(state, config, comptime!(Field::OlderAdults as u32), row);
-        put(
-            state,
-            config,
-            comptime!(Field::CohortDelegate as u32),
-            row,
-            u32::cast_from(workers > 0),
-        );
+        economy
+            .ledger
+            .set_number(Field::FemaleInfants, row, female_infants);
+        let born = plus(
+            economy.ledger.value(Field::CohortBirths, row),
+            ticks(births, 0),
+        )
+        .value;
+        economy.ledger.set(Field::CohortBirths, row, born);
+        economy
+            .ledger
+            .set_number(Field::LivingMembers, row, survivors + births);
+        let workers = economy.ledger.number(Field::YoungAdults, row)
+            + economy.ledger.number(Field::OlderAdults, row);
+        economy
+            .ledger
+            .set_number(Field::CohortDelegate, row, u32::cast_from(workers > 0));
     }
 }
 
@@ -300,6 +242,7 @@ const METRICS: usize = 16;
 
 #[cube(launch)]
 fn observe(state: &mut [u32], config: &EconomyConfig, output: &mut [u64], #[comptime] lanes: u32) {
+    let ledger = Ledger::new(state, config);
     let row = ABSOLUTE_POS as u32;
     let mut totals = Array::<u64>::new(METRICS);
     #[unroll]
@@ -307,63 +250,37 @@ fn observe(state: &mut [u32], config: &EconomyConfig, output: &mut [u64], #[comp
         totals[metric] = 0;
     }
     if row < config.actors {
-        let living = get(state, config, comptime!(Field::LivingMembers as u32), row);
-        let adults = get(state, config, comptime!(Field::YoungAdults as u32), row)
-            + get(state, config, comptime!(Field::OlderAdults as u32), row);
-        let investment = get(state, config, comptime!(Field::InvestmentFirm as u32), row);
+        let living = ledger.number(Field::LivingMembers, row);
+        let adults =
+            ledger.number(Field::YoungAdults, row) + ledger.number(Field::OlderAdults, row);
+        let investment = ledger.number(Field::InvestmentFirm, row);
         let owner = u32::cast_from(
             adults > 0
                 && investment > 0
-                && get(
-                    state,
-                    config,
-                    comptime!(Field::EnterpriseStatus as u32),
-                    max(investment, 1) - 1,
-                ) < 4,
+                && ledger.number(Field::EnterpriseStatus, max(investment, 1) - 1) < 4,
         );
-        let farmers = select(
-            get(state, config, comptime!(Field::LandPlots as u32), row) > 0,
-            adults - owner,
-            0,
-        );
+        let farmers = select(ledger.number(Field::LandPlots, row) > 0, adults - owner, 0);
         let paid = min(
-            get(state, config, comptime!(Field::Employed as u32), row),
+            ledger.number(Field::Employed, row),
             adults - owner - farmers,
         );
         totals[0usize] = u64::cast_from(living);
         totals[1usize] = u64::cast_from(living - adults);
         for metric in 0..5u32 {
-            totals[2 + metric as usize] = wide(load(
-                state,
-                (comptime!(Field::CohortBirths as u32) + metric) * config.state_stride + row,
-            ));
+            totals[2 + metric as usize] =
+                wide(ledger.value_at(comptime!(Field::CohortBirths as u32) + metric, row));
         }
-        totals[7usize] = u64::cast_from(get(state, config, comptime!(Field::Hours as u32), row))
+        totals[7usize] = u64::cast_from(ledger.number(Field::Hours, row))
             + u64::cast_from(select(
-                get(state, config, comptime!(Field::HouseholdBudget as u32), row) > 0,
-                get(state, config, comptime!(Field::CartageMinutes as u32), row),
+                ledger.number(Field::HouseholdBudget, row) > 0,
+                ledger.number(Field::CartageMinutes, row),
                 0,
             ))
-            + u64::cast_from(get(
-                state,
-                config,
-                comptime!(Field::HomeMinutes as u32),
-                row,
-            ));
+            + u64::cast_from(ledger.number(Field::HomeMinutes, row));
         totals[8usize] = u64::cast_from(living)
-            * u64::cast_from(get(
-                state,
-                config,
-                comptime!(Field::CohortFamineExposure as u32),
-                row,
-            ));
-        totals[9usize] = u64::cast_from(living)
-            * u64::cast_from(get(
-                state,
-                config,
-                comptime!(Field::CohortColdExposure as u32),
-                row,
-            ));
+            * u64::cast_from(ledger.number(Field::CohortFamineExposure, row));
+        totals[9usize] =
+            u64::cast_from(living) * u64::cast_from(ledger.number(Field::CohortColdExposure, row));
         totals[10usize] = u64::cast_from(farmers);
         totals[11usize] = u64::cast_from(paid);
         totals[12usize] = u64::cast_from(owner);

@@ -2,6 +2,7 @@ use super::{DemographyPolicy, PopulationModel, Stage, WorkerRemapping, kernels};
 use crate::simulation::{
     configuration::EconomyConfig,
     pass::GpuPass,
+    state::{EconomyView, Ledger},
     system::{System, gpu_passes},
 };
 use cubecl::prelude::*;
@@ -37,9 +38,7 @@ impl GpuPass<DemographyInput> for AdvanceHouseholds {
 
     fn execute(mut input: DemographyInput) {
         kernels::step(
-            &mut input.state,
-            &input.actors,
-            &input.config,
+            &mut EconomyView::new(&mut input.state, &input.actors, &input.config),
             &mut input.people,
             &input.ranges,
             &input.policy,
@@ -77,8 +76,7 @@ impl GpuPass<PopulationInput> for CountPopulation {
     fn execute(mut input: PopulationInput) {
         kernels::observe(
             &input.people,
-            &mut input.state,
-            &input.config,
+            &Ledger::new(&mut input.state, &input.config),
             &input.policy,
             &input.output,
             input.count,

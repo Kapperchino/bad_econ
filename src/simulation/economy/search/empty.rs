@@ -277,7 +277,7 @@ pub(super) fn sort_scalar(
 
 #[cube]
 fn write_bound_scalar(
-    actors: &[u32],
+    actors: &ActorTable<'_>,
     config: &EconomyConfig,
     spatial: &[u32],
     scratch: &mut [u32],
@@ -303,9 +303,8 @@ fn write_bound_scalar(
         }
         if supply.producer && !supply.offered && supply.quote > 0 {
             let actor = spatial[(cells + 1 + member) as usize];
-            let stride = actors.len() / ActorLayout::WORDS;
-            let x = actors[ActorLayout::X * stride + actor as usize];
-            let y = actors[ActorLayout::Y * stride + actor as usize];
+            let x = actors.x(actor);
+            let y = actors.y(actor);
             price = min(price, supply.quote);
             min_x = min(min_x, x);
             max_x = max(max_x, x);
@@ -331,7 +330,7 @@ fn write_bound_scalar(
 
 #[cube]
 fn write_bound_plane(
-    actors: &[u32],
+    actors: &ActorTable<'_>,
     config: &EconomyConfig,
     spatial: &[u32],
     scratch: &mut [u32],
@@ -358,9 +357,8 @@ fn write_bound_plane(
         }
         if supply.producer && !supply.offered && supply.quote > 0 {
             let actor = spatial[(cells + 1 + member) as usize];
-            let stride = actors.len() / ActorLayout::WORDS;
-            let x = actors[ActorLayout::X * stride + actor as usize];
-            let y = actors[ActorLayout::Y * stride + actor as usize];
+            let x = actors.x(actor);
+            let y = actors.y(actor);
             price = min(price, supply.quote);
             min_x = min(min_x, x);
             max_x = max(max_x, x);
@@ -397,7 +395,7 @@ fn write_bound_plane(
 
 #[cube]
 fn write_bound(
-    actors: &[u32],
+    actors: &ActorTable<'_>,
     config: &EconomyConfig,
     spatial: &[u32],
     scratch: &mut [u32],
@@ -439,7 +437,7 @@ pub(super) fn stocked_count(config: &EconomyConfig, scratch: &[u32], count: u32)
 
 #[cube]
 pub(super) fn bounds(
-    actors: &[u32],
+    actors: &ActorTable<'_>,
     config: &EconomyConfig,
     spatial: &[u32],
     scratch: &mut [u32],
@@ -541,7 +539,7 @@ fn possible(
 
 #[cube]
 fn visit(
-    actors: &[u32],
+    actors: &ActorTable<'_>,
     config: &EconomyConfig,
     spatial: &[u32],
     scratch: &[u32],
@@ -564,9 +562,8 @@ fn visit(
             && seller != buyer.actor
             && !lt(buyer.cash, ticks(supply.quote, 0))
         {
-            let stride = actors.len() / ActorLayout::WORDS;
-            let sx = actors[ActorLayout::X * stride + seller as usize];
-            let sy = actors[ActorLayout::Y * stride + seller as usize];
+            let sx = actors.x(seller);
+            let sy = actors.y(seller);
             let distance =
                 max(buyer.x, sx) - min(buyer.x, sx) + max(buyer.y, sy) - min(buyer.y, sy);
             let mut cell = 0u32;
@@ -635,7 +632,7 @@ fn visit(
 
 #[cube]
 fn query_with_cache(
-    actors: &[u32],
+    actors: &ActorTable<'_>,
     config: &EconomyConfig,
     spatial: &[u32],
     scratch: &[u32],
@@ -748,7 +745,7 @@ fn query_with_cache(
 
 #[cube]
 pub(super) fn query(
-    actors: &[u32],
+    actors: &ActorTable<'_>,
     config: &EconomyConfig,
     spatial: &[u32],
     scratch: &[u32],
@@ -779,7 +776,7 @@ pub(super) fn query(
 
 #[cube]
 fn cached_offer(
-    actors: &[u32],
+    actors: &ActorTable<'_>,
     config: &EconomyConfig,
     spatial: &[u32],
     cache: &[u32],
@@ -831,14 +828,14 @@ fn cached_offer(
     let mut trip = 0u32;
     if chosen < count {
         actor = spatial[(2 + chosen) as usize];
-        trip = distance(actors, buyer, actor);
+        trip = actors.distance(buyer, actor);
     }
     Offer { actor, trip }
 }
 
 #[cube]
 pub(super) fn cached_query(
-    actors: &[u32],
+    actors: &ActorTable<'_>,
     config: &EconomyConfig,
     spatial: &[u32],
     scratch: &[u32],

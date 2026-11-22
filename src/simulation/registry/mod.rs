@@ -9,6 +9,7 @@ use super::{
     Device, enterprise,
     layout::ActorLayout as A,
     pass::GpuPass,
+    state::{ActorMetadata, ActorMetadataExpand, EconomyView, ReadLedger, ReadLedgerExpand},
     system::{AsBufferArg, System, gpu_passes},
     words::*,
 };
@@ -213,14 +214,13 @@ enum Stage {
 )]
 #[cube]
 fn transition(
-    state: &mut [u32],
-    actors: &[u32],
-    config: &EconomyConfig,
+    economy: &mut EconomyView<'_>,
     requests: &[u32],
     incoming: &[Atomic<u32>],
     day: u32,
     #[comptime] stage: Stage,
 ) {
+    let config = economy.ledger.config;
     let actor = ABSOLUTE_POS as u32;
     let count = config.actors;
     if actor < count {
@@ -235,81 +235,41 @@ fn transition(
         }
         if comptime!(stage == Stage::Apply) {
             let received = times32(incoming[actor as usize].load(), 100);
-            let cash = load(
-                state,
-                comptime!(Field::Cash as u32) * config.state_stride + actor,
-            );
+            let cash = economy.ledger.value(Field::Cash, actor);
             let available = plus(cash, received).value;
             let moving_cost = select(kind == 2, ticks(100, 0), zero());
-            store(
-                state,
-                comptime!(Field::Cash as u32) * config.state_stride + actor,
-                minus(available, moving_cost),
-            );
+            economy
+                .ledger
+                .set(Field::Cash, actor, minus(available, moving_cost));
             if kind == 2 {
                 let destination = (action & 0x00ffffff) - 1;
-                let stride = actors.len() / A::WORDS;
-                let x = actors[A::X * stride + actor as usize];
-                let y = actors[A::Y * stride + actor as usize];
+                let x = economy.actors.x(actor);
+                let y = economy.actors.y(actor);
                 let arrived = requests[destination as usize] >> 24 == 3 && destination < actor;
                 let dx = select(
                     arrived,
-                    load(
-                        state,
-                        comptime!(Field::MoveX as u32) * config.state_stride + destination,
-                    )
-                    .extract(0usize),
-                    actors[A::X * stride + destination as usize],
+                    economy.ledger.number(Field::MoveX, destination),
+                    economy.actors.x(destination),
                 );
                 let dy = select(
                     arrived,
-                    load(
-                        state,
-                        comptime!(Field::MoveY as u32) * config.state_stride + destination,
-                    )
-                    .extract(0usize),
-                    actors[A::Y * stride + destination as usize],
+                    economy.ledger.number(Field::MoveY, destination),
+                    economy.actors.y(destination),
                 );
                 let distance = max(x, dx) - min(x, dx) + max(y, dy) - min(y, dy);
                 let speed = config.shipment_speed;
                 let duration = max((distance + speed - 1) / speed, 1);
-                store(
-                    state,
-                    comptime!(Field::PreviousX as u32) * config.state_stride + actor,
-                    ticks(x, 0),
-                );
-                store(
-                    state,
-                    comptime!(Field::PreviousY as u32) * config.state_stride + actor,
-                    ticks(y, 0),
-                );
-                store(
-                    state,
-                    comptime!(Field::MoveX as u32) * config.state_stride + actor,
-                    ticks(dx, 0),
-                );
-                store(
-                    state,
-                    comptime!(Field::MoveY as u32) * config.state_stride + actor,
-                    ticks(dy, 0),
-                );
-                store(
-                    state,
-                    comptime!(Field::MoveDue as u32) * config.state_stride + actor,
-                    ticks(day + duration, 0),
-                );
+                economy.ledger.set_number(Field::PreviousX, actor, x);
+                economy.ledger.set_number(Field::PreviousY, actor, y);
+                economy.ledger.set_number(Field::MoveX, actor, dx);
+                economy.ledger.set_number(Field::MoveY, actor, dy);
+                economy
+                    .ledger
+                    .set_number(Field::MoveDue, actor, day + duration);
             }
             if kind == 3 || kind == 10 {
-                store(
-                    state,
-                    comptime!(Field::MoveDue as u32) * config.state_stride + actor,
-                    zero(),
-                );
-                store(
-                    state,
-                    comptime!(Field::MoveTarget as u32) * config.state_stride + actor,
-                    zero(),
-                );
+                economy.ledger.set(Field::MoveDue, actor, zero());
+                economy.ledger.set(Field::MoveTarget, actor, zero());
             }
             if (kind == 3 || kind == 10)
                 && comptime!(
@@ -317,28 +277,16 @@ fn transition(
                         || config.economy == crate::domain::Economy::Industrial
                 )
             {
-                store(
-                    state,
-                    comptime!(Field::LandPlots as u32) * config.state_stride + actor,
-                    zero(),
-                );
-                store(
-                    state,
-                    comptime!(Field::CropWork as u32) * config.state_stride + actor,
-                    zero(),
-                );
+                economy.ledger.set(Field::LandPlots, actor, zero());
+                economy.ledger.set(Field::CropWork, actor, zero());
             }
             if kind == 6 {
-                store(
-                    state,
-                    comptime!(Field::PendingCapacity as u32) * config.state_stride + actor,
-                    zero(),
-                );
+                economy.ledger.set(Field::PendingCapacity, actor, zero());
             }
             if kind == 5 {
-                store(
-                    state,
-                    comptime!(Field::EstateSettled as u32) * config.state_stride + actor,
+                economy.ledger.set(
+                    Field::EstateSettled,
+                    actor,
                     ticks(
                         comptime!(crate::domain::enterprise::EstateStatus::Unclaimed as u32),
                         0,

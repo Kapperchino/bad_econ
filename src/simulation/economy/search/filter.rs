@@ -10,14 +10,14 @@ pub(super) fn prefix_slot(successes: &[Atomic<u32>], count: u32, peer: u32) -> u
 
 #[cube]
 pub(super) fn sample_order(
-    state: &mut [u32],
-    config: &EconomyConfig,
+    ledger: &Ledger<'_>,
     successes: &[Atomic<u32>],
     parameters: &EconomyParameters,
     actor: u32,
     seller: u32,
     quantity: Ticks,
 ) {
+    let config = ledger.config;
     let position = (actor + config.actors - parameters.settlement_rotation) % config.actors;
     let units = quantity.extract(LOW_WORD);
     if position < comptime!(PREFIX_BUYERS)
@@ -25,14 +25,8 @@ pub(super) fn sample_order(
         && units > 0
         && units <= u32::MAX / comptime!(PREFIX_BUYERS)
     {
-        let cost = times32(
-            units,
-            number(state, config, comptime!(Field::Price as u32), seller),
-        );
-        if !lt(
-            value(state, config, comptime!(Field::Cash as u32), actor),
-            cost,
-        ) {
+        let cost = times32(units, ledger.number(Field::Price, seller));
+        if !lt(ledger.value(Field::Cash, actor), cost) {
             let slot = prefix_slot(successes, config.actors, seller);
             successes[slot].fetch_add(units);
             successes[slot + 1].fetch_max(units);
@@ -42,12 +36,12 @@ pub(super) fn sample_order(
 
 #[cube]
 pub(super) fn stock_limits(
-    state: &mut [u32],
-    config: &EconomyConfig,
+    ledger: &Ledger<'_>,
     spatial: &[u32],
     scratch: &[u32],
     successes: &[Atomic<u32>],
 ) {
+    let config = ledger.config;
     let member = ABSOLUTE_POS as u32;
     let cells = config.spatial_side * config.spatial_side;
     if member < spatial[cells as usize] {
@@ -61,8 +55,8 @@ pub(super) fn stock_limits(
         if demand > 0
             && supply.available.extract(HIGH_WORD) == 0
             && supply.quote <= i32::MAX as u32
-            && value(state, config, comptime!(Field::Cash as u32), peer).extract(HIGH_WORD) == 0
-            && value(state, config, comptime!(Field::Sales as u32), peer).extract(HIGH_WORD) == 0
+            && ledger.value(Field::Cash, peer).extract(HIGH_WORD) == 0
+            && ledger.value(Field::Sales, peer).extract(HIGH_WORD) == 0
         {
             limit = max(stock - min(demand, stock), largest - 1);
         }
@@ -73,9 +67,7 @@ pub(super) fn stock_limits(
 
 #[cube]
 fn empty_order(
-    state: &mut [u32],
-    actors: &[u32],
-    config: &EconomyConfig,
+    economy: &EconomyView<'_>,
     proposals: &[u32],
     parameters: &EconomyParameters,
     actor: u32,
@@ -88,22 +80,27 @@ fn empty_order(
     );
     peer != NO_ACTOR
         && !equal(quantity, zero())
-        && !kind(actors, peer).is(comptime!(ActorKind::Household))
-        && equal(value(state, config, parameters.traded_good(), peer), zero())
-        && super::super::clearing::empty_seller_safe(state, config, parameters, peer)
+        && !economy
+            .actors
+            .kind(peer)
+            .is(comptime!(ActorKind::Household))
+        && equal(
+            economy.ledger.value_at(parameters.traded_good(), peer),
+            zero(),
+        )
+        && super::super::clearing::empty_seller_safe(&economy.ledger, parameters, peer)
 }
 
 #[cube]
 pub(super) fn buyers(
-    state: &mut [u32],
-    actors: &[u32],
-    config: &EconomyConfig,
+    economy: &EconomyView<'_>,
     proposals: &[u32],
     searches: &[u32],
     successes: &[Atomic<u32>],
     control: &[Atomic<u32>],
     parameters: &EconomyParameters,
 ) {
+    let config = economy.ledger.config;
     let position = ABSOLUTE_POS as u32;
     let count = config.actors;
     let mut kept = false;
@@ -121,8 +118,7 @@ pub(super) fn buyers(
                 let units = proposals
                     [actor as usize * ProposalLayout::WORDS + ProposalLayout::QUANTITY_LOW];
                 let exhausted = position >= comptime!(PREFIX_BUYERS) && units > limit;
-                kept = !exhausted
-                    && !empty_order(state, actors, config, proposals, parameters, actor, peer);
+                kept = !exhausted && !empty_order(economy, proposals, parameters, actor, peer);
                 if !kept {
                     successes[markets::filtered_count(count, peer) as usize].fetch_add(1);
                 } else if limit != u32::MAX {
@@ -153,14 +149,13 @@ pub(super) fn buyers(
 
 #[cube]
 pub(super) fn orders(
-    state: &mut [u32],
-    actors: &[u32],
-    config: &EconomyConfig,
+    economy: &EconomyView<'_>,
     proposals: &[u32],
     successes: &[Atomic<u32>],
     control: &[Atomic<u32>],
     parameters: &EconomyParameters,
 ) {
+    let config = economy.ledger.config;
     if comptime!(parameters.empty_orders == EmptyOrderMode::FeedbackOnly)
         && control[markets::WIDE_ORDERS_WORD].load() == 0
         && parameters.traded_good() != comptime!(Good::Bread as u32)
@@ -178,8 +173,7 @@ pub(super) fn orders(
                 let actor = (position + parameters.settlement_rotation) % parameters.count;
                 let base = actor as usize * ProposalLayout::WORDS;
                 let peer = proposals[base + ProposalLayout::ACTOR];
-                let filtered =
-                    empty_order(state, actors, config, proposals, parameters, actor, peer);
+                let filtered = empty_order(economy, proposals, parameters, actor, peer);
                 if filtered {
                     kept &= !(1u32 << bit);
                     successes[markets::filtered_count(config.actors, peer) as usize].fetch_add(1);

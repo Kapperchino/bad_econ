@@ -608,6 +608,7 @@ impl FreightParticipants {
 
 #[cube]
 fn resource(input: &Input, index: u32) -> u32 {
+    let actors = ActorTable::new(&input.actors);
     let cells = input.config.spatial_side * input.config.spatial_side;
     let base = 2 * (cells + 1 + input.config.actors);
     let active = markets::active(&input.control, &input.parameters);
@@ -631,7 +632,7 @@ fn resource(input: &Input, index: u32) -> u32 {
             if slot > 0 {
                 first = input.scratch[(input.parameters.sort_source + slot - 1) as usize] != seller;
             }
-            if first && kind(&input.actors, seller).is(comptime!(ActorKind::Household)) {
+            if first && actors.kind(seller).is(comptime!(ActorKind::Household)) {
                 resource = seller;
             }
         }
@@ -1236,7 +1237,12 @@ fn propose(input: &mut Input, invocation: u32) {
             let seller =
                 input.proposals[buyer as usize * ProposalLayout::WORDS + ProposalLayout::ACTOR];
             let amount = quantity(&*input, buyer);
-            let request = FreightRequest::new(&input.actors, &input.config, buyer, seller);
+            let request = FreightRequest::new(
+                &ActorTable::new(&input.actors),
+                &input.config,
+                buyer,
+                seller,
+            );
             let mut selected = request.animal();
             let quoted = request.quoted_carrier(&input.config);
             let preferred = request.candidate(&input.config, quoted);
@@ -1387,7 +1393,7 @@ fn commit(input: &mut Input, invocation: u32) {
             let seller =
                 input.proposals[buyer as usize * ProposalLayout::WORDS + ProposalLayout::ACTOR];
             let path = candidate(
-                &input.actors,
+                &ActorTable::new(&input.actors),
                 &input.config,
                 buyer,
                 seller,
@@ -1399,55 +1405,29 @@ fn commit(input: &mut Input, invocation: u32) {
                 comptime!(BookingState::Retrying as u32);
             if allowed {
                 let good = input.parameters.traded_good();
-                let animal = animal_route(&input.actors, &input.config, buyer, seller);
+                let animal = animal_route(
+                    &ActorTable::new(&input.actors),
+                    &input.config,
+                    buyer,
+                    seller,
+                );
                 let base = BASE_FIELDS as u32 + (good - 1) * input.config.ring;
                 let old_field = cartage::waiting_field(&input.config, good, animal.days);
-                let payable = value(
-                    &mut input.state,
-                    &input.config,
-                    comptime!(Field::CartagePayable as u32),
-                    buyer,
-                );
+                let mut ledger = Ledger::new(&mut input.state, &input.config);
+                let payable = ledger.value(Field::CartagePayable, buyer);
                 let waived = multiply(
                     &input.control,
                     amount,
                     cartage::rate(&input.config, animal.days),
                 );
-                set(
-                    &mut input.state,
-                    &input.config,
-                    comptime!(Field::CartagePayable as u32),
-                    buyer,
-                    minus(payable, waived),
-                );
-                let waiting = value(
-                    &mut input.state,
-                    &input.config,
-                    comptime!(Field::RoadFreight as u32),
-                    buyer,
-                );
-                set(
-                    &mut input.state,
-                    &input.config,
-                    comptime!(Field::RoadFreight as u32),
-                    buyer,
-                    minus(waiting, amount),
-                );
+                ledger.set(Field::CartagePayable, buyer, minus(payable, waived));
+                let waiting = ledger.value(Field::RoadFreight, buyer);
+                ledger.set(Field::RoadFreight, buyer, minus(waiting, amount));
                 let new_field = base + (input.parameters.day + path.days) % input.config.ring;
-                let old = value(&mut input.state, &input.config, old_field, buyer);
-                let new = add_checked(
-                    &input.control,
-                    value(&mut input.state, &input.config, new_field, buyer),
-                    amount,
-                );
-                set(
-                    &mut input.state,
-                    &input.config,
-                    old_field,
-                    buyer,
-                    minus(old, amount),
-                );
-                set(&mut input.state, &input.config, new_field, buyer, new);
+                let old = ledger.value_at(old_field, buyer);
+                let new = add_checked(&input.control, ledger.value_at(new_field, buyer), amount);
+                ledger.set_at(old_field, buyer, minus(old, amount));
+                ledger.set_at(new_field, buyer, new);
                 let cost = multiply(&input.control, amount, path.fee);
                 consume_resource(&*input, seller, cost);
                 account(&*input, seller, cost, comptime!(Account::Cost));
@@ -1607,19 +1587,14 @@ fn release_resource(input: &mut Input, id: u32) {
     if id >= actors && id < resources {
         let region = id - actors;
         let available = budget(&*input, id);
+        let mut ledger = Ledger::new(&mut input.state, &input.config);
         regional_set(
-            &mut input.state,
-            &input.config,
+            &mut ledger,
             region,
             available,
             comptime!(RailCapacityField::Available),
         );
-        let level = regional_number(
-            &mut input.state,
-            &input.config,
-            region,
-            comptime!(RailCapacityField::Level),
-        );
+        let level = regional_number(&ledger, region, comptime!(RailCapacityField::Level));
         let before = plus(available, atomic_ticks(&input.resources, base + CONSUMED)).value;
         let used = minus(times32(level, input.config.railway.units_per_level), before);
         let wanted = claims::saturated_sum(
@@ -1633,15 +1608,9 @@ fn release_resource(input: &mut Input, id: u32) {
                 ),
             ),
         );
-        let previous = regional_value(
-            &mut input.state,
-            &input.config,
-            region,
-            comptime!(RailCapacityField::Demand),
-        );
+        let previous = regional_value(&ledger, region, comptime!(RailCapacityField::Demand));
         regional_set(
-            &mut input.state,
-            &input.config,
+            &mut ledger,
             region,
             maximum(previous, wanted),
             comptime!(RailCapacityField::Demand),
@@ -1651,6 +1620,7 @@ fn release_resource(input: &mut Input, id: u32) {
 
 #[cube]
 fn settle_account(input: &mut Input, id: u32) {
+    let mut ledger = Ledger::new(&mut input.state, &input.config);
     let actors = input.config.actors;
     if id < actors {
         let offset = id as usize * ACCOUNT_WORDS;
@@ -1661,50 +1631,14 @@ fn settle_account(input: &mut Input, id: u32) {
         );
         let used = atomic_ticks(&input.accounts, offset + comptime!(Account::Used as usize));
         let sold = atomic_ticks(&input.accounts, offset + comptime!(Account::Sold as usize));
-        let cash = value(
-            &mut input.state,
-            &input.config,
-            comptime!(Field::Cash as u32),
-            id,
-        );
+        let cash = ledger.value(Field::Cash, id);
         let cash = add_checked(&input.control, minus(cash, cost), revenue);
-        set(
-            &mut input.state,
-            &input.config,
-            comptime!(Field::Cash as u32),
-            id,
-            cash,
-        );
-        increase(
-            &mut input.state,
-            &input.config,
-            &input.control,
-            comptime!(Field::RailRevenue as u32),
-            id,
-            revenue,
-        );
-        record_use(&mut input.state, &input.config, &input.control, id, used);
-        let stock = value(
-            &mut input.state,
-            &input.config,
-            comptime!(Field::Railway as u32),
-            id,
-        );
-        set(
-            &mut input.state,
-            &input.config,
-            comptime!(Field::Railway as u32),
-            id,
-            minus(stock, sold),
-        );
-        increase(
-            &mut input.state,
-            &input.config,
-            &input.control,
-            comptime!(Field::Sales as u32),
-            id,
-            sold,
-        );
+        ledger.set(Field::Cash, id, cash);
+        ledger.increase(&input.control, Field::RailRevenue, id, revenue);
+        record_use(&mut ledger, &input.control, id, used);
+        let stock = ledger.value(Field::Railway, id);
+        ledger.set(Field::Railway, id, minus(stock, sold));
+        ledger.increase(&input.control, Field::Sales, id, sold);
     }
 }
 
@@ -1714,6 +1648,7 @@ impl GpuPass<Input> for SettleFreight {
 
     fn execute(mut input: Input) {
         input.parameters.refresh(&mut input.config);
+
         if execution_enabled(&input.progress, &input.control, comptime!(input.execution)) {
             settle_freight(&mut input, ABSOLUTE_POS as u32);
         }
@@ -1748,12 +1683,7 @@ fn settle_freight(input: &mut Input, invocation: u32) {
                 atomic_store(
                     &input.resources,
                     base,
-                    value(
-                        &mut input.state,
-                        &input.config,
-                        comptime!(Field::Cash as u32),
-                        id,
-                    ),
+                    Ledger::new(&mut input.state, &input.config).value(Field::Cash, id),
                 );
             }
         }
@@ -1764,12 +1694,7 @@ fn settle_freight(input: &mut Input, invocation: u32) {
             let base = id as usize * RESOURCE_WORDS;
             reset_resource(&*input, id);
             if id < actors {
-                let cash = value(
-                    &mut input.state,
-                    &input.config,
-                    comptime!(Field::Cash as u32),
-                    id,
-                );
+                let cash = Ledger::new(&mut input.state, &input.config).value(Field::Cash, id);
                 let available = minimum(cash, budget(&*input, id));
                 atomic_store(&input.resources, base, available);
                 for field in 0..ACCOUNT_WORDS {
@@ -1779,8 +1704,7 @@ fn settle_freight(input: &mut Input, invocation: u32) {
             initialize_booking(input, invocation);
             if id >= actors && id < resources {
                 let stock = regional_value(
-                    &mut input.state,
-                    &input.config,
+                    &Ledger::new(&mut input.state, &input.config),
                     id - actors,
                     comptime!(RailCapacityField::Available),
                 );

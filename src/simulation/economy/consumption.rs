@@ -44,18 +44,17 @@ pub(super) fn scaled_luxury(config: &EconomyConfig, good: u32) -> bool {
 }
 
 #[cube]
-pub(super) fn consumers(state: &mut [u32], config: &EconomyConfig, actor: u32) -> u32 {
+pub(super) fn consumers(ledger: &Ledger<'_>, actor: u32) -> u32 {
+    let config = ledger.config;
     match comptime!(config.cohorts) {
-        Feature::Enabled => number(state, config, comptime!(Field::LivingMembers as u32), actor),
+        Feature::Enabled => ledger.number(Field::LivingMembers, actor),
         Feature::Disabled => u32::new(1),
     }
 }
 
 #[cube]
 pub(super) fn durable_target(
-    state: &mut [u32],
-    actors: &[u32],
-    config: &EconomyConfig,
+    economy: &EconomyView<'_>,
     spatial: &[u32],
     control: &[Atomic<u32>],
     parameters: &EconomyParameters,
@@ -63,11 +62,11 @@ pub(super) fn durable_target(
     good: u32,
     budget: Ticks,
 ) -> Ticks {
-    let members = consumers(state, config, household);
+    let config = economy.ledger.config;
+    let members = consumers(&economy.ledger, household);
     if scaled_luxury(config, good) {
-        let quote = pricing::replacement_quote(
-            state, actors, config, spatial, control, parameters, household, good,
-        );
+        let quote =
+            pricing::replacement_quote(economy, spatial, control, parameters, household, good);
         let price = select(quote > 0, quote, config.maximum_price);
         let interval = config.consumption_intervals[good as usize - 1];
         let allowance = multiply(
@@ -101,41 +100,35 @@ pub(super) fn durable_use(
 
 #[cube]
 pub(super) fn preferred_fuel(
-    state: &mut [u32],
-    actors: &[u32],
-    config: &EconomyConfig,
+    economy: &EconomyView<'_>,
     spatial: &[u32],
     parameters: &EconomyParameters,
     household: u32,
     good: u32,
 ) -> u32 {
+    let config = economy.ledger.config;
     let cells = config.spatial_side * config.spatial_side;
     let segment = 2 * (cells + 1 + config.actors);
     let length = spatial[(segment + cells) as usize];
     let rotation = FuelSearchRotation::new(length, parameters.day, household);
-    let cash = value(state, config, comptime!(Field::Cash as u32), household);
+    let cash = economy.ledger.value(Field::Cash, household);
     let mut selected = good;
     let mut best = u32::new(comptime!(i64::from(u32::MAX)));
     for sample in 0..rotation.samples() {
         let rotated = rotation.member(sample);
         let seller = spatial[(segment + cells + 1 + rotated) as usize];
-        let output = kind(actors, seller).output();
+        let output = economy.actors.kind(seller).output();
         let relevant =
             output == comptime!(Good::Coal as u32) || output == comptime!(Good::Wood as u32);
         if relevant {
-            let price = number(state, config, comptime!(Field::Price as u32), seller);
-            let trip = distance(actors, household, seller);
-            let available =
-                number(
-                    state,
-                    config,
-                    comptime!(Field::EnterpriseStatus as u32),
-                    seller,
-                ) < comptime!(crate::domain::enterprise::EnterpriseState::Liquidating as u32)
-                    && household_production::offers(state, actors, config, seller, output)
-                    && trip <= config.search_radius
-                    && price > 0
-                    && !lt(cash, ticks(price, 0));
+            let price = economy.ledger.number(Field::Price, seller);
+            let trip = economy.actors.distance(household, seller);
+            let available = economy.ledger.number(Field::EnterpriseStatus, seller)
+                < comptime!(crate::domain::enterprise::EnterpriseState::Liquidating as u32)
+                && household_production::offers(economy, seller, output)
+                && trip <= config.search_radius
+                && price > 0
+                && !lt(cash, ticks(price, 0));
             let units = select(output == comptime!(Good::Coal as u32), 2u32, 1u32);
             let days = max(ceildiv(trip, config.shipment_speed), 1);
             let score = price * (2 / units) * (config.ring + 1) + days;
@@ -159,13 +152,13 @@ pub(super) fn input_coverage(config: &EconomyConfig, output: u32) -> u32 {
 
 #[cube]
 pub(super) fn budget(
-    state: &mut [u32],
-    config: &EconomyConfig,
+    ledger: &Ledger<'_>,
     control: &[Atomic<u32>],
     household: u32,
     good: u32,
 ) -> Ticks {
-    let cash = value(state, config, comptime!(Field::Cash as u32), household);
+    let config = ledger.config;
+    let cash = ledger.value(Field::Cash, household);
     let basic = select(
         good == comptime!(Good::LuxuryClothes as u32),
         comptime!(Good::Clothes as u32),
@@ -178,16 +171,16 @@ pub(super) fn budget(
     if basic > 0 {
         let stock = add_checked(
             control,
-            value(state, config, basic, household),
-            value(state, config, TRANSIT_FIELDS as u32 + basic - 1, household),
+            ledger.value_at(basic, household),
+            ledger.value_at(TRANSIT_FIELDS as u32 + basic - 1, household),
         );
         let daily = add_checked(
             control,
             times32(
-                food::reserve_daily(state, config, household),
-                number(state, config, comptime!(Field::FoodPrice as u32), household),
+                food::reserve_daily(ledger, household),
+                ledger.number(Field::FoodPrice, household),
             ),
-            times32(config.household_rent, consumers(state, config, household)),
+            times32(config.household_rent, consumers(ledger, household)),
         );
         let reserve = multiply(
             control,
@@ -198,7 +191,7 @@ pub(super) fn budget(
             ),
         );
         select(
-            lt(stock, ticks(consumers(state, config, household), 0)),
+            lt(stock, ticks(consumers(ledger, household), 0)),
             zero(),
             positive(cash, reserve),
         )
@@ -209,60 +202,45 @@ pub(super) fn budget(
 
 #[cube]
 pub(super) fn fuel_target(
-    state: &mut [u32],
-    config: &EconomyConfig,
+    ledger: &Ledger<'_>,
     control: &[Atomic<u32>],
     household: u32,
     good: u32,
 ) -> Ticks {
-    let need = number(
-        state,
-        config,
-        comptime!(Field::HeatingNeed as u32),
-        household,
-    );
-    fuel_stock_target(state, config, control, household, good, need)
+    let need = ledger.number(Field::HeatingNeed, household);
+    fuel_stock_target(ledger, control, household, good, need)
 }
 
 #[cube]
 pub(super) fn fuel_purchase_target(
-    state: &mut [u32],
-    config: &EconomyConfig,
+    ledger: &Ledger<'_>,
     control: &[Atomic<u32>],
     parameters: &EconomyParameters,
     household: u32,
     good: u32,
 ) -> Ticks {
-    let comfort = number(
-        state,
-        config,
-        comptime!(Field::HeatingNeed as u32),
-        household,
-    );
-    let freezing = number(
-        state,
-        config,
-        comptime!(Field::LivingMembers as u32),
-        household,
-    ) * (max(config.heating_per_person, 2) - 2);
+    let config = ledger.config;
+    let comfort = ledger.number(Field::HeatingNeed, household);
+    let freezing =
+        ledger.number(Field::LivingMembers, household) * (max(config.heating_per_person, 2) - 2);
     let need = select(
         comptime!(config.food_income == crate::domain::food::FoodIncome::PurchasingPower)
             && parameters.matching_round + 1 < MATCHING_ROUNDS as u32,
         freezing,
         comfort,
     );
-    fuel_stock_target(state, config, control, household, good, need)
+    fuel_stock_target(ledger, control, household, good, need)
 }
 
 #[cube]
 fn fuel_stock_target(
-    state: &mut [u32],
-    config: &EconomyConfig,
+    ledger: &Ledger<'_>,
     control: &[Atomic<u32>],
     household: u32,
     good: u32,
     need: u32,
 ) -> Ticks {
+    let config = ledger.config;
     let coal = good == comptime!(Good::Coal as u32);
     let other = select(
         coal,
@@ -273,8 +251,8 @@ fn fuel_stock_target(
     let other_units = select(coal, 1u32, 2u32);
     let other_stock = add_checked(
         control,
-        value(state, config, other, household),
-        value(state, config, TRANSIT_FIELDS as u32 + other - 1, household),
+        ledger.value_at(other, household),
+        ledger.value_at(TRANSIT_FIELDS as u32 + other - 1, household),
     );
     let target = times32(need, config.coverage + config.ring - 1);
     let remaining = positive(
@@ -285,33 +263,20 @@ fn fuel_stock_target(
 }
 
 #[cube]
-pub(super) fn heat(
-    state: &mut [u32],
-    config: &EconomyConfig,
-    control: &[Atomic<u32>],
-    household: u32,
-) {
-    let mut need = number(
-        state,
-        config,
-        comptime!(Field::HeatingNeed as u32),
-        household,
-    );
+pub(super) fn heat(ledger: &mut Ledger<'_>, control: &[Atomic<u32>], household: u32) {
+    let config = ledger.config;
+    let mut need = ledger.number(Field::HeatingNeed, household);
     if comptime!(config.food_income == crate::domain::food::FoodIncome::PurchasingPower) {
-        let freezing = number(
-            state,
-            config,
-            comptime!(Field::LivingMembers as u32),
-            household,
-        ) * (max(config.heating_per_person, 2) - 2);
+        let freezing = ledger.number(Field::LivingMembers, household)
+            * (max(config.heating_per_person, 2) - 2);
         let reserve = times32(freezing, config.coverage + config.ring - 2);
         let limit = add_checked(control, reserve, ticks(need, 0));
         let coal = minimum(
-            value(state, config, comptime!(Good::Coal as u32), household),
+            ledger.value_at(comptime!(Good::Coal as u32), household),
             limit,
         );
         let wood = minimum(
-            value(state, config, comptime!(Good::Wood as u32), household),
+            ledger.value_at(comptime!(Good::Wood as u32), household),
             limit,
         );
         let available = add_checked(control, multiply(control, coal, 2), wood);
@@ -323,39 +288,31 @@ pub(super) fn heat(
     }
     let mut served = 0u32;
     if need > 0 {
-        let coal_stock = value(state, config, comptime!(Good::Coal as u32), household);
-        let wood_stock = value(state, config, comptime!(Good::Wood as u32), household);
+        let coal_stock = ledger.value_at(comptime!(Good::Coal as u32), household);
+        let wood_stock = ledger.value_at(comptime!(Good::Wood as u32), household);
         let coal = minimum(coal_stock, ticks(need / 2, 0));
         let remaining = need - coal.extract(LOW_WORD) * 2;
         let wood = minimum(wood_stock, ticks(remaining, 0));
         let unmet = remaining - wood.extract(LOW_WORD);
         let additional = minimum(minus(coal_stock, coal), ticks((unmet + 1) / 2, 0));
         let burned_coal = add_checked(control, coal, additional);
-        set(
-            state,
-            config,
+        ledger.set_at(
             comptime!(Good::Coal as u32),
             household,
             minus(coal_stock, burned_coal),
         );
-        set(
-            state,
-            config,
+        ledger.set_at(
             comptime!(Good::Wood as u32),
             household,
             minus(wood_stock, wood),
         );
-        increase(
-            state,
-            config,
+        ledger.increase_at(
             control,
             CONSUMPTION_FIELDS as u32 + comptime!(Good::Coal as u32) - 1,
             household,
             burned_coal,
         );
-        increase(
-            state,
-            config,
+        ledger.increase_at(
             control,
             CONSUMPTION_FIELDS as u32 + comptime!(Good::Wood as u32) - 1,
             household,
@@ -366,11 +323,5 @@ pub(super) fn heat(
             burned_coal.extract(LOW_WORD) * 2 + wood.extract(LOW_WORD),
         );
     }
-    set32(
-        state,
-        config,
-        comptime!(Field::HeatingServed as u32),
-        household,
-        served,
-    );
+    ledger.set_number(Field::HeatingServed, household, served);
 }

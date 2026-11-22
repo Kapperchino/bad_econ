@@ -59,6 +59,7 @@ impl GpuPass<BuyerProbeInput> for CompareBuyer {
     type Output = ();
 
     fn execute(mut input: BuyerProbeInput) {
+        let mut economy = EconomyView::new(&mut input.state, &input.actors, &input.config);
         let id = ABSOLUTE_POS as u32;
         if id < input.parameters.count {
             let actor = id + input.parameters.offset;
@@ -67,9 +68,7 @@ impl GpuPass<BuyerProbeInput> for CompareBuyer {
             let mut status = KernelEventStatus::new(comptime!(EventStatus::Rejected));
             match comptime!(input.execution) {
                 BuyerExecution::Direct => status.replace(buyer_settlement(
-                    &mut input.state,
-                    &input.actors,
-                    &input.config,
+                    &mut economy,
                     &mut input.proposals,
                     &input.control,
                     &input.parameters,
@@ -78,9 +77,7 @@ impl GpuPass<BuyerProbeInput> for CompareBuyer {
                     comptime!(input.posting.posting()),
                 )),
                 BuyerExecution::Event => status.replace(event_settlement(
-                    &mut input.state,
-                    &input.actors,
-                    &input.config,
+                    &mut economy,
                     &mut input.proposals,
                     &input.control,
                     &input.parameters,
@@ -235,6 +232,7 @@ impl GpuPass<EmptySellerProbeInput> for CompareEmptySeller {
     type Output = ();
 
     fn execute(mut input: EmptySellerProbeInput) {
+        let mut economy = EconomyView::new(&mut input.state, &input.actors, &input.config);
         let actor = ABSOLUTE_POS as u32;
         if actor < input.parameters.count {
             let peer =
@@ -242,9 +240,7 @@ impl GpuPass<EmptySellerProbeInput> for CompareEmptySeller {
             let prior = KernelEventStatus::load(&mut input.statuses, actor);
             let status = match comptime!(input.execution) {
                 EmptySellerExecution::Direct => empty_seller_settlement(
-                    &mut input.state,
-                    &input.actors,
-                    &input.config,
+                    &mut economy,
                     &input.proposals,
                     &input.control,
                     &input.parameters,
@@ -253,16 +249,9 @@ impl GpuPass<EmptySellerProbeInput> for CompareEmptySeller {
                     &prior,
                 ),
                 EmptySellerExecution::Peer => {
-                    let mut balances = PeerBalances::new(
-                        &mut input.state,
-                        &input.actors,
-                        &input.config,
-                        &input.parameters,
-                        peer,
-                    );
+                    let mut balances = PeerBalances::new(&mut economy, &input.parameters, peer);
                     let status = balances.offer(
-                        &mut input.state,
-                        &input.config,
+                        &mut economy.ledger,
                         &mut input.proposals,
                         &input.control,
                         &input.parameters,
@@ -272,13 +261,7 @@ impl GpuPass<EmptySellerProbeInput> for CompareEmptySeller {
                             status: prior,
                         },
                     );
-                    balances.store(
-                        &mut input.state,
-                        &input.actors,
-                        &input.config,
-                        &input.parameters,
-                        peer,
-                    );
+                    balances.store(&mut economy, &input.parameters, peer);
                     status
                 }
             };
