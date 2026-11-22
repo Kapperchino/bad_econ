@@ -194,7 +194,7 @@ impl SettlementBatch {
         {
             let tiles = selected
                 .iter()
-                .map(|actor| actor / crate::simulation::economy::audit::TILE_ACTORS)
+                .map(|actor| actor / crate::simulation::economy::accounting::audit::TILE_ACTORS)
                 .collect::<BTreeSet<_>>()
                 .len();
             eprintln!(
@@ -204,7 +204,7 @@ impl SettlementBatch {
                 metadata
                     .actors
                     .len()
-                    .div_ceil(crate::simulation::economy::audit::TILE_ACTORS),
+                    .div_ceil(crate::simulation::economy::accounting::audit::TILE_ACTORS),
             );
         }
         let fields = match requests

@@ -6,15 +6,15 @@ use crate::{
         configuration::Feature,
         economy::{
             EconomyStage,
-            batch::{
+            market::orders,
+            market::sorting::{self, INPUT_TILE, MarketSort, SortKeys},
+            settlement::batch::{
                 self,
                 labor::{LaborExecution, LaborInputLaunch, LaborSettlement},
                 payroll::{PayrollInputLaunch, PayrollSettlement},
                 quantity::{QuantityInputLaunch, QuantitySettlement},
             },
-            markets,
-            railway::settlement::Stage as FreightStage,
-            sorting::{self, INPUT_TILE, MarketSort, SortKeys},
+            transport::railway::settlement::Stage as FreightStage,
         },
         parameters::MarketClock,
         profiling::MarketProfile,
@@ -163,9 +163,9 @@ impl MarketRound<'_> {
             _ => self.profile.start(device),
         };
         let groups = || {
-            markets::job_dispatch(
+            orders::job_dispatch(
                 &simulation.searches.dispatches,
-                markets::QUEUE_DISPATCH,
+                orders::QUEUE_DISPATCH,
                 self.count,
             )
         };

@@ -11,13 +11,6 @@ use crate::{
 use cubecl::prelude::*;
 
 #[cube]
-fn add(control: &[Atomic<u32>], first: Ticks, second: Ticks) -> Ticks {
-    let sum = plus(first, second);
-    sum.faults.record(control);
-    sum.value
-}
-
-#[cube]
 impl<'a> ResearchView<'a> {
     pub fn summarize(&mut self, id: usize) {
         let metrics = comptime!(SummaryLayout::WORDS / TICK_WORDS);
@@ -31,11 +24,8 @@ impl<'a> ResearchView<'a> {
             if metric < SummaryLayout::CONSUMED / TICK_WORDS + Good::COUNT {
                 for index in shard * chunk..min((shard + 1) * chunk, count) {
                     let lab = self.parameters.lab(index);
-                    total = add(
-                        self.control,
-                        total,
-                        self.state.lab_consumed(&lab.saved, metric),
-                    );
+                    total = plus(total, self.state.lab_consumed(&lab.saved, metric))
+                        .record(self.control);
                 }
             }
             let count = self.parameters.project_count as usize;
@@ -43,18 +33,18 @@ impl<'a> ResearchView<'a> {
             for index in shard * chunk..min((shard + 1) * chunk, count) {
                 let project = self.parameters.project(index);
                 if metric == SummaryLayout::ATTEMPTS / TICK_WORDS {
-                    total = add(
-                        self.control,
+                    total = plus(
                         total,
                         self.state.amount(&project.saved, ProjectState::ATTEMPTS),
-                    );
+                    )
+                    .record(self.control);
                 }
                 if metric == SummaryLayout::DISCOVERIES / TICK_WORDS {
-                    total = add(
-                        self.control,
+                    total = plus(
                         total,
                         self.state.amount(&project.saved, ProjectState::DISCOVERIES),
-                    );
+                    )
+                    .record(self.control);
                 }
             }
             let count = self.parameters.machine_count as usize;
@@ -67,18 +57,18 @@ impl<'a> ResearchView<'a> {
                         .number(&machine.definition, MachineLayout::MAINTENANCE_GOOD)
                         == metric as u32 + 1
                 {
-                    total = add(
-                        self.control,
+                    total = plus(
                         total,
                         self.state.amount(&machine.saved, MachineState::CONSUMED),
-                    );
+                    )
+                    .record(self.control);
                 }
                 if metric == SummaryLayout::REMAINING_SERVICE / TICK_WORDS {
-                    total = add(
-                        self.control,
+                    total = plus(
                         total,
                         self.state.amount(&machine.saved, MachineState::REMAINING),
-                    );
+                    )
+                    .record(self.control);
                 }
             }
             let count = self.parameters.stock_count as usize;
@@ -86,11 +76,11 @@ impl<'a> ResearchView<'a> {
             if metric == SummaryLayout::NATURAL_STOCK / TICK_WORDS {
                 for index in shard * chunk..min((shard + 1) * chunk, count) {
                     let stock = self.parameters.stock(index);
-                    total = add(
-                        self.control,
+                    total = plus(
                         total,
                         ticks(self.state.number(&stock.saved, StockState::STOCK), 0),
-                    );
+                    )
+                    .record(self.control);
                 }
             }
             let count = self.parameters.strike_count as usize;
@@ -98,14 +88,14 @@ impl<'a> ResearchView<'a> {
             if metric == SummaryLayout::STRIKING / TICK_WORDS {
                 for index in shard * chunk..min((shard + 1) * chunk, count) {
                     let strike = self.parameters.strike(index);
-                    total = add(
-                        self.control,
+                    total = plus(
                         total,
                         ticks(
                             self.state.number(&strike.saved, StrikeState::PARTICIPATION),
                             0,
                         ),
-                    );
+                    )
+                    .record(self.control);
                 }
             }
             store(self.output, id as u32, total);

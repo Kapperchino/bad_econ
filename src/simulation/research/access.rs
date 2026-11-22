@@ -163,9 +163,8 @@ impl<'a> ResearchState<'a> {
         value: Ticks,
         control: &[Atomic<u32>],
     ) {
-        let sum = plus(self.amount(row, field), value);
-        sum.faults.record(control);
-        self.set_amount(row, field, sum.value);
+        let sum = plus(self.amount(row, field), value).record(control);
+        self.set_amount(row, field, sum);
     }
 
     pub fn lab_consumed(&self, lab: &RowIndex, good: usize) -> Ticks {
@@ -175,9 +174,8 @@ impl<'a> ResearchState<'a> {
 
     pub fn consume(&mut self, lab: &RowIndex, good: usize, used: Ticks, control: &[Atomic<u32>]) {
         let word = lab.field(LabState::CONSUMED, Good::COUNT * TICK_WORDS) + good * TICK_WORDS;
-        let sum = plus(read_tick_words(&*self.words, word), used);
-        sum.faults.record(control);
-        write_tick_words(self.words, word, sum.value);
+        let sum = plus(read_tick_words(&*self.words, word), used).record(control);
+        write_tick_words(self.words, word, sum);
     }
 
     pub fn lab_access(&self, lab: &RowIndex) -> u32 {

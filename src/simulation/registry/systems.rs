@@ -55,7 +55,18 @@ impl GpuPass<CapacityInput> for PatchCapacity {
     type Output = ();
 
     fn execute(mut input: CapacityInput) {
-        capacity_rows(&input.actors, &input.requests, &mut input.output);
+        let index = ABSOLUTE_POS;
+        if index < input.actors.len() {
+            let count = input.requests.len();
+            let action = input.requests[index % count];
+            let mut value = input.actors[index];
+            let field = index / count;
+            let capacity = field == A::CAPACITY || (field == A::GEOGRAPHIC_CAPACITY && value > 0);
+            if capacity && action >> 24 == 6 {
+                value += action & 0x00ffffff;
+            }
+            input.output[index] = value;
+        }
     }
 }
 
@@ -79,6 +90,18 @@ impl GpuPass<ActorGrowthInput> for ExtendActors {
     type Output = ();
 
     fn execute(mut input: ActorGrowthInput) {
-        extend_rows(&input.actors, &input.additions, &mut input.output);
+        let index = ABSOLUTE_POS;
+        if index < input.output.len() {
+            let before = input.actors.len() / A::WORDS;
+            let added = input.additions.len() / A::WORDS;
+            let count = before + added;
+            let actor = index % count;
+            let field = index / count;
+            input.output[index] = if actor < before {
+                input.actors[field * before + actor]
+            } else {
+                input.additions[field * added + actor - before]
+            };
+        }
     }
 }

@@ -1,4 +1,7 @@
-use super::kernels;
+use super::kernels::{
+    AVAILABLE, Bounds, INADMISSIBLE, INAPPLICABLE, Rounding, SignedBoundsWriter, UNRESOLVED,
+    checked, checked_vector, divide_product, sum,
+};
 use crate::simulation::{
     Device,
     pass::GpuPass,
@@ -65,7 +68,13 @@ impl<N: Size> GpuPass<RescaleInput<N>> for RescaleVector {
     type Output = ();
 
     fn execute(mut input: RescaleInput<N>) {
-        kernels::rescale::<N>(&mut input.values, &input.control, input.scale);
+        let index = ABSOLUTE_POS;
+        if index < input.values.len() {
+            input.values[index] = checked_vector(
+                input.values[index] / Vector::new(input.scale),
+                &input.control,
+            );
+        }
     }
 }
 
@@ -135,14 +144,11 @@ impl<N: Size> GpuPass<AdditionInput<N>> for AddVectors {
     type Output = ();
 
     fn execute(mut input: AdditionInput<N>) {
-        kernels::vector_add::<N>(
-            &input.left,
-            &input.right,
-            &mut input.output,
-            &input.control,
-            input.start,
-            input.count,
-        );
+        if ABSOLUTE_POS < input.count as usize {
+            let index = input.start as usize + ABSOLUTE_POS;
+            input.output[index] =
+                checked_vector(input.left[index] + input.right[index], &input.control);
+        }
     }
 }
 
@@ -169,14 +175,41 @@ impl GpuPass<VectorNormalizationInput> for NormalizeVector {
     type Output = ();
 
     fn execute(mut input: VectorNormalizationInput) {
-        kernels::normalize(
-            &input.input,
-            &mut input.output,
-            &input.control,
-            input.length,
-            input.reference,
-            input.scale,
-        );
+        let index = ABSOLUTE_POS;
+        if index < input.length as usize {
+            let divisor = Bounds::read(&input.input, input.reference as usize);
+            if divisor.lower == 0.0 {
+                input.control[0].store(UNRESOLVED);
+            }
+            if divisor.lower > 0.0 {
+                let value = Bounds::read(&input.input, index);
+                Bounds {
+                    lower: select(
+                        index == input.reference as usize,
+                        input.scale as f32,
+                        divide_product(
+                            value.lower,
+                            input.scale as f32,
+                            divisor.upper,
+                            &input.control,
+                        )
+                        .lower,
+                    ),
+                    upper: select(
+                        index == input.reference as usize,
+                        input.scale as f32,
+                        divide_product(
+                            value.upper,
+                            input.scale as f32,
+                            divisor.lower,
+                            &input.control,
+                        )
+                        .upper,
+                    ),
+                }
+                .store(&mut input.output, index);
+            }
+        }
     }
 }
 
@@ -203,14 +236,16 @@ impl GpuPass<CertificateRowsInput> for CheckCertificateRows {
     type Output = ();
 
     fn execute(mut input: CertificateRowsInput) {
-        kernels::certificate_rows(
-            &input.product,
-            &input.weights,
-            &mut input.output,
-            input.rows,
-            input.numerator,
-            input.denominator,
-        );
+        let row = ABSOLUTE_POS;
+        if row < input.rows as usize {
+            let value = Bounds::read(&input.product, row);
+            let weight = Bounds::read(&input.weights, row).lower;
+            input.output[row * 2] = u32::cast_from(
+                (input.numerator as f32) < input.denominator as f32
+                    && value.upper <= weight * input.numerator as f32 / input.denominator as f32,
+            );
+            input.output[row * 2 + 1] = u32::cast_from(value.lower >= weight);
+        }
     }
 }
 
@@ -233,7 +268,13 @@ impl GpuPass<CertificateStatusInput> for ResolveCertificate {
     type Output = ();
 
     fn execute(input: CertificateStatusInput) {
-        kernels::certificate_status(&input.flags, &input.control);
+        if ABSOLUTE_POS == 0 {
+            input.control[0].store(select(
+                input.flags[0] != 0,
+                AVAILABLE,
+                select(input.flags[1] != 0, INADMISSIBLE, UNRESOLVED),
+            ));
+        }
     }
 }
 
@@ -259,13 +300,15 @@ impl GpuPass<SolutionResidualInput> for MeasureResidual {
     type Output = ();
 
     fn execute(mut input: SolutionResidualInput) {
-        kernels::residual(
-            &input.product,
-            &input.estimate,
-            &input.weights,
-            &mut input.output,
-            input.rows,
-        );
+        let row = ABSOLUTE_POS;
+        if row < input.rows as usize {
+            let product = Bounds::read(&input.product, row);
+            let approximate = Bounds::read(&input.estimate, row);
+            input.output[row] = max(
+                f32::abs(product.lower - approximate.lower),
+                f32::abs(product.upper - approximate.upper),
+            ) / input.weights[row] as f32;
+        }
     }
 }
 
@@ -292,14 +335,17 @@ impl GpuPass<SolutionErrorInput> for BoundError {
     type Output = ();
 
     fn execute(mut input: SolutionErrorInput) {
-        kernels::error_bound(
-            &input.norm,
-            &mut input.error,
-            &input.control,
-            input.numerator,
-            input.denominator,
-            input.tolerance,
-        );
+        if ABSOLUTE_POS == 0 {
+            let bound = checked(
+                max(input.norm[0], 0.0) * input.denominator as f32
+                    / (input.denominator - input.numerator) as f32,
+                &input.control,
+            );
+            input.error[0] = bound;
+            if input.control[0].load() == AVAILABLE && bound > input.tolerance {
+                input.control[0].store(UNRESOLVED);
+            }
+        }
     }
 }
 
@@ -326,14 +372,16 @@ impl GpuPass<SolutionBoundsInput> for EncloseSolution {
     type Output = ();
 
     fn execute(mut input: SolutionBoundsInput) {
-        kernels::solution_bounds(
-            &input.estimate,
-            &input.weights,
-            &input.error,
-            &mut input.output,
-            &input.control,
-            input.rows,
-        );
+        let row = ABSOLUTE_POS;
+        if row < input.rows as usize && input.control[0].load() == AVAILABLE {
+            let bound = checked(input.error[0] * input.weights[row] as f32, &input.control);
+            let value = Bounds::read(&input.estimate, row);
+            Bounds {
+                lower: max(value.lower - bound, 0.0),
+                upper: sum(value.upper, bound, &input.control),
+            }
+            .store(&mut input.output, row);
+        }
     }
 }
 
@@ -360,14 +408,31 @@ impl GpuPass<ValueComparisonInput> for CompareValues {
     type Output = ();
 
     fn execute(mut input: ValueComparisonInput) {
-        kernels::comparator(
-            &input.requirement,
-            &mut input.output,
-            &input.control,
-            input.living_low,
-            input.living_high,
-            input.scale,
-        );
+        if ABSOLUTE_POS == 0 {
+            let living = (u64::cast_from(input.living_low)
+                | (u64::cast_from(input.living_high) << 32)) as f32;
+            let value = Bounds::read(&input.requirement, 0);
+            let mut output = SignedBoundsWriter::new(&mut input.output, &input.control);
+            output.difference(0, living, value.upper, Rounding::Lower);
+            output.difference(3, living, value.lower, Rounding::Upper);
+            if value.lower == 0.0 {
+                input.control[0].store(select(value.upper == 0.0, INAPPLICABLE, UNRESOLVED));
+            }
+            if value.lower > 0.0 {
+                output.difference(
+                    6,
+                    living * input.scale as f32 / value.upper,
+                    input.scale as f32,
+                    Rounding::Lower,
+                );
+                output.difference(
+                    9,
+                    living * input.scale as f32 / value.lower,
+                    input.scale as f32,
+                    Rounding::Upper,
+                );
+            }
+        }
     }
 }
 
@@ -395,15 +460,20 @@ impl GpuPass<MatrixUnitsInput> for ScaleMatrixUnits {
     type Output = ();
 
     fn execute(mut input: MatrixUnitsInput) {
-        kernels::dense_units(
-            &input.input,
-            &input.row_factors,
-            &input.column_factors,
-            &mut input.output,
-            &input.control,
-            input.rows,
-            input.columns,
-        );
+        let index = ABSOLUTE_POS;
+        if index < input.rows as usize * input.columns as usize {
+            let row = index / input.columns as usize;
+            let column = index % input.columns as usize;
+            let factor = input.row_factors[row * 2] as f32 / input.row_factors[row * 2 + 1] as f32
+                * input.column_factors[column * 2] as f32
+                / input.column_factors[column * 2 + 1] as f32;
+            let value = Bounds::read(&input.input, index);
+            Bounds {
+                lower: checked(value.lower * factor, &input.control),
+                upper: checked(value.upper * factor, &input.control),
+            }
+            .store(&mut input.output, index);
+        }
     }
 }
 
@@ -429,13 +499,13 @@ impl GpuPass<MatrixColumnInput> for StoreMatrixColumn {
     type Output = ();
 
     fn execute(mut input: MatrixColumnInput) {
-        kernels::dense_column(
-            &input.input,
-            &mut input.output,
-            input.rows,
-            input.columns,
-            input.column,
-        );
+        let row = ABSOLUTE_POS;
+        if row < input.rows as usize {
+            Bounds::read(&input.input, row).store(
+                &mut input.output,
+                row * input.columns as usize + input.column as usize,
+            );
+        }
     }
 }
 
@@ -461,13 +531,14 @@ impl GpuPass<SignedVectorReadInput> for EncodeSignedVector {
     type Output = ();
 
     fn execute(mut input: SignedVectorReadInput) {
-        kernels::signed_vector(
-            &input.positive,
-            &input.negative,
-            &mut input.output,
-            &input.control,
-            input.length,
-        );
+        let index = ABSOLUTE_POS;
+        if index < input.length as usize {
+            let a = Bounds::read(&input.positive, index);
+            let b = Bounds::read(&input.negative, index);
+            let mut output = SignedBoundsWriter::new(&mut input.output, &input.control);
+            output.difference(index * 6, a.lower, b.upper, Rounding::Lower);
+            output.difference(index * 6 + 3, a.upper, b.lower, Rounding::Upper);
+        }
     }
 }
 

@@ -2,7 +2,7 @@ use super::{
     Simulation, Trace,
     economy::{
         self, EconomyStage,
-        railway::{self, RailStage},
+        transport::railway::{self, RailStage},
     },
     layout::WORD_BYTES,
     market::{
@@ -104,7 +104,7 @@ impl Simulation {
         result?;
         self.market_result(evidence)?;
         self.apply_feedback()?;
-        economy::cartage::dispatch(
+        economy::transport::cartage::dispatch(
             self.gpu(),
             &self.control,
             self.day as u32,

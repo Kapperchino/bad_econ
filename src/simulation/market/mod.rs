@@ -9,7 +9,9 @@ use crate::{
     domain::{Good, Market, Phase, PhaseEvidence, Scenario, food::FoodIncome},
     simulation::{
         Simulation, Trace,
-        economy::{EconomyStage, EconomySystem, markets, railway::RouteAvailability},
+        economy::{
+            EconomyStage, EconomySystem, market::orders, transport::railway::RouteAvailability,
+        },
         flags::{self, CONTROL_WORDS, ControlLayout, EventStatus},
         layout::WORD_BYTES,
         market_graphs::MarketProgram,
@@ -327,26 +329,26 @@ impl<'a> MarketRound<'a> {
         let window = self.profile.start(device);
         let groups = invocations.div_ceil(device.workgroup as usize);
         let dispatch = match stage {
-            GroupExecute => markets::dispatch(
+            GroupExecute => orders::dispatch(
                 &simulation.searches.dispatches,
-                markets::RANGE_DISPATCH,
+                orders::RANGE_DISPATCH,
                 groups,
             ),
             GroupPrepare | GroupFinalize | FinalizeFixedWages | GroupRadixLocal
-            | GroupRadixScatter | GroupRemainder | GroupRanges => markets::dispatch(
+            | GroupRadixScatter | GroupRemainder | GroupRanges => orders::dispatch(
                 &simulation.searches.dispatches,
-                markets::SORT_DISPATCH,
+                orders::SORT_DISPATCH,
                 groups,
             ),
             _ => device.count(invocations).into(),
         };
         match stage {
-            MarketBoundary => markets::prepare_dispatch_for(
+            MarketBoundary => orders::prepare_dispatch_for(
                 device,
                 &simulation.control,
                 &simulation.searches.dispatches,
                 self.count,
-                markets::PreparationWorkgroup::Native,
+                orders::PreparationWorkgroup::Native,
             ),
             _ => EconomySystem::launch(
                 device,
@@ -424,13 +426,13 @@ impl<'a> MarketRound<'a> {
             (self.market, self.index + 1 == MATCHING_ROUNDS)
         {
             self.parameters.status_start = 4 * self.count as u32;
-            markets::feedback_boundary(
+            orders::feedback_boundary(
                 &simulation.device,
                 &simulation.control,
                 &simulation.work.feedback,
                 match self.parameters.empty_orders {
-                    EmptyOrderMode::Settle => markets::FeedbackSource::Constructed,
-                    EmptyOrderMode::FeedbackOnly => markets::FeedbackSource::Searches,
+                    EmptyOrderMode::Settle => orders::FeedbackSource::Constructed,
+                    EmptyOrderMode::FeedbackOnly => orders::FeedbackSource::Searches,
                 },
             );
             simulation.feedback_operation(

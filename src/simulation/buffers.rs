@@ -1,7 +1,7 @@
 use super::{
     Device,
     configuration::Configuration,
-    economy::{self, EconomyStage, markets},
+    economy::{self, EconomyStage, market::orders},
     flags::CONTROL_WORDS,
     layout::*,
     parameters::{EconomyParameters, SchedulerParameters},
@@ -41,8 +41,8 @@ impl BufferSizes {
         let batch = actors.min(batch_limit as usize);
         let mut sizes = Self {
             proposals: actors * ProposalLayout::WORDS,
-            events: actors.div_ceil(economy::audit::TILE_ACTORS) * SummaryLayout::WORDS,
-            scratch: markets::scratch_words(actors),
+            events: actors.div_ceil(economy::accounting::audit::TILE_ACTORS) * SummaryLayout::WORDS,
+            scratch: orders::scratch_words(actors),
             feedback: CONTROL_WORDS + actors * TICK_WORDS,
             #[cfg(test)]
             links: batch * LinkLayout::WORDS_PER_EVENT,
@@ -121,13 +121,15 @@ impl EconomyBuffers<'_> {
 
     pub(super) fn run(&self, stage: EconomyStage, count: usize, parameters: &EconomyParameters) {
         match (stage, parameters.phase) {
-            (EconomyStage::Local, crate::domain::Phase::Opening) => economy::opening::launch(
-                self.economy.device,
-                self.economy.state,
-                self.economy.config,
-                self.control,
-                parameters.day,
-            ),
+            (EconomyStage::Local, crate::domain::Phase::Opening) => {
+                economy::phases::opening::launch(
+                    self.economy.device,
+                    self.economy.state,
+                    self.economy.config,
+                    self.control,
+                    parameters.day,
+                )
+            }
             _ => economy::EconomySystem::launch_elements(
                 self.economy.device,
                 count,

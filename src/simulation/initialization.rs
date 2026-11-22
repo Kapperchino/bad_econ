@@ -9,7 +9,7 @@ use super::{
     layout::*,
     management,
     market::{FreightActivity, FreightExecution, MarketExecution, MarketReplay, Provisioning},
-    market_graphs, markets, ownership, registry, research, tensor,
+    market_graphs, orders, ownership, registry, research, tensor,
 };
 use crate::{domain::*, runtime::RuntimeState};
 use anyhow::{Result, anyhow};
@@ -139,8 +139,8 @@ impl Simulation {
         let ownership = Some(ownership::OwnershipRuntime::new(&device, &initial)?);
         let enterprise_requests = device.tensor(&vec![0; initial.actors.len()]);
         let day = initial.day;
-        let audit = economy::audit::AuditBuffers::new(&device, &initial.actors);
-        let searches = markets::SearchBuffers::new(&device, &initial.actors);
+        let audit = economy::accounting::audit::AuditBuffers::new(&device, &initial.actors);
+        let searches = orders::SearchBuffers::new(&device, &initial.actors);
         let mut simulation = Self {
             scenario,
             device,
@@ -160,7 +160,7 @@ impl Simulation {
             spatial,
             work,
             searches,
-            market_sort: economy::sorting::MarketSort::default(),
+            market_sort: economy::market::sorting::MarketSort::default(),
             market_graphs: market_graphs::MarketGraphs::default(),
             market_replay: MarketReplay::Reusable,
             freight_activity: FreightActivity::Active,

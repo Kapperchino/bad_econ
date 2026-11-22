@@ -1,5 +1,5 @@
 use super::{
-    credit::{CreditCapacity, CreditTerms, add, ceil_scaled, lending_limit, multiply, scaled},
+    credit::{CreditCapacity, CreditTerms},
     *,
 };
 use crate::simulation::{
@@ -140,10 +140,12 @@ impl<'a> BankLedger<'a> {
             let mut faults = KernelFaults::none();
             let capacity = self.credit_capacity();
             let terms = loan.credit_terms(requested);
-            let amount = lending_limit(&terms, &capacity, &mut faults);
-            let risk_debit = ceil_scaled(amount, capacity.risk_weight, FINANCE_SCALE, &mut faults);
-            let next_risk = add(capacity.risk_assets, risk_debit, &mut faults);
-            let next_cash = add(cash, amount, &mut faults);
+            let amount = terms.limit(&capacity, &mut faults);
+            let risk_debit =
+                CheckedTicks::ceiling_ratio(amount, capacity.risk_weight, FINANCE_SCALE)
+                    .accumulate(&mut faults);
+            let next_risk = plus(capacity.risk_assets, risk_debit).accumulate(&mut faults);
+            let next_cash = plus(cash, amount).accumulate(&mut faults);
             let due = self.day + terms.term;
             if due < self.day {
                 faults.insert(KernelFaults::new(comptime!(
@@ -177,39 +179,40 @@ impl<'a> BankLedger<'a> {
                 .extract(LOW_WORD);
             let elapsed = self.day - min(self.day, last);
             let rate = loan.number(LoanMeta::DAILY_RATE);
-            let daily = scaled(principal, rate, FINANCE_SCALE, &mut faults);
+            let daily = ratio(principal, rate, FINANCE_SCALE).accumulate(&mut faults);
             let remainder = minus(
                 principal,
                 times(divide(principal, FINANCE_SCALE), FINANCE_SCALE).value,
             );
             let daily_remainder = remainder.extract(LOW_WORD) * rate % FINANCE_SCALE;
-            let accumulated = add(
+            let accumulated = plus(
                 times32(daily_remainder, elapsed),
                 self.loan_value(loan, LoanField::InterestRemainder),
-                &mut faults,
-            );
+            )
+            .accumulate(&mut faults);
             let carried = divide(accumulated, FINANCE_SCALE);
             let new_remainder = minus(accumulated, times(carried, FINANCE_SCALE).value);
-            let interest = add(
+            let interest = plus(
                 self.loan_value(loan, LoanField::Interest),
-                add(multiply(daily, elapsed, &mut faults), carried, &mut faults),
-                &mut faults,
-            );
-            let total = add(principal, interest, &mut faults);
+                plus(times(daily, elapsed).accumulate(&mut faults), carried)
+                    .accumulate(&mut faults),
+            )
+            .accumulate(&mut faults);
+            let total = plus(principal, interest).accumulate(&mut faults);
             let cash_coordinate = loan.number(LoanMeta::CASH);
             let cash = self.balances.value(cash_coordinate);
             let due = self.loan_value(loan, LoanField::Due).extract(LOW_WORD);
             let repayment = self.day >= due && !lt(cash, total);
-            let reserve = add(
+            let reserve = plus(
                 self.value(BankField::Reserve),
                 select(repayment, total, zero()),
-                &mut faults,
-            );
-            let equity = add(
+            )
+            .accumulate(&mut faults);
+            let equity = plus(
                 self.value(BankField::Equity),
                 select(repayment, interest, zero()),
-                &mut faults,
-            );
+            )
+            .accumulate(&mut faults);
             let risk = self.value(BankField::RiskAssets);
             let loan_risk = self.loan_value(loan, LoanField::RiskAssets);
             if last > self.day || lt(risk, loan_risk) {
@@ -301,15 +304,12 @@ impl BankAudit {
             }
             _ => false,
         };
-        self.principal = add(self.principal, principal, &mut self.faults);
-        self.interest = add(self.interest, interest, &mut self.faults);
-        self.risk = add(self.risk, risk, &mut self.faults);
-        let expected_risk = ceil_scaled(
-            principal,
-            book.bank.risk_weight,
-            FINANCE_SCALE,
-            &mut self.faults,
-        );
+        self.principal = plus(self.principal, principal).accumulate(&mut self.faults);
+        self.interest = plus(self.interest, interest).accumulate(&mut self.faults);
+        self.risk = plus(self.risk, risk).accumulate(&mut self.faults);
+        let expected_risk =
+            CheckedTicks::ceiling_ratio(principal, book.bank.risk_weight, FINANCE_SCALE)
+                .accumulate(&mut self.faults);
         self.active += u32::cast_from(status.extract(LOW_WORD) == LoanStatus::Active as u32);
         self.overdue += u32::cast_from(status.extract(LOW_WORD) == LoanStatus::Overdue as u32);
         let contracted = minimum(
@@ -336,7 +336,7 @@ impl BankAudit {
     fn report(&mut self, book: &BankLedger, output: &mut BalanceBuffer, id: u32) {
         let count = book.bank.stride;
         let reserve = book.value(BankField::Reserve);
-        let assets = add(reserve, self.principal, &mut self.faults);
+        let assets = plus(reserve, self.principal).accumulate(&mut self.faults);
         if !equal(assets, book.value(BankField::Equity))
             || !equal(self.risk, book.value(BankField::RiskAssets))
         {

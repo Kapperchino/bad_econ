@@ -217,7 +217,7 @@ impl Simulation {
 
     fn audit_day(&mut self) -> Result<()> {
         let started = Instant::now();
-        self.railways(economy::railway::RailStage::Close);
+        self.railways(economy::transport::railway::RailStage::Close);
         self.fault_check()?;
         if let Some(research) = &self.research {
             research.phase(&self.device, &self.state, Phase::Audit, self.day)?;
@@ -275,15 +275,15 @@ impl Simulation {
             );
         }
         if phase == Phase::WorkPayment {
-            self.railways(economy::railway::RailStage::Infrastructure);
+            self.railways(economy::transport::railway::RailStage::Infrastructure);
         }
         economy::property::launch(self.gpu(), &self.spatial, &self.control, phase);
-        economy::landlords::launch(self.gpu(), &self.control, phase);
+        economy::property::landlords::launch(self.gpu(), &self.control, phase);
         self.fault_check()
     }
-    pub(super) fn railways(&self, stage: economy::railway::RailStage) {
+    pub(super) fn railways(&self, stage: economy::transport::railway::RailStage) {
         let started = Instant::now();
-        economy::railway::launch(self.gpu(), &self.control, stage);
+        economy::transport::railway::launch(self.gpu(), &self.control, stage);
         if self.day + 1 == profiling_day() && std::env::var_os("BAD_ECON_PROFILE_STAGES").is_some()
         {
             self.device

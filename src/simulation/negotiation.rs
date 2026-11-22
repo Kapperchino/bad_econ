@@ -1,7 +1,5 @@
 use super::{
-    bargaining::{
-        KernelBargainingFactors, KernelWageBounds, bargaining_weight, second_offer, wage_bounds,
-    },
+    bargaining::{KernelBargainingFactors, KernelWageBounds},
     configuration::Feature,
     layout::LOW_WORD,
     policy::MAXIMUM_WAGE,
@@ -267,26 +265,25 @@ pub fn negotiate(
         .record(control);
     payment.whole = required.value;
     let gross = required_gross(request.prior_gross, payment, denominator, config, control);
-    let quote = wage_bounds(
-        KernelWageBounds {
-            legal: ticks(config.bargaining.legal_minimum, 0),
-            gross_needed: gross,
-            funded: request.funded_per_packet,
-            payable_hours: request.payable_minutes,
-            employer_charge: 0,
-            quantum: config.bargaining.quantum,
-        },
-        control,
-    );
+    let mut quote = KernelWageBounds {
+        legal: ticks(config.bargaining.legal_minimum, 0),
+        gross_needed: gross,
+        funded: request.funded_per_packet,
+        payable_hours: request.payable_minutes,
+        employer_charge: 0,
+        quantum: config.bargaining.quantum,
+    }
+    .quote(control);
     let quantum = config.bargaining.quantum;
-    let ceiling = minimum(quote.maximum, ticks(MAXIMUM_WAGE / quantum * quantum, 0));
-    let weight = bargaining_weight(KernelBargainingFactors {
+    quote.maximum = minimum(quote.maximum, ticks(MAXIMUM_WAGE / quantum * quantum, 0));
+    let weight = KernelBargainingFactors {
         mandate: config.bargaining.mandate,
         withdrawal: config.bargaining.withdrawal,
         alternatives: config.bargaining.alternatives,
         concentration: config.bargaining.concentration,
         replacements: config.bargaining.replacements,
-    });
+    }
+    .weight();
     let desired = maximum(
         quote.minimum,
         ticks(
@@ -300,13 +297,11 @@ pub fn negotiate(
     );
     let mut wage = zero();
     let mut status = u32::new(comptime!(NegotiationStatus::Unavailable as i64));
-    if !lt(ceiling, quote.minimum) {
-        wage = second_offer(
+    if !lt(quote.maximum, quote.minimum) {
+        wage = quote.second_offer(
             ticks(request.candidate_wage, 0),
             desired,
             weight,
-            quote.minimum,
-            ceiling,
             quantum,
             control,
         );
@@ -315,7 +310,7 @@ pub fn negotiate(
     NegotiationQuote {
         wage,
         minimum: quote.minimum,
-        maximum: ceiling,
+        maximum: quote.maximum,
         required_net_rate: displayed.value,
         gross_needed: gross,
         status,

@@ -191,7 +191,7 @@ impl Simulation {
             .transpose()?;
         let ownership = Some(ownership::OwnershipRuntime::new(&self.device, &metadata)?);
         let management = management::EnterpriseManagement::new(&self.device, &metadata);
-        let audit = economy::audit::AuditBuffers::new(&self.device, &metadata.actors);
+        let audit = economy::accounting::audit::AuditBuffers::new(&self.device, &metadata.actors);
         checkpoint("Miscellaneous");
         let searches = self.searches.resized(&self.device, &metadata.actors);
         let mut next = Self {
@@ -225,7 +225,7 @@ impl Simulation {
                 .work
                 .resized(&self.device, count, self.scenario.config().batch_size),
             searches,
-            market_sort: economy::sorting::MarketSort::default(),
+            market_sort: economy::market::sorting::MarketSort::default(),
             market_graphs: market_graphs::MarketGraphs::default(),
             market_replay: match self.device.cube {
                 cubecl::Device::Metal(_) => MarketReplay::Reusable,
@@ -266,12 +266,12 @@ impl Simulation {
         checkpoint("Apply");
         let rings = match (registry_audit, &settlement) {
             #[cfg(test)]
-            (RegistryAudit::Full, _) => economy::audit::RingValidation::All,
+            (RegistryAudit::Full, _) => economy::accounting::audit::RingValidation::All,
             (RegistryAudit::Validated, None) => {
-                economy::audit::RingValidation::Selected(&ring_indices)
+                economy::accounting::audit::RingValidation::Selected(&ring_indices)
             }
             (RegistryAudit::Validated, Some(settlement)) => {
-                economy::audit::RingValidation::Changed {
+                economy::accounting::audit::RingValidation::Changed {
                     entries: &ring_indices,
                     settlements: settlement.indices(),
                 }

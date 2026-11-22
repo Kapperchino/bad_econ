@@ -49,12 +49,14 @@ struct PaymentLeg {
 }
 
 #[cube]
-fn post_leg(output: &mut [u32], base: usize, leg: PaymentLeg) {
-    output[base + LegLayout::COORDINATE] = leg.coordinate;
-    output[base + LegLayout::DEBIT_LOW] = leg.debit.extract(0usize);
-    output[base + LegLayout::DEBIT_HIGH] = leg.debit.extract(1usize);
-    output[base + LegLayout::CREDIT_LOW] = leg.credit.extract(0usize);
-    output[base + LegLayout::CREDIT_HIGH] = leg.credit.extract(1usize);
+impl PaymentLeg {
+    fn post(&self, output: &mut [u32], base: usize) {
+        output[base + LegLayout::COORDINATE] = self.coordinate;
+        output[base + LegLayout::DEBIT_LOW] = self.debit.extract(0usize);
+        output[base + LegLayout::DEBIT_HIGH] = self.debit.extract(1usize);
+        output[base + LegLayout::CREDIT_LOW] = self.credit.extract(0usize);
+        output[base + LegLayout::CREDIT_HIGH] = self.credit.extract(1usize);
+    }
 }
 
 #[derive(CubeType, CubeLaunch)]
@@ -77,69 +79,49 @@ impl GpuPass<PaymentInput> for ConstructPayments {
     type Output = ();
 
     fn execute(mut input: PaymentInput) {
-        construct(&input.input, &mut input.output, input.count);
-    }
-}
-
-#[cube]
-fn construct(input: &[u32], output: &mut [u32], count: u32) {
-    let id = ABSOLUTE_POS as u32;
-    if id < count {
-        let base = id as usize * PaymentRecord::WORDS;
-        let event = id as usize * EVENT_WORDS;
-        for leg in 0..MAX_LEGS {
-            for word in 0..LEG_WORDS {
-                output[event + leg * LEG_WORDS + word] =
-                    select(word == LegLayout::COORDINATE, EMPTY, 0);
+        let id = ABSOLUTE_POS as u32;
+        if id < input.count {
+            let base = id as usize * PaymentRecord::WORDS;
+            let event = id as usize * EVENT_WORDS;
+            for leg in 0..MAX_LEGS {
+                for word in 0..LEG_WORDS {
+                    input.output[event + leg * LEG_WORDS + word] =
+                        select(word == LegLayout::COORDINATE, EMPTY, 0);
+                }
             }
-        }
-        let payer = input[base + PaymentRecord::PAYER];
-        let payee = input[base + PaymentRecord::PAYEE];
-        let sender = input[base + PaymentRecord::PAYER_RESERVE];
-        let receiver = input[base + PaymentRecord::PAYEE_RESERVE];
-        let amount = ticks(
-            input[base + PaymentRecord::AMOUNT],
-            input[base + PaymentRecord::AMOUNT + 1],
-        );
-        post_leg(
-            output,
-            event,
+            let payer = input.input[base + PaymentRecord::PAYER];
+            let payee = input.input[base + PaymentRecord::PAYEE];
+            let sender = input.input[base + PaymentRecord::PAYER_RESERVE];
+            let receiver = input.input[base + PaymentRecord::PAYEE_RESERVE];
+            let amount = read_tick_words(&input.input, base + PaymentRecord::AMOUNT);
             PaymentLeg {
                 coordinate: payer,
                 debit: amount,
                 credit: select(payer == payee, amount, zero()),
-            },
-        );
-        if payer != payee {
-            post_leg(
-                output,
-                event + LEG_WORDS,
+            }
+            .post(&mut input.output, event);
+            if payer != payee {
                 PaymentLeg {
                     coordinate: payee,
                     debit: zero(),
                     credit: amount,
-                },
-            );
-        }
-        if sender != receiver {
-            post_leg(
-                output,
-                event + 2 * LEG_WORDS,
+                }
+                .post(&mut input.output, event + LEG_WORDS);
+            }
+            if sender != receiver {
                 PaymentLeg {
                     coordinate: sender,
                     debit: amount,
                     credit: zero(),
-                },
-            );
-            post_leg(
-                output,
-                event + 3 * LEG_WORDS,
+                }
+                .post(&mut input.output, event + 2 * LEG_WORDS);
                 PaymentLeg {
                     coordinate: receiver,
                     debit: zero(),
                     credit: amount,
-                },
-            );
+                }
+                .post(&mut input.output, event + 3 * LEG_WORDS);
+            }
         }
     }
 }

@@ -77,7 +77,7 @@ impl GpuPass<ProposalInput> for PrepareEntryQuotes {
             &mut input.records.scratch,
             input.day,
         );
-        crate::simulation::economy::mobility::prepare_quotes(
+        crate::simulation::economy::households::mobility::prepare_quotes(
             &mut economy,
             &input.spatial,
             &mut input.records.scratch,
@@ -131,7 +131,7 @@ fn requests(
     if actor < config.actors {
         if comptime!(config.home_mode == Feature::Enabled) && economy.actors.kind(actor).bits() == 0
         {
-            crate::simulation::economy::enterprises::mobility(
+            crate::simulation::economy::production::enterprises::mobility(
                 economy, spatial, quotes, actor, day, quote_mode,
             );
         }
@@ -166,7 +166,9 @@ fn requests(
         if eligible && review {
             proposal = opportunities::discover(economy, spatial, quotes, actor, day, quote_mode);
             let source = select(proposal >> 24 == 8, (proposal & 0x00ffffff) - 1, actor);
-            if !crate::simulation::economy::property::authorized(&economy.ledger, source, actor) {
+            if !crate::simulation::economy::property::PropertySite::new(source)
+                .authorized(&economy.ledger, actor)
+            {
                 proposal = 0;
             }
             action = select(funded, proposal, 0);

@@ -298,7 +298,8 @@ pub(in crate::simulation) fn discover(
                             || kind == comptime!(Good::Dye as u32));
                     let work_days = select(
                         seasonal,
-                        crate::simulation::economy::farming::paid_days(config, kind),
+                        crate::simulation::economy::production::farming::CropCalendar::new(config)
+                            .paid_days(kind),
                         365u32,
                     );
                     let payroll = divide(times32(labor * wage, work_days), 365);

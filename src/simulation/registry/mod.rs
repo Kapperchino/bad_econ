@@ -352,22 +352,6 @@ pub(super) fn patch_capacity(
     output
 }
 
-#[cube]
-fn capacity_rows(actors: &[u32], requests: &[u32], output: &mut [u32]) {
-    let index = ABSOLUTE_POS;
-    if index < actors.len() {
-        let count = requests.len();
-        let action = requests[index % count];
-        let mut value = actors[index];
-        let capacity = index / count == A::CAPACITY;
-        let geographic = index / count == A::GEOGRAPHIC_CAPACITY && value > 0;
-        if (capacity || geographic) && action >> 24 == 6 {
-            value += action & 0x00ffffff;
-        }
-        output[index] = value;
-    }
-}
-
 pub(super) fn extend_actors(
     device: &Device,
     actors: &CubeTensor,
@@ -385,21 +369,4 @@ pub(super) fn extend_actors(
         },
     );
     output
-}
-
-#[cube]
-fn extend_rows(actors: &[u32], additions: &[u32], output: &mut [u32]) {
-    let index = ABSOLUTE_POS;
-    if index < output.len() {
-        let before = actors.len() / A::WORDS;
-        let added = additions.len() / A::WORDS;
-        let count = before + added;
-        let actor = index % count;
-        let field = index / count;
-        if actor < before {
-            output[index] = actors[field * before + actor];
-        } else {
-            output[index] = additions[field * added + actor - before];
-        }
-    }
 }

@@ -87,37 +87,31 @@ pub(super) fn advance(
             let firm = employer - 1;
             let good = economy.actors.kind(firm).bits();
             let shift = economy.ledger.number(Field::Hours, row) / paid;
-            occupational = wide(occupation(
-                policy.occupational[good as usize - 1],
-                shift,
-                policy.parameters.reference_minutes,
-                economy.ledger.number(Field::EquipmentCondition, firm),
-                economy.ledger.number(Field::SafetyProvision, firm),
-                fatigue,
-                economy.ledger.number(Field::ActiveMethod, firm),
-            )) * u64::cast_from(paid)
+            occupational = wide(
+                OccupationalExposure {
+                    minutes: shift,
+                    condition: economy.ledger.number(Field::EquipmentCondition, firm),
+                    safety: economy.ledger.number(Field::SafetyProvision, firm),
+                    fatigue,
+                    method: economy.ledger.number(Field::ActiveMethod, firm),
+                }
+                .risk(
+                    policy.occupational[good as usize - 1],
+                    policy.parameters.reference_minutes,
+                ),
+            ) * u64::cast_from(paid)
                 / u64::cast_from(max(adults, 1));
         }
         let home = economy.ledger.number(Field::HomeMinutes, row) / max(adults, 1);
         let cartage = economy.ledger.number(Field::CartageMinutes, row) / max(adults, 1);
-        occupational += wide(occupation(
+        occupational += wide(OccupationalExposure::unprotected(cartage, fatigue).risk(
             policy.occupational[comptime!(crate::domain::Good::Railway as usize - 1)],
-            cartage,
             policy.parameters.reference_minutes,
-            1000,
-            0,
-            fatigue,
-            0,
         ));
-        occupational += wide(occupation(
-            policy.occupational[0],
-            home,
-            policy.parameters.reference_minutes,
-            1000,
-            0,
-            fatigue,
-            0,
-        ));
+        occupational += wide(
+            OccupationalExposure::unprotected(home, fatigue)
+                .risk(policy.occupational[0], policy.parameters.reference_minutes),
+        );
         let supported = family_support(&economy.ledger, row, food + config.household_need) == 0
             && (comptime!(config.economy == crate::domain::Economy::Agrarian)
                 || max(hunger, cold) == 0);

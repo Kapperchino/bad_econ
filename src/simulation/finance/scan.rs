@@ -101,14 +101,30 @@ impl GpuPass<TickScanInput> for ScanTickBlocks {
     type Output = ();
 
     fn execute(mut input: TickScanInput) {
-        scan_blocks(
-            &mut input.buffer,
-            &input.control,
-            input.offset,
-            input.count,
-            input.channels,
-            comptime!(input.mode),
-        );
+        let blocks = ceildiv(input.count, CUBE_DIM);
+        let channel = CUBE_POS as u32 / blocks;
+        let block = CUBE_POS as u32 % blocks;
+        let id = block * CUBE_DIM + UNIT_POS;
+        let mut value = zero();
+        if channel < input.channels && id < input.count {
+            value = load(&mut input.buffer, input.offset + channel * input.count + id);
+        }
+        let prefix = TickPrefix::scan(value, comptime!(input.mode));
+        prefix.faults.record(&input.control);
+        if channel < input.channels && id < input.count {
+            store(
+                &mut input.buffer,
+                input.offset + channel * input.count + id,
+                prefix.inclusive,
+            );
+        }
+        if channel < input.channels && UNIT_POS == 0 {
+            store(
+                &mut input.buffer,
+                input.offset + input.count * input.channels + channel * blocks + block,
+                prefix.total,
+            );
+        }
     }
 }
 
@@ -117,44 +133,22 @@ impl GpuPass<TickScanInput> for AddTickOffsets {
     type Output = ();
 
     fn execute(mut input: TickScanInput) {
-        add_block_offsets(
-            &mut input.buffer,
-            &input.control,
-            input.offset,
-            input.count,
-            input.channels,
-        );
-    }
-}
-
-#[cube]
-fn scan_blocks(
-    buffer: &mut [u32],
-    control: &[Atomic<u32>],
-    offset: u32,
-    count: u32,
-    channels: u32,
-    #[comptime] mode: ScanMode,
-) {
-    let blocks = ceildiv(count, CUBE_DIM);
-    let channel = CUBE_POS as u32 / blocks;
-    let block = CUBE_POS as u32 % blocks;
-    let id = block * CUBE_DIM + UNIT_POS;
-    let mut value = zero();
-    if channel < channels && id < count {
-        value = load(buffer, offset + channel * count + id);
-    }
-    let prefix = tick_prefix(value, mode);
-    prefix.faults.record(control);
-    if channel < channels && id < count {
-        store(buffer, offset + channel * count + id, prefix.inclusive);
-    }
-    if channel < channels && UNIT_POS == 0 {
-        store(
-            buffer,
-            offset + count * channels + channel * blocks + block,
-            prefix.total,
-        );
+        let id = ABSOLUTE_POS as u32;
+        let channel = id / input.count;
+        let block = (id % input.count) / CUBE_DIM;
+        if channel < input.channels && block > 0 {
+            let preceding = input.offset
+                + input.count * input.channels
+                + channel * ceildiv(input.count, CUBE_DIM)
+                + block
+                - 1;
+            let sum = plus(
+                load(&mut input.buffer, input.offset + id),
+                load(&mut input.buffer, preceding),
+            );
+            sum.faults.record(&input.control);
+            store(&mut input.buffer, input.offset + id, sum.value);
+        }
     }
 }
 
@@ -166,80 +160,61 @@ struct TickPrefix {
 }
 
 #[cube]
-fn tick_prefix(value: Ticks, #[comptime] mode: ScanMode) -> TickPrefix {
-    match mode {
-        ScanMode::Shared => shared_tick_prefix(value),
-        ScanMode::Plane => plane_tick_prefix(value),
+impl TickPrefix {
+    fn scan(value: Ticks, #[comptime] mode: ScanMode) -> TickPrefix {
+        match mode {
+            ScanMode::Shared => Self::shared(value),
+            ScanMode::Plane => Self::plane(value),
+        }
     }
-}
 
-#[cube]
-fn shared_tick_prefix(value: Ticks) -> TickPrefix {
-    let mut tree = TickTree::new(value);
-    WorkgroupTree::inclusive_scan::<TickTree>(&mut tree);
-    TickPrefix {
-        inclusive: tree.values[UNIT_POS as usize],
-        total: tree.values[CUBE_DIM as usize - 1],
-        faults: tree.faults,
+    fn shared(value: Ticks) -> TickPrefix {
+        let mut tree = TickTree::new(value);
+        WorkgroupTree::inclusive_scan::<TickTree>(&mut tree);
+        TickPrefix {
+            inclusive: tree.values[UNIT_POS as usize],
+            total: tree.values[CUBE_DIM as usize - 1],
+            faults: tree.faults,
+        }
     }
-}
 
-#[cube]
-fn plane_tick_prefix(value: Ticks) -> TickPrefix {
-    let mut inclusive = value;
-    let mut faults = KernelFaults::none();
-    let mut stride = 1u32;
-    while stride < PLANE_DIM {
-        let preceding = plane_shuffle_up(inclusive, stride);
-        if UNIT_POS_PLANE >= stride {
-            let sum = plus(inclusive, preceding);
-            inclusive = sum.value;
+    fn plane(value: Ticks) -> TickPrefix {
+        let mut inclusive = value;
+        let mut faults = KernelFaults::none();
+        let mut stride = 1u32;
+        while stride < PLANE_DIM {
+            let preceding = plane_shuffle_up(inclusive, stride);
+            if UNIT_POS_PLANE >= stride {
+                let sum = plus(inclusive, preceding);
+                inclusive = sum.value;
+                faults.insert(sum.faults);
+            }
+            stride *= 2;
+        }
+        let plane = UNIT_POS / PLANE_DIM;
+        let mut planes = WorkgroupTree::planes::<Ticks>();
+        if UNIT_POS_PLANE == min(PLANE_DIM, CUBE_DIM - plane * PLANE_DIM) - 1 {
+            planes[plane as usize] = inclusive;
+        }
+        sync_cube();
+        let mut preceding = zero();
+        let mut total = zero();
+        for index in 0..ceildiv(CUBE_DIM, PLANE_DIM) {
+            let count = planes[index as usize];
+            let sum = plus(total, count);
+            total = sum.value;
             faults.insert(sum.faults);
+            if index < plane {
+                preceding = total;
+            }
         }
-        stride *= 2;
-    }
-    let plane = UNIT_POS / PLANE_DIM;
-    let mut planes = WorkgroupTree::planes::<Ticks>();
-    if UNIT_POS_PLANE == min(PLANE_DIM, CUBE_DIM - plane * PLANE_DIM) - 1 {
-        planes[plane as usize] = inclusive;
-    }
-    sync_cube();
-    let mut preceding = zero();
-    let mut total = zero();
-    for index in 0..ceildiv(CUBE_DIM, PLANE_DIM) {
-        let count = planes[index as usize];
-        let sum = plus(total, count);
-        total = sum.value;
+        let sum = plus(inclusive, preceding);
         faults.insert(sum.faults);
-        if index < plane {
-            preceding = total;
+        TickPrefix {
+            inclusive: sum.value,
+            total,
+            faults,
         }
-    }
-    let sum = plus(inclusive, preceding);
-    faults.insert(sum.faults);
-    TickPrefix {
-        inclusive: sum.value,
-        total,
-        faults,
-    }
-}
-
-#[cube]
-fn add_block_offsets(
-    buffer: &mut [u32],
-    control: &[Atomic<u32>],
-    offset: u32,
-    count: u32,
-    channels: u32,
-) {
-    let id = ABSOLUTE_POS as u32;
-    let channel = id / count;
-    let block = (id % count) / CUBE_DIM;
-    if channel < channels && block > 0 {
-        let preceding = offset + count * channels + channel * ceildiv(count, CUBE_DIM) + block - 1;
-        let sum = plus(load(buffer, offset + id), load(buffer, preceding));
-        sum.faults.record(control);
-        store(buffer, offset + id, sum.value);
     }
 }
 

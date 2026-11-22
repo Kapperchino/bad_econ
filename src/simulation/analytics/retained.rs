@@ -281,7 +281,7 @@ impl AugmentedInverse {
 }
 
 mod retained_kernels {
-    use super::super::kernels::{Bounds, divide_product, interval, write};
+    use super::super::kernels::{Bounds, divide_product};
     use crate::simulation::{
         pass::GpuPass,
         system::{System, gpu_passes},
@@ -310,42 +310,22 @@ mod retained_kernels {
         type Output = ();
 
         fn execute(mut input: ReciprocalInput) {
-            reciprocal_reference(
-                &input.values,
-                &mut input.output,
-                &input.control,
-                input.reference,
-                input.scale,
-            );
-        }
-    }
-
-    #[cube]
-    fn reciprocal_reference(
-        input: &[f32],
-        output: &mut [f32],
-        control: &[Atomic<u32>],
-        reference: u32,
-        scale: u32,
-    ) {
-        if ABSOLUTE_POS == 0 {
-            let divisor = interval(input, reference as usize);
-            if divisor.upper == 0.0 {
-                control[0].store(1);
-            }
-            if (divisor.lower == 0.0) && !(divisor.upper == 0.0) {
-                control[0].store(2);
-            }
-            if !(divisor.lower == 0.0) {
-                let units = scale as f32;
-                write(
-                    output,
-                    0usize,
+            if ABSOLUTE_POS == 0 {
+                let divisor = Bounds::read(&input.values, input.reference as usize);
+                if divisor.upper == 0.0 {
+                    input.control[0].store(1);
+                }
+                if (divisor.lower == 0.0) && !(divisor.upper == 0.0) {
+                    input.control[0].store(2);
+                }
+                if !(divisor.lower == 0.0) {
+                    let units = input.scale as f32;
                     Bounds {
-                        lower: divide_product(units, units, divisor.upper, control).lower,
-                        upper: divide_product(units, units, divisor.lower, control).upper,
-                    },
-                );
+                        lower: divide_product(units, units, divisor.upper, &input.control).lower,
+                        upper: divide_product(units, units, divisor.lower, &input.control).upper,
+                    }
+                    .store(&mut input.output, 0usize);
+                }
             }
         }
     }

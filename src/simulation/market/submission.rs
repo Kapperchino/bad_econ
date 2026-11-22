@@ -5,9 +5,9 @@ use crate::{
         Simulation, Trace,
         economy::{
             EconomyStage,
-            railway::RouteAvailability,
-            search::{INPUT_RAIL_WORD, OrderCollection},
-            sorting::{INPUT_TILE, MarketSort},
+            market::search::{INPUT_RAIL_WORD, OrderCollection},
+            market::sorting::{INPUT_TILE, MarketSort},
+            transport::railway::RouteAvailability,
         },
         flags,
         layout::WORD_BYTES,

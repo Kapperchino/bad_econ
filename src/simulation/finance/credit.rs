@@ -1,5 +1,5 @@
 use super::*;
-use crate::simulation::{flags::KernelFaults, layout::LOW_WORD};
+use crate::simulation::flags::KernelFaults;
 
 #[derive(CubeType, Clone, Copy)]
 pub(super) struct CreditTerms {
@@ -24,80 +24,35 @@ pub(super) struct CreditCapacity {
 }
 
 #[cube]
-pub(super) fn add(a: Ticks, b: Ticks, faults: &mut KernelFaults) -> Ticks {
-    let result = plus(a, b);
-    faults.insert(result.faults);
-    result.value
-}
-
-#[cube]
-pub(super) fn multiply(a: Ticks, b: u32, faults: &mut KernelFaults) -> Ticks {
-    let result = times(a, b);
-    faults.insert(result.faults);
-    result.value
-}
-
-#[cube]
-pub(super) fn scaled(a: Ticks, n: u32, d: u32, faults: &mut KernelFaults) -> Ticks {
-    let result = ratio(a, n, d);
-    faults.insert(result.faults);
-    result.value
-}
-
-#[cube]
-pub(super) fn ceil_scaled(a: Ticks, n: u32, d: u32, faults: &mut KernelFaults) -> Ticks {
-    let result = scaled(a, n, d, faults);
-    let quotient = divide(a, d);
-    let remainder = minus(a, times(quotient, d).value);
-    let extra = times32(remainder.extract(LOW_WORD), n);
-    let fraction = minus(extra, times(divide(extra, d), d).value);
-    add(
-        result,
-        ticks(u32::cast_from(!equal(fraction, zero())), 0),
-        faults,
-    )
-}
-
-#[cube]
-pub(super) fn lending_limit(
-    terms: &CreditTerms,
-    capacity: &CreditCapacity,
-    faults: &mut KernelFaults,
-) -> Ticks {
-    let service = positive(
-        multiply(terms.surplus, terms.service_fraction, faults),
-        multiply(terms.debt_service, FINANCE_SCALE, faults),
-    );
-    let service_cap = scaled(
-        service,
-        terms.term,
-        FINANCE_SCALE + terms.rate * terms.term,
-        faults,
-    );
-    let collateral_cap = divide(
-        positive(
-            multiply(terms.collateral, terms.advance, faults),
-            multiply(terms.secured, FINANCE_SCALE, faults),
-        ),
-        FINANCE_SCALE,
-    );
-    let total_risk_capacity = scaled(
-        capacity.equity,
-        FINANCE_SCALE,
-        capacity.minimum_capital,
-        faults,
-    );
-    let capital_cap = scaled(
-        positive(total_risk_capacity, capacity.risk_assets),
-        FINANCE_SCALE,
-        capacity.risk_weight,
-        faults,
-    );
-    minimum(
+impl CreditTerms {
+    pub(super) fn limit(&self, capacity: &CreditCapacity, faults: &mut KernelFaults) -> Ticks {
+        let service = positive(
+            times(self.surplus, self.service_fraction).accumulate(faults),
+            times(self.debt_service, FINANCE_SCALE).accumulate(faults),
+        );
+        let service_cap =
+            ratio(service, self.term, FINANCE_SCALE + self.rate * self.term).accumulate(faults);
+        let collateral_cap = divide(
+            positive(
+                times(self.collateral, self.advance).accumulate(faults),
+                times(self.secured, FINANCE_SCALE).accumulate(faults),
+            ),
+            FINANCE_SCALE,
+        );
+        let total_risk_capacity =
+            ratio(capacity.equity, FINANCE_SCALE, capacity.minimum_capital).accumulate(faults);
+        let capital_cap = ratio(
+            positive(total_risk_capacity, capacity.risk_assets),
+            FINANCE_SCALE,
+            capacity.risk_weight,
+        )
+        .accumulate(faults);
         minimum(
-            minimum(minimum(terms.requested, service_cap), collateral_cap),
-            capital_cap,
-        ),
-        capacity.liquidity,
-    )
+            minimum(
+                minimum(minimum(self.requested, service_cap), collateral_cap),
+                capital_cap,
+            ),
+            capacity.liquidity,
+        )
+    }
 }

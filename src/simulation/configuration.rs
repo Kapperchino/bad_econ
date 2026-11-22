@@ -96,7 +96,7 @@ pub struct EconomyConfig {
     pub map_size: u32,
     pub commute_speed: u32,
     pub shipment_speed: u32,
-    pub railway: super::economy::railway::RailNetwork,
+    pub railway: super::economy::transport::railway::RailNetwork,
     pub household_need: u32,
     pub food_medium_salary: u32,
     pub food_rich_salary: u32,
@@ -198,7 +198,7 @@ pub struct Configuration {
     pub map_size: u32,
     pub commute_speed: u32,
     pub shipment_speed: u32,
-    pub railway: super::economy::railway::Network,
+    pub railway: super::economy::transport::railway::Network,
     pub household_need: u32,
     pub food_medium_salary: u32,
     pub food_rich_salary: u32,
@@ -263,7 +263,7 @@ impl Configuration {
 
     pub fn new(device: &super::Device, scenario: &Scenario, state: &State) -> Self {
         let rentals = crate::domain::landlords::RentalRegistry::new(scenario, state);
-        let railway = super::economy::railway::Network::new(device, scenario, state);
+        let railway = super::economy::transport::railway::Network::new(device, scenario, state);
         Self::with_rentals(
             device,
             scenario,
@@ -388,7 +388,7 @@ impl Configuration {
         scenario: &Scenario,
         state: &State,
         rentals: crate::domain::landlords::RentalRegistry,
-        railway: super::economy::railway::Network,
+        railway: super::economy::transport::railway::Network,
         cartage: CartageAccounts,
     ) -> Self {
         let config = scenario.config();

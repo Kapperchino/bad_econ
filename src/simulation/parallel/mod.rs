@@ -196,8 +196,8 @@ mod tests {
                         let buffer = device.tensor(&words);
                         let control = device.tensor(&control);
                         let dispatches =
-                            crate::simulation::markets::SearchBuffers::dispatch_buffer(&device);
-                        crate::simulation::markets::prepare_dispatch(
+                            crate::simulation::orders::SearchBuffers::dispatch_buffer(&device);
+                        crate::simulation::orders::prepare_dispatch(
                             &device,
                             &control,
                             &dispatches,
@@ -356,9 +356,9 @@ pub(super) fn scan_histogram(
     for (index, level) in hierarchy.levels.iter().enumerate() {
         ActiveBlockScan::launch(
             device,
-            crate::simulation::markets::dispatch(
+            crate::simulation::orders::dispatch(
                 dispatches,
-                crate::simulation::markets::HISTOGRAM_DISPATCH + index * 3,
+                crate::simulation::orders::HISTOGRAM_DISPATCH + index * 3,
                 level.blocks,
             ),
             CubeDim::new_1d(device.workgroup),
@@ -387,9 +387,9 @@ pub(super) fn scan_histogram(
     {
         ActiveBlockOffsets::launch(
             device,
-            crate::simulation::markets::dispatch(
+            crate::simulation::orders::dispatch(
                 dispatches,
-                crate::simulation::markets::HISTOGRAM_DISPATCH + index * 3,
+                crate::simulation::orders::HISTOGRAM_DISPATCH + index * 3,
                 level.blocks,
             ),
             CubeDim::new_1d(device.workgroup),
@@ -429,7 +429,7 @@ fn scan_active_blocks(
     );
     let block = CUBE_POS as u32;
     let start = block * CUBE_DIM * items + UNIT_POS * items;
-    if block * CUBE_DIM * items < count && crate::simulation::markets::faults_clear(control) {
+    if block * CUBE_DIM * items < count && crate::simulation::orders::faults_clear(control) {
         let mut values = Array::<u32>::new(items as usize);
         let mut total = 0u32;
         #[unroll]
@@ -476,7 +476,7 @@ fn add_active_offsets(
     );
     let block = CUBE_POS as u32;
     let start = block * CUBE_DIM * items + UNIT_POS;
-    if start < count && block > 0 && crate::simulation::markets::faults_clear(control) {
+    if start < count && block > 0 && crate::simulation::orders::faults_clear(control) {
         let preceding = buffer[(offset + bound + block - 1) as usize];
         #[unroll]
         for item in 0..items {

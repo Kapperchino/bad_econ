@@ -1,3 +1,4 @@
+use super::kernels::{Bounds, UNRESOLVED, checked, scaled, sum};
 use super::*;
 use crate::simulation::{pass::GpuPass, system::gpu_passes};
 use cubecl::prelude::*;
@@ -553,200 +554,6 @@ impl LaborTruncation {
     }
 }
 
-mod derivative_kernels {
-    use super::super::kernels::{Bounds, UNRESOLVED, divide_product, interval, scaled, sum, write};
-    use super::super::kernels::{checked, positive};
-    use cubecl::prelude::*;
-
-    #[cube]
-    pub fn absolute(
-        positive_input: &[f32],
-        negative_input: &[f32],
-        output: &mut [f32],
-        length: u32,
-    ) {
-        let index = ABSOLUTE_POS;
-        if index < length as usize {
-            let a = interval(positive_input, index);
-            let b = interval(negative_input, index);
-            write(
-                output,
-                index,
-                Bounds {
-                    lower: max(positive(a.lower, b.upper), positive(b.lower, a.upper)),
-                    upper: max(positive(a.upper, b.lower), positive(b.upper, a.lower)),
-                },
-            );
-        }
-    }
-
-    #[cube]
-    fn quotient(value: Bounds, divisor: &Bounds, scale: u32, control: &[Atomic<u32>]) -> Bounds {
-        Bounds {
-            lower: divide_product(value.lower, scale as f32, divisor.upper, control).lower,
-            upper: divide_product(value.upper, scale as f32, divisor.lower, control).upper,
-        }
-    }
-
-    #[cube]
-    fn cross_term(
-        left: &Bounds,
-        right: Bounds,
-        divisor: &Bounds,
-        control: &[Atomic<u32>],
-    ) -> Bounds {
-        Bounds {
-            lower: divide_product(left.lower, right.lower, divisor.upper, control).lower,
-            upper: divide_product(left.upper, right.upper, divisor.lower, control).upper,
-        }
-    }
-
-    #[cube]
-    pub fn normalized(
-        beta: &[f32],
-        change_positive: &[f32],
-        change_negative: &[f32],
-        positive_output: &mut [f32],
-        negative_output: &mut [f32],
-        control: &[Atomic<u32>],
-        length: u32,
-        reference: u32,
-        scale: u32,
-    ) {
-        let index = ABSOLUTE_POS;
-        if index < length as usize {
-            let divisor = interval(beta, reference as usize);
-            if divisor.lower == 0.0 {
-                control[0].store(UNRESOLVED);
-            }
-            if index == reference as usize {
-                write(
-                    positive_output,
-                    index,
-                    Bounds {
-                        lower: 0.0,
-                        upper: 0.0,
-                    },
-                );
-                write(
-                    negative_output,
-                    index,
-                    Bounds {
-                        lower: 0.0,
-                        upper: 0.0,
-                    },
-                );
-            }
-            if index != reference as usize && !(divisor.lower == 0.0) {
-                let alpha = quotient(interval(beta, index), &divisor, scale, control);
-                let dp = quotient(interval(change_positive, index), &divisor, scale, control);
-                let dn = quotient(interval(change_negative, index), &divisor, scale, control);
-                let cp = cross_term(
-                    &alpha,
-                    interval(change_negative, reference as usize),
-                    &divisor,
-                    control,
-                );
-                let cn = cross_term(
-                    &alpha,
-                    interval(change_positive, reference as usize),
-                    &divisor,
-                    control,
-                );
-                let positive = Bounds {
-                    lower: sum(dp.lower, cp.lower, control),
-                    upper: sum(dp.upper, cp.upper, control),
-                };
-                let negative = Bounds {
-                    lower: sum(dn.lower, cn.lower, control),
-                    upper: sum(dn.upper, cn.upper, control),
-                };
-                write(positive_output, index, positive);
-                write(negative_output, index, negative);
-            }
-        }
-    }
-
-    #[cube]
-    pub fn weighted_values(
-        labor: &[f32],
-        weights: &[u32],
-        output: &mut [f32],
-        rows: u32,
-        columns: u32,
-    ) {
-        let index = ABSOLUTE_POS;
-        if index < rows as usize * columns as usize {
-            let weighted = interval(labor, index).upper * weights[index % columns as usize] as f32;
-            write(
-                output,
-                index,
-                Bounds {
-                    lower: weighted,
-                    upper: weighted,
-                },
-            );
-        }
-    }
-
-    #[cube]
-    pub fn tail_bound(
-        norms: &[f32],
-        output: &mut [f32],
-        control: &[Atomic<u32>],
-        numerator: u32,
-        denominator: u32,
-        terms: u32,
-    ) {
-        if ABSOLUTE_POS == 0 {
-            let mut bound = checked(max(norms[0], 0.0), control);
-            for _term in 0..terms {
-                bound = scaled(bound, numerator, denominator, control).upper;
-            }
-            bound = scaled(bound, denominator, denominator - numerator, control).upper;
-            write(
-                output,
-                0usize,
-                Bounds {
-                    lower: 0.0,
-                    upper: bound,
-                },
-            );
-        }
-    }
-
-    #[cube]
-    pub fn tail_enclosure(
-        partial: &[f32],
-        tail: &[f32],
-        weights: &[u32],
-        output: &mut [f32],
-        control: &[Atomic<u32>],
-        rows: u32,
-        columns: u32,
-    ) {
-        let index = ABSOLUTE_POS;
-        if index < rows as usize * columns as usize {
-            let value = interval(partial, index);
-            let bound = scaled(
-                interval(tail, 0usize).upper,
-                1u32,
-                weights[index % columns as usize],
-                control,
-            )
-            .upper;
-            write(
-                output,
-                index,
-                Bounds {
-                    lower: value.lower,
-                    upper: sum(value.upper, bound, control),
-                },
-            );
-        }
-    }
-}
-
 #[derive(CubeType, CubeLaunch)]
 pub(super) struct AbsoluteValueInput {
     pub(super) positive_input: Box<[f32]>,
@@ -769,12 +576,12 @@ impl GpuPass<AbsoluteValueInput> for BoundAbsoluteValue {
     type Output = ();
 
     fn execute(mut input: AbsoluteValueInput) {
-        derivative_kernels::absolute(
-            &input.positive_input,
-            &input.negative_input,
-            &mut input.output,
-            input.length,
-        );
+        let index = ABSOLUTE_POS;
+        if index < input.length as usize {
+            let a = Bounds::read(&input.positive_input, index);
+            let b = Bounds::read(&input.negative_input, index);
+            a.absolute_difference(&b).store(&mut input.output, index);
+        }
     }
 }
 
@@ -805,17 +612,62 @@ impl GpuPass<NormalizedDerivativeInput> for NormalizeDerivative {
     type Output = ();
 
     fn execute(mut input: NormalizedDerivativeInput) {
-        derivative_kernels::normalized(
-            &input.beta,
-            &input.change_positive,
-            &input.change_negative,
-            &mut input.positive_output,
-            &mut input.negative_output,
-            &input.control,
-            input.length,
-            input.reference,
-            input.scale,
-        );
+        let index = ABSOLUTE_POS;
+        if index < input.length as usize {
+            let divisor = Bounds::read(&input.beta, input.reference as usize);
+            if divisor.lower == 0.0 {
+                input.control[0].store(UNRESOLVED);
+            }
+            if index == input.reference as usize {
+                Bounds {
+                    lower: 0.0,
+                    upper: 0.0,
+                }
+                .store(&mut input.positive_output, index);
+                Bounds {
+                    lower: 0.0,
+                    upper: 0.0,
+                }
+                .store(&mut input.negative_output, index);
+            }
+            if index != input.reference as usize && !(divisor.lower == 0.0) {
+                let alpha = Bounds::read(&input.beta, index).quotient(
+                    &divisor,
+                    input.scale,
+                    &input.control,
+                );
+                let dp = Bounds::read(&input.change_positive, index).quotient(
+                    &divisor,
+                    input.scale,
+                    &input.control,
+                );
+                let dn = Bounds::read(&input.change_negative, index).quotient(
+                    &divisor,
+                    input.scale,
+                    &input.control,
+                );
+                let cp = alpha.product_quotient(
+                    Bounds::read(&input.change_negative, input.reference as usize),
+                    &divisor,
+                    &input.control,
+                );
+                let cn = alpha.product_quotient(
+                    Bounds::read(&input.change_positive, input.reference as usize),
+                    &divisor,
+                    &input.control,
+                );
+                let positive = Bounds {
+                    lower: sum(dp.lower, cp.lower, &input.control),
+                    upper: sum(dp.upper, cp.upper, &input.control),
+                };
+                let negative = Bounds {
+                    lower: sum(dn.lower, cn.lower, &input.control),
+                    upper: sum(dn.upper, cn.upper, &input.control),
+                };
+                positive.store(&mut input.positive_output, index);
+                negative.store(&mut input.negative_output, index);
+            }
+        }
     }
 }
 
@@ -842,13 +694,16 @@ impl GpuPass<WeightedValuesInput> for WeightValues {
     type Output = ();
 
     fn execute(mut input: WeightedValuesInput) {
-        derivative_kernels::weighted_values(
-            &input.labor,
-            &input.weights,
-            &mut input.output,
-            input.rows,
-            input.columns,
-        );
+        let index = ABSOLUTE_POS;
+        if index < input.rows as usize * input.columns as usize {
+            let weighted = Bounds::read(&input.labor, index).upper
+                * input.weights[index % input.columns as usize] as f32;
+            Bounds {
+                lower: weighted,
+                upper: weighted,
+            }
+            .store(&mut input.output, index);
+        }
     }
 }
 
@@ -876,14 +731,24 @@ impl GpuPass<TailBoundInput> for BoundTail {
     type Output = ();
 
     fn execute(mut input: TailBoundInput) {
-        derivative_kernels::tail_bound(
-            &input.norms,
-            &mut input.output,
-            &input.control,
-            input.numerator,
-            input.denominator,
-            input.terms,
-        );
+        if ABSOLUTE_POS == 0 {
+            let mut bound = checked(max(input.norms[0], 0.0), &input.control);
+            for _term in 0..input.terms {
+                bound = scaled(bound, input.numerator, input.denominator, &input.control).upper;
+            }
+            bound = scaled(
+                bound,
+                input.denominator,
+                input.denominator - input.numerator,
+                &input.control,
+            )
+            .upper;
+            Bounds {
+                lower: 0.0,
+                upper: bound,
+            }
+            .store(&mut input.output, 0usize);
+        }
     }
 }
 
@@ -912,14 +777,21 @@ impl GpuPass<TailEnclosureInput> for EncloseTail {
     type Output = ();
 
     fn execute(mut input: TailEnclosureInput) {
-        derivative_kernels::tail_enclosure(
-            &input.partial,
-            &input.tail,
-            &input.weights,
-            &mut input.output,
-            &input.control,
-            input.rows,
-            input.columns,
-        );
+        let index = ABSOLUTE_POS;
+        if index < input.rows as usize * input.columns as usize {
+            let value = Bounds::read(&input.partial, index);
+            let bound = scaled(
+                Bounds::read(&input.tail, 0usize).upper,
+                1u32,
+                input.weights[index % input.columns as usize],
+                &input.control,
+            )
+            .upper;
+            Bounds {
+                lower: value.lower,
+                upper: sum(value.upper, bound, &input.control),
+            }
+            .store(&mut input.output, index);
+        }
     }
 }

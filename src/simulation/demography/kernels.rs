@@ -1,8 +1,8 @@
 use super::{
-    DemographyPolicy, OBSERVATION_METRICS, OBSERVATION_SHARDS, PersonLayout as P, PopulationModel,
-    Stage, WorkerRemapping,
+    DemographyPolicy, PersonLayout as P, PopulationModel, Stage,
+    systems::{DemographyInput, DemographyInputExpand},
 };
-use crate::simulation::configuration::Feature;
+use crate::simulation::{configuration::Feature, economy::households::food::BreadDemand};
 use crate::{
     domain::{
         Field,
@@ -113,27 +113,40 @@ pub(super) fn family_support(ledger: &Ledger<'_>, household: u32, food: u32) -> 
     support
 }
 
+#[derive(CubeType)]
+pub(super) struct OccupationalExposure {
+    pub minutes: u32,
+    pub condition: u32,
+    pub safety: u32,
+    pub fatigue: u32,
+    pub method: u32,
+}
+
 #[cube]
-pub(super) fn occupation(
-    rate_ppm: u32,
-    minutes: u32,
-    reference: u32,
-    condition: u32,
-    safety: u32,
-    fatigue: u32,
-    method: u32,
-) -> Ticks {
-    let base = divide(
-        times(times32(rate_ppm, 1_000_000), minutes).value,
-        reference,
-    );
-    let equipment = 1000 + (1000 - min(condition, 1000)) * 2;
-    let tired = 1000 + fatigue + (max(minutes, 480) - 480) * 1000 / 480;
-    let mechanized = select(method > 0, 1250u32, 1000u32);
-    let maintained = ratio(base, equipment, 1000).value;
-    let exertion = ratio(maintained, tired, 1000).value;
-    let method_risk = ratio(exertion, mechanized, 1000).value;
-    ratio(method_risk, 1000 - min(safety, 900), 1000).value
+impl OccupationalExposure {
+    pub(super) fn unprotected(minutes: u32, fatigue: u32) -> Self {
+        OccupationalExposure {
+            minutes,
+            condition: 1000,
+            safety: 0,
+            fatigue,
+            method: 0,
+        }
+    }
+
+    pub(super) fn risk(&self, rate_ppm: u32, reference: u32) -> Ticks {
+        let base = divide(
+            times(times32(rate_ppm, 1_000_000), self.minutes).value,
+            reference,
+        );
+        let equipment = 1000 + (1000 - min(self.condition, 1000)) * 2;
+        let tired = 1000 + self.fatigue + (max(self.minutes, 480) - 480) * 1000 / 480;
+        let mechanized = select(self.method > 0, 1250u32, 1000u32);
+        let maintained = ratio(base, equipment, 1000).value;
+        let exertion = ratio(maintained, tired, 1000).value;
+        let method_risk = ratio(exertion, mechanized, 1000).value;
+        ratio(method_risk, 1000 - min(self.safety, 900), 1000).value
+    }
 }
 
 #[cube]
@@ -171,603 +184,589 @@ pub(super) fn cold_risk(exposure: u32, daily_ppm: u32, vulnerability: u32) -> Ti
     risk
 }
 
-#[cube]
-fn death_cause(
-    draw: Ticks,
+#[derive(CubeType)]
+struct MortalityRisks {
     background: Ticks,
     occupational: Ticks,
     famine: Ticks,
     cold: Ticks,
-) -> u32 {
-    let first = background;
-    let second = plus(first, occupational).value;
-    let third = plus(second, famine).value;
-    let total = minimum(
-        plus(third, cold).value,
-        ticks(
-            comptime!(PROBABILITY_SCALE as u32),
-            comptime!((PROBABILITY_SCALE >> 32) as u32),
-        ),
-    );
-    let mut cause = 0;
-    if lt(draw, total) {
-        cause = 4;
-    }
-    if lt(draw, third) {
-        cause = 3;
-    }
-    if lt(draw, second) {
-        cause = 2;
-    }
-    if lt(draw, first) {
-        cause = 1;
-    }
-    cause
 }
 
-#[allow(
-    clippy::collapsible_if,
-    clippy::manual_is_multiple_of,
-    clippy::manual_range_contains,
-    clippy::manual_div_ceil,
-    reason = "CubeCL lowers explicit runtime guards"
-)]
 #[cube]
-pub fn step(
-    economy: &mut EconomyView<'_>,
-    people: &mut [u32],
-    ranges: &[u32],
-    policy: &DemographyPolicy,
-    births: &mut [u32],
-    samples: &[f32],
+impl MortalityRisks {
+    fn cause(&self, draw: Ticks) -> u32 {
+        let first = self.background;
+        let second = plus(first, self.occupational).value;
+        let third = plus(second, self.famine).value;
+        let total = minimum(
+            plus(third, self.cold).value,
+            ticks(
+                comptime!(PROBABILITY_SCALE as u32),
+                comptime!((PROBABILITY_SCALE >> 32) as u32),
+            ),
+        );
+        let mut cause = 0;
+        if lt(draw, total) {
+            cause = 4;
+        }
+        if lt(draw, third) {
+            cause = 3;
+        }
+        if lt(draw, second) {
+            cause = 2;
+        }
+        if lt(draw, first) {
+            cause = 1;
+        }
+        cause
+    }
+}
+
+#[derive(CubeType)]
+struct HouseholdProfile {
+    living: u32,
+    demand: u64,
+    worker: u32,
+    available: u32,
+    workers: u32,
+    shortest_day: u32,
+    household_time: u32,
+}
+
+#[derive(CubeType)]
+struct PersonDay<'a> {
+    words: &'a mut [u32],
+    base: usize,
+}
+
+#[cube]
+impl<'a> PersonDay<'a> {
+    fn new(words: &'a mut [u32], index: u32) -> Self {
+        PersonDay::<'a> {
+            words,
+            base: index as usize * P::WORDS,
+        }
+    }
+
+    fn number(&self, #[comptime] field: usize) -> u32 {
+        self.words[self.base + field]
+    }
+
+    fn set(&mut self, #[comptime] field: usize, value: u32) {
+        self.words[self.base + field] = value;
+    }
+
+    fn identity(&self) -> Ticks {
+        read_tick_words(&*self.words, self.base + P::IDENTITY)
+    }
+}
+
+#[derive(CubeType)]
+struct HouseholdDay<'a> {
+    economy: EconomyView<'a>,
+    people: &'a mut [u32],
+    policy: &'a DemographyPolicy,
+    births: &'a mut [u32],
+    samples: &'a [f32],
     day: u32,
-    #[comptime] stage: Stage,
-    #[comptime] model: PopulationModel,
-) {
-    let config = economy.ledger.config;
-    let household = ABSOLUTE_POS as u32;
-    if household < config.actors {
-        let start = ranges[household as usize * 2];
-        let count = ranges[household as usize * 2 + 1];
-        let mut living = 0;
-        let mut demand = 0u64;
-        let mut worker = u32::new(comptime!(i64::from(u32::MAX)));
-        let mut available = 0;
-        let mut workers = 0u32;
-        let mut shortest_day = config.work_cap;
-        let mut household_time = 0;
+    household: u32,
+    first: u32,
+    count: u32,
+}
+
+#[cube]
+impl<'a> HouseholdDay<'a> {
+    fn new(input: &'a mut DemographyInput, household: u32) -> Self {
+        HouseholdDay::<'a> {
+            economy: EconomyView::new(&mut input.state, &input.actors, &input.config),
+            people: &mut input.people,
+            policy: &input.policy,
+            births: &mut input.births,
+            samples: &input.samples,
+            day: input.day,
+            household,
+            first: input.ranges[household as usize * 2],
+            count: input.ranges[household as usize * 2 + 1],
+        }
+    }
+
+    fn profile(
+        &mut self,
+        #[comptime] stage: Stage,
+        #[comptime] model: PopulationModel,
+    ) -> HouseholdProfile {
+        let config = self.economy.ledger.config;
+        let mut profile = HouseholdProfile {
+            living: 0,
+            demand: 0,
+            worker: u32::MAX,
+            available: 0,
+            workers: 0,
+            shortest_day: config.work_cap,
+            household_time: 0,
+        };
         if comptime!(stage == Stage::Observation) {
-            births[household as usize] = 0;
-            economy.ledger.set_number(Field::SplitPerson, household, 0);
+            self.births[self.household as usize] = 0;
+            self.economy
+                .ledger
+                .set_number(Field::SplitPerson, self.household, 0);
         }
         if comptime!(model == PopulationModel::Cohorts) {
-            living = economy.ledger.number(Field::LivingMembers, household);
+            profile.living = self
+                .economy
+                .ledger
+                .number(Field::LivingMembers, self.household);
             for band in 0..5u32 {
-                demand += u64::cast_from(
-                    economy
+                profile.demand += u64::cast_from(
+                    self.economy
                         .ledger
-                        .number_at(comptime!(Field::Infants as u32) + band, household),
-                ) * u64::cast_from(policy.food[band as usize]);
+                        .number_at(comptime!(Field::Infants as u32) + band, self.household),
+                ) * u64::cast_from(self.policy.food[band as usize]);
             }
-            demand *= u64::cast_from(config.household_need);
-            workers = economy.ledger.number(Field::YoungAdults, household)
-                + economy.ledger.number(Field::OlderAdults, household);
-            shortest_day = min(
-                config.work_cap * (1000 - economy.ledger.number(Field::Fatigue, household)) / 1000,
+            profile.demand *= u64::cast_from(config.household_need);
+            profile.workers = self
+                .economy
+                .ledger
+                .number(Field::YoungAdults, self.household)
+                + self
+                    .economy
+                    .ledger
+                    .number(Field::OlderAdults, self.household);
+            profile.shortest_day = min(
+                config.work_cap
+                    * (1000 - self.economy.ledger.number(Field::Fatigue, self.household))
+                    / 1000,
                 1440 - config.reserved_minutes,
             );
-            household_time = workers * shortest_day;
-            worker = select(workers > 0, household, u32::MAX);
-            workers = select(shortest_day > 0, workers, 0);
+            profile.household_time = profile.workers * profile.shortest_day;
+            profile.worker = select(profile.workers > 0, self.household, u32::MAX);
+            profile.workers = select(profile.shortest_day > 0, profile.workers, 0);
         }
-        for offset in 0..count {
-            let index = start + (offset + day % max(count, 1)) % max(count, 1);
-            let base = index as usize * P::WORDS;
+        for offset in 0..self.count {
+            let index = self.first + (offset + self.day % max(self.count, 1)) % max(self.count, 1);
+            let mut person = PersonDay::new(self.people, index);
             if comptime!(stage == Stage::Observation) {
-                people[base + P::EMPLOYER] = 0;
-                people[base + P::WORK] = 0;
+                person.set(P::EMPLOYER, 0);
+                person.set(P::WORK, 0);
             }
-            if people[base + P::CAUSE] == 0 {
-                let age = people[base + P::AGE];
-                living += 1;
-                demand += u64::cast_from(policy.food[band(age) as usize] * config.household_need);
-                let eligible =
-                    age >= policy.parameters.minimum_age && age < policy.parameters.retirement_age;
+            if person.number(P::CAUSE) == 0 {
+                let age = person.number(P::AGE);
+                profile.living += 1;
+                profile.demand +=
+                    u64::cast_from(self.policy.food[band(age) as usize] * config.household_need);
+                let eligible = age >= self.policy.parameters.minimum_age
+                    && age < self.policy.parameters.retirement_age;
                 let capacity = min(
-                    config.work_cap * (1000 - people[base + P::FATIGUE]) / 1000,
+                    config.work_cap * (1000 - person.number(P::FATIGUE)) / 1000,
                     1440 - config.reserved_minutes,
                 );
-                household_time += select(eligible, capacity, 0);
+                profile.household_time += select(eligible, capacity, 0);
                 if eligible && capacity > 0 {
-                    workers += 1;
-                    shortest_day = min(shortest_day, capacity);
+                    profile.workers += 1;
+                    profile.shortest_day = min(profile.shortest_day, capacity);
                 }
-                if eligible && worker == u32::MAX {
-                    worker = index;
-                    available = min(
-                        config.work_cap * (1000 - people[base + P::FATIGUE]) / 1000,
-                        1440 - config.reserved_minutes,
-                    );
-                }
-                if comptime!(stage == Stage::Observation) {
-                    people[base + P::EMPLOYER] = 0;
-                    people[base + P::WORK] = 0;
+                if eligible && profile.worker == u32::MAX {
+                    profile.worker = index;
+                    profile.available = capacity;
                 }
             }
         }
-        if comptime!(stage == Stage::Observation) {
-            economy
+        profile
+    }
+
+    #[allow(
+        clippy::manual_div_ceil,
+        reason = "CubeCL lowers explicit integer division"
+    )]
+    fn observe(&mut self, profile: &HouseholdProfile) {
+        let config = self.economy.ledger.config;
+        self.economy
+            .ledger
+            .set_number(Field::LivingMembers, self.household, profile.living);
+        self.economy.ledger.set_number(
+            Field::HeatingNeed,
+            self.household,
+            profile.living * config.heating_per_person,
+        );
+        self.economy
+            .ledger
+            .set_number(Field::HeatingServed, self.household, 0);
+        self.economy
+            .ledger
+            .set_number(Field::Worker, self.household, profile.worker);
+        let mut available = profile.available;
+        if comptime!(config.cohorts == Feature::Enabled) {
+            available = profile.shortest_day * profile.workers;
+            self.economy
                 .ledger
-                .set_number(Field::LivingMembers, household, living);
-            economy.ledger.set_number(
-                Field::HeatingNeed,
-                household,
-                living * config.heating_per_person,
-            );
-            economy
+                .set_number(Field::EligibleWorkers, self.household, profile.workers);
+        }
+        let moving = self.economy.ledger.number(Field::MoveDue, self.household) > 0;
+        self.economy.ledger.set_number(
+            Field::HouseholdBudget,
+            self.household,
+            select(moving, 0, profile.household_time),
+        );
+        self.economy
+            .ledger
+            .set_number(Field::Time, self.household, select(moving, 0, available));
+        self.economy.ledger.set_number(
+            Field::HomeTime,
+            self.household,
+            select(moving, 0, profile.household_time - available),
+        );
+        let gross = self
+            .economy
+            .ledger
+            .value(Field::GrossIncome, self.household);
+        let previous = self
+            .economy
+            .ledger
+            .value(Field::OpeningGrossIncome, self.household);
+        let salary = positive(gross, previous);
+        self.economy
+            .ledger
+            .set(Field::OpeningGrossIncome, self.household, gross);
+        self.plan_food(
+            salary,
+            profile.living,
+            ((profile.demand + 999u64) / 1000u64) as u32,
+        );
+        self.economy.ledger.set_number(
+            Field::NutritionNeed,
+            self.household,
+            select(
+                config.food_medium_salary > 0,
+                profile.living * config.household_need,
+                ((profile.demand + 999u64) / 1000u64) as u32,
+            ),
+        );
+    }
+
+    fn after_labor(&mut self, profile: &HouseholdProfile) {
+        let config = self.economy.ledger.config;
+        let gross = self
+            .economy
+            .ledger
+            .value(Field::GrossIncome, self.household);
+        let opening = self
+            .economy
+            .ledger
+            .value(Field::OpeningGrossIncome, self.household);
+        let salary = positive(gross, opening);
+        self.plan_food(
+            salary,
+            profile.living,
+            profile.living * config.household_need,
+        );
+    }
+
+    fn requirements(&mut self, profile: &HouseholdProfile) {
+        let config = self.economy.ledger.config;
+        let work = self.economy.ledger.number(Field::Hours, self.household)
+            + self
+                .economy
                 .ledger
-                .set_number(Field::HeatingServed, household, 0);
-            economy.ledger.set_number(Field::Worker, household, worker);
-            if comptime!(config.cohorts == Feature::Enabled) {
-                available = shortest_day * workers;
-                economy
+                .number(Field::CartageMinutes, self.household)
+            + self
+                .economy
+                .ledger
+                .number(Field::HomeMinutes, self.household);
+        let additional = u64::cast_from(work)
+            * u64::cast_from(self.policy.parameters.work_food)
+            * u64::cast_from(config.household_need)
+            / 480u64;
+        let total = profile.demand
+            + additional
+            + u64::cast_from(
+                self.economy
                     .ledger
-                    .set_number(Field::EligibleWorkers, household, workers);
-            }
-            let moving = economy.ledger.number(Field::MoveDue, household) > 0;
-            economy.ledger.set_number(
-                Field::HouseholdBudget,
-                household,
-                select(moving, 0, household_time),
+                    .number(Field::FoodFraction, self.household),
             );
-            economy
-                .ledger
-                .set_number(Field::Time, household, select(moving, 0, available));
-            economy.ledger.set_number(
-                Field::HomeTime,
-                household,
-                select(moving, 0, household_time - available),
+        let gross = self
+            .economy
+            .ledger
+            .value(Field::GrossIncome, self.household);
+        let opening = self
+            .economy
+            .ledger
+            .value(Field::OpeningGrossIncome, self.household);
+        let salary = positive(gross, opening);
+        self.plan_food(salary, profile.living, (total / 1000u64) as u32);
+        self.economy.ledger.set_number(
+            Field::NutritionNeed,
+            self.household,
+            select(
+                config.food_medium_salary > 0,
+                profile.living * config.household_need,
+                (total / 1000u64) as u32,
+            ),
+        );
+        self.economy.ledger.set_number(
+            Field::FoodFraction,
+            self.household,
+            (total % 1000u64) as u32,
+        );
+    }
+
+    fn plan_food(&mut self, salary: Ticks, members: u32, minimum: u32) {
+        let ledger = &mut self.economy.ledger;
+        let target = BreadDemand {
+            gross_income: salary,
+            savings: ledger.value(Field::Cash, self.household),
+            expected_income: ledger.value(Field::IncomeForecast, self.household),
+            minimum,
+            members,
+            price: ledger.number(Field::FoodPrice, self.household),
+        }
+        .target(ledger.config);
+        ledger.set_number(Field::FoodNeed, self.household, target);
+    }
+
+    #[allow(
+        clippy::manual_is_multiple_of,
+        clippy::manual_range_contains,
+        clippy::manual_div_ceil,
+        reason = "CubeCL lowers explicit runtime guards"
+    )]
+    fn individual_mortality(&mut self, mut living: u32) {
+        let config = self.economy.ledger.config;
+        let target = self.economy.ledger.number(Field::FoodNeed, self.household);
+        let consumed = target - self.economy.ledger.number(Field::Shortage, self.household);
+        let need = self
+            .economy
+            .ledger
+            .number(Field::NutritionNeed, self.household);
+        let deficit = (need - min(need, consumed)) * 1000 / max(need, 1);
+        let freezing_need = self
+            .economy
+            .ledger
+            .number(Field::LivingMembers, self.household)
+            * (max(config.heating_per_person, 2) - 2);
+        let served = self
+            .economy
+            .ledger
+            .number(Field::HeatingServed, self.household);
+        let cold_deficit =
+            (freezing_need - min(freezing_need, served)) * 1000 / max(freezing_need, 1);
+        let mut supported_births = zero();
+        if self.policy.parameters.births > 0 {
+            let infant_food = select(
+                config.food_medium_salary > 0,
+                config.household_need,
+                (self.policy.food[0usize] * config.household_need + 999) / 1000,
             );
-            let gross = economy.ledger.value(Field::GrossIncome, household);
-            let previous = economy.ledger.value(Field::OpeningGrossIncome, household);
-            let salary = positive(gross, previous);
-            economy
-                .ledger
-                .set(Field::OpeningGrossIncome, household, gross);
-            let target = crate::simulation::economy::food::bread_target(
-                config,
-                crate::simulation::economy::food::BreadDemand {
-                    gross_income: salary,
-                    savings: economy.ledger.value(Field::Cash, household),
-                    expected_income: economy.ledger.value(Field::IncomeForecast, household),
-                    minimum: ((demand + 999u64) / 1000u64) as u32,
-                    members: living,
-                    price: economy.ledger.number(Field::FoodPrice, household),
-                },
+            let support = family_support(&self.economy.ledger, self.household, need + infant_food);
+            let support = select(
+                comptime!(config.economy == crate::domain::Economy::Industrial)
+                    && max(deficit, cold_deficit) > 0,
+                comptime!(FamilySupport::Deprived as u32),
+                support,
             );
-            economy
-                .ledger
-                .set_number(Field::FoodNeed, household, target);
-            economy.ledger.set_number(
-                Field::NutritionNeed,
-                household,
-                select(
-                    config.food_medium_salary > 0,
-                    living * config.household_need,
-                    ((demand + 999u64) / 1000u64) as u32,
-                ),
+            supported_births = select(
+                support == comptime!(FamilySupport::Secure as u32),
+                rate(self.policy.parameters.births),
+                zero(),
             );
         }
-        if comptime!(stage == Stage::Diet) {
-            let gross = economy.ledger.value(Field::GrossIncome, household);
-            let opening = economy.ledger.value(Field::OpeningGrossIncome, household);
-            let salary = positive(gross, opening);
-            let target = crate::simulation::economy::food::bread_target(
-                config,
-                crate::simulation::economy::food::BreadDemand {
-                    gross_income: salary,
-                    savings: economy.ledger.value(Field::Cash, household),
-                    expected_income: economy.ledger.value(Field::IncomeForecast, household),
-                    minimum: living * config.household_need,
-                    members: living,
-                    price: economy.ledger.number(Field::FoodPrice, household),
-                },
-            );
-            economy
-                .ledger
-                .set_number(Field::FoodNeed, household, target);
-        }
-        if comptime!(stage == Stage::Requirements) {
-            let work = economy.ledger.number(Field::Hours, household)
-                + economy.ledger.number(Field::CartageMinutes, household)
-                + economy.ledger.number(Field::HomeMinutes, household);
-            let additional = u64::cast_from(work)
-                * u64::cast_from(policy.parameters.work_food)
-                * u64::cast_from(config.household_need)
-                / 480u64;
-            let total = demand
-                + additional
-                + u64::cast_from(economy.ledger.number(Field::FoodFraction, household));
-            let gross = economy.ledger.value(Field::GrossIncome, household);
-            let opening = economy.ledger.value(Field::OpeningGrossIncome, household);
-            let salary = positive(gross, opening);
-            let target = crate::simulation::economy::food::bread_target(
-                config,
-                crate::simulation::economy::food::BreadDemand {
-                    gross_income: salary,
-                    savings: economy.ledger.value(Field::Cash, household),
-                    expected_income: economy.ledger.value(Field::IncomeForecast, household),
-                    minimum: (total / 1000u64) as u32,
-                    members: living,
-                    price: economy.ledger.number(Field::FoodPrice, household),
-                },
-            );
-            economy
-                .ledger
-                .set_number(Field::FoodNeed, household, target);
-            economy.ledger.set_number(
-                Field::NutritionNeed,
-                household,
-                select(
-                    config.food_medium_salary > 0,
-                    living * config.household_need,
-                    (total / 1000u64) as u32,
-                ),
-            );
-            economy
-                .ledger
-                .set_number(Field::FoodFraction, household, (total % 1000u64) as u32);
-        }
-        if comptime!(stage == Stage::Mortality && model == PopulationModel::Cohorts) {
-            crate::simulation::demography::cohorts::advance(economy, policy, samples, household);
-        }
-        if comptime!(stage == Stage::Mortality && model == PopulationModel::Individuals) {
-            let target = economy.ledger.number(Field::FoodNeed, household);
-            let consumed = target - economy.ledger.number(Field::Shortage, household);
-            let need = economy.ledger.number(Field::NutritionNeed, household);
-            let deficit = (need - min(need, consumed)) * 1000 / max(need, 1);
-            let freezing_need = economy.ledger.number(Field::LivingMembers, household)
-                * (max(config.heating_per_person, 2) - 2);
-            let served = economy.ledger.number(Field::HeatingServed, household);
-            let cold_deficit =
-                (freezing_need - min(freezing_need, served)) * 1000 / max(freezing_need, 1);
-            let mut supported_births = zero();
-            if policy.parameters.births > 0 {
-                let infant_food = select(
-                    config.food_medium_salary > 0,
-                    config.household_need,
-                    (policy.food[0usize] * config.household_need + 999) / 1000,
+        let selected = self.economy.ledger.number(Field::Worker, self.household);
+        let employer = self.economy.ledger.number(Field::Employer, self.household);
+        let minutes = self.economy.ledger.number(Field::Hours, self.household);
+        let home = self
+            .economy
+            .ledger
+            .number(Field::HomeMinutes, self.household);
+        let mut home_remaining = home;
+        let mut cartage_remaining = self
+            .economy
+            .ledger
+            .number(Field::CartageMinutes, self.household);
+        let mut paid_workers = self.economy.ledger.number(Field::Employed, self.household);
+        let shift = minutes / max(paid_workers, 1);
+        let mut delegate = zero();
+        for offset in 0..self.count {
+            let first = select(selected == u32::MAX, self.first, selected + 1);
+            let index = self.first + (first - self.first + offset) % max(self.count, 1);
+            let mut person = PersonDay::new(self.people, index);
+            if person.number(P::CAUSE) == 0 {
+                let age = person.number(P::AGE);
+                let group = band(age);
+                let mut work = select(index == selected, minutes, 0);
+                let eligible = age >= self.policy.parameters.minimum_age
+                    && age < self.policy.parameters.retirement_age;
+                let capacity = min(
+                    config.work_cap * (1000 - person.number(P::FATIGUE)) / 1000,
+                    1440 - config.reserved_minutes,
                 );
-                let support = family_support(&economy.ledger, household, need + infant_food);
-                let support = select(
-                    comptime!(config.economy == crate::domain::Economy::Industrial)
-                        && max(deficit, cold_deficit) > 0,
-                    comptime!(FamilySupport::Deprived as u32),
-                    support,
+                if comptime!(config.cohorts == Feature::Enabled) {
+                    let hired = paid_workers > 0 && shift > 0 && eligible && capacity >= shift;
+                    work = select(hired, shift, 0);
+                    paid_workers -= u32::cast_from(hired);
+                }
+                let home_work =
+                    select(eligible, min(home_remaining, max(capacity, work) - work), 0);
+                home_remaining -= home_work;
+                let cartage = select(
+                    eligible,
+                    min(cartage_remaining, max(capacity, work) - work - home_work),
+                    0,
                 );
-                supported_births = select(
-                    support == comptime!(FamilySupport::Secure as u32),
-                    rate(policy.parameters.births),
-                    zero(),
+                cartage_remaining -= cartage;
+                let prior = person.number(P::EXPOSURE);
+                let exposure = famine_exposure(prior, deficit, self.policy.parameters.recovery);
+                person.set(P::EXPOSURE, exposure);
+                let sex_and_cold_exposure = person.number(P::SEX_AND_COLD_EXPOSURE);
+                let sex = sex_and_cold_exposure & 1;
+                let cold_exposure = cold_exposure(
+                    sex_and_cold_exposure >> 1,
+                    cold_deficit,
+                    self.policy.parameters.recovery,
                 );
-            }
-            let selected = economy.ledger.number(Field::Worker, household);
-            let employer = economy.ledger.number(Field::Employer, household);
-            let minutes = economy.ledger.number(Field::Hours, household);
-            let home = economy.ledger.number(Field::HomeMinutes, household);
-            let mut home_remaining = home;
-            let mut cartage_remaining = economy.ledger.number(Field::CartageMinutes, household);
-            let mut paid_workers = economy.ledger.number(Field::Employed, household);
-            let shift = minutes / max(paid_workers, 1);
-            let mut delegate = zero();
-            for offset in 0..count {
-                let first = select(selected == u32::MAX, start, selected + 1);
-                let index = start + (first - start + offset) % max(count, 1);
-                let base = index as usize * P::WORDS;
-                if people[base + P::CAUSE] == 0 {
-                    let age = people[base + P::AGE];
-                    let group = band(age);
-                    let mut work = select(index == selected, minutes, 0);
-                    let eligible = age >= policy.parameters.minimum_age
-                        && age < policy.parameters.retirement_age;
-                    let capacity = min(
-                        config.work_cap * (1000 - people[base + P::FATIGUE]) / 1000,
-                        1440 - config.reserved_minutes,
-                    );
-                    if comptime!(config.cohorts == Feature::Enabled) {
-                        let hired = paid_workers > 0 && shift > 0 && eligible && capacity >= shift;
-                        work = select(hired, shift, 0);
-                        paid_workers -= u32::cast_from(hired);
+                person.set(P::SEX_AND_COLD_EXPOSURE, sex | (cold_exposure << 1));
+                person.set(P::EMPLOYER, select(work > 0, employer, 0));
+                person.set(P::WORK, work + home_work + cartage);
+                let background = rate(self.policy.background[group as usize]);
+                let mut occupational = zero();
+                if employer > 0 && work > 0 {
+                    let firm = employer - 1;
+                    let good = self.economy.actors.kind(firm).bits();
+                    occupational = OccupationalExposure {
+                        minutes: work,
+                        condition: self.economy.ledger.number(Field::EquipmentCondition, firm),
+                        safety: self.economy.ledger.number(Field::SafetyProvision, firm),
+                        fatigue: person.number(P::FATIGUE),
+                        method: self.economy.ledger.number(Field::ActiveMethod, firm),
                     }
-                    let home_work =
-                        select(eligible, min(home_remaining, max(capacity, work) - work), 0);
-                    home_remaining -= home_work;
-                    let cartage = select(
-                        eligible,
-                        min(cartage_remaining, max(capacity, work) - work - home_work),
-                        0,
+                    .risk(
+                        self.policy.occupational[good as usize - 1],
+                        self.policy.parameters.reference_minutes,
                     );
-                    cartage_remaining -= cartage;
-                    let prior = people[base + P::EXPOSURE];
-                    let exposure = famine_exposure(prior, deficit, policy.parameters.recovery);
-                    people[base + P::EXPOSURE] = exposure;
-                    let sex_and_cold_exposure = people[base + P::SEX_AND_COLD_EXPOSURE];
-                    let sex = sex_and_cold_exposure & 1;
-                    let cold_exposure = cold_exposure(
-                        sex_and_cold_exposure >> 1,
-                        cold_deficit,
-                        policy.parameters.recovery,
-                    );
-                    people[base + P::SEX_AND_COLD_EXPOSURE] = sex | (cold_exposure << 1);
-                    people[base + P::EMPLOYER] = select(work > 0, employer, 0);
-                    people[base + P::WORK] = work + home_work + cartage;
-                    let background = rate(policy.background[group as usize]);
-                    let mut occupational = zero();
-                    if employer > 0 && work > 0 {
-                        let firm = employer - 1;
-                        let good = economy.actors.kind(firm).bits();
-                        occupational = occupation(
-                            policy.occupational[good as usize - 1],
-                            work,
-                            policy.parameters.reference_minutes,
-                            economy.ledger.number(Field::EquipmentCondition, firm),
-                            economy.ledger.number(Field::SafetyProvision, firm),
-                            people[base + P::FATIGUE],
-                            economy.ledger.number(Field::ActiveMethod, firm),
-                        );
-                    }
-                    if home_work > 0 {
-                        let household_risk = occupation(
-                            policy.occupational[0],
-                            home_work,
-                            policy.parameters.reference_minutes,
-                            1000,
-                            0,
-                            people[base + P::FATIGUE],
-                            0,
-                        );
-                        occupational = plus(occupational, household_risk).value;
-                    }
-                    if cartage > 0 {
-                        occupational = plus(
-                            occupational,
-                            occupation(
-                                policy.occupational
-                                    [comptime!(crate::domain::Good::Railway as usize - 1)],
-                                cartage,
-                                policy.parameters.reference_minutes,
-                                1000,
-                                0,
-                                people[base + P::FATIGUE],
-                                0,
-                            ),
-                        )
-                        .value;
-                    }
-                    let famine = famine_risk(
-                        exposure,
-                        policy.parameters.famine,
-                        policy.vulnerability[group as usize],
-                    );
-                    let draw = probability_draw(
-                        samples[index as usize * 5],
-                        samples[index as usize * 5 + 1],
-                    );
-                    let cold = cold_risk(
-                        cold_exposure,
-                        policy.parameters.cold,
-                        policy.cold_vulnerability[group as usize],
-                    );
-                    let cause = death_cause(draw, background, occupational, famine, cold);
-                    people[base + P::CAUSE] = cause;
-                    living -= u32::cast_from(cause > 0);
-                    if comptime!(config.cohorts == Feature::Enabled) && eligible && cause == 0 {
-                        delegate =
-                            ticks(people[base + P::IDENTITY], people[base + P::IDENTITY + 1]);
-                    }
-                    let independent = age >= 18 * DAYS_PER_YEAR
-                        && age < 19 * DAYS_PER_YEAR
-                        && index != selected
-                        && cause == 0;
-                    if independent && (day + people[base + P::IDENTITY]) % 365 == 0 && living > 1 {
-                        economy.ledger.set(
-                            Field::SplitPerson,
-                            household,
-                            ticks(people[base + P::IDENTITY], people[base + P::IDENTITY + 1]),
-                        );
-                    }
-                    people[base + P::DEATH_DAY] = select(cause > 0, day + 1, 0);
-                    people[base + P::AGE] += 1;
-                    let fatigue = people[base + P::FATIGUE];
-                    let exertion = people[base + P::WORK] * config.work_fatigue / 480;
-                    people[base + P::FATIGUE] = min(
+                }
+                if home_work > 0 {
+                    let household_risk =
+                        OccupationalExposure::unprotected(home_work, person.number(P::FATIGUE))
+                            .risk(
+                                self.policy.occupational[0],
+                                self.policy.parameters.reference_minutes,
+                            );
+                    occupational = plus(occupational, household_risk).value;
+                }
+                if cartage > 0 {
+                    occupational = plus(
+                        occupational,
+                        OccupationalExposure::unprotected(cartage, person.number(P::FATIGUE)).risk(
+                            self.policy.occupational
+                                [comptime!(crate::domain::Good::Railway as usize - 1)],
+                            self.policy.parameters.reference_minutes,
+                        ),
+                    )
+                    .value;
+                }
+                let famine = famine_risk(
+                    exposure,
+                    self.policy.parameters.famine,
+                    self.policy.vulnerability[group as usize],
+                );
+                let draw = probability_draw(
+                    self.samples[index as usize * 5],
+                    self.samples[index as usize * 5 + 1],
+                );
+                let cold = cold_risk(
+                    cold_exposure,
+                    self.policy.parameters.cold,
+                    self.policy.cold_vulnerability[group as usize],
+                );
+                let cause = MortalityRisks {
+                    background,
+                    occupational,
+                    famine,
+                    cold,
+                }
+                .cause(draw);
+                person.set(P::CAUSE, cause);
+                living -= u32::cast_from(cause > 0);
+                if comptime!(config.cohorts == Feature::Enabled) && eligible && cause == 0 {
+                    delegate = person.identity();
+                }
+                let independent = age >= 18 * DAYS_PER_YEAR
+                    && age < 19 * DAYS_PER_YEAR
+                    && index != selected
+                    && cause == 0;
+                if independent && (self.day + person.number(P::IDENTITY)) % 365 == 0 && living > 1 {
+                    self.economy
+                        .ledger
+                        .set(Field::SplitPerson, self.household, person.identity());
+                }
+                person.set(P::DEATH_DAY, select(cause > 0, self.day + 1, 0));
+                person.set(P::AGE, person.number(P::AGE) + 1);
+                let fatigue = person.number(P::FATIGUE);
+                let exertion = person.number(P::WORK) * config.work_fatigue / 480;
+                person.set(
+                    P::FATIGUE,
+                    min(
                         max(fatigue + exertion, config.rest_recovery) - config.rest_recovery,
                         1000,
-                    );
-                    let cooldown = people[base + P::COOLDOWN];
-                    people[base + P::COOLDOWN] = max(cooldown, 1) - 1;
-                    let fertile = age >= 18 * DAYS_PER_YEAR
-                        && age < 45 * DAYS_PER_YEAR
-                        && sex == 0
-                        && cooldown == 0
-                        && cause == 0;
-                    let birth_draw = probability_draw(
-                        samples[index as usize * 5 + 2],
-                        samples[index as usize * 5 + 3],
-                    );
-                    let fertility = select(
-                        comptime!(config.economy == crate::domain::Economy::Industrial)
-                            && max(exposure, cold_exposure) > 0,
-                        zero(),
-                        supported_births,
-                    );
-                    if fertile && lt(birth_draw, fertility) && births[household as usize] == 0 {
-                        births[household as usize] =
-                            1 + u32::cast_from(samples[index as usize * 5 + 4] >= 0.5);
-                        people[base + P::COOLDOWN] = policy.parameters.spacing;
-                    }
+                    ),
+                );
+                let cooldown = person.number(P::COOLDOWN);
+                person.set(P::COOLDOWN, max(cooldown, 1) - 1);
+                let fertile = age >= 18 * DAYS_PER_YEAR
+                    && age < 45 * DAYS_PER_YEAR
+                    && sex == 0
+                    && cooldown == 0
+                    && cause == 0;
+                let birth_draw = probability_draw(
+                    self.samples[index as usize * 5 + 2],
+                    self.samples[index as usize * 5 + 3],
+                );
+                let fertility = select(
+                    comptime!(config.economy == crate::domain::Economy::Industrial)
+                        && max(exposure, cold_exposure) > 0,
+                    zero(),
+                    supported_births,
+                );
+                if fertile && lt(birth_draw, fertility) && self.births[self.household as usize] == 0
+                {
+                    self.births[self.household as usize] =
+                        1 + u32::cast_from(self.samples[index as usize * 5 + 4] >= 0.5);
+                    person.set(P::COOLDOWN, self.policy.parameters.spacing);
                 }
             }
-            if comptime!(config.cohorts == Feature::Enabled) {
-                economy
-                    .ledger
-                    .set(Field::CohortDelegate, household, delegate);
-            }
-            economy
+        }
+        if comptime!(config.cohorts == Feature::Enabled) {
+            self.economy
                 .ledger
-                .set_number(Field::LivingMembers, household, living);
+                .set(Field::CohortDelegate, self.household, delegate);
         }
+        self.economy
+            .ledger
+            .set_number(Field::LivingMembers, self.household, living);
     }
 }
 
 #[cube]
-pub fn observe(
-    people: &[u32],
-    ledger: &Ledger<'_>,
-    policy: &DemographyPolicy,
-    output: &[Atomic<u32>],
-    count: u32,
-) {
-    let config = ledger.config;
-    let index = ABSOLUTE_POS;
-    if index < count as usize {
-        let base = index * P::WORDS;
-        let shard = index % OBSERVATION_SHARDS * OBSERVATION_METRICS;
-        let cause = people[base + P::CAUSE];
-        if cause == 0 {
-            output[shard].fetch_add(1);
-            let age = people[base + P::AGE];
-            let household = people[base + P::HOUSEHOLD];
-            let selected = ledger.number(Field::Worker, household) == index as u32;
-            let firm = ledger.number(Field::InvestmentFirm, household);
-            let owner = firm > 0 && ledger.number(Field::EnterpriseStatus, max(firm, 1) - 1) < 4;
-            let farmer = ledger.number(Field::LandPlots, household) > 0;
-            let dependent =
-                age < policy.parameters.minimum_age || age >= policy.parameters.retirement_age;
-            let participant = selected || comptime!(config.cohorts == Feature::Enabled);
-            let mut category = select(participant, 3u32, 5u32);
-            category = select(people[base + P::EMPLOYER] > 0, 1u32, category);
-            category = select(participant && farmer, 0u32, category);
-            category = select(selected && owner, 2u32, category);
-            category = select(dependent, 4u32, category);
-            output[shard + 8 + category as usize].fetch_add(1);
-            output[shard + 1].fetch_add(u32::cast_from(dependent));
-        } else {
-            match cause {
-                1 => {
-                    output[shard + 2].fetch_add(1);
-                }
-                2 => {
-                    output[shard + 3].fetch_add(1);
-                }
-                3 => {
-                    output[shard + 4].fetch_add(1);
-                }
-                _ => (),
+impl DemographyInput {
+    pub(super) fn advance(&mut self) {
+        let household = ABSOLUTE_POS as u32;
+        if household < self.config.actors {
+            let stage = comptime!(self.stage);
+            let model = comptime!(self.model);
+            let mut day = HouseholdDay::new(self, household);
+            let profile = day.profile(stage, model);
+            match stage {
+                Stage::Observation => day.observe(&profile),
+                Stage::Diet => day.after_labor(&profile),
+                Stage::Requirements => day.requirements(&profile),
+                Stage::Mortality => match model {
+                    PopulationModel::Cohorts => super::cohorts::advance(
+                        &mut day.economy,
+                        day.policy,
+                        day.samples,
+                        household,
+                    ),
+                    PopulationModel::Individuals => day.individual_mortality(profile.living),
+                },
             }
-        }
-        let work = people[base + P::WORK];
-        if work > 0 {
-            output[shard + 5].fetch_add(work);
-        }
-        let exposure = people[base + P::EXPOSURE];
-        let mut famine_carry = 0u32;
-        if exposure > 0 {
-            let previous = output[shard + 6].fetch_add(exposure);
-            famine_carry = u32::cast_from(exposure > u32::MAX - previous);
-        }
-        if famine_carry > 0 {
-            output[shard + 7].fetch_add(famine_carry);
-        }
-        let cold_exposure = people[base + P::SEX_AND_COLD_EXPOSURE] >> 1;
-        let mut cold_carry = 0u32;
-        if cold_exposure > 0 {
-            let prior_cold = output[shard + 14].fetch_add(cold_exposure);
-            cold_carry = u32::cast_from(cold_exposure > u32::MAX - prior_cold);
-        }
-        if cold_carry > 0 {
-            output[shard + 15].fetch_add(cold_carry);
-        }
-    }
-}
-
-#[cube]
-pub(super) fn remap_workers(
-    state: &mut [u32],
-    previous_people: &[Vector<u32, Const<4>>],
-    people: &[Vector<u32, Const<4>>],
-    previous_ranges: &[Vector<u32, Const<2>>],
-    ranges: &[Vector<u32, Const<2>>],
-    stride: u32,
-    minimum_age: u32,
-    retirement_age: u32,
-    #[comptime] remapping: WorkerRemapping,
-) {
-    let household = ABSOLUTE_POS;
-    if household < ranges.len() {
-        let current = ranges[household];
-        let start = current.extract(0usize);
-        let count = current.extract(1usize);
-        let mut old_start = 0u32;
-        let mut old_count = 0u32;
-        if household < previous_ranges.len() {
-            let old = previous_ranges[household];
-            old_start = old.extract(0usize);
-            old_count = old.extract(1usize);
-        }
-        if count > 0 || old_count > 0 {
-            let coordinate = comptime!(Field::Worker as u32) * stride + household as u32;
-            let selected = load(state, coordinate).extract(0usize);
-            let mut worker = selected;
-            if old_count > 0 && selected >= old_start && selected - old_start < old_count {
-                match comptime!(remapping) {
-                    WorkerRemapping::Births => worker = start + selected - old_start,
-                    WorkerRemapping::Formations => {
-                        worker = u32::new(comptime!(i64::from(u32::MAX)));
-                        let identity = previous_people[selected as usize * (P::WORDS / 4)];
-                        for offset in 0..count {
-                            let person = people[(start + offset) as usize * (P::WORDS / 4)];
-                            if person.extract(P::IDENTITY) == identity.extract(P::IDENTITY)
-                                && person.extract(P::IDENTITY + 1)
-                                    == identity.extract(P::IDENTITY + 1)
-                            {
-                                worker = start + offset;
-                            }
-                        }
-                    }
-                }
-            }
-            if old_count == 0 {
-                worker = u32::new(comptime!(i64::from(u32::MAX)));
-            }
-            if worker == u32::MAX && selected != u32::MAX {
-                for offset in 0..count {
-                    let header = people[(start + offset) as usize * (P::WORDS / 4)];
-                    let status = people[(start + offset) as usize * (P::WORDS / 4) + 1];
-                    let age = header.extract(P::AGE);
-                    let eligible = age >= minimum_age
-                        && age < retirement_age
-                        && status.extract(P::CAUSE - 4) == 0;
-                    if eligible && worker == u32::MAX {
-                        worker = start + offset;
-                    }
-                }
-            }
-            store(state, coordinate, ticks(worker, 0));
-        }
-    }
-}
-
-#[cube]
-pub fn observation_totals(sums: &[u64], output: &mut [u32]) {
-    let metric = ABSOLUTE_POS;
-    if metric < OBSERVATION_METRICS && metric != 7 && metric != 15 {
-        output[metric] = sums[metric] as u32;
-        if metric == 6 {
-            output[7usize] = ((sums[6usize] >> 32) + sums[7usize]) as u32;
-        }
-        if metric == 14 {
-            output[15usize] = ((sums[14usize] >> 32) + sums[15usize]) as u32;
         }
     }
 }
@@ -783,15 +782,14 @@ mod tests {
         let index = ABSOLUTE_POS;
         if index * 8 < input.len() {
             let base = index * 8;
-            let risk = occupation(
-                input[base],
-                input[base + 1],
-                144_000,
-                input[base + 2],
-                input[base + 3],
-                input[base + 4],
-                input[base + 5],
-            );
+            let risk = OccupationalExposure {
+                minutes: input[base + 1],
+                condition: input[base + 2],
+                safety: input[base + 3],
+                fatigue: input[base + 4],
+                method: input[base + 5],
+            }
+            .risk(input[base], 144_000);
             let draw = probability_draw(
                 (input[base + 6] >> 8) as f32 / 16777216.0,
                 (input[base + 7] >> 8) as f32 / 16777216.0,
@@ -816,13 +814,13 @@ mod tests {
             output[base] = exposure;
             output[base + 1] = risk.extract(0usize);
             output[base + 2] = risk.extract(1usize);
-            output[base + 3] = death_cause(
-                ticks(input[base + 3], 0),
-                ticks(10, 0),
-                ticks(20, 0),
-                ticks(30, 0),
-                zero(),
-            );
+            output[base + 3] = MortalityRisks {
+                background: ticks(10, 0),
+                occupational: ticks(20, 0),
+                famine: ticks(30, 0),
+                cold: zero(),
+            }
+            .cause(ticks(input[base + 3], 0));
         }
     }
 
@@ -929,59 +927,6 @@ mod tests {
     }
 }
 
-#[cube]
-pub(super) fn grow(
-    source: &[Vector<u32, Const<4>>],
-    target: &mut [Vector<u32, Const<4>>],
-    audited: &mut [Vector<u32, Const<4>>],
-    old_ranges: &[u32],
-    new_ranges: &[u32],
-    people: u32,
-) {
-    let index = ABSOLUTE_POS;
-    if index < people as usize * (P::WORDS / 4) {
-        let person = index / (P::WORDS / 4);
-        let household = source[person * (P::WORDS / 4)].extract(P::HOUSEHOLD) as usize;
-        let offset = new_ranges[household * 2] - old_ranges[household * 2];
-        let destination = index + offset as usize * (P::WORDS / 4);
-        let value = source[index];
-        target[destination] = value;
-        audited[destination] = value;
-    }
-}
-
-#[cube]
-pub(super) fn newborns(
-    target: &mut [Vector<u32, Const<4>>],
-    audited: &mut [Vector<u32, Const<4>>],
-    old_ranges: &[u32],
-    new_ranges: &[u32],
-    births: &[u32],
-    next_low: u32,
-    next_high: u32,
-) {
-    let household = ABSOLUTE_POS;
-    if household < births.len() && births[household] > 0 {
-        let start = old_ranges[household * 2];
-        let count = old_ranges[household * 2 + 1];
-        let destination = new_ranges[household * 2];
-        let base = (destination + count) as usize * (P::WORDS / 4);
-        let identity = plus(ticks(next_low, next_high), ticks(destination - start, 0)).value;
-        let mut header = Vector::<u32, Const<4>>::new(0);
-        header.insert(P::IDENTITY, identity.extract(0usize));
-        header.insert(P::IDENTITY + 1, identity.extract(1usize));
-        header.insert(P::HOUSEHOLD, household as u32);
-        let mut status = Vector::<u32, Const<4>>::new(0);
-        status.insert(P::SEX_AND_COLD_EXPOSURE - 4, births[household] - 1);
-        target[base] = header;
-        audited[base] = header;
-        target[base + 1] = status;
-        audited[base + 1] = status;
-        target[base + 2] = Vector::new(0);
-        audited[base + 2] = Vector::new(0);
-    }
-}
-
 #[cfg(test)]
 #[cube(launch)]
 pub(super) fn original_grow(
@@ -1015,35 +960,5 @@ pub(super) fn original_grow(
             target[base + 2] = household as u32;
             target[base + P::SEX_AND_COLD_EXPOSURE] = births[household] - 1;
         }
-    }
-}
-
-#[cube]
-pub(super) fn birth_prefix(births: &[u32], scratch: &mut [u32]) {
-    let actor = ABSOLUTE_POS;
-    let mut present = 0u32;
-    if actor < births.len() {
-        present = u32::cast_from(births[actor] > 0);
-    }
-    let prefix = crate::simulation::parallel::prefix_sum::<u32>(present);
-    if actor < births.len() {
-        scratch[actor] = prefix.inclusive;
-    }
-    if UNIT_POS == 0 {
-        scratch[births.len() + CUBE_POS] = prefix.total;
-    }
-}
-
-#[cube]
-pub(super) fn birth_ranges(old: &[u32], births: &[u32], scratch: &[u32], ranges: &mut [u32]) {
-    let actor = ABSOLUTE_POS;
-    if actor < births.len() {
-        let birth = u32::cast_from(births[actor] > 0);
-        let mut offset = scratch[actor] - birth;
-        if CUBE_POS > 0 {
-            offset += scratch[births.len() + CUBE_POS - 1];
-        }
-        ranges[actor * 2] = old[actor * 2] + offset;
-        ranges[actor * 2 + 1] = old[actor * 2 + 1] + birth;
     }
 }

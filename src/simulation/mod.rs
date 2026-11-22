@@ -48,7 +48,7 @@ use crate::runtime::{PhaseTiming, RuntimeState};
 use buffers::DeviceEconomy;
 use burn_wgpu::CubeTensor;
 use checkpoint::CopyDirection;
-use economy::{markets, railway::settlement, scheduler};
+use economy::{market::orders, settlement::scheduler, transport::railway::settlement};
 use enterprise::{management, ownership};
 use layout::{decode, encode};
 #[cfg(test)]
@@ -92,8 +92,8 @@ pub struct Simulation {
     config: configuration::Configuration,
     spatial: CubeTensor,
     work: buffers::PhaseBuffers,
-    searches: markets::SearchBuffers,
-    market_sort: economy::sorting::MarketSort,
+    searches: orders::SearchBuffers,
+    market_sort: economy::market::sorting::MarketSort,
     market_graphs: market_graphs::MarketGraphs,
     market_replay: MarketReplay,
     freight_activity: FreightActivity,
@@ -101,7 +101,7 @@ pub struct Simulation {
     market_execution: MarketExecution,
     control: CubeTensor,
     summary: CubeTensor,
-    audit: economy::audit::AuditBuffers,
+    audit: economy::accounting::audit::AuditBuffers,
     #[cfg(test)]
     audit_execution: AuditExecution,
     finance: Option<finance::FinanceRuntime>,

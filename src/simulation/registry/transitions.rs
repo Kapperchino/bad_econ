@@ -2,7 +2,7 @@ use super::commit::{RegistryAudit, apply_records, newborn_count};
 use super::{self as registry, records::PendingRecord, settlement::SettlementBatch};
 use crate::simulation::{
     Simulation, configuration,
-    economy::{self, railway::Network},
+    economy::{self, transport::railway::Network},
     enterprise::{management, ownership},
     market_graphs, profiling, tensor,
 };
@@ -212,24 +212,31 @@ impl Simulation {
         let bindings = RegistryBindings::install(self, plan.actors.take(), buffers);
         let rings = match (audit, &settlement) {
             #[cfg(test)]
-            (RegistryAudit::Full, _) => economy::audit::RingValidation::All,
+            (RegistryAudit::Full, _) => economy::accounting::audit::RingValidation::All,
             (RegistryAudit::Validated, Some(batch)) => {
-                economy::audit::RingValidation::Selected(batch.indices())
+                economy::accounting::audit::RingValidation::Selected(batch.indices())
             }
-            (RegistryAudit::Validated, None) => economy::audit::RingValidation::Unchanged,
+            (RegistryAudit::Validated, None) => {
+                economy::accounting::audit::RingValidation::Unchanged
+            }
         };
-        let registry_observation =
-            economy::audit::RegistryObservation::new(audit, births, settlement.as_ref());
+        let registry_observation = economy::accounting::audit::RegistryObservation::new(
+            audit,
+            births,
+            settlement.as_ref(),
+        );
         if std::env::var_os("BAD_ECON_PROFILE_REGISTRY").is_some() {
             eprintln!("REGISTRY {} Observation {registry_observation:?}", self.day);
         }
         let observation = population
             .and_then(|population| {
                 match registry_observation {
-                    economy::audit::RegistryObservation::Existing => {
+                    economy::accounting::audit::RegistryObservation::Existing => {
                         self.fault_check().map(|_| self.snapshot.clone())
                     }
-                    economy::audit::RegistryObservation::Updated => self.observe_rings(rings),
+                    economy::accounting::audit::RegistryObservation::Updated => {
+                        self.observe_rings(rings)
+                    }
                 }
                 .map(|mut snapshot| {
                     if let Some(population) = population {

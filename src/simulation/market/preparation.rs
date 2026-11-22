@@ -5,8 +5,10 @@ use crate::{
         Simulation, Trace,
         configuration::Feature,
         economy::{
-            EconomyStage, indexing, markets,
-            search::{
+            EconomyStage,
+            market::indexing,
+            market::orders,
+            market::search::{
                 self, MarketSearch, OrderCollection, SearchInputLaunch, SearchStage, StatusReset,
             },
         },
@@ -244,8 +246,8 @@ impl<'a> OrderSearch<'a> {
         parallel::scan(
             &simulation.device,
             &simulation.searches.successes,
-            markets::search_counts_offset(self.round.count),
-            markets::search_blocks(self.round.count),
+            orders::search_counts_offset(self.round.count),
+            orders::search_blocks(self.round.count),
         );
     }
 
@@ -339,13 +341,13 @@ impl<'a> OrderSearch<'a> {
                 CubeCount::Static(groups.clamp(1, 512) as u32, 1, 1).into()
             }
             (PrepareSelected, _) => {
-                markets::dispatch(dispatches, markets::PREPARATION_DISPATCH, groups)
+                orders::dispatch(dispatches, orders::PREPARATION_DISPATCH, groups)
             }
             (Search | SearchGrain | SearchIndexed, _) => {
-                markets::job_dispatch(dispatches, markets::SEARCH_DISPATCH, count)
+                orders::job_dispatch(dispatches, orders::SEARCH_DISPATCH, count)
             }
             (SearchFuel | SearchHousehold | Compact, _) => {
-                markets::dispatch(dispatches, markets::SEARCH_COMPACT_DISPATCH, groups)
+                orders::dispatch(dispatches, orders::SEARCH_COMPACT_DISPATCH, groups)
             }
         }
     }
@@ -396,7 +398,7 @@ impl<'a> OrderSearch<'a> {
                     .read_range(&simulation.searches.requests, 0, 5 * count)?;
             simulation.readback_bytes += ((words.len() + requests.len()) * WORD_BYTES) as u64;
             let minimum_quote = u64::from(words[search::INPUT_MINIMUM_QUOTE_WORD]);
-            let searches = words[markets::SEARCHES_WORD];
+            let searches = words[orders::SEARCHES_WORD];
             let unaffordable = requests[..searches as usize]
                 .iter()
                 .filter(|&&buyer| {
@@ -419,7 +421,7 @@ impl<'a> OrderSearch<'a> {
             let words = simulation.device.read_range(
                 &simulation.control,
                 0,
-                markets::WIDE_ORDERS_WORD + 1,
+                orders::WIDE_ORDERS_WORD + 1,
             )?;
             simulation.readback_bytes += (words.len() * WORD_BYTES) as u64;
             eprintln!(
@@ -427,8 +429,8 @@ impl<'a> OrderSearch<'a> {
                 self.round.market,
                 self.round.index,
                 self.round.parameters.empty_orders,
-                words[markets::WIDE_ORDERS_WORD],
-                words[markets::SEARCHES_WORD],
+                words[orders::WIDE_ORDERS_WORD],
+                words[orders::SEARCHES_WORD],
                 words[flags::CONSTRUCTED_EVENTS_WORD],
                 words[flags::COMPLETED_WORD],
                 words[flags::PROGRESS_WORD],

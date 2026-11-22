@@ -61,9 +61,8 @@ impl<'a> ActorBalances<'a> {
         actor: u32,
         amount: Ticks,
     ) {
-        let total = plus(self.value(field, actor), amount);
-        total.faults.record(control);
-        self.set(field, actor, total.value);
+        let total = plus(self.value(field, actor), amount).record(control);
+        self.set(field, actor, total);
     }
 }
 
@@ -131,9 +130,8 @@ impl<'a> Ledger<'a> {
     }
 
     pub fn increase_at(&mut self, control: &[Atomic<u32>], field: u32, actor: u32, amount: Ticks) {
-        let total = plus(self.value_at(field, actor), amount);
-        total.faults.record(control);
-        self.set_at(field, actor, total.value);
+        let total = plus(self.value_at(field, actor), amount).record(control);
+        self.set_at(field, actor, total);
     }
 
     pub fn increase(

@@ -1206,7 +1206,7 @@ fn vectorized_opening_matches_serial_deliveries_resets_and_faults_on_gpu() -> Re
                 stage: EconomyStage::Local,
             },
         );
-        economy::opening::launch(
+        economy::phases::opening::launch(
             &simulation.device,
             &actual,
             &simulation.config,
@@ -1295,7 +1295,8 @@ fn partitioned_audits_match_original_tiles_extrema_and_overflow_on_gpu() -> Resu
         simulation.spatial = simulation
             .device
             .tensor(&SpatialIndex::new(&scenario, &initial).words);
-        simulation.audit = economy::audit::AuditBuffers::new(&simulation.device, &initial.actors);
+        simulation.audit =
+            economy::accounting::audit::AuditBuffers::new(&simulation.device, &initial.actors);
         simulation.metadata.actors = initial.actors.clone();
         for amounts in [Amounts::Wide, Amounts::Overflow] {
             if let Amounts::Overflow = amounts {

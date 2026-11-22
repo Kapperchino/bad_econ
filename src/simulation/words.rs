@@ -13,6 +13,35 @@ pub struct CheckedTicks {
 }
 
 #[cube]
+impl CheckedTicks {
+    pub fn ceiling_ratio(value: Ticks, numerator: u32, denominator: u32) -> Self {
+        let floor = ratio(value, numerator, denominator);
+        let remainder = minus(value, times(divide(value, denominator), denominator).value);
+        let scaled_remainder = times32(remainder.extract(LOW_WORD), numerator);
+        let fraction = minus(
+            scaled_remainder,
+            times(divide(scaled_remainder, denominator), denominator).value,
+        );
+        let mut rounded = plus(
+            floor.value,
+            ticks(u32::cast_from(!equal(fraction, zero())), 0),
+        );
+        rounded.faults.insert(floor.faults);
+        rounded
+    }
+
+    pub fn accumulate(self, faults: &mut KernelFaults) -> Ticks {
+        faults.insert(self.faults);
+        self.value
+    }
+
+    pub fn record(&self, control: &[Atomic<u32>]) -> Ticks {
+        self.faults.record(control);
+        self.value
+    }
+}
+
+#[cube]
 pub fn ticks(low: u32, high: u32) -> Ticks {
     let mut result = Ticks::new(low);
     result.insert(HIGH_WORD, high);

@@ -1,7 +1,7 @@
 use super::{InputOrders, MarketRound, MatchingState};
 use crate::simulation::{
     Simulation, Trace,
-    economy::railway::{
+    economy::transport::railway::{
         RouteAvailability,
         settlement::{
             self, ClaimPreparation, ClaimStorage, ClaimWork, Execution, ResourceSelection, Stage,

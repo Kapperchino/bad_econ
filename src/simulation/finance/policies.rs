@@ -125,101 +125,6 @@ impl PlanRecord {
     const CUSHION: usize = offset_of!(Self, cushion) / WORD_BYTES;
 }
 
-#[cube]
-fn read(words: &[u32], base: usize) -> Ticks {
-    ticks(words[base], words[base + 1])
-}
-
-#[cube]
-fn lending(input: &[u32], output: &mut [u32], control: &[Atomic<u32>], count: u32) {
-    let id = ABSOLUTE_POS as u32;
-    if id < count {
-        let base = id as usize * LendingRecord::WORDS;
-        let mut faults = KernelFaults::none();
-        let value = super::credit::lending_limit(
-            &super::credit::CreditTerms {
-                requested: read(input, base + LendingRecord::REQUESTED),
-                term: input[base + LendingRecord::TERM],
-                rate: input[base + LendingRecord::RATE],
-                surplus: read(input, base + LendingRecord::SURPLUS),
-                debt_service: read(input, base + LendingRecord::DEBT_SERVICE),
-                service_fraction: input[base + LendingRecord::SERVICE_FRACTION],
-                advance: input[base + LendingRecord::ADVANCE],
-                collateral: read(input, base + LendingRecord::COLLATERAL),
-                secured: read(input, base + LendingRecord::SECURED),
-            },
-            &super::credit::CreditCapacity {
-                equity: read(input, base + LendingRecord::EQUITY),
-                minimum_capital: input[base + LendingRecord::MINIMUM_CAPITAL],
-                risk_assets: read(input, base + LendingRecord::RISK_ASSETS),
-                risk_weight: input[base + LendingRecord::RISK_WEIGHT],
-                liquidity: read(input, base + LendingRecord::LIQUIDITY),
-            },
-            &mut faults,
-        );
-        faults.record(control);
-        store(output, id, value);
-    }
-}
-
-#[cube]
-fn funding(
-    plans: &[u32],
-    flows: &mut [u32],
-    output: &mut [u32],
-    control: &[Atomic<u32>],
-    count: u32,
-) {
-    let id = ABSOLUTE_POS as u32;
-    if id < count {
-        let base = id as usize * PlanRecord::WORDS;
-        let first = plans[base + PlanRecord::FIRST];
-        let end = first + plans[base + PlanRecord::COUNT];
-        let mut outflows = zero();
-        let mut receipts = zero();
-        let mut need = read(plans, base + PlanRecord::CUSHION);
-        for index in first..end {
-            let outgoing = plus(outflows, load(flows, index * 3));
-            let incoming = plus(receipts, load(flows, index * 3 + 1));
-            outgoing.faults.union(incoming.faults).record(control);
-            outflows = outgoing.value;
-            receipts = incoming.value;
-            let required = plus(outflows, load(flows, index * 3 + 2));
-            required.faults.record(control);
-            need = maximum(need, positive(required.value, receipts));
-        }
-        store(output, id * 2, need);
-        store(
-            output,
-            id * 2 + 1,
-            positive(need, read(plans, base + PlanRecord::CASH)),
-        );
-    }
-}
-
-#[cube]
-fn pools(
-    plans: &[u32],
-    demands: &mut [u32],
-    output: &mut [u32],
-    remaining: &mut [u32],
-    count: u32,
-) {
-    let id = ABSOLUTE_POS as u32;
-    if id < count {
-        let base = id as usize * PlanRecord::WORDS;
-        let first = plans[base + PlanRecord::FIRST];
-        let end = first + plans[base + PlanRecord::COUNT];
-        let mut capacity = read(plans, base + PlanRecord::CASH);
-        for index in first..end {
-            let fill = minimum(capacity, load(demands, index));
-            store(output, index, fill);
-            capacity = minus(capacity, fill);
-        }
-        store(remaining, id, capacity);
-    }
-}
-
 impl FinancePolicies {
     pub fn lending(device: &Device, inputs: &[LendingInput]) -> Result<Vec<LendingResult>> {
         let records = inputs
@@ -445,36 +350,6 @@ impl DiscountRecord {
 const DISCOUNT_SCALE: u32 = 1_000_000;
 
 #[cube]
-fn budgets(input: &[u32], output: &mut [u32], control: &[Atomic<u32>], count: u32) {
-    let id = ABSOLUTE_POS as u32;
-    if id < count {
-        let base = id as usize * BudgetRecord::WORDS;
-        let earmark = minimum(
-            positive(
-                read(input, base + BudgetRecord::TARGET),
-                read(input, base + BudgetRecord::EARMARKED),
-            ),
-            read(input, base + BudgetRecord::FREE_CASH),
-        );
-        let rent_base = minimum(
-            positive(
-                read(input, base + BudgetRecord::BEFORE_RENT),
-                read(input, base + BudgetRecord::RETAINED),
-            ),
-            read(input, base + BudgetRecord::BUDGET),
-        );
-        let rent = ratio(
-            rent_base,
-            input[base + BudgetRecord::FRACTION],
-            FINANCE_SCALE,
-        );
-        rent.faults.record(control);
-        store(output, id * 2, earmark);
-        store(output, id * 2 + 1, rent.value);
-    }
-}
-
-#[cube]
 fn discount_ceil(
     amount: Ticks,
     numerator: u32,
@@ -505,62 +380,6 @@ fn signed_difference(output: &mut [u32], base: u32, credit: Ticks, debit: Ticks)
     let amount = select(negative, minus(debit, credit), minus(credit, debit));
     store(output, base, ticks(u32::cast_from(negative), 0));
     store(output, base + 1, amount);
-}
-
-#[cube]
-fn discounts(
-    plans: &[u32],
-    flows: &mut [u32],
-    output: &mut [u32],
-    control: &[Atomic<u32>],
-    count: u32,
-) {
-    let id = ABSOLUTE_POS as u32;
-    if id < count {
-        let base = id as usize * DiscountRecord::WORDS;
-        let first = plans[base + DiscountRecord::FIRST];
-        let end = first + plans[base + DiscountRecord::COUNT];
-        let denominator = FINANCE_SCALE + plans[base + DiscountRecord::RATE];
-        let mut lower_weight = u32::new(comptime!(i64::from(DISCOUNT_SCALE)));
-        let mut upper_weight = u32::new(comptime!(i64::from(DISCOUNT_SCALE)));
-        let mut receipt_lower = zero();
-        let mut receipt_upper = zero();
-        let mut outflow_lower = zero();
-        let mut outflow_upper = zero();
-        for index in first..end {
-            if index > first {
-                lower_weight =
-                    divide(times32(lower_weight, FINANCE_SCALE), denominator).extract(0usize);
-                upper_weight =
-                    discount_ceil(ticks(upper_weight, 0), FINANCE_SCALE, denominator, control)
-                        .extract(0usize);
-            }
-            let receipt = load(flows, index * 2);
-            let outflow = load(flows, index * 2 + 1);
-            let r_lower = ratio(receipt, lower_weight, DISCOUNT_SCALE);
-            let o_lower = ratio(outflow, lower_weight, DISCOUNT_SCALE);
-            let r_upper = discount_ceil(receipt, upper_weight, DISCOUNT_SCALE, control);
-            let o_upper = discount_ceil(outflow, upper_weight, DISCOUNT_SCALE, control);
-            let next_r_lower = plus(receipt_lower, r_lower.value);
-            let next_r_upper = plus(receipt_upper, r_upper);
-            let next_o_lower = plus(outflow_lower, o_lower.value);
-            let next_o_upper = plus(outflow_upper, o_upper);
-            r_lower
-                .faults
-                .union(o_lower.faults)
-                .union(next_r_lower.faults)
-                .union(next_r_upper.faults)
-                .union(next_o_lower.faults)
-                .union(next_o_upper.faults)
-                .record(control);
-            receipt_lower = next_r_lower.value;
-            receipt_upper = next_r_upper.value;
-            outflow_lower = next_o_lower.value;
-            outflow_upper = next_o_upper.value;
-        }
-        signed_difference(output, id * 4, receipt_lower, outflow_upper);
-        signed_difference(output, id * 4 + 2, receipt_upper, outflow_lower);
-    }
 }
 
 impl FinancePolicies {
@@ -689,7 +508,34 @@ impl GpuPass<PolicyInput> for EvaluateLending {
     type Output = ();
 
     fn execute(mut input: PolicyInput) {
-        lending(&input.input, &mut input.output, &input.control, input.count);
+        let id = ABSOLUTE_POS as u32;
+        if id < input.count {
+            let base = id as usize * LendingRecord::WORDS;
+            let mut faults = KernelFaults::none();
+            let value = super::credit::CreditTerms {
+                requested: read_tick_words(&input.input, base + LendingRecord::REQUESTED),
+                term: input.input[base + LendingRecord::TERM],
+                rate: input.input[base + LendingRecord::RATE],
+                surplus: read_tick_words(&input.input, base + LendingRecord::SURPLUS),
+                debt_service: read_tick_words(&input.input, base + LendingRecord::DEBT_SERVICE),
+                service_fraction: input.input[base + LendingRecord::SERVICE_FRACTION],
+                advance: input.input[base + LendingRecord::ADVANCE],
+                collateral: read_tick_words(&input.input, base + LendingRecord::COLLATERAL),
+                secured: read_tick_words(&input.input, base + LendingRecord::SECURED),
+            }
+            .limit(
+                &super::credit::CreditCapacity {
+                    equity: read_tick_words(&input.input, base + LendingRecord::EQUITY),
+                    minimum_capital: input.input[base + LendingRecord::MINIMUM_CAPITAL],
+                    risk_assets: read_tick_words(&input.input, base + LendingRecord::RISK_ASSETS),
+                    risk_weight: input.input[base + LendingRecord::RISK_WEIGHT],
+                    liquidity: read_tick_words(&input.input, base + LendingRecord::LIQUIDITY),
+                },
+                &mut faults,
+            );
+            faults.record(&input.control);
+            store(&mut input.output, id, value);
+        }
     }
 }
 
@@ -698,7 +544,32 @@ impl GpuPass<PolicyInput> for EvaluateBudget {
     type Output = ();
 
     fn execute(mut input: PolicyInput) {
-        budgets(&input.input, &mut input.output, &input.control, input.count);
+        let id = ABSOLUTE_POS as u32;
+        if id < input.count {
+            let base = id as usize * BudgetRecord::WORDS;
+            let earmark = minimum(
+                positive(
+                    read_tick_words(&input.input, base + BudgetRecord::TARGET),
+                    read_tick_words(&input.input, base + BudgetRecord::EARMARKED),
+                ),
+                read_tick_words(&input.input, base + BudgetRecord::FREE_CASH),
+            );
+            let rent_base = minimum(
+                positive(
+                    read_tick_words(&input.input, base + BudgetRecord::BEFORE_RENT),
+                    read_tick_words(&input.input, base + BudgetRecord::RETAINED),
+                ),
+                read_tick_words(&input.input, base + BudgetRecord::BUDGET),
+            );
+            let rent = ratio(
+                rent_base,
+                input.input[base + BudgetRecord::FRACTION],
+                FINANCE_SCALE,
+            );
+            rent.faults.record(&input.control);
+            store(&mut input.output, id * 2, earmark);
+            store(&mut input.output, id * 2 + 1, rent.value);
+        }
     }
 }
 
@@ -734,13 +605,34 @@ impl GpuPass<FlowInput> for EvaluateFunding {
     type Output = ();
 
     fn execute(mut input: FlowInput) {
-        funding(
-            &input.plans,
-            &mut input.flows,
-            &mut input.output,
-            &input.control,
-            input.count,
-        );
+        let id = ABSOLUTE_POS as u32;
+        if id < input.count {
+            let base = id as usize * PlanRecord::WORDS;
+            let first = input.plans[base + PlanRecord::FIRST];
+            let end = first + input.plans[base + PlanRecord::COUNT];
+            let mut outflows = zero();
+            let mut receipts = zero();
+            let mut need = read_tick_words(&input.plans, base + PlanRecord::CUSHION);
+            for index in first..end {
+                let outgoing = plus(outflows, load(&mut input.flows, index * 3));
+                let incoming = plus(receipts, load(&mut input.flows, index * 3 + 1));
+                outgoing
+                    .faults
+                    .union(incoming.faults)
+                    .record(&input.control);
+                outflows = outgoing.value;
+                receipts = incoming.value;
+                let required = plus(outflows, load(&mut input.flows, index * 3 + 2));
+                required.faults.record(&input.control);
+                need = maximum(need, positive(required.value, receipts));
+            }
+            store(&mut input.output, id * 2, need);
+            store(
+                &mut input.output,
+                id * 2 + 1,
+                positive(need, read_tick_words(&input.plans, base + PlanRecord::CASH)),
+            );
+        }
     }
 }
 
@@ -749,13 +641,56 @@ impl GpuPass<FlowInput> for EvaluateDiscounts {
     type Output = ();
 
     fn execute(mut input: FlowInput) {
-        discounts(
-            &input.plans,
-            &mut input.flows,
-            &mut input.output,
-            &input.control,
-            input.count,
-        );
+        let id = ABSOLUTE_POS as u32;
+        if id < input.count {
+            let base = id as usize * DiscountRecord::WORDS;
+            let first = input.plans[base + DiscountRecord::FIRST];
+            let end = first + input.plans[base + DiscountRecord::COUNT];
+            let denominator = FINANCE_SCALE + input.plans[base + DiscountRecord::RATE];
+            let mut lower_weight = u32::new(comptime!(i64::from(DISCOUNT_SCALE)));
+            let mut upper_weight = u32::new(comptime!(i64::from(DISCOUNT_SCALE)));
+            let mut receipt_lower = zero();
+            let mut receipt_upper = zero();
+            let mut outflow_lower = zero();
+            let mut outflow_upper = zero();
+            for index in first..end {
+                if index > first {
+                    lower_weight =
+                        divide(times32(lower_weight, FINANCE_SCALE), denominator).extract(0usize);
+                    upper_weight = discount_ceil(
+                        ticks(upper_weight, 0),
+                        FINANCE_SCALE,
+                        denominator,
+                        &input.control,
+                    )
+                    .extract(0usize);
+                }
+                let receipt = load(&mut input.flows, index * 2);
+                let outflow = load(&mut input.flows, index * 2 + 1);
+                let r_lower = ratio(receipt, lower_weight, DISCOUNT_SCALE);
+                let o_lower = ratio(outflow, lower_weight, DISCOUNT_SCALE);
+                let r_upper = discount_ceil(receipt, upper_weight, DISCOUNT_SCALE, &input.control);
+                let o_upper = discount_ceil(outflow, upper_weight, DISCOUNT_SCALE, &input.control);
+                let next_r_lower = plus(receipt_lower, r_lower.value);
+                let next_r_upper = plus(receipt_upper, r_upper);
+                let next_o_lower = plus(outflow_lower, o_lower.value);
+                let next_o_upper = plus(outflow_upper, o_upper);
+                r_lower
+                    .faults
+                    .union(o_lower.faults)
+                    .union(next_r_lower.faults)
+                    .union(next_r_upper.faults)
+                    .union(next_o_lower.faults)
+                    .union(next_o_upper.faults)
+                    .record(&input.control);
+                receipt_lower = next_r_lower.value;
+                receipt_upper = next_r_upper.value;
+                outflow_lower = next_o_lower.value;
+                outflow_upper = next_o_upper.value;
+            }
+            signed_difference(&mut input.output, id * 4, receipt_lower, outflow_upper);
+            signed_difference(&mut input.output, id * 4 + 2, receipt_upper, outflow_lower);
+        }
     }
 }
 
@@ -782,12 +717,18 @@ impl GpuPass<PoolInput> for AllocatePool {
     type Output = ();
 
     fn execute(mut input: PoolInput) {
-        pools(
-            &input.plans,
-            &mut input.demands,
-            &mut input.output,
-            &mut input.remaining,
-            input.count,
-        );
+        let id = ABSOLUTE_POS as u32;
+        if id < input.count {
+            let base = id as usize * PlanRecord::WORDS;
+            let first = input.plans[base + PlanRecord::FIRST];
+            let end = first + input.plans[base + PlanRecord::COUNT];
+            let mut capacity = read_tick_words(&input.plans, base + PlanRecord::CASH);
+            for index in first..end {
+                let fill = minimum(capacity, load(&mut input.demands, index));
+                store(&mut input.output, index, fill);
+                capacity = minus(capacity, fill);
+            }
+            store(&mut input.remaining, id, capacity);
+        }
     }
 }

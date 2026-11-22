@@ -45,7 +45,7 @@ pub(super) struct MarketKey {
     pub market: MarketProgram,
     pub phase: crate::domain::Phase,
     pub preparation: Preparation,
-    pub routing: super::economy::railway::RouteAvailability,
+    pub routing: super::economy::transport::railway::RouteAvailability,
     pub freight: super::FreightExecution,
 }
 
@@ -263,7 +263,7 @@ mod tests {
     use crate::simulation::system::AsBufferArg;
     use crate::simulation::{
         FreightActivity, Simulation, Trace,
-        economy::sorting::MarketSort,
+        economy::market::sorting::MarketSort,
         encode,
         parameters::{EconomyParameters, MarketClock},
         tensor,
@@ -317,7 +317,8 @@ mod tests {
                     market: market.into(),
                     phase: Phase::ProvisionPurchase,
                     preparation: Preparation::First,
-                    routing: crate::simulation::economy::railway::RouteAvailability::Dormant,
+                    routing:
+                        crate::simulation::economy::transport::railway::RouteAvailability::Dormant,
                     freight: crate::simulation::FreightExecution::Synchronous,
                 };
                 graphs.bind(&device, key.market, std::iter::once(&counter));
@@ -359,11 +360,11 @@ mod tests {
             market: MarketProgram::Household,
             phase: Phase::ProvisionPurchase,
             preparation: Preparation::First,
-            routing: crate::simulation::economy::railway::RouteAvailability::Dormant,
+            routing: crate::simulation::economy::transport::railway::RouteAvailability::Dormant,
             freight: crate::simulation::FreightExecution::Synchronous,
         };
         let fallback = MarketKey {
-            routing: crate::simulation::economy::railway::RouteAvailability::Available,
+            routing: crate::simulation::economy::transport::railway::RouteAvailability::Available,
             ..key
         };
         let run = |graphs: &mut MarketGraphs, key: MarketKey, counter: &CubeTensor| {
@@ -430,8 +431,8 @@ mod tests {
                 expected.phase(phase, Trace::Discard)?;
                 if let Phase::ProvisionPurchase = phase {
                     for routing in [
-                        crate::simulation::economy::railway::RouteAvailability::Available,
-                        crate::simulation::economy::railway::RouteAvailability::Dormant,
+                        crate::simulation::economy::transport::railway::RouteAvailability::Available,
+                        crate::simulation::economy::transport::railway::RouteAvailability::Dormant,
                     ] {
                         assert!(actual.market_graphs.entries.iter().any(|entry| {
                             entry.key.routing == routing
@@ -441,7 +442,7 @@ mod tests {
                 }
                 assert_eq!(
                     actual.config.railway.route_availability(),
-                    crate::simulation::economy::railway::RouteAvailability::Available,
+                    crate::simulation::economy::transport::railway::RouteAvailability::Available,
                 );
                 assert_eq!(actual.download()?, expected.download()?, "{phase:?}");
             }

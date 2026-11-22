@@ -151,7 +151,7 @@ fn consolidate_serial(
                     .increase(control, Field::DisplacedPlots, selected, plots);
                 economy.ledger.set_number(Field::LandPlots, selected, 0);
                 economy.ledger.set_number(Field::CropWork, selected, 0);
-                discard_grain(&mut economy.ledger, control, selected);
+                PropertySite::new(selected).discard_grain(&mut economy.ledger, control);
             }
             remaining = max(remaining, plots.extract(LOW_WORD)) - plots.extract(LOW_WORD);
         } else {

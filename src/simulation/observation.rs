@@ -23,17 +23,17 @@ impl Simulation {
     }
 
     pub fn observe(&mut self) -> Result<ObservationSnapshot> {
-        self.observe_rings(economy::audit::RingValidation::All)
+        self.observe_rings(economy::accounting::audit::RingValidation::All)
     }
     pub(super) fn observe_rings(
         &mut self,
-        rings: economy::audit::RingValidation<'_>,
+        rings: economy::accounting::audit::RingValidation<'_>,
     ) -> Result<ObservationSnapshot> {
         self.device.write(
             &self.control,
             bytemuck::cast_slice(&[ObservationControlLayout::zeroed()]),
         );
-        let input = economy::audit::AuditInput {
+        let input = economy::accounting::audit::AuditInput {
             economy: self.gpu(),
             spatial: &self.spatial,
             partials: &self.work.events,
