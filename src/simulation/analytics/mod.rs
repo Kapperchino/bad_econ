@@ -195,6 +195,25 @@ pub enum Diagnostic<T> {
     UnresolvedAccuracy,
 }
 
+impl<T> Diagnostic<T> {
+    fn try_and_then<'a, U>(
+        &'a self,
+        convert: impl FnOnce(&'a T) -> Result<Diagnostic<U>>,
+    ) -> Result<Diagnostic<U>> {
+        match self {
+            Self::Available(value) => convert(value),
+            Self::MissingData => Ok(Diagnostic::MissingData),
+            Self::Inapplicable => Ok(Diagnostic::Inapplicable),
+            Self::Inadmissible => Ok(Diagnostic::Inadmissible),
+            Self::UnresolvedAccuracy => Ok(Diagnostic::UnresolvedAccuracy),
+        }
+    }
+
+    fn try_map<U>(&self, convert: impl FnOnce(&T) -> Result<U>) -> Result<Diagnostic<U>> {
+        self.try_and_then(|value| convert(value).map(Diagnostic::Available))
+    }
+}
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize)]
 pub struct Interval {
     pub lower: u64,
@@ -623,15 +642,13 @@ impl DeviceSolution {
     }
 
     pub fn read(&self, device: &Device) -> Result<Diagnostic<ApproximateValues>> {
-        Ok(match self.values(device)? {
-            Diagnostic::Available(values) => Diagnostic::Available(ApproximateValues {
+        self.values(device)?.try_map(|values| {
+            Ok(ApproximateValues {
                 values: values.read(device)?,
                 weighted_error: f32::from_bits(device.read(&self.error)?[0]).ceil() as u64,
                 iterations: self.iterations,
                 profile: ANALYTICAL_PROFILE,
-            }),
-            Diagnostic::Inadmissible => Diagnostic::Inadmissible,
-            _ => Diagnostic::UnresolvedAccuracy,
+            })
         })
     }
 }

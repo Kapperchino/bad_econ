@@ -1,23 +1,10 @@
-use super::{estimates, support};
+use super::{estimates, fixtures::uniform_matrix, support};
 
 use anyhow::Result;
 use bad_econ::simulation::{Device, analytics::*};
 
 fn sparse(rows: usize, columns: usize, values: &[u32], denominator: u32) -> Result<SparseMatrix> {
-    SparseMatrix::new(
-        rows,
-        columns,
-        values
-            .iter()
-            .enumerate()
-            .map(|(index, &numerator)| Coefficient {
-                row: index / columns,
-                column: index % columns,
-                numerator,
-                denominator,
-            })
-            .collect(),
-    )
+    uniform_matrix(rows, columns, values.iter().copied(), denominator)
 }
 
 fn matrix(

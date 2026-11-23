@@ -1,23 +1,10 @@
-use super::support;
+use super::{fixtures::uniform_matrix, support};
 
 use anyhow::{Result, anyhow};
 use bad_econ::simulation::{analytics::*, research::capabilities::CapabilityEdge};
 
 fn matrix(rows: usize, columns: usize, values: &[u32]) -> Result<SparseMatrix> {
-    SparseMatrix::new(
-        rows,
-        columns,
-        values
-            .iter()
-            .enumerate()
-            .map(|(index, &numerator)| Coefficient {
-                row: index / columns,
-                column: index % columns,
-                numerator,
-                denominator: 1,
-            })
-            .collect(),
-    )
+    uniform_matrix(rows, columns, values.iter().copied(), 1)
 }
 
 fn request() -> Result<AnalysisRequest> {

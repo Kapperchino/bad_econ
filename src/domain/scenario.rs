@@ -92,10 +92,6 @@ impl Scenario {
         &self.initial_employment
     }
 
-    pub(super) fn initial_actors(&self) -> &ActorRows {
-        &self.initial_actors
-    }
-
     pub(super) fn distributor(&self, firm: u64) -> Option<&enterprise::Distributor> {
         self.retailers.get(&firm)
     }

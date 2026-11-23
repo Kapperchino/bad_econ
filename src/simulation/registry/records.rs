@@ -10,6 +10,22 @@ pub(in crate::simulation) struct PendingRecord {
     pub birth: u32,
 }
 
+impl PendingRecord {
+    const PAYLOAD: u32 = 0x00ff_ffff;
+
+    pub(super) fn payload(self) -> u32 {
+        self.request & Self::PAYLOAD
+    }
+
+    pub(super) fn target(self) -> usize {
+        self.payload() as usize - 1
+    }
+
+    pub(super) fn remap_target(self, target: usize) -> u32 {
+        (self.request & !Self::PAYLOAD) + target as u32 + 1
+    }
+}
+
 pub(in crate::simulation) struct PendingRecords {
     pub records: Vec<PendingRecord>,
     pub readback_bytes: u64,

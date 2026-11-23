@@ -219,10 +219,8 @@ struct EncodedResearch {
 struct ResearchLaunch<'a> {
     main: &'a CubeTensor,
     state: &'a CubeTensor,
-    output: &'a CubeTensor,
     stage: ResearchStage,
     day: u32,
-    count: usize,
 }
 
 fn append(words: &mut Vec<u32>, values: &[u32]) -> Result<u32> {
@@ -520,14 +518,7 @@ impl ResearchRuntime {
             )),
             true => {
                 device.write(&runtime.state, &snapshot.words);
-                runtime.run(
-                    device,
-                    &runtime.dummy,
-                    &runtime.summary,
-                    ResearchStage::Audit,
-                    0,
-                    runtime.work_items,
-                )?;
+                runtime.run(device, &runtime.dummy, ResearchStage::Audit, 0)?;
                 match runtime.summary(device)? == snapshot.summary {
                     true => {
                         runtime.save_audited(device)?;
@@ -543,29 +534,28 @@ impl ResearchRuntime {
         &self,
         device: &Device,
         main: &CubeTensor,
-        output: &CubeTensor,
         stage: ResearchStage,
         day: u32,
-        count: usize,
     ) -> Result<()> {
-        device.write(&self.control, &[0; CONTROL_WORDS]);
         self.dispatch(
             device,
             ResearchLaunch {
                 main,
                 state: &self.state,
-                output,
                 stage,
                 day,
-                count,
             },
         )?;
-        self.readback_bytes
-            .set(self.readback_bytes.get() + (CONTROL_WORDS * 4) as u64);
+        self.count_readback(CONTROL_WORDS);
+        self.check_faults(device)
+    }
+
+    fn check_faults(&self, device: &Device) -> Result<()> {
         FaultFlags::read(&device.read(&self.control)?)?.into_result()
     }
 
     fn dispatch(&self, device: &Device, launch: ResearchLaunch<'_>) -> Result<()> {
+        device.write(&self.control, &[0; CONTROL_WORDS]);
         let samples = match launch.stage {
             ResearchStage::Strike => super::random::samples(
                 device,
@@ -585,7 +575,7 @@ impl ResearchRuntime {
         };
         let count = match launch.stage {
             ResearchStage::Summary => self.summary_shards.meta.shape()[0] / 2,
-            _ => launch.count,
+            _ => self.work_items,
         };
         ResearchSystem::launch_elements(
             device,
@@ -601,7 +591,7 @@ impl ResearchRuntime {
                 samples: samples.buffer_arg(),
                 output: match launch.stage {
                     ResearchStage::Summary => &self.summary_shards,
-                    _ => launch.output,
+                    _ => &self.summary,
                 }
                 .buffer_arg(),
                 control: self.control.buffer_arg(),
@@ -618,7 +608,7 @@ impl ResearchRuntime {
             let totals = super::reduction::sum_ticks(device, &input, 0, &self.control)?;
             let output = cubecl::std::tensor::TensorHandle::new_contiguous(
                 [1, SummaryLayout::WORDS / 2],
-                launch.output.handle.clone(),
+                self.summary.handle.clone(),
                 <u64 as cubecl::prelude::Scalar>::elem_type_native(),
             );
             cubecl::std::tensor::copy_into(
@@ -668,9 +658,9 @@ impl ResearchRuntime {
             Phase::PhysicalClose => &[ResearchStage::Maintenance, ResearchStage::Attempt],
             _ => &[],
         };
-        stages.iter().try_for_each(|&stage| {
-            self.run(device, main, &self.summary, stage, day, self.work_items)
-        })
+        stages
+            .iter()
+            .try_for_each(|&stage| self.run(device, main, stage, day))
     }
 
     pub fn phase(&self, device: &Device, main: &CubeTensor, phase: Phase, day: u64) -> Result<()> {
@@ -687,66 +677,59 @@ impl ResearchRuntime {
             Phase::Audit => &[ResearchStage::Audit],
             _ => &[],
         };
-        stages.iter().try_for_each(|&stage| {
-            self.run(device, main, &self.summary, stage, day, self.work_items)
-        })
+        stages
+            .iter()
+            .try_for_each(|&stage| self.run(device, main, stage, day))
     }
 
-    pub fn summary(&self, device: &Device) -> Result<ResearchSummary> {
-        self.run(
-            device,
-            &self.dummy,
-            &self.summary,
-            ResearchStage::Summary,
-            0,
-            SummaryLayout::WORDS / 2,
-        )?;
-        let words = device.read_range(&self.summary, 0, SummaryLayout::WORDS)?;
+    fn count_readback(&self, words: usize) {
         self.readback_bytes
-            .set(self.readback_bytes.get() + (SummaryLayout::WORDS * 4) as u64);
+            .set(self.readback_bytes.get() + (words * size_of::<u32>()) as u64);
+    }
+
+    fn read_summary(&self, device: &Device) -> Result<ResearchSummary> {
+        let words = device.read_range(&self.summary, 0, SummaryLayout::WORDS)?;
         let summary: &SummaryLayout = bytemuck::from_bytes(bytemuck::cast_slice(&words));
         Ok(summary.into())
     }
 
-    pub fn snapshot(&self, device: &Device) -> Result<ResearchSnapshot> {
-        self.readback_bytes
-            .set(self.readback_bytes.get() + (self.state_words * 4) as u64);
-        Ok(ResearchSnapshot {
+    pub fn summary(&self, device: &Device) -> Result<ResearchSummary> {
+        self.run(device, &self.dummy, ResearchStage::Summary, 0)?;
+        let summary = self.read_summary(device)?;
+        self.count_readback(SummaryLayout::WORDS);
+        Ok(summary)
+    }
+
+    fn snapshot_from(&self, words: Vec<u32>, summary: ResearchSummary) -> ResearchSnapshot {
+        ResearchSnapshot {
             profile: RESEARCH_PROFILE.into(),
             table_hash: RESEARCH_TABLE_HASH.into(),
             configuration_hash: self.configuration_hash.clone(),
-            words: device.read(&self.state)?,
-            summary: self.summary(device)?,
-        })
+            words,
+            summary,
+        }
+    }
+
+    pub fn snapshot(&self, device: &Device) -> Result<ResearchSnapshot> {
+        self.count_readback(self.state_words);
+        let words = device.read(&self.state)?;
+        Ok(self.snapshot_from(words, self.summary(device)?))
     }
 
     pub fn audited_snapshot(&self, device: &Device) -> Result<ResearchSnapshot> {
-        device.write(&self.control, &[0; CONTROL_WORDS]);
         self.dispatch(
             device,
             ResearchLaunch {
                 main: &self.dummy,
                 state: &self.audited,
-                output: &self.summary,
                 stage: ResearchStage::Summary,
                 day: 0,
-                count: SummaryLayout::WORDS / 2,
             },
         )?;
-        self.readback_bytes.set(
-            self.readback_bytes.get()
-                + ((CONTROL_WORDS + SummaryLayout::WORDS + self.state_words) * 4) as u64,
-        );
-        FaultFlags::read(&device.read(&self.control)?)?.into_result()?;
-        let words = device.read_range(&self.summary, 0, SummaryLayout::WORDS)?;
-        let summary: &SummaryLayout = bytemuck::from_bytes(bytemuck::cast_slice(&words));
-        Ok(ResearchSnapshot {
-            profile: RESEARCH_PROFILE.into(),
-            table_hash: RESEARCH_TABLE_HASH.into(),
-            configuration_hash: self.configuration_hash.clone(),
-            words: device.read(&self.audited)?,
-            summary: summary.into(),
-        })
+        self.count_readback(CONTROL_WORDS + SummaryLayout::WORDS + self.state_words);
+        self.check_faults(device)?;
+        let summary = self.read_summary(device)?;
+        Ok(self.snapshot_from(device.read(&self.audited)?, summary))
     }
 
     pub fn readback_bytes(&self) -> u64 {

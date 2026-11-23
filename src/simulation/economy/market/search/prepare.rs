@@ -169,12 +169,12 @@ impl SearchInput {
                         .store(searches, config.actors, id);
                     }
                     if comptime!(market == MarketFlag::Household) {
-                        let failure = select(
-                            equal(wanted, zero()),
-                            0u32,
-                            select(equal(purchasing_power, zero()), 2u32, 1u32),
-                        );
-                        economy.ledger.set_number(Field::FoodAccess, id, failure);
+                        let result = FoodSearchResult {
+                            seller: NO_ACTOR,
+                            seen_supply: false,
+                            used_fallback: false,
+                        };
+                        result.record(&mut economy.ledger, id, wanted, purchasing_power);
                     }
                 }
                 _ => {

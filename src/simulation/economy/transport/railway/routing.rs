@@ -142,6 +142,91 @@ pub(super) struct RouteTraversal {
     pub(super) segments: u32,
 }
 
+#[derive(CubeType)]
+pub(super) struct RouteCursor {
+    node: u32,
+    origin: u32,
+    carrier: u32,
+    steps: u32,
+    pub(super) owner: u32,
+    start: u32,
+    pub(super) length: u32,
+    reverse: bool,
+}
+
+#[cube]
+impl RouteCursor {
+    pub(super) fn new(path: &FreightRoute) -> Self {
+        RouteCursor {
+            node: path.destination,
+            origin: path.origin,
+            carrier: path.carrier,
+            steps: 0,
+            owner: u32::MAX,
+            start: 0,
+            length: 0,
+            reverse: false,
+        }
+    }
+
+    pub(super) fn has_next(&self, network: &RailNetwork) -> bool {
+        self.node != self.origin && self.steps < network.nodes
+    }
+
+    pub(super) fn advance(&mut self, network: &RailNetwork) -> bool {
+        let edge = network.routes[network.route_cell(self.carrier, self.origin, self.node) + 1];
+        self.steps += 1;
+        let present = edge < network.segment_count;
+        if present {
+            let base = edge as usize * SEGMENT_WORDS;
+            self.reverse = network.segments[base + 1] == self.node;
+            self.node = select(
+                self.reverse,
+                network.segments[base],
+                network.segments[base + 1],
+            );
+            self.owner = network.segments[base + 2];
+            self.start = network.segments[base + 5];
+            self.length = network.segments[base + 6];
+        }
+        present
+    }
+
+    pub(super) fn record(&self, network: &RailNetwork, entry: u32) -> u32 {
+        let offset = select(self.reverse, self.length - entry - 1, entry);
+        network.segment_regions[(self.start + offset) as usize]
+    }
+}
+
+#[derive(CubeType)]
+pub(super) struct TrackAccess {
+    pub(super) owner: u32,
+    region: u32,
+    pub(super) units: u32,
+}
+
+#[cube]
+impl TrackAccess {
+    pub(super) fn new() -> Self {
+        TrackAccess {
+            owner: u32::MAX,
+            region: u32::MAX,
+            units: 0,
+        }
+    }
+
+    pub(super) fn start_on(&mut self, owner: u32) {
+        self.owner = owner;
+        self.region = u32::MAX;
+        self.units = 0;
+    }
+
+    pub(super) fn visit(&mut self, region: u32) {
+        self.units += u32::cast_from(self.region != u32::MAX && self.region != region);
+        self.region = region;
+    }
+}
+
 #[cube]
 impl FreightRoute {
     pub(in crate::simulation::economy) fn by_road(
@@ -157,40 +242,25 @@ impl FreightRoute {
     }
 
     pub(super) fn traverse(&self, network: &RailNetwork) -> RouteTraversal {
-        let mut cursor = self.destination;
+        let mut cursor = RouteCursor::new(self);
         let mut previous = u32::new(comptime!(i64::from(u32::MAX)));
         let mut first = u32::new(comptime!(i64::from(u32::MAX)));
         let mut pending = u32::new(comptime!(i64::from(u32::MAX)));
         let mut fee = 0u32;
         let mut visits = 0u32;
         let mut toll = 0u32;
-        let mut access_owner = u32::new(comptime!(i64::from(u32::MAX)));
-        let mut access_region = u32::new(comptime!(i64::from(u32::MAX)));
-        let mut access_units = 0u32;
+        let mut access = TrackAccess::new();
         let rate = network.companies[self.carrier as usize * COMPANY_WORDS + 1];
-        let mut steps = 0u32;
-        while cursor != self.origin && steps < network.nodes {
-            let edge = network.routes[network.route_cell(self.carrier, self.origin, cursor) + 1];
-            if edge < network.segment_count {
-                let base = edge as usize * SEGMENT_WORDS;
-                let owner = network.segments[base + 2];
-                if owner != access_owner {
-                    toll += network.access_fare(access_owner, self.carrier, access_units);
-                    access_owner = owner;
-                    access_region = u32::MAX;
-                    access_units = 0;
+        while cursor.has_next(network) {
+            if cursor.advance(network) {
+                if cursor.owner != access.owner {
+                    toll += network.access_fare(access.owner, self.carrier, access.units);
+                    access.start_on(cursor.owner);
                 }
-                let reverse = network.segments[base + 1] == cursor;
-                let next = select(reverse, network.segments[base], network.segments[base + 1]);
-                let start = network.segments[base + 5];
-                let count = network.segments[base + 6];
-                for index in 0..count {
-                    let position = select(reverse, count - index - 1, index);
-                    let record = network.segment_regions[(start + position) as usize];
+                for index in 0..cursor.length {
+                    let record = cursor.record(network, index);
                     let region = network.regions[record as usize * REGION_WORDS + 1];
-                    access_units +=
-                        u32::cast_from(access_region != u32::MAX && access_region != region);
-                    access_region = region;
+                    access.visit(region);
                     first = select(first == u32::MAX, record, first);
                     let entered = region != previous && pending < network.region_count;
                     visits += u32::cast_from(entered);
@@ -200,17 +270,15 @@ impl FreightRoute {
                     pending = record;
                     previous = region;
                 }
-                cursor = next;
             }
-            steps += 1;
         }
         if fee == 0 && first < network.region_count {
             fee = rate;
         }
         RouteTraversal {
-            fee: fee + toll + network.access_fare(access_owner, self.carrier, access_units),
+            fee: fee + toll + network.access_fare(access.owner, self.carrier, access.units),
             visits: max(visits, u32::cast_from(first < network.region_count)),
-            segments: steps,
+            segments: cursor.steps,
         }
     }
 }

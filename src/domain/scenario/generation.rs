@@ -2,9 +2,8 @@ use super::{Experiment, Scenario, ScenarioConfig};
 use crate::{
     arithmetic::add,
     domain::{
-        ActorRows, CohortSizes, Economy, Field, Good, HouseholdLiquidity, ProductionMethod,
-        RentPolicy, State, Technology, employment, enterprise, food, prices, railway, research,
-        supply,
+        CohortSizes, Economy, Field, Good, HouseholdLiquidity, ProductionMethod, RentPolicy, State,
+        Technology, employment, enterprise, food, prices, railway, research, supply,
     },
 };
 use anyhow::{Result, anyhow};
@@ -160,22 +159,8 @@ impl Scenario {
         let actors = self.actors();
         let config = &self.config;
         let food_reserve = supply::StartingReserves::new(config);
-        let properties = (0..actors)
-            .map(|index| self.actor(index))
-            .collect::<ActorRows>();
-        let mut state = State {
-            day: 0,
-            next_identity: self.next_identity(),
-            actors: properties,
-            values: vec![0; self.fields() * actors],
-            initial_cash: 0,
-            initial_goods: [0; Good::COUNT],
-            research: None,
-            people: Vec::new(),
-            initial_population: 0,
-            ownership: Vec::new(),
-            companies: Vec::new(),
-        };
+        let settlement = employment::InitialSettlement::new(config);
+        let mut state = self.empty_opening_state(self.next_identity());
         (0..actors).try_for_each(|actor| -> Result<()> {
             let entry = state.actors.at(actor);
             let kind = entry.kind;
@@ -188,35 +173,18 @@ impl Scenario {
                 _ => config.firm_cash,
             };
             state.set(Field::Cash, actor, cash);
-            let settlement = employment::InitialSettlement::new(config);
-            let farm_members = match (kind, config.household_production, &self.cohorts) {
-                (0, enterprise::HouseholdProduction::Available { .. }, Some(layout)) => {
-                    u64::from(layout.rows[actor].farmers)
-                }
-                (0, enterprise::HouseholdProduction::Available { .. }, None) => {
-                    u64::from(settlement.worker(actor).is_none())
-                }
-                _ => 0,
+            let farmers = match (kind, &self.cohorts) {
+                (0, Some(layout)) => Some(layout.rows[actor].farmers),
+                (0, None) => Some(u32::from(settlement.worker(actor).is_none())),
+                _ => None,
             };
-            if let (
-                0,
-                enterprise::HouseholdProduction::Available {
-                    annual_yield_per_plot,
-                    ..
-                },
-            ) = (kind, config.household_production)
+            if let Some(farm) =
+                farmers.and_then(|farmers| supply::StartingFarm::new(config, farmers))
             {
-                let members = farm_members;
-                let plots =
-                    members * u64::from(config.demography.initial_household_members.div_ceil(2));
-                let harvest = u64::from(annual_yield_per_plot) * plots;
-                state.set(Field::Grain, actor, harvest);
-                state.set(Field::Tools, actor, members);
-                state.set(Field::LandPlots, actor, plots);
-                state.initial_goods[Good::Grain as usize - 1] =
-                    add(state.initial_goods[Good::Grain as usize - 1], harvest)?;
-                state.initial_goods[Good::Tools as usize - 1] =
-                    add(state.initial_goods[Good::Tools as usize - 1], members)?;
+                state.set(Field::LandPlots, actor, farm.plots);
+                for stock in farm.inventory {
+                    stock.seed(&mut state, actor)?;
+                }
             }
             state.set(
                 Field::EnterpriseStatus,
@@ -228,8 +196,7 @@ impl Scenario {
                 0 => {
                     state.set(Field::Price, actor, config.prices[2].into());
                     for stock in food_reserve.household(u64::from(entry.capacity)) {
-                        state.set(Field::inventory(stock.good), actor, stock.units);
-                        stock.add_to(&mut state.initial_goods)?;
+                        stock.seed(&mut state, actor)?;
                     }
                 }
                 _ => {
@@ -238,8 +205,7 @@ impl Scenario {
                         .production
                         .inventory(config, &food_reserve, output, retailer)
                     {
-                        state.set(Field::inventory(stock.good), actor, stock.units);
-                        stock.add_to(&mut state.initial_goods)?;
+                        stock.seed(&mut state, actor)?;
                     }
                     state.set(
                         Field::Price,

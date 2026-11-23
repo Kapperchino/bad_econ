@@ -1,3 +1,4 @@
+use super::demand::FoodSearchResult;
 use crate::simulation::economy::*;
 
 #[derive(CubeType)]
@@ -131,21 +132,18 @@ pub(in crate::simulation::economy) fn propose(
         }
 
         if comptime!(labor_round != employment::LaborRound::Retained) && search {
-            let px = economy.actors.x(id);
-            let py = economy.actors.y(id);
-            let radius = config.search_radius;
-            let cx = px / radius;
-            let cy = py / radius;
+            let columns = search::SearchAxis::around(economy.actors.x(id), config);
+            let rows = search::SearchAxis::around(economy.actors.y(id), config);
             let side = config.spatial_side;
             let mut best = ticks(u32::MAX, u32::MAX);
             if comptime!(market == MarketFlag::Labor) {
                 best = ticks(0u32, 0u32);
             }
             let mut considered = 0u32;
-            let mut y = max(cy, 1u32) - 1u32;
-            while y <= min(cy + 1u32, side - 1u32) && considered < DISCOVERY_CANDIDATES {
-                let mut x = max(cx, 1u32) - 1u32;
-                while x <= min(cx + 1u32, side - 1u32) && considered < DISCOVERY_CANDIDATES {
+            let mut y = rows.first;
+            while y <= rows.last && considered < DISCOVERY_CANDIDATES {
+                let mut x = columns.first;
+                while x <= columns.last && considered < DISCOVERY_CANDIDATES {
                     let cell = y * side + x;
                     let mut j = spatial[cell as usize];
                     let begin = j;
@@ -153,10 +151,7 @@ pub(in crate::simulation::economy) fn propose(
                     let limit = begin + search::supplier_samples(parameters, length);
                     let stride = search::supplier_stride(&economy.actors, parameters, id, length);
                     let mut cursor = (parameters.settlement_rotation + id) % max(length, 1);
-                    let nearest = max(px, x * radius) - min(px, (x + 1) * radius - 1)
-                        + max(py, y * radius)
-                        - min(py, (y + 1) * radius - 1);
-                    if nearest > radius {
+                    if columns.distance_to(x) + rows.distance_to(y) > config.search_radius {
                         j = spatial[(cell + 1) as usize];
                     }
                     while j < limit && considered < DISCOVERY_CANDIDATES {
@@ -327,11 +322,12 @@ pub(in crate::simulation::economy) fn propose(
         }
         if comptime!(market == MarketFlag::Household) {
             let cash = economy.ledger.value(Field::Cash, id);
-            let mut failure = u32::cast_from(missing_supply);
-            if !equal(wanted, zero()) && chosen == NO_ACTOR {
-                failure = select(seen_supply || equal(cash, zero()), 2u32, 1u32);
-            }
-            economy.ledger.set_number(Field::FoodAccess, id, failure);
+            let result = FoodSearchResult {
+                seller: chosen,
+                seen_supply,
+                used_fallback: missing_supply,
+            };
+            result.record(&mut economy.ledger, id, wanted, cash);
         }
         MarketProposal {
             peer: chosen,

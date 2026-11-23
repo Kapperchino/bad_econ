@@ -95,7 +95,6 @@ impl CapabilityGraph {
                 let sources = device.tensor(padded(&sources));
                 let mut current = device.empty(self.nodes.max(1));
                 let mut next = device.empty(self.nodes.max(1));
-                let changed = device.tensor(&[0]);
                 ClosureInitialization::launch_elements(
                     device,
                     self.nodes,
@@ -107,12 +106,7 @@ impl CapabilityGraph {
                         direction,
                     },
                 );
-                let mut round = 0;
-                let mut progress = ClosureProgress::Propagating;
-                while round < self.nodes.saturating_sub(1)
-                    && progress == ClosureProgress::Propagating
-                {
-                    device.write(&changed, &[0]);
+                propagate_until_stable(device, self.nodes, |changed| {
                     ClosurePropagation::launch_elements(
                         device,
                         self.nodes,
@@ -129,12 +123,7 @@ impl CapabilityGraph {
                         },
                     );
                     std::mem::swap(&mut current, &mut next);
-                    progress = match device.read(&changed)?[0] {
-                        0 => ClosureProgress::Converged,
-                        _ => ClosureProgress::Propagating,
-                    };
-                    round += 1;
-                }
+                })?;
                 Ok(CapabilityClosure {
                     values: current,
                     nodes: self.nodes,
@@ -176,6 +165,26 @@ enum ClosureDirection {
 enum ClosureProgress {
     Propagating,
     Converged,
+}
+
+fn propagate_until_stable(
+    device: &Device,
+    nodes: usize,
+    mut propagate: impl FnMut(&CubeTensor),
+) -> Result<()> {
+    let changed = device.tensor(&[0]);
+    let mut progress = ClosureProgress::Propagating;
+    let mut round = 0;
+    while round < nodes.saturating_sub(1) && progress == ClosureProgress::Propagating {
+        device.write(&changed, &[0]);
+        propagate(&changed);
+        progress = match device.read(&changed)?[0] {
+            0 => ClosureProgress::Converged,
+            _ => ClosureProgress::Propagating,
+        };
+        round += 1;
+    }
+    Ok(())
 }
 
 #[cube]

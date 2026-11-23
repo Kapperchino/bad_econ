@@ -86,15 +86,11 @@ impl ValuationRequest {
                     &analysis.goods_certificate,
                     analysis.budget,
                 )?;
-                let occupational_hours = match solution.values(device)? {
-                    Diagnostic::Available(requirements) => Diagnostic::Available(
-                        account
-                            .occupational_hours(device, requirements)?
-                            .read(device)?,
-                    ),
-                    Diagnostic::Inadmissible => Diagnostic::Inadmissible,
-                    _ => Diagnostic::UnresolvedAccuracy,
-                };
+                let occupational_hours = solution.values(device)?.try_map(|requirements| {
+                    account
+                        .occupational_hours(device, requirements)?
+                        .read(device)
+                })?;
                 Ok(ValuationRecord {
                     context: analysis.context,
                     activity,

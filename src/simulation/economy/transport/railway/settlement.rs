@@ -205,7 +205,9 @@ impl FreightSettlementInput {
             }
             Stage::Queue | Stage::SortClaims => (),
             Stage::Reset => self.reset_resource(self.resource(invocation)),
-            Stage::Propose => self.propose(invocation),
+            Stage::Propose | Stage::EmitClaims | Stage::Commit => {
+                self.process_booking(invocation);
+            }
             Stage::CountClaims => {
                 let id = self.resource(invocation);
                 let resources = self.config.actors + self.config.railway.region_count;
@@ -221,7 +223,6 @@ impl FreightSettlementInput {
                 }
             }
             Stage::AdmitClaims => (),
-            Stage::EmitClaims => self.emit_claims(invocation),
             Stage::ClaimOffsets => self.store_claim_offset(invocation),
             Stage::Resolve => {
                 let id = self.resource(invocation);
@@ -230,7 +231,6 @@ impl FreightSettlementInput {
                     self.resolve_claims(id);
                 }
             }
-            Stage::Commit => self.commit(invocation),
             Stage::Release => {
                 let id = self.resource(invocation);
                 self.release_resource(id);

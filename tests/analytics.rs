@@ -1,4 +1,4 @@
-use super::{estimates, support};
+use super::{estimates, fixtures::dense_matrix, support};
 
 use anyhow::{Result, anyhow};
 use bad_econ::simulation::analytics::*;
@@ -9,20 +9,11 @@ fn dense(
     numerators: &[u32],
     denominators: &[u32],
 ) -> Result<SparseMatrix> {
-    SparseMatrix::new(
+    dense_matrix(
         rows,
         columns,
-        numerators
-            .iter()
-            .zip(denominators)
-            .enumerate()
-            .map(|(index, (&numerator, &denominator))| Coefficient {
-                row: index / columns,
-                column: index % columns,
-                numerator,
-                denominator,
-            })
-            .collect(),
+        numerators.iter().copied(),
+        denominators.iter().copied(),
     )
 }
 

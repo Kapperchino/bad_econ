@@ -1,4 +1,4 @@
-use super::super::routing::FreightRouteExpand;
+use super::super::routing::{FreightRouteExpand, RouteCursor};
 use super::*;
 
 #[derive(CubeType)]
@@ -58,38 +58,26 @@ enum FreightFit {
 
 #[derive(CubeType)]
 pub(super) struct RegionCursor {
-    node: u32,
-    origin: u32,
-    carrier: u32,
-    edge: u32,
+    route: RouteCursor,
     entry: u32,
-    length: u32,
-    steps: u32,
     previous: u32,
     pending: u32,
     first: u32,
     emitted: u32,
     finished: u32,
-    reverse: bool,
 }
 
 #[cube]
 impl RegionCursor {
     pub(super) fn new(path: &FreightRoute) -> Self {
         RegionCursor {
-            node: path.destination,
-            origin: path.origin,
-            carrier: path.carrier,
-            edge: 0,
+            route: RouteCursor::new(path),
             entry: 0,
-            length: 0,
-            steps: 0,
             previous: u32::MAX,
             pending: u32::MAX,
             first: u32::MAX,
             emitted: 0,
             finished: 0,
-            reverse: false,
         }
     }
 
@@ -97,19 +85,13 @@ impl RegionCursor {
         let mut result = u32::new(comptime!(i64::from(u32::MAX)));
         while result == u32::MAX && self.finished == 0 {
             let phase = select(
-                self.entry < self.length,
+                self.entry < self.route.length,
                 0,
-                select(
-                    self.node != self.origin && self.steps < config.railway.nodes,
-                    1u32,
-                    2u32,
-                ),
+                select(self.route.has_next(&config.railway), 1u32, 2u32),
             );
             match phase {
                 0 => {
-                    let start = config.railway.segments[self.edge as usize * SEGMENT_WORDS + 5];
-                    let offset = select(self.reverse, self.length - self.entry - 1, self.entry);
-                    let record = config.railway.segment_regions[(start + offset) as usize];
+                    let record = self.route.record(&config.railway, self.entry);
                     let region = config.railway.regions[record as usize * REGION_WORDS + 1];
                     self.first = select(self.first == u32::MAX, record, self.first);
                     if region != self.previous && self.pending < config.railway.region_count {
@@ -121,21 +103,7 @@ impl RegionCursor {
                     self.entry += 1;
                 }
                 1 => {
-                    self.edge = config.railway.routes[config.railway.route_cell(
-                        self.carrier,
-                        self.origin,
-                        self.node,
-                    ) + 1];
-                    self.steps += 1;
-                    if self.edge < config.railway.segment_count {
-                        let base = self.edge as usize * SEGMENT_WORDS;
-                        self.reverse = config.railway.segments[base + 1] == self.node;
-                        self.node = select(
-                            self.reverse,
-                            config.railway.segments[base],
-                            config.railway.segments[base + 1],
-                        );
-                        self.length = config.railway.segments[base + 6];
+                    if self.route.advance(&config.railway) {
                         self.entry = 0;
                     } else {
                         self.finished = 1;

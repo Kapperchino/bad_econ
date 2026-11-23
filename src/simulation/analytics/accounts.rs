@@ -203,24 +203,41 @@ impl DeviceAccounts {
     ) -> Result<Diagnostic<PlanAccount>> {
         match &self.research {
             None => Ok(Diagnostic::Inapplicable),
-            Some(research) => {
-                let demand = final_demand.add(device, &research.inputs.apply(device, attempts)?)?;
-                let gross_requirements = self.goods.solve(device, &demand, certificate, budget)?;
-                let occupational_hours = match gross_requirements.values(device)? {
-                    Diagnostic::Available(requirements) => Diagnostic::Available(
-                        self.labor
-                            .apply(device, requirements)?
-                            .add(device, &research.hours.apply(device, attempts)?)?,
-                    ),
-                    Diagnostic::Inadmissible => Diagnostic::Inadmissible,
-                    _ => Diagnostic::UnresolvedAccuracy,
-                };
-                Ok(Diagnostic::Available(PlanAccount {
-                    gross_requirements,
-                    occupational_hours,
-                }))
-            }
+            Some(_) => self
+                .production_plan(device, final_demand, Some(attempts), certificate, budget)
+                .map(Diagnostic::Available),
         }
+    }
+
+    pub(super) fn production_plan(
+        &self,
+        device: &Device,
+        final_demand: &DeviceVector,
+        attempts: Option<&DeviceVector>,
+        certificate: &Contraction,
+        budget: SolveBudget,
+    ) -> Result<PlanAccount> {
+        let research = self.research.as_ref().zip(attempts);
+        let demand = match research {
+            Some((research, attempts)) => {
+                final_demand.add(device, &research.inputs.apply(device, attempts)?)?
+            }
+            None => final_demand.clone(),
+        };
+        let gross_requirements = self.goods_requirements(device, &demand, certificate, budget)?;
+        let occupational_hours = gross_requirements.values(device)?.try_map(|requirements| {
+            let production = self.occupational_hours(device, requirements)?;
+            match research {
+                Some((research, attempts)) => {
+                    production.add(device, &research.hours.apply(device, attempts)?)
+                }
+                None => Ok(production),
+            }
+        })?;
+        Ok(PlanAccount {
+            gross_requirements,
+            occupational_hours,
+        })
     }
 
     pub fn plan_value(

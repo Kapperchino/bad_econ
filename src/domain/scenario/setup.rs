@@ -122,17 +122,11 @@ fn generated_totals(
     for stock in food_reserve.household(u64::from(config.population_size())) {
         stock.add_to(&mut goods)?;
     }
-    if let enterprise::HouseholdProduction::Available {
-        annual_yield_per_plot,
-        ..
-    } = config.household_production
-    {
-        let farms =
-            u64::from(employment::InitialSettlement::new(config).farmers(config.population_size()));
-        goods[Good::Grain as usize - 1] = farms
-            * u64::from(annual_yield_per_plot)
-            * u64::from(config.demography.initial_household_members.div_ceil(2));
-        goods[Good::Tools as usize - 1] = farms;
+    let farmers = employment::InitialSettlement::new(config).farmers(config.population_size());
+    if let Some(farm) = supply::StartingFarm::new(config, farmers) {
+        for stock in farm.inventory {
+            stock.add_to(&mut goods)?;
+        }
     }
     for firm in 0..config.firms as usize {
         let good = generated_good(config, firm);

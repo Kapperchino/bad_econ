@@ -319,6 +319,21 @@ fn cooperative_market_search_preserves_serial_search_and_shared_fallback_on_gpu(
                 }
             }
             if let Market::Household = market {
+                use crate::domain::enterprise::FoodAccess;
+                let access = match case {
+                    SupplyCase::Capped => Some(FoodAccess::Satisfied),
+                    SupplyCase::Empty => Some(FoodAccess::MissingSupply),
+                    SupplyCase::Unaffordable => Some(FoodAccess::Unaffordable),
+                    _ => None,
+                };
+                if let Some(access) = access {
+                    let stride = probe.simulation.config.state_stride as usize;
+                    assert_eq!(
+                        expected.state[Field::FoodAccess as usize * stride * TICK_WORDS],
+                        access as u32,
+                        "{case:?}"
+                    );
+                }
                 assert_eq!(
                     probe.outcome(SearchExecution::ScalarHousehold)?,
                     expected,

@@ -99,71 +99,35 @@ impl AnalysisRequest {
                     &self.value_certificate,
                     self.budget,
                 )?;
-                let demand = match &self.research {
-                    Some(research) => final_demand.add(
-                        device,
-                        &DeviceOperator::new(device, &research.inputs).apply(
-                            device,
-                            &DeviceVector::from_ticks(device, &research.attempts)?,
-                        )?,
-                    )?,
-                    None => final_demand.clone(),
-                };
-                let gross = account.goods_requirements(
+                let attempts = self
+                    .research
+                    .as_ref()
+                    .map(|research| DeviceVector::from_ticks(device, &research.attempts))
+                    .transpose()?;
+                let plan = account.production_plan(
                     device,
-                    &demand,
+                    &final_demand,
+                    attempts.as_ref(),
                     &self.goods_certificate,
                     self.budget,
                 )?;
-                let hours = match gross.values(device)? {
-                    Diagnostic::Available(gross) => {
-                        let production =
-                            DeviceOperator::new(device, &self.labor).apply(device, gross)?;
-                        let hours = match &self.research {
-                            Some(research) => production.add(
-                                device,
-                                &DeviceOperator::new(device, &research.hours).apply(
-                                    device,
-                                    &DeviceVector::from_ticks(device, &research.attempts)?,
-                                )?,
-                            )?,
-                            None => production,
-                        };
-                        Diagnostic::Available(hours.read(device)?)
-                    }
-                    Diagnostic::Inadmissible => Diagnostic::Inadmissible,
-                    _ => Diagnostic::UnresolvedAccuracy,
-                };
+                let hours = plan
+                    .occupational_hours
+                    .try_map(|hours| hours.read(device))?;
                 let available_values = values.values(device)?;
-                let research_values = match &available_values {
-                    Diagnostic::Available(values) => {
-                        account.research_values(device, values, &weights)?
-                    }
-                    Diagnostic::Inadmissible => Diagnostic::Inadmissible,
-                    _ => Diagnostic::UnresolvedAccuracy,
-                };
-                let plan_value = match &available_values {
-                    Diagnostic::Available(values) => {
-                        let ordinary = values.dot(device, &final_demand, self.scale)?;
-                        match (&self.research, &research_values) {
-                            (Some(research), Diagnostic::Available(costs)) => {
-                                Diagnostic::Available(ordinary.add(
-                                    device,
-                                    &costs.dot(
-                                        device,
-                                        &DeviceVector::from_ticks(device, &research.attempts)?,
-                                        self.scale,
-                                    )?,
-                                )?)
-                            }
-                            (None, _) => Diagnostic::Available(ordinary),
-                            (_, Diagnostic::Inadmissible) => Diagnostic::Inadmissible,
-                            _ => Diagnostic::UnresolvedAccuracy,
-                        }
-                    }
-                    Diagnostic::Inadmissible => Diagnostic::Inadmissible,
-                    _ => Diagnostic::UnresolvedAccuracy,
-                };
+                let research_values = available_values
+                    .try_and_then(|values| account.research_values(device, values, &weights))?;
+                let plan_value = available_values.try_and_then(|values| {
+                    let ordinary = values.dot(device, &final_demand, self.scale)?;
+                    Ok(match (&attempts, &research_values) {
+                        (Some(attempts), Diagnostic::Available(costs)) => Diagnostic::Available(
+                            ordinary.add(device, &costs.dot(device, attempts, self.scale)?)?,
+                        ),
+                        (None, _) => Diagnostic::Available(ordinary),
+                        (_, Diagnostic::Inadmissible) => Diagnostic::Inadmissible,
+                        _ => Diagnostic::UnresolvedAccuracy,
+                    })
+                })?;
                 let coupled = match &self.reproduction {
                     Some(reproduction) => account.coupled_values(
                         device,
@@ -173,22 +137,10 @@ impl AnalysisRequest {
                     )?,
                     None => Diagnostic::Inapplicable,
                 };
-                let available_coupled = match &coupled {
-                    Diagnostic::Available(solution) => solution.values(device)?,
-                    Diagnostic::Inadmissible => Diagnostic::Inadmissible,
-                    Diagnostic::Inapplicable => Diagnostic::Inapplicable,
-                    _ => Diagnostic::UnresolvedAccuracy,
-                };
-                let normalized = match &available_coupled {
-                    Diagnostic::Available(values) => values.normalize(
-                        device,
-                        self.goods.rows() + self.reference_occupation,
-                        self.scale,
-                    )?,
-                    Diagnostic::Inadmissible => Diagnostic::Inadmissible,
-                    Diagnostic::Inapplicable => Diagnostic::Inapplicable,
-                    _ => Diagnostic::UnresolvedAccuracy,
-                };
+                let available_coupled = coupled.try_and_then(|solution| solution.values(device))?;
+                let reference = self.goods.rows() + self.reference_occupation;
+                let normalized = available_coupled
+                    .try_and_then(|values| values.normalize(device, reference, self.scale))?;
                 let comparator = match (&self.comparator, &plan_value) {
                     (Some(request), Diagnostic::Available(total)) => {
                         Diagnostic::Available(comparator(
@@ -203,33 +155,21 @@ impl AnalysisRequest {
                     (_, Diagnostic::Inadmissible) => Diagnostic::Inadmissible,
                     _ => Diagnostic::UnresolvedAccuracy,
                 };
-                let residual_scale = match &available_coupled {
-                    Diagnostic::Available(values) => values.reciprocal_reference(
-                        device,
-                        self.goods.rows() + self.reference_occupation,
-                        self.scale,
-                    )?,
-                    Diagnostic::Inadmissible => Diagnostic::Inadmissible,
-                    Diagnostic::Inapplicable => Diagnostic::Inapplicable,
-                    _ => Diagnostic::UnresolvedAccuracy,
-                };
+                let residual_scale = available_coupled.try_and_then(|values| {
+                    values.reciprocal_reference(device, reference, self.scale)
+                })?;
                 Ok(AnalysisReport {
                     context: self.context,
                     profile: ANALYTICAL_PROFILE,
                     scale: self.scale,
                     goods_values: values.read(device)?,
-                    gross_requirements: gross.read(device)?,
+                    gross_requirements: plan.gross_requirements.read(device)?,
                     occupational_hours: hours,
-                    research_values: read_diagnostic(device, research_values)?,
-                    plan_value: read_diagnostic(device, plan_value)?,
-                    coupled_values: match coupled {
-                        Diagnostic::Available(values) => values.read(device)?,
-                        Diagnostic::Inadmissible => Diagnostic::Inadmissible,
-                        Diagnostic::Inapplicable => Diagnostic::Inapplicable,
-                        _ => Diagnostic::UnresolvedAccuracy,
-                    },
-                    normalized_coupled: read_diagnostic(device, normalized)?,
-                    residual_scale: read_diagnostic(device, residual_scale)?,
+                    research_values: research_values.try_map(|values| values.read(device))?,
+                    plan_value: plan_value.try_map(|value| value.read(device))?,
+                    coupled_values: coupled.try_and_then(|solution| solution.read(device))?,
+                    normalized_coupled: normalized.try_map(|values| values.read(device))?,
+                    residual_scale: residual_scale.try_map(|value| value.read(device))?,
                     comparator,
                     valuations: match &self.valuation {
                         Some(request) => {
@@ -241,17 +181,4 @@ impl AnalysisRequest {
             }
         }
     }
-}
-
-fn read_diagnostic(
-    device: &Device,
-    value: Diagnostic<DeviceVector>,
-) -> Result<Diagnostic<Vec<Interval>>> {
-    Ok(match value {
-        Diagnostic::Available(value) => Diagnostic::Available(value.read(device)?),
-        Diagnostic::MissingData => Diagnostic::MissingData,
-        Diagnostic::Inapplicable => Diagnostic::Inapplicable,
-        Diagnostic::Inadmissible => Diagnostic::Inadmissible,
-        Diagnostic::UnresolvedAccuracy => Diagnostic::UnresolvedAccuracy,
-    })
 }

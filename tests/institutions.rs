@@ -1,4 +1,4 @@
-use super::support;
+use super::{fixtures::WoodFirms, support};
 
 use anyhow::{Context, Result};
 use bad_econ::{
@@ -8,55 +8,12 @@ use bad_econ::{
 };
 
 fn configuration() -> Result<ScenarioConfig> {
-    let mut config = Scenario::baseline(3, 42, Experiment::Concentrated)?
-        .config()
-        .clone();
-    config.distribution_rate = 0;
-    config.forecast_weight = 0;
-    config.coverage = 30;
-    config.behavior.work_fatigue = 0;
-    config.behavior.wage_increment = 0;
-    config.resources = ResourceMap::Explicit {
-        regions: vec![ResourceRegion::new(
-            Good::Wood,
-            Position { x: 0, y: 0 },
-            Position {
-                x: config.map_size,
-                y: config.map_size,
-            },
-            config.map_size,
-        )?],
-    };
-    config.population = Some(Population {
-        households: (1..=3)
-            .map(|identity| HouseholdSeed {
-                identity,
-                position: Position { x: 0, y: 0 },
-                cash: 0,
-                inventories: Good::food([0; 3]),
-                fatigue: 0,
-            })
-            .collect(),
-        firms: (4..=6)
-            .map(|identity| FirmSeed {
-                identity,
-                position: Position { x: 0, y: 0 },
-                owner: 1,
-                good: Good::Wood,
-                cash: 0,
-                inventories: Good::food([0; 3]),
-                capacity: 1,
-                technique: Technique {
-                    labor_minutes: 80,
-                    input_ticks: 0,
-                    output_ticks: 1,
-                },
-                wage: 1,
-                price: 1,
-            })
-            .collect(),
-    });
-    Ok(config)
+    WoodFirms {
+        seed: 42,
+        firm_cash: 0,
+        labor_minutes: 80,
+    }
+    .configuration()
 }
 
 fn finance() -> FinanceConfig {
@@ -243,5 +200,42 @@ fn research_adoption_equipment_and_natural_stocks_constrain_real_production() ->
     simulation.command(SimulationCommand::Restore(checkpoint.into()))?;
     (0..4).try_for_each(|_| simulation.advance())?;
     assert_eq!(simulation.download()?, expected);
+    Ok(())
+}
+
+#[test]
+fn research_snapshot_reads_mixed_width_columns_on_gpu() -> Result<()> {
+    let mut config = research_configuration()?.config().clone();
+    let research = config.research.as_mut().context("research configuration")?;
+    let projects = &mut research.labs[0].projects;
+    projects.push(ResearchProject {
+        identity: projects[0].identity + 1,
+        exposure: 73,
+        ..projects[0].clone()
+    });
+    let service = u64::from(u32::MAX) + 19;
+    research.equipment[0].remaining_service = service;
+    let mut simulation = Simulation::new(Scenario::new(config)?, support::device(64)?)?;
+    let mut snapshot = simulation
+        .download()?
+        .research
+        .context("research snapshot")?;
+    let research = simulation
+        .scenario
+        .config()
+        .research
+        .as_ref()
+        .context("research configuration")?;
+    assert_eq!(snapshot.lab(research, 0)?.permitted, 1);
+    assert_eq!(snapshot.project(research, 0, 0)?.exposure, 0);
+    assert_eq!(snapshot.project(research, 0, 1)?.exposure, 73);
+    assert_eq!(snapshot.equipment(research, 0)?.remaining_service, service);
+    assert_eq!(snapshot.stock(research, 0)?.stock, 4);
+    assert_eq!(snapshot.strike(research, 0)?.probability, 0);
+    snapshot.words.pop();
+    assert_eq!(
+        snapshot.strike(research, 0).unwrap_err().to_string(),
+        "incomplete research observation"
+    );
     Ok(())
 }

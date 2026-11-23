@@ -11,6 +11,8 @@ mod enterprise;
 mod estimates;
 mod execution;
 mod finance;
+#[path = "support/fixtures.rs"]
+mod fixtures;
 mod food;
 mod heating;
 mod households;

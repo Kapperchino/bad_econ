@@ -250,20 +250,7 @@ impl Population {
         }
     }
     pub fn initial(&self, scenario: &Scenario) -> Result<State> {
-        let count = scenario.actors();
-        let mut state = State {
-            day: 0,
-            next_identity: self.next_identity(),
-            actors: scenario.initial_actors().clone(),
-            values: vec![0; scenario.fields() * count],
-            initial_cash: 0,
-            initial_goods: [0; Good::COUNT],
-            research: None,
-            people: Vec::new(),
-            initial_population: 0,
-            ownership: Vec::new(),
-            companies: Vec::new(),
-        };
+        let mut state = scenario.empty_opening_state(self.next_identity());
         for (source, seed) in self.households.iter().enumerate() {
             let row = scenario.row(source);
             for (field, value) in [

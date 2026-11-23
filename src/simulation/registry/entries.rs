@@ -1,6 +1,7 @@
+use super::staging::{StagedRows, Staging, Transfer, transfer};
 use super::*;
 use crate::domain::Good;
-use crate::simulation::{decode, encode, enterprise, layout::TICK_WORDS, words::Ticks};
+use crate::simulation::{encode, enterprise, layout::TICK_WORDS};
 use std::collections::BTreeSet;
 
 pub(in crate::simulation) fn state_capacity(count: usize) -> usize {
@@ -40,7 +41,7 @@ impl EntryRequests {
             .filter(|record| Self::is_entry(record.request))
             .collect::<Vec<_>>();
         let sources = entries.iter().all(|record| match record.request >> 24 {
-            8 | 9 => (1..=actors as u32).contains(&(record.request & 0x00ffffff)),
+            8 | 9 => (1..=actors as u32).contains(&record.payload()),
             _ => true,
         });
         match (
@@ -116,7 +117,7 @@ impl EntryBatch {
             .iter()
             .flat_map(|record| {
                 let source = match record.request >> 24 {
-                    8 | 9 => Some((record.request & 0x00ffffff) as usize - 1),
+                    8 | 9 => Some(record.target()),
                     _ => None,
                 };
                 std::iter::once(record.actor as usize).chain(source)
@@ -125,42 +126,15 @@ impl EntryBatch {
             .into_iter()
             .collect::<Vec<_>>();
         let fields = crate::domain::BASE_FIELDS;
-        let required = selected.len() as u64 * fields as u64 * 16;
-        match device
-            .reclaim_memory(required)?
-            .bytes_reserved
-            .saturating_add(required)
-            <= device.memory_budget.bytes()
-        {
-            true => (),
-            false => Err(anyhow::anyhow!(
-                "entry staging exceeds the device memory budget"
-            ))?,
-        }
-        let indices = device.tensor(
-            &selected
-                .iter()
-                .map(|&index| index as u32)
-                .collect::<Vec<_>>(),
-        );
-        let values = device.empty(selected.len() * fields * TICK_WORDS);
-        transfer(
-            device,
-            state,
-            &values,
-            &indices,
-            state.meta.num_elements() / (scenario.fields() * TICK_WORDS),
-            Transfer::Gather,
-        );
-        let words = device.read(&values)?;
-        let readback_bytes = words.len() as u64 * 4;
+        let staged = StagedRows::new(device, state, scenario.fields(), &selected, Staging::Entry)?;
+        let readback_bytes = staged.readback_bytes();
         let mut compact = State {
             day: metadata.day,
             actors: selected
                 .iter()
                 .map(|&index| metadata.actors.at(index))
                 .collect(),
-            values: decode(&words),
+            values: staged.read(device, state)?,
             ownership: Vec::new(),
             companies: Vec::new(),
             next_identity,
@@ -175,12 +149,11 @@ impl EntryBatch {
             let owner = record.actor as usize;
             let index = selected.binary_search(&owner).expect("selected owner");
             compact_requests[index] = match record.request >> 24 {
-                kind @ (8 | 9) => {
-                    let source = (record.request & 0x00ffffff) as usize - 1;
-                    (kind << 24)
-                        + selected.binary_search(&source).expect("selected source") as u32
-                        + 1
-                }
+                8 | 9 => record.remap_target(
+                    selected
+                        .binary_search(&record.target())
+                        .expect("selected source"),
+                ),
                 _ => record.request,
             };
         }
@@ -358,95 +331,4 @@ fn grow_fields<N: Size>(
         }
         field += CUBE_COUNT_Y;
     }
-}
-
-#[derive(Clone, Copy, Debug, Hash, PartialEq, Eq)]
-pub(super) enum Transfer {
-    Gather,
-    Scatter,
-}
-
-#[derive(CubeType, CubeLaunch)]
-struct TransferInput {
-    source: Box<[Ticks]>,
-    target: Box<[Ticks]>,
-    indices: Box<[u32]>,
-    actors: u32,
-    #[cube(comptime)]
-    stage: Transfer,
-}
-
-struct RegistryTransfers;
-struct TransferRows;
-
-impl System for RegistryTransfers {
-    type Input = TransferInput;
-    type Passes = gpu_passes![TransferRows];
-}
-
-#[cube]
-impl GpuPass<TransferInput> for TransferRows {
-    type Output = ();
-
-    fn execute(mut input: TransferInput) {
-        transfer_rows(
-            &input.source,
-            &mut input.target,
-            &input.indices,
-            input.actors,
-            comptime!(input.stage),
-        );
-    }
-}
-
-#[cube]
-fn transfer_rows(
-    source: &[Ticks],
-    target: &mut [Ticks],
-    indices: &[u32],
-    actors: u32,
-    #[comptime] stage: Transfer,
-) {
-    let id = ABSOLUTE_POS;
-    match stage {
-        Transfer::Gather => {
-            if id < target.len() {
-                let field = id / indices.len();
-                let actor = indices[id % indices.len()] as usize;
-                target[id] = source[field * actors as usize + actor];
-            }
-        }
-        Transfer::Scatter => {
-            if id < source.len() {
-                let field = id / indices.len();
-                let actor = indices[id % indices.len()] as usize;
-                target[field * actors as usize + actor] = source[id];
-            }
-        }
-    }
-}
-
-pub(super) fn transfer(
-    device: &Device,
-    source: &CubeTensor,
-    target: &CubeTensor,
-    indices: &CubeTensor,
-    actors: usize,
-    stage: Transfer,
-) {
-    let count = match stage {
-        Transfer::Scatter => source.meta.shape()[0],
-        _ => target.meta.shape()[0],
-    };
-    RegistryTransfers::launch_elements(
-        device,
-        count / TICK_WORDS,
-        TransferInputLaunch {
-            source: source.buffer_arg(),
-            target: target.buffer_arg(),
-            indices: indices.buffer_arg(),
-            actors: actors as u32,
-            stage,
-        },
-    );
 }

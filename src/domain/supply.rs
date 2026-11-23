@@ -1,5 +1,5 @@
 use super::{
-    ActorRows, Economy, Good, ScenarioConfig, calendar,
+    ActorRows, Economy, Field, Good, ScenarioConfig, State, calendar,
     enterprise::{Distributor, HouseholdProduction},
     food, railway,
     scenario::{generated_firm_identity, generated_good},
@@ -98,8 +98,8 @@ impl StartingReserves {
 }
 
 pub(super) struct StartingStock {
-    pub good: Good,
-    pub units: u64,
+    good: Good,
+    units: u64,
 }
 
 impl StartingStock {
@@ -107,6 +107,45 @@ impl StartingStock {
         let total = &mut goods[self.good as usize - 1];
         *total = add(*total, self.units)?;
         Ok(())
+    }
+
+    pub fn seed(&self, state: &mut State, actor: usize) -> Result<()> {
+        state.set(Field::inventory(self.good), actor, self.units);
+        self.add_to(&mut state.initial_goods)
+    }
+}
+
+pub(super) struct StartingFarm {
+    pub plots: u64,
+    pub inventory: [StartingStock; 2],
+}
+
+impl StartingFarm {
+    pub fn new(config: &ScenarioConfig, farmers: u32) -> Option<Self> {
+        match config.household_production {
+            HouseholdProduction::Available {
+                annual_yield_per_plot,
+                ..
+            } => {
+                let farmers = u64::from(farmers);
+                let plots =
+                    farmers * u64::from(config.demography.initial_household_members.div_ceil(2));
+                Some(Self {
+                    plots,
+                    inventory: [
+                        StartingStock {
+                            good: Good::Grain,
+                            units: u64::from(annual_yield_per_plot) * plots,
+                        },
+                        StartingStock {
+                            good: Good::Tools,
+                            units: farmers,
+                        },
+                    ],
+                })
+            }
+            HouseholdProduction::Unavailable => None,
+        }
     }
 }
 

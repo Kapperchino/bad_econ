@@ -61,17 +61,8 @@ impl SearchInput {
                 let px = location.x;
                 let py = location.y;
                 let radius = config.search_radius;
-                let whole_map = comptime!(matches!(suppliers, SupplierSearch::SingleCell { .. }));
-                let cx = if comptime!(whole_map) {
-                    u32::cast_from(0u32)
-                } else {
-                    px / radius
-                };
-                let cy = if comptime!(whole_map) {
-                    u32::cast_from(0u32)
-                } else {
-                    py / radius
-                };
+                let columns = SearchAxis::for_suppliers(px, config, suppliers);
+                let rows = SearchAxis::for_suppliers(py, config, suppliers);
                 let side = config.spatial_side;
                 let mut chosen = u32::new(comptime!(i64::from(NO_ACTOR)));
                 let mut trip = 0u32;
@@ -97,10 +88,10 @@ impl SearchInput {
                     comptime!(ScanPopulation::Stocked as u32),
                     comptime!(ScanPopulation::Original as u32),
                 );
-                let mut y = select(stocked > 0 && affordable, max(cy, 1u32) - 1, side);
-                while y <= min(cy + 1, side - 1) && considered < DISCOVERY_CANDIDATES {
-                    let mut x = max(cx, 1u32) - 1;
-                    while x <= min(cx + 1, side - 1) && considered < DISCOVERY_CANDIDATES {
+                let mut y = select(stocked > 0 && affordable, rows.first, side);
+                while y <= rows.last && considered < DISCOVERY_CANDIDATES {
+                    let mut x = columns.first;
+                    while x <= columns.last && considered < DISCOVERY_CANDIDATES {
                         let cell = y * side + x;
                         let begin = spatial[cell as usize];
                         let end = spatial[(cell + 1) as usize];
@@ -123,14 +114,7 @@ impl SearchInput {
                                 + offset) as usize];
                         }
                         let mut j = begin;
-                        let nearest = if comptime!(whole_map) {
-                            u32::cast_from(0u32)
-                        } else {
-                            max(px, x * radius) - min(px, (x + 1) * radius - 1)
-                                + max(py, y * radius)
-                                - min(py, (y + 1) * radius - 1)
-                        };
-                        if nearest > radius {
+                        if columns.distance_to(x) + rows.distance_to(y) > radius {
                             j = end;
                         }
                         while j < limit && considered < DISCOVERY_CANDIDATES {
@@ -382,12 +366,12 @@ impl SearchInput {
                     }
                 }
                 if comptime!(parameters.market == MarketFlag::Household) {
-                    let mut failure = u32::cast_from(missing_supply);
-                    if !equal(wanted, zero()) && chosen == NO_ACTOR {
-                        failure =
-                            select(seen_supply || equal(purchasing_power, zero()), 2u32, 1u32);
-                    }
-                    economy.ledger.set_number(Field::FoodAccess, id, failure);
+                    let result = FoodSearchResult {
+                        seller: chosen,
+                        seen_supply,
+                        used_fallback: missing_supply,
+                    };
+                    result.record(&mut economy.ledger, id, wanted, purchasing_power);
                 }
                 MarketProposal {
                     peer: chosen,

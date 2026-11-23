@@ -1,4 +1,32 @@
+use crate::domain::enterprise::FoodAccess;
 use crate::simulation::economy::*;
+
+#[derive(CubeType)]
+pub(super) struct FoodSearchResult {
+    pub seller: u32,
+    pub seen_supply: bool,
+    pub used_fallback: bool,
+}
+
+#[cube]
+impl FoodSearchResult {
+    pub(super) fn record(&self, ledger: &mut Ledger<'_>, buyer: u32, wanted: Ticks, budget: Ticks) {
+        let access = if self.seller == NO_ACTOR && !equal(wanted, zero()) {
+            select(
+                self.seen_supply || equal(budget, zero()),
+                comptime!(FoodAccess::Unaffordable as u32),
+                comptime!(FoodAccess::MissingSupply as u32),
+            )
+        } else {
+            select(
+                self.used_fallback,
+                comptime!(FoodAccess::MissingSupply as u32),
+                comptime!(FoodAccess::Satisfied as u32),
+            )
+        };
+        ledger.set_number(Field::FoodAccess, buyer, access);
+    }
+}
 
 #[derive(CubeType)]
 pub(in crate::simulation::economy) struct PurchaseRequest {

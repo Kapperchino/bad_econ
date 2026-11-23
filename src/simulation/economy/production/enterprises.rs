@@ -1,3 +1,4 @@
+use crate::domain::enterprise::FoodAccess;
 use crate::domain::enterprise::{EnterpriseModel, EnterpriseState};
 use crate::simulation::configuration::Feature;
 use crate::simulation::economy::*;
@@ -83,7 +84,8 @@ pub(crate) fn mobility(
 ) {
     let config = economy.ledger.config;
     let needs_food = economy.ledger.number(Field::Shortage, household) > 0
-        && economy.ledger.number(Field::FoodAccess, household) == 1;
+        && economy.ledger.number(Field::FoodAccess, household)
+            == comptime!(FoodAccess::MissingSupply as u32);
     let idle = economy.ledger.number(Field::Employed, household) == 0;
     let landless = economy.ledger.number(Field::LandPlots, household) == 0;
     let settled = economy.ledger.number(Field::MoveDue, household) == 0;

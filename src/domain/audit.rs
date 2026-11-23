@@ -1,7 +1,7 @@
 use super::{
     CONSUMPTION_FIELDS, FIRM_RENT_GRACE_DAYS, Field, Good, HiringTerm, HousingState,
     ProductionMethod, Scenario, State, Technique, USED_FIELDS, company, demography, employment,
-    enterprise, finance, industry, landlords, property, research,
+    enterprise, industry, landlords, property, research,
 };
 use anyhow::{Result, anyhow};
 
@@ -14,11 +14,7 @@ impl<'a> AuditedState<'a> {
         let _ = enterprise::OwnershipRegistry::new(state)?;
         let _ = company::CompanyRegistry::new(state)?;
         let shape = state.actors.len() >= scenario.actors()
-            && state.values.len()
-                == state.actors.len() * scenario.fields()
-                    + c.finance
-                        .as_ref()
-                        .map_or(0, finance::FinanceConfig::state_len);
+            && state.values.len() == scenario.state_len_for(state.actors.len());
         match shape {
             true => Ok(()),
             false => Err(anyhow!("state shape does not match scenario")),

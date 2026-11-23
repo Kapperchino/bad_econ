@@ -8,6 +8,22 @@ use crate::{
 use anyhow::{Context, Result, anyhow};
 
 impl Scenario {
+    pub(in crate::domain) fn empty_opening_state(&self, next_identity: u64) -> State {
+        State {
+            day: 0,
+            next_identity,
+            actors: self.initial_actors.as_ref().clone(),
+            values: vec![0; self.fields() * self.actors()],
+            initial_cash: 0,
+            initial_goods: [0; Good::COUNT],
+            research: None,
+            people: Vec::new(),
+            initial_population: 0,
+            ownership: Vec::new(),
+            companies: Vec::new(),
+        }
+    }
+
     pub fn initial(&self) -> Result<State> {
         let mut state = match &self.config.population {
             Some(population) => population.initial(self),
@@ -18,14 +34,7 @@ impl Scenario {
             state.initial_cash = add(state.initial_cash, finance.initial_cash()?)?;
         }
         for actor in self.population_rows()..self.actors() {
-            let good = Good::from_index(state.actors.at(actor).kind)?;
-            state.set_recipe(
-                actor,
-                industry::Recipe {
-                    technique: self.technique(actor),
-                    inputs: good.inputs(),
-                },
-            );
+            state.set_recipe(actor, self.production_recipe(actor, None)?);
         }
         state.ownership = state
             .actors

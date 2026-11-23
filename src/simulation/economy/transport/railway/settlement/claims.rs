@@ -1,3 +1,4 @@
+use super::booking::ReadyBooking;
 use super::*;
 
 #[cfg(test)]
@@ -354,46 +355,24 @@ impl FreightSettlementInput {
         }
     }
 
-    pub(super) fn emit_claims(&mut self, invocation: u32) {
-        if invocation < self.active_bookings() {
-            let priority = self.booking_priority(invocation);
-            let buyer = self.booking_buyer(priority);
-            if self.bookings[buyer as usize * FREIGHT_BOOKING_WORDS]
-                == comptime!(BookingState::Ready as u32)
-            {
-                let seller =
-                    self.proposals[buyer as usize * ProposalLayout::WORDS + ProposalLayout::ACTOR];
-                let path = FreightRequest::new(
-                    &ActorTable::new(&self.actors),
-                    &self.config,
-                    buyer,
-                    seller,
-                )
-                .candidate(
-                    &self.config,
-                    self.bookings[buyer as usize * FREIGHT_BOOKING_WORDS + 1],
-                );
-                let amount = self.quantity(buyer);
-                let cost = times(amount, path.fee).record(&self.control);
-                self.emit_claim(Claim {
-                    resource: seller,
-                    priority,
-                    buyer,
-                    amount: cost,
-                });
-                let mut cursor = RegionCursor::new(&path);
-                let mut record = cursor.next(&self.config);
-                while record < self.config.railway.region_count {
-                    let resource = self.config.actors + record;
-                    self.emit_claim(Claim {
-                        resource,
-                        priority,
-                        buyer,
-                        amount,
-                    });
-                    record = cursor.next(&self.config);
-                }
-            }
+    pub(super) fn emit_claims(&mut self, booking: &ReadyBooking) {
+        let cost = times(booking.quantity, booking.path.fee).record(&self.control);
+        self.emit_claim(Claim {
+            resource: booking.seller,
+            priority: booking.priority,
+            buyer: booking.buyer,
+            amount: cost,
+        });
+        let mut cursor = RegionCursor::new(&booking.path);
+        let mut record = cursor.next(&self.config);
+        while record < self.config.railway.region_count {
+            self.emit_claim(Claim {
+                resource: self.config.actors + record,
+                priority: booking.priority,
+                buyer: booking.buyer,
+                amount: booking.quantity,
+            });
+            record = cursor.next(&self.config);
         }
     }
 

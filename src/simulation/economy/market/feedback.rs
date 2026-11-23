@@ -1,3 +1,4 @@
+use crate::domain::enterprise::FoodAccess;
 use crate::simulation::economy::*;
 
 #[allow(
@@ -37,9 +38,14 @@ pub(in crate::simulation::economy) fn record_feedback(
         let status = KernelEventStatus::load(outcomes, parameters.status_start + index);
         if firm != NO_ACTOR && status.contains(comptime!(EventStatus::Rejected)) {
             if comptime!(parameters.market == MarketFlag::Household)
-                && ledger.number(Field::FoodAccess, actor) == 0
+                && ledger.number(Field::FoodAccess, actor)
+                    == comptime!(FoodAccess::Satisfied as u32)
             {
-                ledger.set_number(Field::FoodAccess, actor, 3);
+                ledger.set_number(
+                    Field::FoodAccess,
+                    actor,
+                    comptime!(FoodAccess::MatchingFailure as u32),
+                );
             }
             let base = CONTROL_WORDS as u32 + firm * TICK_WORDS as u32;
             let quantity =

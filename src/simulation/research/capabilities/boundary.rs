@@ -1,4 +1,4 @@
-use super::{CapabilityClosure, CapabilityGraph, ClosureProgress, padded};
+use super::{CapabilityClosure, CapabilityGraph, padded, propagate_until_stable};
 use crate::simulation::{
     Device,
     analytics::SparseMatrix,
@@ -142,11 +142,7 @@ impl DeviceCapabilityGraph {
     pub fn closure(&self, device: &Device) -> Result<CapabilityClosure> {
         let labels = device.empty(self.nodes.max(1));
         crate::simulation::tensor::copy(device, &self.labels, &labels);
-        let changed = device.tensor(&[0]);
-        let mut round = 0;
-        let mut progress = ClosureProgress::Propagating;
-        while round < self.nodes.saturating_sub(1) && progress == ClosureProgress::Propagating {
-            device.write(&changed, &[0]);
+        propagate_until_stable(device, self.nodes, |changed| {
             BoundaryPropagation::launch_elements(
                 device,
                 self.nodes,
@@ -158,12 +154,7 @@ impl DeviceCapabilityGraph {
                     row_words: self.row_words as u32,
                 },
             );
-            progress = match device.read(&changed)?[0] {
-                0 => ClosureProgress::Converged,
-                _ => ClosureProgress::Propagating,
-            };
-            round += 1;
-        }
+        })?;
         Ok(CapabilityClosure {
             values: labels,
             nodes: self.nodes,

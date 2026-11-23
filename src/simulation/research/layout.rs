@@ -1,18 +1,23 @@
 use crate::domain::Good;
 use crate::ledger::TickLayout;
-use crate::simulation::rows::row_layout;
+use crate::simulation::rows::{row_layout, word_layout};
 use bytemuck::{Pod, Zeroable};
 use cubecl::prelude::*;
-use std::mem::offset_of;
 
-macro_rules! layout {
-    ($name:ident { $($field:ident : $ty:ty => $constant:ident),* $(,)? }) => {
-        #[repr(C)]
-        #[derive(Clone, Copy, Pod, Zeroable)]
-        pub struct $name { $(pub $field: $ty),* }
-        impl $name {
-            pub const WORDS: usize = size_of::<Self>() / size_of::<u32>();
-            $(pub const $constant: usize = offset_of!(Self, $field) / size_of::<u32>();)*
+macro_rules! state_layout {
+    ($rows:ident, $record:ident { $($field:ident : $ty:ty => $constant:ident),+ $(,)? }) => {
+        row_layout!($rows, $record { $($field: $ty => $constant),+ });
+        impl $record {
+            pub fn from_rows(
+                words: &[u32],
+                offset: usize,
+                count: usize,
+                index: usize,
+            ) -> anyhow::Result<Self> {
+                Ok(Self {
+                    $($field: read_row(words, offset + Self::$constant * count, index)?),+
+                })
+            }
         }
     };
 }
@@ -155,7 +160,7 @@ row_layout!(StrikeLayoutRows, StrikeLayout {
     risk: u32 => RISK,
 });
 
-row_layout!(LabStateRows, LabState {
+state_layout!(LabStateRows, LabState {
     discovered: u32 => DISCOVERED,
     mastered: u32 => MASTERED,
     permitted: u32 => PERMITTED,
@@ -163,7 +168,7 @@ row_layout!(LabStateRows, LabState {
     consumed: [TickLayout; Good::COUNT] => CONSUMED,
 });
 
-row_layout!(ProjectStateRows, ProjectState {
+state_layout!(ProjectStateRows, ProjectState {
     attempts: TickLayout => ATTEMPTS,
     discoveries: TickLayout => DISCOVERIES,
     exposure: u32 => EXPOSURE,
@@ -171,7 +176,7 @@ row_layout!(ProjectStateRows, ProjectState {
     probability: u32 => PROBABILITY,
 });
 
-row_layout!(MachineStateRows, MachineState {
+state_layout!(MachineStateRows, MachineState {
     remaining: TickLayout => REMAINING,
     condition: u32 => CONDITION,
     produced_before: TickLayout => PRODUCED_BEFORE,
@@ -179,19 +184,19 @@ row_layout!(MachineStateRows, MachineState {
     maintenance_restoration: u32 => MAINTENANCE_RESTORATION,
 });
 
-row_layout!(StockStateRows, StockState {
+state_layout!(StockStateRows, StockState {
     stock: u32 => STOCK,
     produced_before: TickLayout => PRODUCED_BEFORE,
     extracted: TickLayout => EXTRACTED,
 });
 
-row_layout!(StrikeStateRows, StrikeState {
+state_layout!(StrikeStateRows, StrikeState {
     score: u32 => SCORE,
     probability: u32 => PROBABILITY,
     participation: u32 => PARTICIPATION,
 });
 
-layout!(SummaryLayout {
+word_layout!(SummaryLayout {
     consumed: [TickLayout; Good::COUNT] => CONSUMED,
     attempts: TickLayout => ATTEMPTS,
     discoveries: TickLayout => DISCOVERIES,
@@ -199,91 +204,6 @@ layout!(SummaryLayout {
     natural_stock: TickLayout => NATURAL_STOCK,
     striking: TickLayout => STRIKING,
 });
-
-impl LabState {
-    pub fn from_rows(
-        words: &[u32],
-        offset: usize,
-        count: usize,
-        index: usize,
-    ) -> anyhow::Result<Self> {
-        Ok(Self {
-            discovered: read_row(words, offset + Self::DISCOVERED * count, index)?,
-            mastered: read_row(words, offset + Self::MASTERED * count, index)?,
-            permitted: read_row(words, offset + Self::PERMITTED * count, index)?,
-            adopted: read_row(words, offset + Self::ADOPTED * count, index)?,
-            consumed: read_row(words, offset + Self::CONSUMED * count, index)?,
-        })
-    }
-}
-
-impl ProjectState {
-    pub fn from_rows(
-        words: &[u32],
-        offset: usize,
-        count: usize,
-        index: usize,
-    ) -> anyhow::Result<Self> {
-        Ok(Self {
-            attempts: read_row(words, offset + Self::ATTEMPTS * count, index)?,
-            discoveries: read_row(words, offset + Self::DISCOVERIES * count, index)?,
-            exposure: read_row(words, offset + Self::EXPOSURE * count, index)?,
-            outcome: read_row(words, offset + Self::OUTCOME * count, index)?,
-            probability: read_row(words, offset + Self::PROBABILITY * count, index)?,
-        })
-    }
-}
-
-impl MachineState {
-    pub fn from_rows(
-        words: &[u32],
-        offset: usize,
-        count: usize,
-        index: usize,
-    ) -> anyhow::Result<Self> {
-        Ok(Self {
-            remaining: read_row(words, offset + Self::REMAINING * count, index)?,
-            condition: read_row(words, offset + Self::CONDITION * count, index)?,
-            produced_before: read_row(words, offset + Self::PRODUCED_BEFORE * count, index)?,
-            consumed: read_row(words, offset + Self::CONSUMED * count, index)?,
-            maintenance_restoration: read_row(
-                words,
-                offset + Self::MAINTENANCE_RESTORATION * count,
-                index,
-            )?,
-        })
-    }
-}
-
-impl StockState {
-    pub fn from_rows(
-        words: &[u32],
-        offset: usize,
-        count: usize,
-        index: usize,
-    ) -> anyhow::Result<Self> {
-        Ok(Self {
-            stock: read_row(words, offset + Self::STOCK * count, index)?,
-            produced_before: read_row(words, offset + Self::PRODUCED_BEFORE * count, index)?,
-            extracted: read_row(words, offset + Self::EXTRACTED * count, index)?,
-        })
-    }
-}
-
-impl StrikeState {
-    pub fn from_rows(
-        words: &[u32],
-        offset: usize,
-        count: usize,
-        index: usize,
-    ) -> anyhow::Result<Self> {
-        Ok(Self {
-            score: read_row(words, offset + Self::SCORE * count, index)?,
-            probability: read_row(words, offset + Self::PROBABILITY * count, index)?,
-            participation: read_row(words, offset + Self::PARTICIPATION * count, index)?,
-        })
-    }
-}
 
 fn read_row<T: Pod>(words: &[u32], offset: usize, index: usize) -> anyhow::Result<T> {
     use anyhow::Context;

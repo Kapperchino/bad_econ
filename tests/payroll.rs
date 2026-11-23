@@ -1,11 +1,14 @@
-use super::support;
+use super::{fixtures::WoodFirms, support};
 use anyhow::Result;
 use bad_econ::domain::*;
 
 fn scenario() -> Result<Scenario> {
-    let mut config = Scenario::baseline(3, 1, Experiment::Concentrated)?
-        .config()
-        .clone();
+    let mut config = WoodFirms {
+        seed: 1,
+        firm_cash: 100_000,
+        labor_minutes: 7,
+    }
+    .configuration()?;
     config.payroll = Some(PayrollPolicy {
         base_rate: 100,
         employee_charge: 50,
@@ -13,51 +16,6 @@ fn scenario() -> Result<Scenario> {
             threshold: 100,
             marginal_rate: 300,
         }],
-    });
-    config.distribution_rate = 0;
-    config.forecast_weight = 0;
-    config.coverage = 30;
-    config.behavior.work_fatigue = 0;
-    config.behavior.wage_increment = 0;
-    config.resources = ResourceMap::Explicit {
-        regions: vec![ResourceRegion::new(
-            Good::Wood,
-            Position { x: 0, y: 0 },
-            Position {
-                x: config.map_size,
-                y: config.map_size,
-            },
-            config.map_size,
-        )?],
-    };
-    config.population = Some(Population {
-        households: (1..=3)
-            .map(|identity| HouseholdSeed {
-                identity,
-                position: Position { x: 0, y: 0 },
-                cash: 0,
-                inventories: Good::food([0; 3]),
-                fatigue: 0,
-            })
-            .collect(),
-        firms: (4..=6)
-            .map(|identity| FirmSeed {
-                identity,
-                position: Position { x: 0, y: 0 },
-                owner: 1,
-                good: Good::Wood,
-                cash: 100_000,
-                inventories: Good::food([0; 3]),
-                capacity: 1,
-                technique: Technique {
-                    labor_minutes: 7,
-                    input_ticks: 0,
-                    output_ticks: 1,
-                },
-                wage: 1,
-                price: 1,
-            })
-            .collect(),
     });
     Scenario::new(config)
 }

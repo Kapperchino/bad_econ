@@ -37,24 +37,13 @@ impl SearchInput {
             }
             let location = BuyerLocation::new(&economy.actors, config, id);
             let buyer_access = location.access;
-            let px = location.x;
-            let py = location.y;
             let radius = config.search_radius;
-            let whole_map = comptime!(matches!(suppliers, SupplierSearch::SingleCell { .. }));
             let maximum_delivery_cost = times32(
                 max(ceildiv(radius, config.shipment_speed), 1),
                 config.delivery_penalty,
             );
-            let cx = if comptime!(whole_map) {
-                u32::cast_from(0u32)
-            } else {
-                px / radius
-            };
-            let cy = if comptime!(whole_map) {
-                u32::cast_from(0u32)
-            } else {
-                py / radius
-            };
+            let columns = SearchAxis::for_suppliers(location.x, config, suppliers);
+            let rows = SearchAxis::for_suppliers(location.y, config, suppliers);
             let side = config.spatial_side;
             let buyer = MatchingBuyer {
                 id,
@@ -69,7 +58,7 @@ impl SearchInput {
                 _ => 32usize,
             });
             let mut candidates = CandidateTile::new(lanes, comptime!(parameters.market));
-            let mut y = max(cy, 1u32) - 1;
+            let mut y = rows.first;
             if comptime!(source == index::SupplySource::Grain)
                 && grain::tiled_dealer(&*economy, &*spatial, control, jobs, id, purchasing_power)
             {
@@ -123,9 +112,9 @@ impl SearchInput {
             {
                 y = side;
             }
-            while y <= min(cy + 1, side - 1) && selection.considered < DISCOVERY_CANDIDATES {
-                let mut x = max(cx, 1u32) - 1;
-                while x <= min(cx + 1, side - 1) && selection.considered < DISCOVERY_CANDIDATES {
+            while y <= rows.last && selection.considered < DISCOVERY_CANDIDATES {
+                let mut x = columns.first;
+                while x <= columns.last && selection.considered < DISCOVERY_CANDIDATES {
                     let cell = y * side + x;
                     let begin = spatial[cell as usize];
                     let end = spatial[(cell + 1) as usize];
@@ -134,13 +123,7 @@ impl SearchInput {
                     let stride = supplier_stride(&economy.actors, parameters, id, length);
                     let mut cursor = (parameters.settlement_rotation + id) % max(length, 1);
                     let mut j = begin;
-                    let nearest = if comptime!(whole_map) {
-                        u32::cast_from(0u32)
-                    } else {
-                        max(px, x * radius) - min(px, (x + 1) * radius - 1) + max(py, y * radius)
-                            - min(py, (y + 1) * radius - 1)
-                    };
-                    if nearest > radius {
+                    if columns.distance_to(x) + rows.distance_to(y) > radius {
                         j = end;
                     }
                     while j < limit && selection.considered < DISCOVERY_CANDIDATES {
@@ -343,15 +326,12 @@ impl SearchInput {
                     );
                 }
                 if comptime!(parameters.market == MarketFlag::Household) {
-                    let mut failure = u32::cast_from(missing_supply);
-                    if !equal(wanted, zero()) && selection.proposal.peer == NO_ACTOR {
-                        failure = select(
-                            selection.seen_supply || equal(purchasing_power, zero()),
-                            2u32,
-                            1u32,
-                        );
-                    }
-                    economy.ledger.set_number(Field::FoodAccess, id, failure);
+                    let result = FoodSearchResult {
+                        seller: selection.proposal.peer,
+                        seen_supply: selection.seen_supply,
+                        used_fallback: missing_supply,
+                    };
+                    result.record(&mut economy.ledger, id, wanted, purchasing_power);
                 }
                 selection.proposal.store(proposals, id);
                 if selection.proposal.peer != NO_ACTOR {

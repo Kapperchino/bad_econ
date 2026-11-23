@@ -1,16 +1,24 @@
-macro_rules! row_layout {
-    ($rows:ident, $record:ident { $first:ident : $first_ty:ty => $first_constant:ident $(, $field:ident : $ty:ty => $constant:ident)* $(,)? }) => {
+macro_rules! word_layout {
+    ($record:ident { $($field:ident : $ty:ty => $constant:ident),+ $(,)? }) => {
         #[repr(C)]
         #[derive(Clone, Copy, bytemuck::Pod, bytemuck::Zeroable)]
         pub(crate) struct $record {
-            pub $first: $first_ty,
-            $(pub $field: $ty),*
+            $(pub $field: $ty),+
         }
         impl $record {
             pub const WORDS: usize = size_of::<Self>() / size_of::<u32>();
-            pub const $first_constant: usize = std::mem::offset_of!(Self, $first) / size_of::<u32>();
-            $(pub const $constant: usize = std::mem::offset_of!(Self, $field) / size_of::<u32>();)*
+            $(pub const $constant: usize = std::mem::offset_of!(Self, $field) / size_of::<u32>();)+
         }
+    };
+}
+pub(crate) use word_layout;
+
+macro_rules! row_layout {
+    ($rows:ident, $record:ident { $first:ident : $first_ty:ty => $first_constant:ident $(, $field:ident : $ty:ty => $constant:ident)* $(,)? }) => {
+        $crate::simulation::rows::word_layout!($record {
+            $first: $first_ty => $first_constant,
+            $($field: $ty => $constant),*
+        });
         #[derive(Default)]
         pub(crate) struct $rows {
             $first: Vec<$first_ty>,

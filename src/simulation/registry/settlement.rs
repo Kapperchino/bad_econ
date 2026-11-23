@@ -1,11 +1,8 @@
-use super::{
-    MigrationRegistry,
-    entries::{Transfer, transfer},
-    records::PendingRecord,
-};
+use super::staging::{StagedRows, Staging, Transfer, transfer};
+use super::{MigrationRegistry, records::PendingRecord};
 use crate::domain::{ActorRows, Scenario, State, enterprise::Ownership};
 use crate::simulation::enterprise::acquisitions::PURCHASE;
-use crate::simulation::{Device, decode, encode, enterprise, layout::TICK_WORDS};
+use crate::simulation::{Device, encode, enterprise};
 use anyhow::{Context, Result, anyhow};
 use burn_wgpu::CubeTensor;
 use std::collections::{BTreeMap, BTreeSet};
@@ -78,7 +75,7 @@ impl SettlementBatch {
             selected.insert(record.actor as usize);
             match record.request >> 24 {
                 2 | 7 | PURCHASE => {
-                    let target = (record.request & 0x00ffffff) as usize - 1;
+                    let target = record.target();
                     selected.insert(target);
                     if record.request >> 24 != 2 {
                         firms.insert(target);
@@ -214,39 +211,30 @@ impl SettlementBatch {
             true => scenario.fields(),
             false => crate::domain::BASE_FIELDS,
         };
-        let elements = selected.len() * fields;
-        let required = elements as u64 * 16;
-        match device
-            .reclaim_memory(required)?
-            .bytes_reserved
-            .saturating_add(required)
-            <= device.memory_budget.bytes()
-        {
-            true => (),
-            false => Err(anyhow!(
-                "settlement staging exceeds the device memory budget"
-            ))?,
-        }
-        let indices = device.tensor(
-            &selected
-                .iter()
-                .map(|&actor| actor as u32)
-                .collect::<Vec<_>>(),
-        );
-        let stride = state.meta.num_elements() / (scenario.fields() * TICK_WORDS);
-        let tiles = tiles::GatheredTiles::supported(device, elements)
-            .then(|| tiles::GatheredTiles::read(device, state, &indices, stride, elements))
+        let staged = StagedRows::new(
+            device,
+            state,
+            scenario.fields(),
+            &selected,
+            Staging::Settlement { fields },
+        )?;
+        let tiles = tiles::GatheredTiles::supported(device, staged.elements)
+            .then(|| {
+                tiles::GatheredTiles::read(
+                    device,
+                    state,
+                    &staged.indices,
+                    staged.stride,
+                    staged.elements,
+                )
+            })
             .transpose()?;
         let readback_bytes = tiles
             .as_ref()
-            .map_or(elements as u64 * 8, |tiles| tiles.readback_bytes());
+            .map_or(staged.readback_bytes(), |tiles| tiles.readback_bytes());
         let values = match &tiles {
-            Some(tiles) => tiles.unpack(elements),
-            None => {
-                let values = device.empty(elements * TICK_WORDS);
-                transfer(device, state, &values, &indices, stride, Transfer::Gather);
-                decode(&device.read(&values)?)
-            }
+            Some(tiles) => tiles.unpack(staged.elements),
+            None => staged.read(device, state)?,
         };
         let mut compact = State {
             actors: selected
@@ -276,15 +264,12 @@ impl SettlementBatch {
                 .ok()
                 .context("missing settlement actor")?;
             actions[actor] = match record.request >> 24 {
-                kind @ (2 | 7 | PURCHASE) => {
-                    let target = (record.request & 0x00ffffff) as usize - 1;
-                    (kind << 24)
-                        + selected
-                            .binary_search(&target)
-                            .ok()
-                            .context("missing settlement target")? as u32
-                        + 1
-                }
+                2 | 7 | PURCHASE => record.remap_target(
+                    selected
+                        .binary_search(&record.target())
+                        .ok()
+                        .context("missing settlement target")?,
+                ),
                 _ => record.request,
             };
         }
@@ -331,7 +316,7 @@ impl SettlementBatch {
             ownership,
             owners,
             readback_bytes,
-            indices,
+            indices: staged.indices,
             values: match tiles {
                 Some(tiles) => SettlementValues::Changes(tiles.changes(device, &compact.values)),
                 None => SettlementValues::Rows(

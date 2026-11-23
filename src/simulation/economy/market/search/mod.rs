@@ -1,3 +1,4 @@
+use super::demand::FoodSearchResult;
 use crate::simulation::configuration::Configuration;
 use crate::simulation::economy::*;
 use crate::simulation::{
@@ -9,12 +10,14 @@ mod demand;
 mod matching;
 mod prepare;
 mod ranking;
+mod spatial;
 use candidates::*;
 pub(in crate::simulation::economy) use candidates::{
     OfferRequest, supplier_samples, supplier_stride, supply_score,
 };
 use demand::BuyerDemand;
 use ranking::{CandidateRank, group_winner};
+pub(super) use spatial::SearchAxis;
 mod empty;
 mod filter;
 mod fuel;

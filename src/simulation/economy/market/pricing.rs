@@ -387,16 +387,14 @@ impl<'a> ReplacementMarket<'a> {
             && economy.ledger.number(Field::EnterpriseModel, buyer)
                 == comptime!(EnterpriseModel::Distributor as u32);
         let first_segment = select(household_grain, 1u32, 2u32);
-        let x = economy.actors.x(buyer);
-        let y = economy.actors.y(buyer);
-        let cx = x / config.search_radius;
-        let cy = y / config.search_radius;
+        let columns = search::SearchAxis::around(economy.actors.x(buyer), config);
+        let rows = search::SearchAxis::around(economy.actors.y(buyer), config);
         let mut quote = 0u32;
         let mut best = ticks(u32::MAX, u32::MAX);
-        let mut row = max(cy, 1) - 1;
-        while row <= min(cy + 1, side - 1) {
-            let mut column = max(cx, 1) - 1;
-            while column <= min(cx + 1, side - 1) {
+        let mut row = rows.first;
+        while row <= rows.last {
+            let mut column = columns.first;
+            while column <= columns.last {
                 let cell = row * side + column;
                 for group in first_segment..3u32 {
                     let segment = group * (cells + 1 + config.actors);

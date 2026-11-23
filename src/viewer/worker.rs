@@ -66,17 +66,13 @@ pub(super) fn run(
         };
         let result = match control {
             Ok(Control::Simulation(command)) => {
-                let cue = match &*command {
-                    SimulationCommand::Pause => Cue::Paused,
-                    SimulationCommand::Resume => Cue::Running,
-                    SimulationCommand::AdvanceDay => Cue::Stepped,
-                    SimulationCommand::Reset(_) | SimulationCommand::Restore(_) => Cue::Reset,
-                };
-                let publication = match &*command {
+                let (publication, cue) = match &*command {
+                    SimulationCommand::Pause => (Publication::Snapshot, Cue::Paused),
+                    SimulationCommand::Resume => (Publication::Snapshot, Cue::Running),
+                    SimulationCommand::AdvanceDay => (Publication::Snapshot, Cue::Stepped),
                     SimulationCommand::Reset(_) | SimulationCommand::Restore(_) => {
-                        Publication::Restart
+                        (Publication::Restart, Cue::Reset)
                     }
-                    _ => Publication::Snapshot,
                 };
                 simulation.command(*command).and_then(|()| {
                     if let Publication::Restart = publication {
@@ -105,14 +101,12 @@ pub(super) fn run(
         if let Err(error) = result {
             publisher.error(&simulation, error);
         }
-        if target.reached(simulation.snapshot.day) {
-            simulation.command(SimulationCommand::Pause)?;
-            target = RunTarget::Open;
+        if let Some(cue) = finish_comparison(&mut simulation, &mut target)? {
             publish(
                 &mut simulation,
                 &publisher,
                 Publication::Snapshot,
-                Some(Cue::Compared),
+                Some(cue),
             )?;
         }
         if let (WorkerState::Active, RuntimeState::Running, true) =
@@ -120,14 +114,7 @@ pub(super) fn run(
         {
             next_day = Instant::now() + speed.period();
             let result = simulation.advance().and_then(|()| {
-                let cue = match target.reached(simulation.snapshot.day) {
-                    true => {
-                        simulation.command(SimulationCommand::Pause)?;
-                        target = RunTarget::Open;
-                        Some(Cue::Compared)
-                    }
-                    false => None,
-                };
+                let cue = finish_comparison(&mut simulation, &mut target)?;
                 publish(&mut simulation, &publisher, Publication::Snapshot, cue)
             });
             if let Err(error) = result {
@@ -136,6 +123,17 @@ pub(super) fn run(
         }
     }
     Ok(())
+}
+
+fn finish_comparison(simulation: &mut Simulation, target: &mut RunTarget) -> Result<Option<Cue>> {
+    match target.reached(simulation.snapshot.day) {
+        true => {
+            simulation.command(SimulationCommand::Pause)?;
+            *target = RunTarget::Open;
+            Ok(Some(Cue::Compared))
+        }
+        false => Ok(None),
+    }
 }
 
 fn inspect(

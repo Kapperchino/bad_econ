@@ -7,6 +7,7 @@ pub(super) mod metadata;
 pub(super) mod records;
 pub(super) mod settlement;
 pub(super) mod spatial;
+mod staging;
 mod systems;
 mod transitions;
 use super::{
@@ -131,7 +132,7 @@ impl RegistryPlan {
                         .children
                         .contains_key(&metadata.actors.at(record.actor as usize).identity)
             }
-            6 => record.request & 0x00ffffff > 0,
+            6 => record.payload() > 0,
             _ => false,
         });
         match supported {
@@ -148,7 +149,7 @@ impl RegistryPlan {
                     let action = record.request;
                     match action >> 24 {
                         2 => {
-                            let destination = (action & 0x00ffffff) as usize - 1;
+                            let destination = record.target();
                             next.destinations.insert(
                                 index,
                                 actors
@@ -178,7 +179,7 @@ impl RegistryPlan {
                             }
                             actor.capacity = actor
                                 .capacity
-                                .checked_add(action & 0x00ffffff)
+                                .checked_add(record.payload())
                                 .context("firm capacity exhausted")?;
                             rows.set(index, actor);
                         }
