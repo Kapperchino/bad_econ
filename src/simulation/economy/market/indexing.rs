@@ -55,7 +55,11 @@ impl GpuPass<IndexInput> for StoreMembers {
 }
 
 #[cube]
-fn discoverable(economy: &EconomyView<'_>, parameters: &EconomyParameters, firm: u32) -> bool {
+pub(super) fn discoverable(
+    economy: &EconomyView<'_>,
+    parameters: &EconomyParameters,
+    firm: u32,
+) -> bool {
     let market = comptime!(parameters.market);
     match market {
         MarketFlag::Labor => economy.ledger.number(Field::Slots, firm) > 0,
@@ -68,11 +72,24 @@ fn discoverable(economy: &EconomyView<'_>, parameters: &EconomyParameters, firm:
                 && k.output() == good
                 && status
                     < comptime!(crate::domain::enterprise::EnterpriseState::Liquidating as u32);
-            let mut available = producer || household_production::offers(economy, firm, good);
-            if comptime!(matches!(market, MarketFlag::Input(_))) {
-                available = available && (!distributor || good == comptime!(Good::Grain as u32));
-            }
-            available
+            producer
+                || household_production::offers(economy, firm, good)
+                || (distributor
+                    && ((firm + parameters.day + good) % economy.ledger.config.retail_rotation
+                        == 0
+                        || !equal(
+                            economy.ledger.value_at(
+                                pricing::retail_field(
+                                    economy.ledger.config,
+                                    good,
+                                    comptime!(crate::domain::RetailAccount::Demand),
+                                ),
+                                firm,
+                            ),
+                            zero(),
+                        ))
+                    && status
+                        < comptime!(crate::domain::enterprise::EnterpriseState::Liquidating as u32))
         }
         MarketFlag::Payroll | MarketFlag::Distribution => false,
     }
@@ -109,8 +126,7 @@ pub(in crate::simulation::economy) fn index_count(
 fn index_segment(config: &EconomyConfig, parameters: &EconomyParameters) -> u32 {
     let cells = config.spatial_side * config.spatial_side;
     let good = parameters.traded_good();
-    let households = good == Good::Bread as u32
-        || (comptime!(config.home_mode == Feature::Enabled) && good == Good::Grain as u32);
+    let households = good == Good::Bread as u32 && comptime!(config.home_mode == Feature::Disabled);
     (cells + 1 + config.actors) * select(households, 1u32, 2u32)
 }
 
@@ -168,7 +184,12 @@ pub(in crate::simulation::economy) fn index_fill(
 }
 
 #[cube]
-pub(in crate::simulation::economy) fn index_prices(ledger: &Ledger<'_>, spatial: &mut [u32]) {
+pub(in crate::simulation::economy) fn index_prices(
+    economy: &EconomyView<'_>,
+    spatial: &mut [u32],
+    good: u32,
+) {
+    let ledger = &economy.ledger;
     let config = ledger.config;
     let cells = config.spatial_side * config.spatial_side;
     let count = spatial[cells as usize];
@@ -177,7 +198,8 @@ pub(in crate::simulation::economy) fn index_prices(ledger: &Ledger<'_>, spatial:
     let mut member = block * DISCOVERY_BLOCK + UNIT_POS;
     while member < min((block + 1) * DISCOVERY_BLOCK, count) {
         let actor = spatial[(cells + 1 + member) as usize];
-        quote = min(quote, ledger.number(Field::Price, actor));
+        let terms = household_production::TradeFields::new(&economy.actors, config, actor, good);
+        quote = min(quote, ledger.number_at(terms.price, actor));
         member += CUBE_DIM;
     }
     let minimum = parallel::reduce::<u32>(quote, comptime!(Reduction::Minimum));

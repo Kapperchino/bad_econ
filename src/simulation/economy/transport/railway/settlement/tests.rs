@@ -446,7 +446,7 @@ impl FitFixture {
                     claim_source: claims::settlement_source(buffers),
                     claim_offsets: claims::offsets_start(buffers.claim_capacity),
                     progress: buffers.progress.buffer_arg(),
-                    parameters: self.parameters.launch(),
+                    parameters: (&self.parameters).into(),
                     stage: Stage::Propose,
                     resource_selection: ResourceSelection::AllFirms,
                     execution: Execution::Immediate(Wave::Initial),

@@ -71,8 +71,8 @@ impl MarketRound<'_> {
             simulation.config.home_mode,
         );
         let source = match (observed, self.parameters.clock, self.profile) {
-            (Some(count @ 1..=INPUT_TILE), _, _) => {
-                self.sort_input_tile(simulation, count);
+            (Some(1..=INPUT_TILE), _, _) => {
+                self.sort_input_tile(simulation);
                 0
             }
             (_, MarketClock::Device, _) | (_, _, MarketProfile::Enabled(_)) => {
@@ -99,15 +99,15 @@ impl MarketRound<'_> {
         Ok(source)
     }
 
-    pub(super) fn sort_input_tile(&self, simulation: &Simulation, count: usize) {
+    pub(super) fn sort_input_tile(&self, simulation: &Simulation) {
         sorting::sort_input_tile(
             &simulation.device,
             &simulation.searches.requests,
             &simulation.work.proposals,
             &simulation.work.scratch,
             &simulation.control,
-            &self.parameters,
-            count,
+            &simulation.config.market_table,
+            self.parameters.count,
         );
     }
 

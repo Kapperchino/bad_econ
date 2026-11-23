@@ -243,8 +243,12 @@ pub(in crate::simulation::economy) fn construct(
                 }
                 _ => {
                     let good = parameters.traded_good();
-                    let terms =
-                        household_production::TradeFields::new(&economy.actors, other, good);
+                    let terms = household_production::TradeFields::new(
+                        &economy.actors,
+                        economy.ledger.config,
+                        other,
+                        good,
+                    );
                     let cost = times(quantity, economy.ledger.number_at(terms.price, other))
                         .record(control);
                     let freight = times(quantity, route.fee).record(control);
@@ -274,6 +278,13 @@ pub(in crate::simulation::economy) fn construct(
                         guard: plus(retained, quantity).record(control),
                     });
                     event.transfer(slot, actor, zero, quantity);
+                    let delivered = cartage::road_price(
+                        config,
+                        control,
+                        economy.ledger.value_at(terms.price, other),
+                        trip,
+                        route.days,
+                    );
                     if good == comptime!(Good::Bread as u32)
                         && economy
                             .actors
@@ -284,7 +295,7 @@ pub(in crate::simulation::economy) fn construct(
                             comptime!(Field::FoodPrice as u32),
                             actor,
                             economy.ledger.value(Field::FoodPrice, actor),
-                            economy.ledger.value_at(terms.price, other),
+                            delivered,
                         );
                     }
                     for input in 0u32..2 {
@@ -298,16 +309,18 @@ pub(in crate::simulation::economy) fn construct(
                                 cost_field,
                                 actor,
                                 economy.ledger.value_at(cost_field, actor),
-                                economy.ledger.value_at(terms.price, other),
+                                delivered,
                             );
                         }
                     }
-                    if economy.ledger.number(Field::EnterpriseModel, actor) == 1 {
+                    if pricing::distributor(&economy.ledger, actor) {
+                        let cost_field =
+                            pricing::cost_field(config, economy.actors.kind(actor).output(), good);
                         event.transfer(
-                            comptime!(Field::ReplacementCost as u32),
+                            cost_field,
                             actor,
-                            economy.ledger.value(Field::ReplacementCost, actor),
-                            economy.ledger.value_at(terms.price, other),
+                            economy.ledger.value_at(cost_field, actor),
+                            delivered,
                         );
                     }
                     event.transfer(TRANSIT_FIELDS as u32 + good - 1, actor, zero, quantity);

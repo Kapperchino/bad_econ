@@ -29,11 +29,7 @@ impl SearchInput {
             let purchasing_power = demand.purchasing_power;
             let mut input_target = zero();
             if comptime!(matches!(parameters.market, MarketFlag::Input(_))) {
-                let capacity = economy.actors.capacity(id);
-                input_target = minimum(
-                    wanted,
-                    times32(capacity, economy.ledger.number(Field::InputTicks, id)),
-                );
+                input_target = candidates::input_target(&*economy, parameters, id, wanted);
             }
             let location = BuyerLocation::new(&economy.actors, config, id);
             let buyer_access = location.access;
@@ -52,7 +48,8 @@ impl SearchInput {
                 access: buyer_access,
                 maximum_delivery_cost,
             };
-            let mut selection = MatchSelection::new(comptime!(parameters.market));
+            let mut selection =
+                MatchSelection::new(comptime!(parameters.market), parameters.supplier_limit());
             let lanes = comptime!(match source {
                 index::SupplySource::Index =>
                     crate::simulation::gpu::device::MAX_WORKGROUP_SIZE as usize,
@@ -60,36 +57,28 @@ impl SearchInput {
             });
             let mut candidates = CandidateTile::new(lanes, comptime!(parameters.market));
             let mut y = rows.first;
-            if comptime!(source == index::SupplySource::Grain)
-                && grain::tiled_dealer(&*economy, &*spatial, control, jobs, id, purchasing_power)
+            if comptime!(matches!(parameters.market, MarketFlag::Input(_)))
+                && proposals[id as usize * ProposalLayout::WORDS + ProposalLayout::ACTOR]
+                    != NO_ACTOR
             {
-                let trade = grain::dealer_trade(
-                    &*economy,
-                    &*spatial,
-                    &*searches,
-                    control,
-                    parameters,
-                    job,
-                    id,
-                    wanted,
-                    purchasing_power,
-                    buyer_access,
+                let slot = id as usize * ProposalLayout::WORDS;
+                selection.proposal.peer = proposals[slot + ProposalLayout::ACTOR];
+                selection.proposal.trip = proposals[slot + ProposalLayout::DISTANCE];
+                selection.proposal.quantity = ticks(
+                    proposals[slot + ProposalLayout::QUANTITY_LOW],
+                    proposals[slot + ProposalLayout::QUANTITY_HIGH],
                 );
-                selection.proposal.peer = trade.seller;
-                selection.proposal.quantity = trade.quantity;
-                selection.proposal.trip = trade.trip;
                 y = side;
-            } else if comptime!(source == index::SupplySource::Grain)
-                && (!household_production::grain_dealer(&*economy, id)
-                    || lt(
-                        purchasing_power,
-                        ticks(control[INPUT_MINIMUM_QUOTE_WORD].load(), 0),
-                    ))
+            } else if comptime!(parameters.market == MarketFlag::Input(InputMarket::Grain))
+                && pricing::distributor(&economy.ledger, id)
             {
+                y = side;
+            } else if comptime!(source == index::SupplySource::Grain) {
                 let trade = grain::search(
                     &*economy,
                     &*spatial,
                     &*searches,
+                    scratch,
                     control,
                     parameters,
                     id,
@@ -113,21 +102,21 @@ impl SearchInput {
             {
                 y = side;
             }
-            while y <= rows.last && selection.considered < DISCOVERY_CANDIDATES {
+            while y <= rows.last && selection.considered < selection.limit {
                 let mut x = columns.first;
-                while x <= columns.last && selection.considered < DISCOVERY_CANDIDATES {
+                while x <= columns.last && selection.considered < selection.limit {
                     let cell = y * side + x;
-                    let begin = spatial[cell as usize];
+                    let begin = supplier_start(&*economy, &*spatial, parameters, id, cell);
                     let end = spatial[(cell + 1) as usize];
                     let length = end - begin;
-                    let limit = begin + supplier_samples(parameters, length);
+                    let limit = begin + supplier_samples(config, parameters, length);
                     let stride = supplier_stride(&economy.actors, parameters, id, length);
                     let mut cursor = (parameters.settlement_rotation + id) % max(length, 1);
                     let mut j = begin;
                     if columns.distance_to(x) + rows.distance_to(y) > radius {
                         j = end;
                     }
-                    while j < limit && selection.considered < DISCOVERY_CANDIDATES {
+                    while j < limit && selection.considered < selection.limit {
                         let previous = j;
                         let mut skipped = 0u32;
                         if comptime!(
@@ -254,10 +243,18 @@ impl SearchInput {
                             let mut cooperative = false;
                             if comptime!(source == index::SupplySource::Index) {
                                 cooperative = CUBE_DIM >= 32;
-                                selection.rank_indexed(&candidates, &offer, parameters, &window);
+                                if cooperative {
+                                    selection.rank_indexed(
+                                        &candidates,
+                                        &offer,
+                                        parameters,
+                                        &window,
+                                    );
+                                }
                             }
                             if comptime!(
                                 source != index::SupplySource::Index
+                                    && !matches!(parameters.market, MarketFlag::Input(_))
                                     && parameters.scan
                                         == crate::simulation::parallel::ScanMode::Plane
                             ) {
@@ -342,10 +339,9 @@ impl SearchInput {
                         trip: selection.proposal.trip,
                         buyer_access,
                     };
-                    if comptime!(
-                        matches!(parameters.market, MarketFlag::Input(_))
-                            && config.railway.routes_enabled == Feature::Enabled
-                    ) && control[INPUT_RAIL_WORD].load() == 0
+                    if comptime!(matches!(parameters.market, MarketFlag::Input(_)))
+                        && config.railway.has_routes()
+                        && control[INPUT_RAIL_WORD].load() == 0
                         && delivery.may_book(config)
                     {
                         control[INPUT_RAIL_WORD].store(1);

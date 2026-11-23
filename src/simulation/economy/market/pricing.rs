@@ -1,6 +1,36 @@
 use crate::domain::enterprise::{EnterpriseModel, EnterpriseState};
 use crate::simulation::economy::*;
 
+#[cube]
+pub(in crate::simulation::economy) fn distributor(ledger: &Ledger<'_>, firm: u32) -> bool {
+    ledger.number(Field::EnterpriseModel, firm) == comptime!(EnterpriseModel::Distributor as u32)
+}
+
+#[cube]
+pub(in crate::simulation::economy) fn retail_field(
+    config: &EconomyConfig,
+    good: u32,
+    #[comptime] account: crate::domain::RetailAccount,
+) -> u32 {
+    config.fields - comptime!(crate::domain::RetailAccount::FIELDS as u32)
+        + comptime!(account as u32 * Good::COUNT as u32)
+        + good
+        - 1
+}
+
+#[cube]
+pub(in crate::simulation::economy) fn cost_field(
+    config: &EconomyConfig,
+    output: u32,
+    good: u32,
+) -> u32 {
+    select(
+        output == good,
+        comptime!(Field::ReplacementCost as u32),
+        retail_field(config, good, comptime!(crate::domain::RetailAccount::Cost)),
+    )
+}
+
 #[repr(u32)]
 enum InventoryPolicy {
     Producer,
@@ -146,19 +176,32 @@ impl<'a> FirmPricing<'a> {
     fn quote_rule(&self, ledger: &Ledger<'_>, excess: Ticks) -> u32 {
         let firm = self.firm;
         if equal(excess, zero()) {
-            let no_orders = equal(ledger.value(Field::Sales, firm), zero())
-                && equal(ledger.value(Field::Unfilled, firm), zero());
+            let unfilled = ledger.value(Field::Unfilled, firm);
+            let fulfilled = equal(unfilled, zero())
+                && (self.good <= comptime!(Good::Bread as u32)
+                    || equal(ledger.value(Field::Sales, firm), zero()));
             select(
-                no_orders,
+                fulfilled,
                 comptime!(QuoteRule::CostPlusMargin as u32),
                 comptime!(QuoteRule::Scarcity as u32),
             )
         } else {
-            let manufacturer = ledger.number(Field::FirstInput, firm) > 0
+            let purchased_stock = ledger.number(Field::FirstInput, firm) > 0
+                || ledger.number(Field::EnterpriseModel, firm)
+                    == comptime!(EnterpriseModel::Distributor as u32);
+            let stale_food = self.good <= comptime!(Good::Bread as u32)
+                && equal(ledger.value(Field::Sales, firm), zero())
+                && equal(ledger.value(Field::Unfilled, firm), zero())
+                && lt(
+                    ledger.value(Field::Demand, firm),
+                    ledger.value(Field::OutputTicks, firm),
+                );
+            let operating = purchased_stock
+                && !stale_food
                 && ledger.number(Field::EnterpriseStatus, firm)
                     == comptime!(EnterpriseState::Operating as u32);
             select(
-                manufacturer,
+                operating,
                 comptime!(QuoteRule::DiscountToCost as u32),
                 comptime!(QuoteRule::Inventory as u32),
             )
@@ -177,10 +220,22 @@ impl<'a> FirmPricing<'a> {
             && repricing != comptime!(QuoteRule::Inventory as u32)
         {
             let cost = self.packet_cost(ledger);
+            let labor = times32(
+                ledger.number(Field::Wage, firm),
+                ledger.number(Field::LaborMinutes, firm),
+            );
+            let margin_base = select(
+                self.good <= comptime!(Good::Bread as u32)
+                    && (ledger.number(Field::FirstInput, firm) > 0
+                        || ledger.number(Field::EnterpriseModel, firm)
+                            == comptime!(EnterpriseModel::Distributor as u32)),
+                labor,
+                cost,
+            );
             let target = select(
                 repricing == comptime!(QuoteRule::DiscountToCost as u32),
                 cost,
-                divide(times(cost, 5).record(control), 4),
+                plus(cost, divide(margin_base, 4)).record(control),
             );
             let output = max(ledger.number(Field::OutputTicks, firm), 1);
             let quote = minimum(
@@ -225,21 +280,25 @@ impl<'a> FirmPricing<'a> {
         &self,
         economy: &EconomyView<'_>,
         demand: Ticks,
+        day: u32,
     ) -> Ticks {
         let actor = self.firm;
         let control = self.control;
         let config = economy.ledger.config;
-        let mut daily = demand;
+        let reserve = economy.ledger.number(Field::StockCoverage, actor);
         if self.good == comptime!(Good::Grain as u32) {
             let shifts = economy.actors.capacity(actor);
             let units = economy.ledger.number(Field::OutputTicks, actor);
-            daily = minimum(demand, times32(shifts, units));
+            let capacity = times32(shifts, units);
+            let days = min(
+                reserve,
+                farming::CropCalendar::new(config).on(day).days_to_harvest(),
+            );
+            let daily = minimum(capacity, maximum(demand, ticks(units, 0)));
+            times(daily, days + config.ring).record(control)
+        } else {
+            times(demand, reserve + config.ring).record(control)
         }
-        times(
-            daily,
-            economy.ledger.number(Field::StockCoverage, actor) + config.ring,
-        )
-        .record(control)
     }
 
     pub(in crate::simulation::economy) fn inventory_target(
@@ -276,7 +335,7 @@ impl<'a> FirmPricing<'a> {
                 )
                 .record(control)
             }
-            1 => self.distributor_target(economy, demand),
+            1 => self.distributor_target(economy, demand, day),
             _ => farming::CropCalendar::new(config)
                 .on(day)
                 .inventory_target(control, demand),
@@ -346,19 +405,18 @@ impl<'a> ReplacementMarket<'a> {
                             select(distributor, economy.actors.kind(buyer).output(), 0u32)
                         }
                     };
-                    if good > 0 {
+                    if good > 0 && !(input == 2 && good == comptime!(Good::Grain as u32)) {
                         let stock = economy
                             .ledger
                             .stock_with_transit(good, buyer)
                             .record(control);
-                        let raw_material = input < 2
-                            && comptime!(config.economy == crate::domain::Economy::Industrial)
-                            && !lt(
-                                stock,
-                                ticks(economy.ledger.number(Field::InputTicks, buyer), 0),
-                            )
-                            && economy.ledger.number_at(field, buyer) > 0;
-                        if !raw_material {
+                        let batch = max(economy.ledger.number(Field::InputTicks, buyer), 1);
+                        let stocked =
+                            comptime!(config.economy == crate::domain::Economy::Industrial)
+                                && input < 2
+                                && !lt(stock, ticks(batch, 0))
+                                && economy.ledger.number_at(field, buyer) > 0;
+                        if !stocked {
                             let current = self.quote(&*economy, buyer, good);
                             if current > 0 {
                                 economy.ledger.set_number_at(field, buyer, current);
@@ -381,12 +439,11 @@ impl<'a> ReplacementMarket<'a> {
         let config = economy.ledger.config;
         let side = config.spatial_side;
         let cells = side * side;
-        let grain = good == comptime!(Good::Grain as u32);
-        let household_grain = comptime!(config.home_mode == Feature::Enabled)
-            && grain
-            && economy.ledger.number(Field::EnterpriseModel, buyer)
-                == comptime!(EnterpriseModel::Distributor as u32);
-        let first_segment = select(household_grain, 1u32, 2u32);
+        let segment = 2 * (cells + 1 + config.actors);
+        let mut buyer_access = 0u32;
+        if config.railway.has_routes() {
+            buyer_access = config.railway.access[buyer as usize * 2 + 1];
+        }
         let columns = search::SearchAxis::around(economy.actors.x(buyer), config);
         let rows = search::SearchAxis::around(economy.actors.y(buyer), config);
         let mut quote = 0u32;
@@ -396,52 +453,49 @@ impl<'a> ReplacementMarket<'a> {
             let mut column = columns.first;
             while column <= columns.last {
                 let cell = row * side + column;
-                for group in first_segment..3u32 {
-                    let segment = group * (cells + 1 + config.actors);
-                    let begin = spatial[(segment + cell) as usize];
-                    let length = spatial[(segment + cell + 1) as usize] - begin;
-                    let samples = min(length, HOUSEHOLD_SEARCH_SAMPLES);
-                    for sample in 0..samples {
-                        let offset =
-                            sample * (length / samples) + sample * (length % samples) / samples;
-                        let rotated = (offset + self.day + buyer) % length;
-                        let seller = spatial[(segment + cells + 1 + begin + rotated) as usize];
-                        let k = economy.actors.kind(seller);
-                        let relevant = seller != buyer
-                            && select(
-                                group == 1,
-                                k.is(comptime!(ActorKind::Household)),
-                                k.output() == good,
-                            );
-                        if relevant {
-                            let status = economy.ledger.number(Field::EnterpriseStatus, seller);
-                            let trip = economy.actors.distance(buyer, seller);
-                            let terms = household_production::TradeFields::new(
-                                &economy.actors,
+                let begin = spatial[(segment + cell) as usize];
+                let length = spatial[(segment + cell + 1) as usize] - begin;
+                let samples = min(length, HOUSEHOLD_SEARCH_SAMPLES);
+                for sample in 0..samples {
+                    let offset =
+                        sample * (length / samples) + sample * (length % samples) / samples;
+                    let rotated = (offset + self.day + buyer) % length;
+                    let seller = spatial[(segment + cells + 1 + begin + rotated) as usize];
+                    let k = economy.actors.kind(seller);
+                    let relevant = seller != buyer
+                        && (k.output() == good || distributor(&economy.ledger, seller));
+                    if relevant {
+                        let status = economy.ledger.number(Field::EnterpriseStatus, seller);
+                        let trip = economy.actors.distance(buyer, seller);
+                        let terms = household_production::TradeFields::new(
+                            &economy.actors,
+                            economy.ledger.config,
+                            seller,
+                            good,
+                        );
+                        let price = economy.ledger.number_at(terms.price, seller);
+                        let supplier =
+                            household_production::counterparty(economy, buyer, seller, good);
+                        let available = status < comptime!(EnterpriseState::Liquidating as u32)
+                            && supplier
+                            && household_production::offers(economy, seller, good)
+                            && trip <= config.search_radius
+                            && price > 0;
+                        if available {
+                            let days = railway::DeliveryRequest {
+                                buyer,
                                 seller,
-                                good,
-                            );
-                            let price = economy.ledger.number_at(terms.price, seller);
-                            let supplier = if grain {
-                                household_production::grain_counterparty(economy, buyer, seller)
-                            } else {
-                                economy.ledger.number(Field::EnterpriseModel, seller)
-                                    == comptime!(EnterpriseModel::Producer as u32)
-                            };
-                            let available = status < comptime!(EnterpriseState::Liquidating as u32)
-                                && supplier
-                                && household_production::offers(economy, seller, good)
-                                && trip <= config.search_radius
-                                && price > 0;
-                            if available {
-                                let days = max(ceildiv(trip, config.shipment_speed), 1);
-                                let score =
-                                    plus(ticks(price, 0), times32(days, config.delivery_penalty))
-                                        .record(control);
-                                if lt(score, best) {
-                                    quote = price;
-                                    best = score;
-                                }
+                                trip,
+                                buyer_access,
+                            }
+                            .days(config);
+                            let delivered = cartage::delivered_price(config, price, trip, days);
+                            let score =
+                                plus(ticks(delivered, 0), times32(days, config.delivery_penalty))
+                                    .record(control);
+                            if lt(score, best) {
+                                quote = delivered;
+                                best = score;
                             }
                         }
                     }

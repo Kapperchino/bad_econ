@@ -526,6 +526,40 @@ impl SummaryInput {
                     control,
                 );
             }
+            if priced && ledger.number(Field::EnterpriseModel, actor) == 1 {
+                let status = ledger.number(Field::EnterpriseStatus, actor);
+                let trading = status
+                    > comptime!(crate::domain::enterprise::EnterpriseState::Forming as u32)
+                    && status
+                        < comptime!(crate::domain::enterprise::EnterpriseState::Liquidating as u32);
+                if trading {
+                    let global = definition.kind > Good::COUNT as u32;
+                    let first = select(global, 1, definition.kind);
+                    let last = select(global, Good::COUNT as u32, definition.kind);
+                    for good in first..last + 1 {
+                        if good != actor_kind && !equal(ledger.value_at(good, actor), zero()) {
+                            let quote = ledger.number_at(
+                                pricing::retail_field(
+                                    &self.config,
+                                    good,
+                                    comptime!(crate::domain::RetailAccount::Quote),
+                                ),
+                                actor,
+                            );
+                            if quote > 0 {
+                                let price = u64::cast_from(quote);
+                                let amount = match definition.source {
+                                    16 => 1u64,
+                                    15 => price * price,
+                                    _ => price,
+                                };
+                                total =
+                                    combine_metrics(total, amount, definition.operation, control);
+                            }
+                        }
+                    }
+                }
+            }
             member += CUBE_DIM;
         }
         reduce_metric(total, definition.operation, control)

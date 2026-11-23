@@ -8,28 +8,16 @@ enum BreadTier {
 }
 
 #[derive(CubeType)]
-struct Conversion {
-    input: u32,
-    output: u32,
-}
-
-#[derive(CubeType)]
 pub(in crate::simulation::economy) struct ConvertedFood {
     pub quantity: Ticks,
     pub remainder: u32,
 }
 
 #[derive(CubeType)]
-pub(in crate::simulation::economy) struct HomeFoodWork {
-    pub grain: Ticks,
-    pub minutes: u32,
-}
-
-#[derive(CubeType)]
 pub(in crate::simulation) struct BreadDemand {
     pub gross_income: Ticks,
     pub expected_income: Ticks,
-    pub savings: Ticks,
+    pub daily_savings: Ticks,
     pub minimum: u32,
     pub members: u32,
     pub price: u32,
@@ -70,130 +58,90 @@ impl HouseholdRation {
         )
     }
 
-    pub fn consumption_reserve(
-        &self,
-        ledger: &Ledger<'_>,
-        control: &[Atomic<u32>],
-        household: u32,
-        day: u32,
-    ) -> Ticks {
-        let config = ledger.config;
-        let mut reserve = times32(self.nutrition, config.coverage + config.ring - 2);
-        if comptime!(config.food_income == crate::domain::food::FoodIncome::PurchasingPower)
-            && ledger.number(Field::LandPlots, household) > 0
-        {
-            let day = farming::CropCalendar::new(config).on(day);
-            let requirement = times32(self.nutrition, day.days_to_harvest() - 1);
-            let grain = minimum(ledger.value(Field::Grain, household), requirement);
-            let kitchen = HomeKitchen::new(ledger, household);
-            let milling = kitchen.mill(control, grain);
-            let flour = plus(
-                milling.quantity,
-                minimum(ledger.value(Field::Flour, household), requirement),
-            )
-            .record(control);
-            let baking = kitchen.bake(control, flour);
-            reserve = maximum(reserve, positive(requirement, baking.quantity));
-        }
-        reserve
+    pub fn consumption_reserve(&self, config: &EconomyConfig) -> Ticks {
+        times32(self.nutrition, config.coverage + config.ring - 2)
     }
 }
 
 #[derive(CubeType)]
-pub(in crate::simulation::economy) struct HomeKitchen {
-    milling: Conversion,
-    baking: Conversion,
-    milling_remainder: u32,
-    baking_remainder: u32,
+pub(in crate::simulation) struct HomeKitchen {
+    flour_units: u32,
+    bread_units: u32,
+    remainder: u32,
 }
 
 #[cube]
 impl HomeKitchen {
+    pub fn available(ledger: &Ledger<'_>, household: u32) -> bool {
+        comptime!(ledger.config.home_mode == Feature::Enabled)
+            && ledger.number(Field::LandPlots, household) > 0
+    }
+
+    pub fn budget_days(ledger: &Ledger<'_>, household: u32, day: u32) -> u32 {
+        let seasonal = Self::available(ledger, household) && ledger.config.home.harvest_days < 365;
+        select(
+            seasonal,
+            max(
+                90,
+                farming::CropCalendar::new(ledger.config)
+                    .on(day)
+                    .days_to_harvest(),
+            ),
+            90,
+        )
+    }
+
+    pub fn flour_capacity(ledger: &Ledger<'_>, household: u32, days: u32) -> Ticks {
+        let budget = ledger.number(Field::HouseholdBudget, household);
+        let paid = ledger.number(Field::Hours, household);
+        times32(
+            (max(budget, paid) - paid) / max(ledger.config.home.baking_minutes, 1),
+            days,
+        )
+    }
+
     pub fn new(ledger: &Ledger<'_>, household: u32) -> Self {
-        let config = ledger.config;
+        let calibrated = ledger.config.wheat_kg_per_hectare > 0;
         HomeKitchen {
-            milling: Conversion::milling(config),
-            baking: Conversion::baking(config),
-            milling_remainder: ledger.number(Field::MillingRemainder, household),
-            baking_remainder: ledger.number(Field::BakingRemainder, household),
+            flour_units: select(calibrated, 25u32, 1u32),
+            bread_units: select(calibrated, 64u32, 1u32),
+            remainder: ledger.number(Field::BakingRemainder, household),
         }
     }
 
     pub fn flour_for_bread(&self, control: &[Atomic<u32>], bread: Ticks) -> Ticks {
-        self.baking.required(control, bread, self.baking_remainder)
-    }
-
-    pub fn grain_for_flour(&self, control: &[Atomic<u32>], flour: Ticks) -> Ticks {
-        self.milling
-            .required(control, flour, self.milling_remainder)
-    }
-
-    pub fn mill(&self, control: &[Atomic<u32>], grain: Ticks) -> ConvertedFood {
-        self.milling.process(control, grain, self.milling_remainder)
-    }
-
-    pub fn bake(&self, control: &[Atomic<u32>], flour: Ticks) -> ConvertedFood {
-        self.baking.process(control, flour, self.baking_remainder)
-    }
-
-    pub fn work(
-        &self,
-        config: &EconomyConfig,
-        control: &[Atomic<u32>],
-        missing: u32,
-    ) -> HomeFoodWork {
-        let flour = self.flour_for_bread(control, ticks(missing, 0));
-        let grain = self.grain_for_flour(control, flour);
-        HomeFoodWork {
-            grain,
-            minutes: grain.extract(LOW_WORD) * config.home.milling_minutes
-                + flour.extract(LOW_WORD) * config.home.baking_minutes,
-        }
-    }
-}
-
-#[cube]
-impl Conversion {
-    pub fn milling(config: &EconomyConfig) -> Self {
-        Conversion {
-            input: select(config.wheat_kg_per_hectare > 0, 5u32, 1u32),
-            output: select(config.wheat_kg_per_hectare > 0, 4u32, 1u32),
-        }
-    }
-
-    pub fn baking(config: &EconomyConfig) -> Self {
-        Conversion {
-            input: select(config.wheat_kg_per_hectare > 0, 25u32, 1u32),
-            output: select(config.wheat_kg_per_hectare > 0, 64u32, 1u32),
-        }
-    }
-
-    pub fn required(&self, control: &[Atomic<u32>], quantity: Ticks, remainder: u32) -> Ticks {
         let missing = positive(
-            times(quantity, self.input).record(control),
-            ticks(remainder, 0),
+            times(bread, self.flour_units).record(control),
+            ticks(self.remainder, 0),
         );
         divide(
-            plus(missing, ticks(self.output - 1, 0)).record(control),
-            self.output,
+            plus(missing, ticks(self.bread_units - 1, 0)).record(control),
+            self.bread_units,
         )
     }
 
-    pub fn process(
+    fn scaled_bread(&self, flour: Ticks) -> CheckedTicks {
+        let scaled = times(flour, self.bread_units);
+        let mut total = plus(scaled.value, ticks(self.remainder, 0));
+        total.faults.insert(scaled.faults);
+        total
+    }
+
+    pub fn bread_from_flour(&self, flour: Ticks) -> Ticks {
+        divide(self.scaled_bread(flour).value, self.flour_units)
+    }
+
+    pub(in crate::simulation::economy) fn bake(
         &self,
         control: &[Atomic<u32>],
-        quantity: Ticks,
-        remainder: u32,
+        flour: Ticks,
     ) -> ConvertedFood {
-        let total = plus(
-            times(quantity, self.output).record(control),
-            ticks(remainder, 0),
-        )
-        .record(control);
-        let produced = divide(total, self.input);
+        let total = self.scaled_bread(flour).record(control);
+        let quantity = divide(total, self.flour_units);
         ConvertedFood {
-            quantity: produced,
-            remainder: minus(total, times(produced, self.input).record(control)).extract(LOW_WORD),
+            quantity,
+            remainder: minus(total, times(quantity, self.flour_units).record(control))
+                .extract(LOW_WORD),
         }
     }
 }
@@ -205,7 +153,7 @@ impl BreadDemand {
             comptime!(config.food_income == crate::domain::food::FoodIncome::PurchasingPower),
             plus(
                 divide(self.expected_income, POLICY_SCALE),
-                divide(self.savings, 90),
+                self.daily_savings,
             )
             .value,
             self.gross_income,
@@ -234,7 +182,7 @@ impl BreadDemand {
         let nominal = self.members * config.household_need * portions;
         let affordable = (salary / 5) * 4 / u64::cast_from(max(self.price, 1));
         let purchasing = max(
-            self.minimum,
+            max(self.minimum, self.members * config.household_need),
             min(
                 affordable,
                 u64::cast_from(self.members * config.household_need * 10),

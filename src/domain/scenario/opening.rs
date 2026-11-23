@@ -107,7 +107,7 @@ impl Scenario {
                 Field::Demand,
                 firm,
                 match &self.config.population {
-                    None => self.production.daily[distributor.good as usize - 1],
+                    None => self.production.daily(distributor.good, Some(distributor)),
                     Some(_) => {
                         u64::from(state.actors.at(firm).capacity)
                             * u64::from(distributor.units_per_shift)

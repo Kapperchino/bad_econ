@@ -199,6 +199,8 @@ fn worker_shifts(bargaining: Option<bargaining::BargainingPolicy>) -> Result<()>
     )?;
     let mut config = scenario.config().clone();
     config.buffer_days = 1;
+    config.behavior.work_fatigue = 48;
+    config.behavior.rest_recovery = 2;
     config.bargaining = bargaining;
     config.payroll = Some(PayrollPolicy {
         base_rate: 0,
@@ -246,6 +248,20 @@ fn worker_shifts(bargaining: Option<bargaining::BargainingPolicy>) -> Result<()>
     assert!(state.people.is_empty());
     for row in 0..scenario.population_rows() {
         assert!(state.get(Field::Employed, row) <= state.get(Field::EligibleWorkers, row));
+        let exertion: u64 = [
+            Field::Hours,
+            Field::HomeMinutes,
+            Field::CartageMinutes,
+            Field::ResearchMinutes,
+        ]
+        .into_iter()
+        .map(|field| state.get(field, row))
+        .sum();
+        let minutes = exertion / state.get(Field::EligibleWorkers, row).max(1);
+        let fatigue = (initial.get(Field::Fatigue, row) + minutes * 48 / 480)
+            .saturating_sub(2)
+            .min(1000);
+        assert_eq!(state.get(Field::Fatigue, row), fatigue);
         let gross = state.get(Field::GrossIncome, row);
         let allowance = 100 * u64::from(state.actors.at(row).capacity);
         assert_eq!(
@@ -452,6 +468,8 @@ fn a_founder_buys_materials_and_leaves_an_explicit_cohort_on_gpu() -> Result<()>
 
 fn legacy_fields(state: &mut State, scenario: &Scenario, missing: std::ops::Range<usize>) {
     let rows = state.actors.len();
+    let end = scenario.fields() * rows;
+    state.values.drain(end - RetailAccount::FIELDS * rows..end);
     if missing.end == USED_FIELDS {
         let shipments = Good::COUNT * scenario.ring();
         state
@@ -473,6 +491,7 @@ fn legacy_checkpoints_migrate_and_resume_on_gpu() -> Result<()> {
     let state = simulation.download()?;
     let checkpoint = serde_json::to_value(simulation.checkpoint()?)?;
     for (version, missing) in [
+        (28, 0..0),
         (23, Field::JobDaysRemaining as usize..USED_FIELDS),
         (24, Field::EligibleWorkers as usize..USED_FIELDS),
         (25, Field::Infants as usize..USED_FIELDS),

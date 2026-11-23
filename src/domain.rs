@@ -17,8 +17,8 @@ pub use observation::{MarketObservation, ObservationSnapshot, QuoteDistribution}
 pub use phase::{Market, Phase, PhaseEvidence};
 pub use scenario::{Experiment, SCENARIO_VERSION, Scenario, ScenarioConfig};
 pub use state::{
-    BASE_FIELDS, CONSUMPTION_FIELDS, Field, PRODUCTION_FIELDS, STATE_HASH_VERSION, State,
-    TRANSIT_FIELDS, USED_FIELDS,
+    BASE_FIELDS, CONSUMPTION_FIELDS, Field, PRODUCTION_FIELDS, RetailAccount, STATE_HASH_VERSION,
+    State, TRANSIT_FIELDS, USED_FIELDS,
 };
 
 pub mod bargaining;

@@ -41,6 +41,10 @@ enum Recording {
 #[derive(Clone, Copy, PartialEq, Eq)]
 pub(super) enum GraphScope {
     PrepareOrders,
+    SettleInput {
+        routing: RouteAvailability,
+        capacity: usize,
+    },
     FullMarket,
 }
 
@@ -58,12 +62,14 @@ pub(super) struct MarketKey {
 pub(super) enum MarketProgram {
     Labor,
     GrainInput,
+    FlourInput,
     BreadInput,
     Input,
     BreadConsumer,
-    Fuel(Good),
+    Fuel,
     Consumer(Good),
-    LuxuryConsumer(Good),
+    HouseholdGoods,
+    LuxuryConsumer,
     Household,
     Payroll,
     Distribution,
@@ -75,13 +81,15 @@ impl From<crate::domain::Market> for MarketProgram {
         match market {
             Market::Labor => Self::Labor,
             Market::Input(Good::Grain) => Self::GrainInput,
+            Market::Input(Good::Flour) => Self::FlourInput,
             Market::Input(Good::Bread) => Self::BreadInput,
             Market::Input(_) => Self::Input,
             Market::Consumer(Good::Bread) => Self::BreadConsumer,
-            Market::Consumer(good @ (Good::Coal | Good::Wood)) => Self::Fuel(good),
-            Market::Consumer(good @ (Good::LuxuryClothes | Good::LuxuryFurniture)) => {
-                Self::LuxuryConsumer(good)
-            }
+            Market::Consumer(Good::Coal | Good::Wood) => Self::Fuel,
+            Market::Consumer(Good::LuxuryClothes | Good::LuxuryFurniture) => Self::LuxuryConsumer,
+            Market::Consumer(
+                Good::Linen | Good::Cloth | Good::Clothes | Good::Furniture | Good::Glass,
+            ) => Self::HouseholdGoods,
             Market::Consumer(good) => Self::Consumer(good),
             Market::Household => Self::Household,
             Market::Payroll => Self::Payroll,
@@ -283,7 +291,12 @@ mod tests {
     }
 
     #[cube(launch)]
-    fn record_consumer_good(counter: &mut [u32], parameters: EconomyParameters) {
+    fn record_consumer_good(
+        counter: &mut [u32],
+        mut config: crate::simulation::economy::configuration::EconomyConfig,
+        mut parameters: EconomyParameters,
+    ) {
+        parameters.refresh(&mut config);
         if ABSOLUTE_POS == 0 {
             let good = parameters.traded_good();
             counter[good as usize - 1] += good;
@@ -315,8 +328,9 @@ mod tests {
                 let market = crate::domain::Market::Consumer(good);
                 let mut parameters =
                     simulation.parameters(Phase::ProvisionPurchase, market, 0, 1)?;
-                parameters.clock = MarketClock::Scalars;
-                parameters.good = Good::Bread as u32;
+                crate::simulation::economy::market::MarketStart::Standard
+                    .launch(simulation.market_buffers(), &parameters);
+                parameters.clock = MarketClock::Device;
                 let key = MarketKey {
                     scope: GraphScope::FullMarket,
                     market: market.into(),
@@ -333,6 +347,7 @@ mod tests {
                             CubeCount::Static(1, 1, 1),
                             CubeDim::new_1d(32),
                             counter.buffer_arg(),
+                            simulation.config.launch(),
                             parameters.launch(),
                         );
                         Ok(7)
@@ -344,9 +359,9 @@ mod tests {
                 assert!(!device.client.is_capturing());
             }
         }
-        assert_eq!(graphs.entries.len(), 6);
-        assert_eq!(graphs.records, 6);
-        assert_eq!(graphs.replays, 6);
+        assert_eq!(graphs.entries.len(), 3);
+        assert_eq!(graphs.records, 3);
+        assert_eq!(graphs.replays, 12);
         assert_eq!(graphs.invalidations, 1);
         Ok(())
     }

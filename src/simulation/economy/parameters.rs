@@ -84,19 +84,27 @@ impl EconomyParameters {
 
     pub fn refresh(&mut self, config: &mut super::configuration::EconomyConfig) {
         if comptime!(self.clock == MarketClock::Device) {
-            self.day = config.consumption_intervals[Good::COUNT];
-            self.settlement_rotation = config.consumption_intervals[Good::COUNT + 1usize];
-            self.good = config.consumption_intervals[Good::COUNT + 2usize];
-            self.matching_round = config.consumption_intervals[Good::COUNT + 4usize];
-            config.heating_per_person = config.consumption_intervals[Good::COUNT + 3usize];
+            self.day = config.market_table[Good::COUNT];
+            self.settlement_rotation = config.market_table[Good::COUNT + 1usize];
+            self.good = config.market_table[Good::COUNT + 2usize];
+            self.matching_round = config.market_table[Good::COUNT + 4usize];
+            config.heating_per_person = config.market_table[Good::COUNT + 3usize];
         }
+    }
+
+    pub fn supplier_limit(&self) -> u32 {
+        select(
+            comptime!(self.market == MarketFlag::Input(InputMarket::Grain)),
+            super::policy::GRAIN_MARKET_QUOTES,
+            super::policy::DISCOVERY_CANDIDATES,
+        )
     }
 
     pub fn traded_good(&self) -> u32 {
         match comptime!(self.market) {
             MarketFlag::Input(InputMarket::Grain) => u32::new(Good::Grain as i64),
-            MarketFlag::Input(InputMarket::Other) => self.good,
-            MarketFlag::Consumer(good) => u32::new(comptime!(good as i64)),
+            MarketFlag::Input(InputMarket::Flour) => u32::new(Good::Flour as i64),
+            MarketFlag::Input(InputMarket::Other) | MarketFlag::Consumer(_) => self.good,
             MarketFlag::Household => u32::new(Good::Bread as i64),
             _ => u32::new(0),
         }

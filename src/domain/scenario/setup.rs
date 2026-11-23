@@ -9,6 +9,37 @@ use crate::{
 use anyhow::{Context, Result, anyhow};
 use std::collections::BTreeMap;
 
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub(super) struct GrainMarkets {
+    pub sites: BTreeMap<usize, usize>,
+    pub villages: Vec<usize>,
+}
+
+impl GrainMarkets {
+    fn new(config: &ScenarioConfig, retailers: &BTreeMap<u64, enterprise::Distributor>) -> Self {
+        match (config.version, config.economy, &config.population) {
+            (5.., crate::domain::Economy::Industrial, None) => {
+                let rows = |good| {
+                    (0..config.firms as usize)
+                        .filter(move |&firm| generated_good(config, firm) == good)
+                        .map(move |firm| config.population_size() as usize + firm)
+                };
+                let dealer = |row: &usize| retailers.get(&(*row as u64 + 1));
+                let villages = rows(Good::Grain)
+                    .filter(|row| dealer(row).is_some_and(|store| store.good == Good::Grain))
+                    .collect();
+                let sites = rows(Good::Flour)
+                    .zip(rows(Good::Grain))
+                    .filter(|(mill, _)| dealer(mill).is_none())
+                    .chain(rows(Good::Bread).zip(rows(Good::Grain)))
+                    .collect();
+                Self { sites, villages }
+            }
+            _ => Self::default(),
+        }
+    }
+}
+
 impl Scenario {
     pub fn new(config: ScenarioConfig) -> Result<Self> {
         let config = config.normalized()?;
@@ -23,17 +54,14 @@ impl Scenario {
             false => Err(anyhow!("distributor identities must be unique"))?,
         }
         let production = supply::StartingProduction::new(&config, &retailers);
-        let initial_employment = employment::InitialEmployment::new(
-            &config,
-            &production.capacities,
-            &production.daily,
-            &retailers,
-        );
+        let initial_employment =
+            employment::InitialEmployment::new(&config, &production, &retailers);
         let totals = match &config.population {
             Some(population) => population.totals()?,
             None => generated_totals(&config, &production, &initial_employment, &retailers)?,
         };
         let resources = resources::ResourceGeography::new(&config)?;
+        let grain_markets = GrainMarkets::new(&config, &retailers);
         let mut scenario = Self {
             starting_prices: prices::StartingPrices::configured(&config),
             config,
@@ -42,6 +70,7 @@ impl Scenario {
             rail_geography: railway::RailGeography::default(),
             production,
             retailers,
+            grain_markets,
             initial_actors: std::sync::Arc::default(),
             initial_employment,
             cohorts: None,
@@ -116,7 +145,7 @@ fn generated_totals(
         (1..=u64::from(cash_sources)).try_fold(0u128, |total, household| -> Result<u128> {
             Ok(total + u128::from(initial_employment.cash(config, household as usize - 1)?))
         })?;
-    let cash = household_cash + u128::from(config.firm_cash) * u128::from(config.firms);
+    let mut cash = household_cash;
     let food_reserve = supply::StartingReserves::new(config);
     let mut goods = [0; Good::COUNT];
     for stock in food_reserve.household(u64::from(config.population_size())) {
@@ -131,6 +160,7 @@ fn generated_totals(
     for firm in 0..config.firms as usize {
         let good = generated_good(config, firm);
         let retailer = retailers.get(&generated_firm_identity(config, firm));
+        cash += u128::from(production.working_cash(config, retailer)?);
         for stock in production.inventory(config, &food_reserve, good, retailer) {
             stock.add_to(&mut goods)?;
         }

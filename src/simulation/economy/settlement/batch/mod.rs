@@ -90,7 +90,12 @@ impl UnitBalances {
     fn new(economy: &mut EconomyView<'_>, peer: u32, good: u32, length: u32) -> Self {
         let cash = economy.ledger.value(Field::Cash, peer);
         let stock = economy.ledger.value_at(good, peer);
-        let terms = household_production::TradeFields::new(&economy.actors, peer, good);
+        let terms = household_production::TradeFields::new(
+            &economy.actors,
+            economy.ledger.config,
+            peer,
+            good,
+        );
         let sales = economy.ledger.value_at(terms.sales, peer);
         let quote = economy.ledger.number_at(terms.price, peer);
         let cash_capacity = bounded_capacity(
@@ -380,6 +385,7 @@ fn settle_tail(
             let prior = KernelEventStatus::load(scratch, 4 * count + actor);
             let terms = household_production::TradeFields::new(
                 &economy.actors,
+                economy.ledger.config,
                 peer,
                 parameters.traded_good(),
             );

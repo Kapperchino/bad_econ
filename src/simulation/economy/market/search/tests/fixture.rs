@@ -139,6 +139,19 @@ impl SearchProbe {
         let mut state = scenario.initial()?;
         state.set(Field::FoodNeed, 0, 3);
         state.set(Field::LivingMembers, 0, 3);
+        if let (
+            Market::Input(Good::Grain),
+            HouseholdProduction::Available {
+                annual_yield_per_plot,
+                ..
+            },
+        ) = (market, scenario.config().household_production)
+        {
+            state.set(Field::LandPlots, 0, 1);
+            let seed =
+                annual_yield_per_plot.div_ceil(crate::domain::food::WheatHusbandry::GROSS_PARTS);
+            state.set(Field::GrainReserve, 0, u64::from(seed));
+        }
         if let Market::Consumer(Good::Coal | Good::Wood) = market {
             state.set(Field::HeatingNeed, 0, 9);
         }
@@ -310,6 +323,9 @@ impl SearchProbe {
             _ => simulation.config.coverage + simulation.config.ring - 1,
         };
         let wanted = match parameters.market {
+            MarketFlag::Input(InputMarket::Grain) if self.state.actors.at(buyer).kind == 0 => {
+                self.state.get(Field::GrainReserve, buyer)
+            }
             MarketFlag::Consumer(_) if parameters.good == Good::Coal as u32 => {
                 (self.state.get(Field::HeatingNeed, buyer) * u64::from(coverage)).div_ceil(2)
             }
@@ -380,38 +396,25 @@ impl SearchProbe {
             }
         }
         if let SearchExecution::Grain = execution {
-            for (stage, grid, width) in [
-                (
-                    SearchStage::GrainFirms,
-                    device.count(count),
-                    device.workgroup,
-                ),
-                (
-                    SearchStage::GrainDealerTiles,
-                    CubeCount::Static(8, 1, 1),
-                    256,
-                ),
-            ] {
-                MarketSearch::launch(
-                    device,
-                    grid,
-                    CubeDim::new_1d(width),
-                    SearchInputLaunch {
-                        state: simulation.state.buffer_arg(),
-                        actors: simulation.actors.buffer_arg(),
-                        config: simulation.config.launch(),
-                        spatial: simulation.spatial.buffer_arg(),
-                        proposals: simulation.work.proposals.buffer_arg(),
-                        searches: simulation.searches.requests.buffer_arg(),
-                        successes: simulation.searches.successes.buffer_arg(),
-                        scratch: simulation.work.scratch.buffer_arg(),
-                        control: simulation.control.buffer_arg(),
-                        parameters: parameters.launch(),
-                        status_reset: StatusReset::Full,
-                        program: stage.program(&simulation.config),
-                    },
-                );
-            }
+            MarketSearch::launch(
+                device,
+                device.count(count),
+                CubeDim::new_1d(device.workgroup),
+                SearchInputLaunch {
+                    state: simulation.state.buffer_arg(),
+                    actors: simulation.actors.buffer_arg(),
+                    config: simulation.config.launch(),
+                    spatial: simulation.spatial.buffer_arg(),
+                    proposals: simulation.work.proposals.buffer_arg(),
+                    searches: simulation.searches.requests.buffer_arg(),
+                    successes: simulation.searches.successes.buffer_arg(),
+                    scratch: simulation.work.scratch.buffer_arg(),
+                    control: simulation.control.buffer_arg(),
+                    parameters: parameters.launch(),
+                    status_reset: StatusReset::Full,
+                    program: SearchStage::GrainFirms.program(&simulation.config),
+                },
+            );
         }
         let stage = match execution {
             SearchExecution::Prepare => SearchStage::Prepare,

@@ -1,4 +1,6 @@
 pub(super) mod demand;
+pub(in crate::simulation::economy) mod distribution;
+pub(in crate::simulation) mod farm_offers;
 pub(in crate::simulation::economy) mod feedback;
 pub(in crate::simulation) mod indexing;
 pub(in crate::simulation) mod orders;
@@ -37,7 +39,7 @@ impl MarketStart {
             CubeDim::new_1d(width),
             buffers.control.buffer_arg(),
             buffers.events.buffer_arg(),
-            config.consumption_intervals.buffer_arg(),
+            config.market_table.buffer_arg(),
             parameters.launch(),
             config.heating_per_person,
             self,
@@ -61,11 +63,17 @@ fn start_market(
         control[CONSTRUCTED_EVENTS_WORD].store(0);
         control[RANGE_SLOTS_WORD].store(0);
         control[orders::SEARCHES_WORD].store(0);
-        control[search::INPUT_MINIMUM_QUOTE_WORD].store(u32::MAX);
+        if comptime!(parameters.market != MarketFlag::Input(InputMarket::Grain))
+            || parameters.matching_round == 0
+        {
+            control[search::INPUT_MINIMUM_QUOTE_WORD].store(u32::MAX);
+        }
         if comptime!(matches!(parameters.market, MarketFlag::Input(_))) {
             control[search::INPUT_RAIL_WORD].store(0);
         }
-        if comptime!(parameters.market == MarketFlag::Input(InputMarket::Grain)) {
+        if comptime!(parameters.market == MarketFlag::Input(InputMarket::Grain))
+            && parameters.matching_round == 0
+        {
             control[search::GRAIN_FIRMS_WORD].store(0);
         }
         if comptime!(

@@ -311,9 +311,7 @@ fn write_bound(
             max_x = max(max_x, x);
             min_y = min(min_y, y);
             max_y = max(max_y, y);
-            if comptime!(config.railway.routes_enabled == Feature::Enabled)
-                && config.railway.nodes > 0
-            {
+            if config.railway.has_routes() {
                 access = min(access, config.railway.access[actor as usize * 2 + 1]);
             }
         }

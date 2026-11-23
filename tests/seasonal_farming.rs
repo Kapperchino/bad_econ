@@ -33,6 +33,83 @@ fn generated_industrial_wheat_budget_matches_its_land_and_opening_prices_on_gpu(
             .iter()
             .any(|store| store.good == Good::Grain)
     );
+    let grain_sites = state
+        .actors
+        .iter()
+        .filter(|site| site.kind == Good::Grain as u32)
+        .map(|site| site.position)
+        .collect::<Vec<_>>();
+    for mill in state
+        .actors
+        .iter()
+        .filter(|site| site.kind == Good::Flour as u32)
+    {
+        assert!(grain_sites.contains(&mill.position));
+        assert!(scenario.has_resource(Good::Grain, mill.position));
+    }
+    Ok(())
+}
+
+#[test]
+fn generated_grain_markets_preserve_legacy_sites_and_reject_invalid_dealers_on_gpu() -> Result<()> {
+    let scenario = Scenario::industrial(100, 42, Experiment::Baseline)?;
+    let device = support::device(64)?;
+    let opening = Simulation::new(scenario.clone(), device.clone())?.download()?;
+    let mut config = scenario.config().clone();
+    config.version = 4;
+    let legacy = Scenario::new(config)?;
+    let mut simulation = Simulation::new(legacy, device.clone())?;
+    let prior = simulation.download()?;
+    assert!(
+        prior
+            .actors
+            .iter()
+            .zip(opening.actors.iter())
+            .any(|(a, b)| a.position != b.position)
+    );
+    let mut restored = Simulation::from_checkpoint(simulation.checkpoint()?, device.clone())?;
+    assert_eq!(restored.download()?, prior);
+    for identity in [0, 1, u64::MAX] {
+        let mut config = scenario.config().clone();
+        let dealer = config
+            .distributors
+            .iter_mut()
+            .find(|s| s.good == Good::Grain)
+            .unwrap();
+        dealer.firm = identity;
+        let result =
+            Scenario::new(config).and_then(|scenario| Simulation::new(scenario, device.clone()));
+        assert!(result.is_err());
+    }
+    Ok(())
+}
+
+#[test]
+#[ignore = "runs the 10,000-person industrial economy through five harvests"]
+fn repeated_harvests_supply_the_industrial_population_on_gpu() -> Result<()> {
+    let people = 10_000;
+    let scenario = Scenario::for_people(
+        people,
+        CohortSizes::default(),
+        Economy::Industrial,
+        42,
+        Experiment::Baseline,
+    )?;
+    let mut simulation = Simulation::new(scenario, support::device(64)?)?;
+    for _year in 0..5 {
+        for _day in 0..calendar::DAYS_PER_YEAR {
+            simulation.advance()?;
+        }
+        let population = &simulation.snapshot.population;
+        assert!(population.living >= u64::from(people) * 9 / 10);
+        assert!(
+            population.deaths[demography::DeathCause::Famine as usize - 1] < u64::from(people) / 20
+        );
+        assert_eq!(
+            simulation.snapshot.household_production[Good::Flour as usize - 1],
+            0
+        );
+    }
     Ok(())
 }
 
@@ -464,6 +541,88 @@ fn grain_dealer_scenario(grain: u64, bread: u64) -> Result<Scenario> {
 }
 
 #[test]
+fn farmer_offers_surplus_to_the_nearest_funded_distributor_on_gpu() -> Result<()> {
+    let mut config = grain_dealer_scenario(11, 100_000)?.config().clone();
+    let original = config.distributors[0].clone();
+    let population = config.population.as_mut().unwrap();
+    population.firms[1].position.x = 550;
+    population.firms[2].good = Good::Grain;
+    let nearer = population.firms[2].identity;
+    config.distributors.push(enterprise::Distributor {
+        firm: nearer,
+        ..original
+    });
+    let device = support::device(64)?;
+    for (near_x, near_cash, far_cash, buyer) in [
+        (510, 100_000, 100_000, Some(nearer)),
+        (510, 0, 100_000, Some(original.firm)),
+        (601, 100_000, 100_000, Some(original.firm)),
+        (510, 0, 0, None),
+    ] {
+        let mut run = config.clone();
+        let firms = &mut run.population.as_mut().unwrap().firms;
+        firms[1].cash = far_cash;
+        firms[2].position.x = near_x;
+        firms[2].cash = near_cash;
+        let scenario = Scenario::new(run)?;
+        let mut state = scenario.initial()?;
+        state.set(Field::LandPlots, 0, 1);
+        let mut sim =
+            Simulation::from_checkpoint(Checkpoint::new(&scenario, &state)?, device.clone())?;
+        sim.advance()?;
+        let settled = sim.download()?;
+        assert_eq!(
+            settled.get(Field::GrainSales, 0),
+            u64::from(buyer.is_some())
+        );
+        for dealer in [original.firm, nearer] {
+            let row = scenario.index_of(dealer).unwrap();
+            assert_eq!(
+                settled.values[TRANSIT_FIELDS * settled.actors.len() + row],
+                u64::from(buyer == Some(dealer))
+            );
+        }
+    }
+    Ok(())
+}
+
+#[test]
+fn farmers_short_of_food_money_can_sell_when_distributor_orders_are_scarce_on_gpu() -> Result<()> {
+    let mut config = grain_dealer_scenario(100, 0)?.config().clone();
+    config.food = Some(FoodPolicy::industrial());
+    config.distributors[0].units_per_shift = 1;
+    let population = config.population.as_mut().unwrap();
+    population.households[1].inventories[Good::Grain as usize - 1] = 100;
+    for household in &mut population.households[..2] {
+        household.inventories[Good::Bread as usize - 1] = 0;
+    }
+    for producer in &mut population.firms {
+        if producer.identity != 14 {
+            producer.cash = 0;
+        }
+    }
+    let device = support::device(64)?;
+    for seller in [0, 1] {
+        let mut run = config.clone();
+        let households = &mut run.population.as_mut().unwrap().households;
+        households[seller].cash = 0;
+        households[1 - seller].cash = 100_000;
+        let scenario = Scenario::new(run)?;
+        let mut state = scenario.initial()?;
+        for farmer in [0, 1] {
+            state.set(Field::LandPlots, farmer, 1);
+        }
+        let mut simulation =
+            Simulation::from_checkpoint(Checkpoint::new(&scenario, &state)?, device.clone())?;
+        simulation.advance()?;
+        let settled = simulation.download()?;
+        assert_eq!(settled.get(Field::GrainSales, seller), 1);
+        assert_eq!(settled.get(Field::GrainSales, 1 - seller), 0);
+    }
+    Ok(())
+}
+
+#[test]
 fn grain_distributor_buys_household_surplus_and_resells_it_to_a_mill_on_gpu() -> Result<()> {
     let device = support::device(64)?;
     for bread in [100_000, 0] {
@@ -488,27 +647,25 @@ fn grain_distributor_buys_household_surplus_and_resells_it_to_a_mill_on_gpu() ->
         )?;
         let cleared = simulation.download()?;
         let sold = cleared.get(Field::GrainSales, 0);
-        assert_eq!(sold, u64::from(bread > 0));
+        assert_eq!(sold, 1);
         assert_eq!(
             cleared.get(Field::Grain, 0) + sold,
             opening.get(Field::Grain, 0)
         );
         assert_eq!(cleared.get(Field::Transit, dealer), sold);
         assert_eq!(cleared.get(Field::Transit, mill), 0);
+        assert_eq!(cleared.get(Field::GrainReserve, 0), 10);
+        assert_eq!(cleared.get(Field::Grain, 0), 10);
         if bread > 0 {
-            assert_eq!(cleared.get(Field::GrainReserve, 0), 10);
-            assert_eq!(cleared.get(Field::Grain, 0), 10);
             assert_eq!(
                 cleared.get(Field::Cash, 0) - opening.get(Field::Cash, 0),
                 sold * u64::from(scenario.config().prices[0])
             );
-            assert_eq!(
-                cleared.get(Field::ReplacementCost, dealer),
-                u64::from(scenario.config().prices[0])
-            );
-        } else {
-            assert!(cleared.get(Field::GrainReserve, 0) > 10);
         }
+        assert_eq!(
+            cleared.get(Field::ReplacementCost, dealer),
+            u64::from(scenario.config().prices[0])
+        );
         for phase in &Phase::ALL[6..] {
             simulation.phase(*phase, bad_econ::simulation::Trace::Discard)?;
         }
@@ -521,27 +678,173 @@ fn grain_distributor_buys_household_surplus_and_resells_it_to_a_mill_on_gpu() ->
         assert_eq!(restored.download()?, resale);
         assert_eq!(resale.get(Field::Sales, dealer), sold);
         assert_eq!(resale.get(Field::Transit, mill), sold);
-        if sold > 0 {
-            assert_eq!(resale.get(Field::FirstInputCost, mill), 200);
-        }
+        assert_eq!(resale.get(Field::FirstInputCost, mill), 200);
     }
     Ok(())
 }
 
 #[test]
-fn grain_distributor_orders_only_what_its_staff_can_handle_on_gpu() -> Result<()> {
-    let scenario = grain_dealer_scenario(100_000, 100_000)?;
+fn a_cashless_farmer_sells_wheat_to_buy_flour_and_bake_on_gpu() -> Result<()> {
+    let mut config = grain_dealer_scenario(100, 0)?.config().clone();
+    config.land_access = Some(LandAccess {
+        total_plots: 1,
+        allocations: vec![enterprise::LandGrant {
+            household: 1,
+            plots: 1,
+        }],
+    });
+    let population = config.population.as_mut().unwrap();
+    population.households[0].cash = 0;
+    for household in &mut population.households {
+        household.inventories[Good::Bread as usize - 1] = 0;
+    }
+    for firm in &mut population.firms {
+        if firm.identity != 14 {
+            firm.cash = 0;
+        }
+    }
+    population.firms[0].inventories[Good::Flour as usize - 1] = 100;
+    let scenario = Scenario::new(config)?;
     let mut state = scenario.initial()?;
+    let dealer = scenario.index_of(14).unwrap();
+    let mill = scenario.index_of(13).unwrap();
+    state.set(Field::Job, 1, dealer as u64 + 1);
+    state.set(Field::JobDaysRemaining, 1, 7);
+    state.set(Field::Demand, dealer, 24);
+    let count = state.actors.len();
+    let flour = Good::Flour as usize - 1;
+    let bread = Good::Bread as usize - 1;
+    let mut simulation =
+        Simulation::from_checkpoint(Checkpoint::new(&scenario, &state)?, support::device(64)?)?;
+    simulation.advance()?;
+    let sale = simulation.download()?;
+    let grain_sold = sale.get(Field::GrainSales, 0);
+    let flour_bought = sale.values[(TRANSIT_FIELDS + flour) * count];
+    assert!(grain_sold > 0 && flour_bought > 0);
+    assert_eq!(sale.get(Field::GrossIncome, 0), 0);
+    assert_eq!(sale.get(Field::Sales, mill), flour_bought);
+    assert_eq!(
+        sale.get(Field::Cash, 0) + flour_bought * state.get(Field::Price, mill),
+        grain_sold * sale.get(Field::GrainQuote, 0)
+    );
+    assert!(sale.get(Field::Grain, 0) >= sale.get(Field::GrainReserve, 0));
+    simulation.advance()?;
+    let baked = simulation.download()?;
+    assert!(baked.values[(PRODUCTION_FIELDS + bread) * count] > 0);
+    assert_eq!(baked.values[(PRODUCTION_FIELDS + flour) * count], 0);
+    assert!(baked.get(Field::Consumed, 0) > 0);
+    Ok(())
+}
+
+#[test]
+fn grain_distributor_orders_only_what_its_staff_can_handle_on_gpu() -> Result<()> {
+    let mut config = grain_dealer_scenario(100_000, 100_000)?.config().clone();
+    for household in config
+        .population
+        .as_mut()
+        .unwrap()
+        .households
+        .iter_mut()
+        .take(6)
+    {
+        household.position.x = 500;
+        household.inventories[Good::Grain as usize - 1] = 100_000;
+    }
+    let scenario = Scenario::new(config)?;
+    let mut state = scenario.initial()?;
+    for farmer in 0..6 {
+        state.set(Field::LandPlots, farmer, 1);
+    }
     let dealer = scenario.index_of(14).unwrap();
     state.set(Field::Demand, dealer, 100_000);
     let daily = u64::from(state.actors.at(dealer).capacity) * state.get(Field::OutputTicks, dealer);
-    let coverage = state.get(Field::StockCoverage, dealer) + scenario.ring() as u64;
+    let mut simulation =
+        Simulation::from_checkpoint(Checkpoint::new(&scenario, &state)?, support::device(64)?)?;
+    for phase in &Phase::ALL[..5] {
+        simulation.phase(*phase, bad_econ::simulation::Trace::Discard)?;
+    }
+    let opening = simulation.download()?;
+    simulation.phase(
+        Phase::ProvisionPurchase,
+        bad_econ::simulation::Trace::Record,
+    )?;
+    let cleared = simulation.download()?;
+    let sales: Vec<_> = (0..6)
+        .map(|farmer| cleared.get(Field::GrainSales, farmer))
+        .collect();
+    assert!(sales.iter().filter(|&&sold| sold > 0).count() > 1);
+    assert_eq!(sales.iter().sum::<u64>(), daily);
+    assert_eq!(cleared.get(Field::Transit, dealer), daily);
+    for (farmer, sold) in sales.into_iter().enumerate() {
+        assert_eq!(cleared.get(Field::GrainReserve, farmer), 10);
+        assert_eq!(
+            cleared.get(Field::Grain, farmer) + sold,
+            opening.get(Field::Grain, farmer)
+        );
+        assert_eq!(
+            cleared.get(Field::Cash, farmer),
+            opening.get(Field::Cash, farmer) + sold * opening.get(Field::GrainQuote, farmer)
+        );
+    }
+    Ok(())
+}
+
+#[test]
+fn grain_collection_reaches_small_farms_within_the_dealers_stock_window_on_gpu() -> Result<()> {
+    let mut config = grain_dealer_scenario(12, 100_000)?.config().clone();
+    config.economy = Economy::Industrial;
+    config.distributors[0].reserve_days = 1;
+    config.land_access = Some(LandAccess {
+        total_plots: 12,
+        allocations: (1..=12)
+            .map(|household| enterprise::LandGrant {
+                household,
+                plots: 1,
+            })
+            .collect(),
+    });
+    for household in &mut config.population.as_mut().unwrap().households {
+        household.position.x = 500;
+        household.inventories[Good::Grain as usize - 1] = 12;
+    }
+    let scenario = Scenario::new(config)?;
+    let dealer = scenario.index_of(14).unwrap();
+    let mut state = scenario.initial()?;
+    state.set(Field::Demand, dealer, 24);
+    let mut simulation =
+        Simulation::from_checkpoint(Checkpoint::new(&scenario, &state)?, support::device(64)?)?;
+    simulation.advance()?;
+    let settled = simulation.download()?;
+    for farmer in 0..12 {
+        assert_eq!(settled.get(Field::GrainSales, farmer), 2);
+        assert_eq!(settled.get(Field::Grain, farmer), 10);
+    }
+    assert_eq!(settled.get(Field::Transit, dealer), 24);
+    assert_eq!(simulation.snapshot.cash, state.initial_cash);
+    Ok(())
+}
+
+#[test]
+fn grain_distributor_keeps_enough_cash_to_handle_its_stock_on_gpu() -> Result<()> {
+    let mut config = grain_dealer_scenario(1000, 100_000)?.config().clone();
+    config.prices[0] = 10;
+    let dealer = &mut config.population.as_mut().unwrap().firms[1];
+    dealer.cash = 500;
+    dealer.wage = 10;
+    let scenario = Scenario::new(config)?;
+    let dealer = scenario.index_of(14).unwrap();
+    let mut state = scenario.initial()?;
+    state.set(Field::LandPlots, 0, 1);
+    state.set(Field::Demand, dealer, 24);
     let mut simulation =
         Simulation::from_checkpoint(Checkpoint::new(&scenario, &state)?, support::device(64)?)?;
     simulation.advance()?;
     let cleared = simulation.download()?;
-    assert_eq!(cleared.get(Field::GrainSales, 0), daily * coverage);
-    assert_eq!(cleared.get(Field::Transit, dealer), daily * coverage);
+    let stock = cleared.get(Field::Transit, dealer);
+    let wage_bill = cleared.get(Field::Wage, dealer) * cleared.get(Field::LaborMinutes, dealer);
+    assert!(stock > 0);
+    assert_eq!(cleared.get(Field::GrainSales, 0), stock);
+    assert!(cleared.get(Field::Cash, dealer) >= stock.div_ceil(24) * wage_bill);
     Ok(())
 }
 
@@ -590,5 +893,75 @@ fn planted_wheat_responds_to_carryover_sales_and_paid_work_on_gpu() -> Result<()
         assert_eq!(planted.get(Field::CropWork, 0), planting);
         assert_eq!(planted.get(Field::Grain, 0), stock - planting.div_ceil(80));
     }
+    Ok(())
+}
+
+#[test]
+fn mill_buys_wheat_directly_at_one_hundred_hectares_on_gpu() -> Result<()> {
+    let mut config = household_wheat_market(0, 100_000, 1)?.config().clone();
+    config.land_access = Some(LandAccess {
+        total_plots: 100,
+        allocations: vec![],
+    });
+    let farm = &mut config.population.as_mut().unwrap().firms[1];
+    farm.good = Good::Grain;
+    farm.position.x = 500;
+    farm.inventories[Good::Grain as usize - 1] = 100;
+    let scenario = Scenario::new(config)?;
+    let mill = scenario.index_of(13).unwrap();
+    let farm = scenario.index_of(14).unwrap();
+    let device = support::device(64)?;
+    for (owned, leased, direct) in [(99, 0, false), (99, 1, true), (100, 0, true)] {
+        let mut state = scenario.initial()?;
+        state.set(Field::FarmHectares, farm, owned);
+        state.set(Field::OccupiedPlots, farm, leased);
+        state.set(Field::Demand, mill, 10);
+        let mut simulation =
+            Simulation::from_checkpoint(Checkpoint::new(&scenario, &state)?, device.clone())?;
+        simulation.advance()?;
+        let state = simulation.download()?;
+        assert_eq!(state.get(Field::Sales, farm) > 0, direct);
+        assert_eq!(state.get(Field::Transit, mill) > 0, direct);
+    }
+    Ok(())
+}
+
+#[test]
+fn distributor_with_a_bread_business_restocks_grain_for_a_mill_on_gpu() -> Result<()> {
+    let mut config = grain_dealer_scenario(1000, 100_000)?.config().clone();
+    config.distributors[0].good = Good::Bread;
+    let customer = &mut config.population.as_mut().unwrap().households[2];
+    customer.position.x = 500;
+    customer.inventories[Good::Bread as usize - 1] = 0;
+    let dealer = &mut config.population.as_mut().unwrap().firms[1];
+    dealer.good = Good::Bread;
+    dealer.technique = Technique::new(60, 1, 1)?;
+    dealer.inventories[Good::Bread as usize - 1] = 20;
+    let scenario = Scenario::new(config)?;
+    let mut state = scenario.initial()?;
+    let mill = scenario.index_of(13).unwrap();
+    let dealer = scenario.index_of(14).unwrap();
+    state.set(Field::Job, 1, dealer as u64 + 1);
+    state.set(Field::JobDaysRemaining, 1, 10);
+    state.set(Field::LandPlots, 0, 1);
+    state.set(Field::Demand, mill, 100);
+    let device = support::device(64)?;
+    let mut simulation =
+        Simulation::from_checkpoint(Checkpoint::new(&scenario, &state)?, device.clone())?;
+    simulation.advance()?;
+    let first = simulation.download()?;
+    assert!(first.get(Field::Bread, dealer) < 20);
+    assert!(first.get(Field::Sales, dealer) > 0);
+    let mut replay = Simulation::from_checkpoint(simulation.checkpoint()?, device)?;
+    for _ in 0..2 {
+        simulation.advance()?;
+        replay.advance()?;
+    }
+    let state = simulation.download()?;
+    assert_eq!(state, replay.download()?);
+    assert!(state.get(Field::Transit, mill) > 0);
+    assert!(state.get(Field::Sales, dealer) > 0);
+    assert_eq!(state.get(Field::Produced, dealer), 0);
+    assert!(state.get(Field::Sales, dealer) <= state.get(Field::RetailOpen, dealer));
     Ok(())
 }

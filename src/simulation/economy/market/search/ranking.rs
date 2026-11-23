@@ -97,12 +97,13 @@ pub(super) struct MatchSelection {
     pub fallback: MarketProposal,
     pub fallback_score: Ticks,
     pub considered: u32,
+    pub limit: u32,
     pub seen_supply: bool,
 }
 
 #[cube]
 impl MatchSelection {
-    pub(super) fn new(#[comptime] market: MarketFlag) -> Self {
+    pub(super) fn new(#[comptime] market: MarketFlag, limit: u32) -> Self {
         let mut score = ticks(u32::MAX, u32::MAX);
         if comptime!(market == MarketFlag::Labor) {
             score = zero();
@@ -121,6 +122,7 @@ impl MatchSelection {
             },
             fallback_score: ticks(u32::MAX, u32::MAX),
             considered: 0,
+            limit,
             seen_supply: false,
         }
     }
@@ -156,7 +158,7 @@ impl MatchSelection {
         let improving =
             eligible * u32::cast_from(self.proposal.peer == NO_ACTOR || lt(score, self.score));
         let prefix = parallel::scan_prefix(counted | (improving << 16), comptime!(parameters.scan));
-        let remaining = DISCOVERY_CANDIDATES - self.considered;
+        let remaining = self.limit - self.considered;
         let included = u32::cast_from(
             window.includes_lane() && (prefix.inclusive & 0xffff) - counted < remaining,
         );
@@ -214,7 +216,7 @@ impl MatchSelection {
                     || offer.score.extract(HIGH_WORD) == 0,
             );
         let preceding = plane_exclusive_sum(counted);
-        let visited = window.includes_lane() && preceding < DISCOVERY_CANDIDATES - self.considered;
+        let visited = window.includes_lane() && preceding < self.limit - self.considered;
         let included = u32::cast_from(visited);
         let total = plane_sum(counted * included);
         self.seen_supply =
@@ -270,7 +272,7 @@ impl MatchSelection {
     ) {
         if UNIT_POS == 0 {
             let mut slot = 0usize;
-            while slot < window.slots() && self.considered < DISCOVERY_CANDIDATES {
+            while slot < window.slots() && self.considered < self.limit {
                 if comptime!(parameters.market == MarketFlag::Labor) {
                     let faults = candidates.faults(slot);
                     if faults != 0 {

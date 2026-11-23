@@ -288,3 +288,50 @@ fn company_dashboard_ranks_pages_and_opens_site_accounts_on_gpu() -> Result<()> 
     assert!(app.world().resource::<Dashboard>().company_page.is_none());
     Ok(())
 }
+
+#[test]
+#[ignore = "release benchmark for viewer day advancement"]
+fn benchmark_million_people_viewer_days_on_gpu() -> Result<()> {
+    let scenario = Scenario::for_people(
+        1_000_000,
+        CohortSizes::default(),
+        Economy::Industrial,
+        42,
+        Experiment::Baseline,
+    )?;
+    let publisher = Publisher {
+        data: Arc::new(Mutex::new(Display::new(&scenario))),
+        wake: || (),
+    };
+    let mut simulation = Simulation::new(scenario, Device::headless(64)?)?;
+    publish(&mut simulation, &publisher, Publication::Restart, None)?;
+    let mut measured = Vec::new();
+    for day in 1..=62 {
+        let start = Instant::now();
+        simulation.command(SimulationCommand::AdvanceDay)?;
+        let advanced = start.elapsed();
+        publish(
+            &mut simulation,
+            &publisher,
+            Publication::Snapshot,
+            Some(Cue::Stepped),
+        )?;
+        let elapsed = start.elapsed();
+        eprintln!(
+            "viewer day {day} {:.6} publish {:.6}",
+            elapsed.as_secs_f64(),
+            (elapsed - advanced).as_secs_f64(),
+        );
+        if day > 2 {
+            measured.push(elapsed);
+        }
+        assert_eq!(publisher.data.lock().unwrap().snapshot.day, day);
+    }
+    measured.sort_unstable();
+    let seconds = measured.iter().sum::<std::time::Duration>().as_secs_f64();
+    let median = (measured[29] + measured[30]) / 2;
+    let p90 = measured[53];
+    let digest = simulation.download()?.digest();
+    eprintln!("60 viewer days in {seconds:.3}s, median {median:?}, p90 {p90:?}, state {digest}");
+    Ok(())
+}

@@ -244,9 +244,7 @@ impl GpuPass<DeliveryFloorInput> for CompareDeliveryFloor {
             let seller = index % count;
             let trip = actors.distance(buyer, seller);
             let mut access = 0u32;
-            if comptime!(input.config.railway.routes_enabled == Feature::Enabled)
-                && input.config.railway.nodes > 0
-            {
+            if input.config.railway.has_routes() {
                 access = input.config.railway.access[buyer as usize * 2 + 1];
             }
             let floor = minimum_delivery_days(&input.config, access, seller, trip);

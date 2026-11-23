@@ -2,7 +2,10 @@ use super::{
     DemographyPolicy, PersonLayout as P, PopulationModel, Stage,
     systems::{DemographyInput, DemographyInputExpand},
 };
-use crate::simulation::economy::{configuration::Feature, households::food::BreadDemand};
+use crate::simulation::economy::{
+    configuration::Feature,
+    households::food::{BreadDemand, HomeKitchen},
+};
 use crate::{
     domain::{
         Field,
@@ -58,23 +61,22 @@ pub(super) fn family_support(ledger: &Ledger<'_>, household: u32, food: u32) -> 
     let mut support = u32::new(comptime!(FamilySupport::Secure as i64));
     if comptime!(config.economy == crate::domain::Economy::Industrial) {
         let plots = ledger.number(Field::LandPlots, household);
-        let tools = ledger.value(Field::Tools, household);
-        let grain = times32(plots, config.home.annual_yield_per_plot);
-        let bread = select(
-            config.wheat_kg_per_hectare > 0,
-            divide(times(grain, 256).value, 125),
-            grain,
+        let bread = ledger
+            .stock_with_transit(comptime!(crate::domain::Good::Bread as u32), household)
+            .value;
+        let flour = minimum(
+            times32(food, 90),
+            ledger
+                .stock_with_transit(comptime!(crate::domain::Good::Flour as u32), household)
+                .value,
         );
-        let grown = select(equal(tools, zero()), zero(), divide(bread, DAYS_PER_YEAR));
-        let bread_stock = ledger.value(Field::Bread, household);
-        let bread_delivery = ledger.value_at(
-            comptime!(crate::domain::TRANSIT_FIELDS as u32)
-                + comptime!(crate::domain::Good::Bread as u32)
-                - 1,
-            household,
+        let baked = select(
+            HomeKitchen::available(ledger, household),
+            HomeKitchen::new(ledger, household).bread_from_flour(flour),
+            zero(),
         );
-        let reserves = divide(plus(bread_stock, bread_delivery).value, 90);
-        let purchased = positive(ticks(food, 0), plus(grown, reserves).value);
+        let reserves = divide(plus(minimum(bread, times32(food, 90)), baked).value, 90);
+        let purchased = positive(ticks(food, 0), reserves);
         let food_cost = times(
             purchased,
             max(ledger.number(Field::FoodPrice, household), 1),
@@ -513,7 +515,10 @@ impl<'a> HouseholdDay<'a> {
         let ledger = &mut self.economy.ledger;
         let target = BreadDemand {
             gross_income: salary,
-            savings: ledger.value(Field::Cash, self.household),
+            daily_savings: divide(
+                ledger.value(Field::Cash, self.household),
+                HomeKitchen::budget_days(&*ledger, self.household, self.day),
+            ),
             expected_income: ledger.value(Field::IncomeForecast, self.household),
             minimum,
             members,

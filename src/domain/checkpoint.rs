@@ -7,7 +7,7 @@ use anyhow::{Result, anyhow};
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 
-const CHECKPOINT_VERSION: u32 = 28;
+const CHECKPOINT_VERSION: u32 = 29;
 
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(try_from = "CheckpointDocument", deny_unknown_fields)]
@@ -76,7 +76,7 @@ impl TryFrom<CheckpointDocument> for Checkpoint {
             .get("version")
             .and_then(serde_json::Value::as_u64)
         {
-            Some(23..=27) => (),
+            Some(23..=28) => (),
             Some(version) if version == u64::from(CHECKPOINT_VERSION) => (),
             _ => Err(anyhow!(
                 "unsupported checkpoint format: expected 23 through {CHECKPOINT_VERSION}"
@@ -96,7 +96,8 @@ impl TryFrom<CheckpointDocument> for Checkpoint {
         if current.version < CHECKPOINT_VERSION {
             let scenario = Scenario::new(current.scenario.clone())?;
             let count = current.state.actors.len();
-            let expected = scenario.state_len_for(count);
+            let retail = super::RetailAccount::FIELDS * count;
+            let expected = scenario.state_len_for(count) - retail;
             let grain = Field::GrainReserve as usize;
             let freight = Field::RoadFreight as usize;
             let missing = match current.version {
@@ -108,6 +109,7 @@ impl TryFrom<CheckpointDocument> for Checkpoint {
                     grain..freight
                 }
                 27 => freight..USED_FIELDS,
+                28 => 0..0,
                 _ => unreachable!(),
             };
             let add_freight = missing.end == USED_FIELDS;
@@ -153,6 +155,11 @@ impl TryFrom<CheckpointDocument> for Checkpoint {
                     &mut current.state,
                 )?;
             }
+            let offset = scenario.fields() * count - retail;
+            current
+                .state
+                .values
+                .splice(offset..offset, std::iter::repeat_n(0, retail));
             current.version = CHECKPOINT_VERSION;
             current.checksum = Self::checksum(&current.scenario, &current.state)?;
         }

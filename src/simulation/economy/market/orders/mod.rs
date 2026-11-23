@@ -302,10 +302,23 @@ pub(in crate::simulation) fn active(
     control: &[Atomic<u32>],
     parameters: &EconomyParameters,
 ) -> u32 {
-    match comptime!(parameters.discovery) {
+    active_count(
+        control,
+        comptime!(parameters.discovery),
+        parameters.sort_count,
+    )
+}
+
+#[cube]
+pub(in crate::simulation::economy) fn active_count(
+    control: &[Atomic<u32>],
+    #[comptime] discovery: Discovery,
+    _sort_count: u32,
+) -> u32 {
+    match comptime!(discovery) {
         Discovery::Indexed => control[CONSTRUCTED_EVENTS_WORD].load(),
         #[cfg(test)]
-        _ => parameters.sort_count,
+        _ => _sort_count,
     }
 }
 

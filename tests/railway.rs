@@ -152,6 +152,7 @@ fn connected_railways_charge_freight_and_foreign_track_fees_on_gpu() -> Result<(
     let quantity = state.get(Field::Purchased, 0);
     assert!(quantity > 0);
     assert_eq!(delivered(&state, &scenario, 1), quantity);
+    assert_eq!(state.get(Field::FoodPrice, 0), 10);
     assert_eq!(
         state.get(Field::Cash, 0),
         1000 + state.get(Field::GrossIncome, 0) - quantity * 10
@@ -220,6 +221,7 @@ fn disconnected_or_unbuilt_tracks_use_animals_on_gpu() -> Result<()> {
         assert_eq!(delivered(&state, &scenario, 9), quantity);
         assert_eq!(delivered(&state, &scenario, 1), 0);
         let fare = quantity * 9 * 3;
+        assert_eq!(state.get(Field::FoodPrice, 0), 10 + fare / quantity);
         assert!(fare > quantity * 7);
         assert_eq!(
             state.get(Field::Cash, 0),
@@ -394,6 +396,10 @@ fn a_household_can_ship_its_grain_surplus_to_a_distributor_by_rail_on_gpu() -> R
     simulation.advance()?;
     let delivered = simulation.download()?;
     assert_eq!(delivered.get(Field::GrainSales, 0), 1);
+    assert_eq!(
+        delivered.get(Field::ReplacementCost, dealer),
+        u64::from(scenario.config().prices[0])
+    );
     assert_eq!(delivered.get(Field::Grain, 0), 92);
     assert_eq!(
         delivered.values[delivered
@@ -449,6 +455,41 @@ fn freight_waits_for_workers_then_dispatches_after_checkpoint_restore_on_gpu() -
     }
     assert!(receipts >= 27 * quantity);
     assert_eq!(simulation.download()?, resumed.download()?);
+    Ok(())
+}
+
+#[test]
+fn a_single_working_age_carter_collects_a_paid_bread_order_on_gpu() -> Result<()> {
+    let mut config = network()?;
+    for firm in &mut config.population.as_mut().unwrap().firms {
+        firm.cash = 0;
+    }
+    let adult = config.demography.minimum_work_age_years * calendar::DAYS_PER_YEAR;
+    config.demography.people = (1..=4)
+        .map(|household| demography::PersonSeed {
+            identity: 100 + household,
+            household,
+            age_days: if household == 4 { adult } else { adult / 2 },
+            sex: demography::Sex::Male,
+        })
+        .collect();
+    let scenario = Scenario::new(config)?;
+    let mut simulation = Simulation::new(scenario.clone(), support::device(64)?)?;
+    simulation.advance()?;
+    let dispatched = simulation.download()?;
+    let quantity = delivered(&dispatched, &scenario, 9);
+    assert!(quantity > 0);
+    assert_eq!(dispatched.get(Field::CartageIncome, 3), quantity * 27);
+    assert_eq!(dispatched.get(Field::CartagePayable, 0), 0);
+    for _ in 0..9 {
+        simulation.advance()?;
+    }
+    let arrived = simulation.download()?;
+    assert_eq!(
+        arrived.get(Field::Bread, 0) + arrived.get(Field::Consumed, 0),
+        quantity
+    );
+    assert_eq!(simulation.snapshot.cash, dispatched.initial_cash);
     Ok(())
 }
 

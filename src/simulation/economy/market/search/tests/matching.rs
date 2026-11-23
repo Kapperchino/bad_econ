@@ -296,7 +296,13 @@ fn cooperative_market_search_preserves_serial_search_and_shared_fallback_on_gpu(
                 _ => SUPPLIERS,
             };
             let day = [0, 128, suppliers - 1][index % 3];
-            let probe = SearchProbe::with_suppliers(case, day, market, suppliers)?;
+            let mut probe = SearchProbe::with_suppliers(case, day, market, suppliers)?;
+            if let (Market::Input(Good::Grain), SupplyCase::Capped) = (market, case) {
+                for dealer in 1..=suppliers as usize {
+                    probe.state.set(Field::EnterpriseModel, dealer, 1);
+                    probe.state.set(Field::RetailOpen, dealer, 100);
+                }
+            }
             let expected = probe.outcome(SearchExecution::Serial)?;
             if let SupplyCase::Capped = case {
                 assert_ne!(expected.proposal[ProposalLayout::ACTOR], NO_ACTOR);

@@ -14,8 +14,7 @@ pub(super) enum RouteCacheState {
 pub struct RailNetwork {
     #[cube(comptime)]
     pub enabled: Feature,
-    #[cube(comptime)]
-    pub routes_enabled: Feature,
+    pub route_nodes: u32,
     pub nodes: u32,
     pub route_index: u32,
     pub route_rows: u32,
@@ -390,9 +389,9 @@ impl Network {
                 0 => Feature::Disabled,
                 _ => Feature::Enabled,
             },
-            routes_enabled: match (self.company_count, self.availability) {
-                (0, _) | (_, RouteAvailability::Dormant) => Feature::Disabled,
-                _ => Feature::Enabled,
+            route_nodes: match self.availability {
+                RouteAvailability::Available => self.nodes,
+                RouteAvailability::Dormant => 0,
             },
             nodes: self.nodes,
             route_index: self.route_index,

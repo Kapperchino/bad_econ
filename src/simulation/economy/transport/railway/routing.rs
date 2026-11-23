@@ -53,8 +53,7 @@ impl FreightRequest {
         let mut origin = 0u32;
         let mut destination = 0u32;
         let mut access_days = 0u32;
-        if comptime!(config.railway.routes_enabled == Feature::Enabled) && config.railway.nodes > 0
-        {
+        if config.railway.has_routes() {
             origin = config.railway.access[seller as usize * 2];
             destination = config.railway.access[buyer as usize * 2];
             access_days = ceildiv(
@@ -77,10 +76,7 @@ impl FreightRequest {
 
     pub(super) fn candidate(&self, config: &EconomyConfig, company: u32) -> FreightRoute {
         let mut result = self.animal();
-        if comptime!(config.railway.routes_enabled == Feature::Enabled)
-            && config.railway.nodes > 0
-            && company < config.railway.company_count
-        {
+        if config.railway.has_routes() && company < config.railway.company_count {
             let base = config
                 .railway
                 .route_cell(company, self.origin, self.destination);
@@ -108,8 +104,7 @@ impl FreightRequest {
 
     pub(super) fn quoted_carrier(&self, config: &EconomyConfig) -> u32 {
         let mut company = u32::new(comptime!(i64::from(u32::MAX)));
-        if comptime!(config.railway.routes_enabled == Feature::Enabled) && config.railway.nodes > 0
-        {
+        if config.railway.has_routes() {
             let limit = min(
                 max(self.animal_days, self.access_days + 1) - self.access_days - 1,
                 config.ring - 1,
@@ -323,8 +318,7 @@ impl DeliveryRequest {
 
     pub(in crate::simulation::economy) fn days(&self, config: &EconomyConfig) -> u32 {
         let mut days = self.road_days(config);
-        if comptime!(config.railway.routes_enabled == Feature::Enabled) && config.railway.nodes > 0
-        {
+        if config.railway.has_routes() {
             days = self.freight(config, days).preferred(config).days;
         }
         days
@@ -333,6 +327,10 @@ impl DeliveryRequest {
 
 #[cube]
 impl RailNetwork {
+    pub(in crate::simulation::economy) fn has_routes(&self) -> bool {
+        comptime!(self.enabled == Feature::Enabled) && self.route_nodes > 0
+    }
+
     pub(super) fn nearest_station(&self, actors: &ActorTable<'_>, actor: u32) -> u32 {
         let mut chosen = 0;
         let mut distance = u32::new(comptime!(i64::from(u32::MAX)));
@@ -389,7 +387,7 @@ impl RailNetwork {
 
     pub(in crate::simulation::economy) fn serves_buyer(&self, buyer: u32, ring: u32) -> bool {
         let mut available = false;
-        if comptime!(self.routes_enabled == Feature::Enabled) && self.nodes > 0 {
+        if self.has_routes() {
             available = true;
             if self.route_index != 0 {
                 let node = self.access[buyer as usize * 2];

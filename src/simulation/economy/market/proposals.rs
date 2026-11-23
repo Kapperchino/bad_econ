@@ -140,21 +140,42 @@ pub(in crate::simulation::economy) fn propose(
                 best = ticks(0u32, 0u32);
             }
             let mut considered = 0u32;
+            let supplier_limit = parameters.supplier_limit();
             let mut y = rows.first;
-            while y <= rows.last && considered < DISCOVERY_CANDIDATES {
+            if comptime!(matches!(market, MarketFlag::Input(_))) {
+                let local = search::local::staple(
+                    &*economy,
+                    spatial,
+                    control,
+                    parameters,
+                    id,
+                    wanted,
+                    purchasing_power,
+                );
+                if (comptime!(parameters.market == MarketFlag::Input(InputMarket::Grain))
+                    && pricing::distributor(&economy.ledger, id))
+                    || local.peer != NO_ACTOR
+                {
+                    chosen = local.peer;
+                    quantity = local.quantity;
+                    trip = local.trip;
+                    y = side;
+                }
+            }
+            while y <= rows.last && considered < supplier_limit {
                 let mut x = columns.first;
-                while x <= columns.last && considered < DISCOVERY_CANDIDATES {
+                while x <= columns.last && considered < supplier_limit {
                     let cell = y * side + x;
-                    let mut j = spatial[cell as usize];
-                    let begin = j;
+                    let begin = search::supplier_start(&*economy, spatial, parameters, id, cell);
+                    let mut j = begin;
                     let length = spatial[(cell + 1) as usize] - begin;
-                    let limit = begin + search::supplier_samples(parameters, length);
+                    let limit = begin + search::supplier_samples(config, parameters, length);
                     let stride = search::supplier_stride(&economy.actors, parameters, id, length);
                     let mut cursor = (parameters.settlement_rotation + id) % max(length, 1);
                     if columns.distance_to(x) + rows.distance_to(y) > config.search_radius {
                         j = spatial[(cell + 1) as usize];
                     }
-                    while j < limit && considered < DISCOVERY_CANDIDATES {
+                    while j < limit && considered < supplier_limit {
                         let previous = j;
                         let rotated = begin + cursor;
                         let mut skipped = 0u32;
@@ -185,10 +206,13 @@ pub(in crate::simulation::economy) fn propose(
                             let firm = spatial[(side * side + 1u32 + rotated) as usize];
                             let dist = economy.actors.distance(id, firm);
                             let mut accessible = dist <= config.search_radius;
-                            if comptime!(market == MarketFlag::Input(InputMarket::Grain)) {
+                            if comptime!(matches!(market, MarketFlag::Input(_))) {
                                 accessible = accessible
-                                    && household_production::grain_counterparty(
-                                        &*economy, id, firm,
+                                    && household_production::counterparty(
+                                        &*economy,
+                                        id,
+                                        firm,
+                                        parameters.traded_good(),
                                     );
                             }
                             if accessible {
@@ -209,6 +233,7 @@ pub(in crate::simulation::economy) fn propose(
                                 };
                                 let terms = household_production::TradeFields::new(
                                     &economy.actors,
+                                    economy.ledger.config,
                                     firm,
                                     good,
                                 );
@@ -227,7 +252,7 @@ pub(in crate::simulation::economy) fn propose(
                                     }
                                 }
                                 if inspect {
-                                    let mut eligible = dist <= config.search_radius;
+                                    let mut eligible = accessible;
 
                                     let mut score =
                                         ticks(quote + route.days * config.delivery_penalty, 0u32);
@@ -239,6 +264,10 @@ pub(in crate::simulation::economy) fn propose(
                                         score = offer.score;
                                         offer.quantity
                                     } else {
+                                        eligible = eligible
+                                            && search::accepts_input_quote(
+                                                &*economy, control, parameters, id, quote,
+                                            );
                                         let affordable = minimum(
                                             wanted,
                                             divide(purchasing_power, max(quote, 1u32)),
@@ -250,7 +279,8 @@ pub(in crate::simulation::economy) fn propose(
                                             .actors
                                             .kind(firm)
                                             .is(comptime!(ActorKind::Household))
-                                            && economy.actors.kind(firm).output() == good;
+                                            && (economy.actors.kind(firm).output() == good
+                                                || pricing::distributor(&economy.ledger, firm));
                                         if eligible
                                             && firm != id
                                             && known_producer

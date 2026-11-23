@@ -152,7 +152,8 @@ impl StartingFarm {
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub(super) struct StartingProduction {
     pub capacities: [u32; Good::COUNT],
-    pub daily: [u64; Good::COUNT],
+    daily: [u64; Good::COUNT],
+    grain_per_dealer: u64,
     stocks: [u64; Good::COUNT],
 }
 
@@ -165,16 +166,36 @@ impl StartingProduction {
             }
         }
         let demand = StartingDemand::new(config);
+        let grain_dealers = retailers
+            .values()
+            .filter(|store| store.good == Good::Grain)
+            .count() as u64;
+        let household_grain = match grain_dealers {
+            0 => 0,
+            _ => demand.household_grain,
+        };
         let daily = Good::ALL.map(|good| {
-            demand.daily[good as usize - 1]
-                .div_ceil(u64::from(firm_counts[good as usize - 1].max(1)))
-                .max(1)
+            let required = demand.daily[good as usize - 1];
+            match good {
+                Good::Grain => required.saturating_sub(household_grain),
+                _ => required,
+            }
+            .div_ceil(u64::from(firm_counts[good as usize - 1].max(1)))
+            .max(1)
         });
+        let grain_per_dealer = match household_grain {
+            0 => daily[Good::Grain as usize - 1],
+            _ => household_grain.div_ceil(grain_dealers),
+        };
         let production = Good::ALL.map(|good| {
-            demand
-                .production(good)
-                .div_ceil(u64::from(firm_counts[good as usize - 1].max(1)))
-                .max(1)
+            match good {
+                Good::Grain => demand
+                    .production(good)
+                    .saturating_sub((household_grain * 5).div_ceil(4)),
+                _ => demand.production(good),
+            }
+            .div_ceil(u64::from(firm_counts[good as usize - 1].max(1)))
+            .max(1)
         });
         let capacities = std::array::from_fn(|good| match (Good::ALL[good], config.economy) {
             (Good::Housing, _) => 0,
@@ -213,7 +234,45 @@ impl StartingProduction {
         Self {
             capacities,
             daily,
+            grain_per_dealer,
             stocks,
+        }
+    }
+
+    pub fn daily(&self, good: Good, retailer: Option<&Distributor>) -> u64 {
+        match (good, retailer) {
+            (Good::Grain, Some(_)) => self.grain_per_dealer,
+            _ => self.daily[good as usize - 1],
+        }
+    }
+
+    pub fn retail_capacity(&self, config: &ScenarioConfig, store: &Distributor) -> u32 {
+        let days = match (store.good, config.household_production) {
+            (Good::Grain, HouseholdProduction::Available { harvest_days, .. })
+                if config.version >= 5 =>
+            {
+                store.reserve_days.div_ceil(harvest_days)
+            }
+            _ => 1,
+        };
+        (self.daily(store.good, Some(store)) * u64::from(days))
+            .div_ceil(u64::from(store.units_per_shift))
+            .clamp(1, u64::from(config.capacity)) as u32
+    }
+
+    pub fn working_cash(
+        &self,
+        config: &ScenarioConfig,
+        retailer: Option<&Distributor>,
+    ) -> Result<u64> {
+        match retailer {
+            Some(store) if store.good == Good::Grain && config.version >= 5 => {
+                let stock = u128::from(self.grain_per_dealer) * u128::from(store.reserve_days);
+                Ok(config
+                    .firm_cash
+                    .max(u64::try_from(stock * u128::from(config.prices[0]))?))
+            }
+            _ => Ok(config.firm_cash),
         }
     }
 
@@ -225,7 +284,7 @@ impl StartingProduction {
         retailer: Option<&Distributor>,
     ) -> impl Iterator<Item = StartingStock> + use<'a> {
         let slot = output as usize - 1;
-        let daily = self.daily[slot];
+        let daily = self.daily(output, retailer);
         let economy = config.economy;
         let units = match retailer {
             Some(store) => daily * u64::from(config.buffer_days.min(store.reserve_days)),
@@ -252,6 +311,7 @@ impl StartingProduction {
 pub(super) struct StartingDemand {
     pub daily: [u64; Good::COUNT],
     food: u64,
+    household_grain: u64,
     calibration: Option<super::food::FoodPolicy>,
 }
 
@@ -298,20 +358,35 @@ impl StartingDemand {
                             .farmers(config.population_size()),
                     ),
                 };
-                let grain = plots * u64::from(annual_yield_per_plot);
-                let bread = config.food.map_or(grain, |food| food.bread(grain));
+                let crop = plots * u64::from(annual_yield_per_plot);
+                let surplus = match config.version {
+                    2 => crop,
+                    _ => crop - crop.div_ceil(u64::from(food::WheatHusbandry::GROSS_PARTS)),
+                };
+                let bread = config.food.map_or(surplus, |food| food.bread(surplus));
                 (bread / 365).min(
                     (farming_households * u64::from(config.household_need) * requirements)
                         .div_ceil(1000),
                 )
             }
         };
+        let baking_flour = match config.version {
+            2 => 0,
+            _ => config
+                .food
+                .map_or(harvest, |policy| policy.inputs(Good::Bread, harvest)),
+        };
+        let household_grain = config.food.map_or(baking_flour, |policy| {
+            policy.inputs(Good::Flour, baking_flour)
+        });
         let mut demand = Self {
             daily: [0; Good::COUNT],
             food,
+            household_grain,
             calibration: config.food,
         };
         demand.include(Good::Bread, food.saturating_sub(harvest));
+        demand.include(Good::Flour, baking_flour);
         let population = households * u64::from(members);
         demand.include(Good::Wood, population);
         demand.include(Good::Coal, population);

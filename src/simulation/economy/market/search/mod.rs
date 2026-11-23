@@ -13,16 +13,17 @@ mod ranking;
 mod spatial;
 use candidates::*;
 pub(in crate::simulation::economy) use candidates::{
-    OfferRequest, supplier_samples, supplier_stride, supply_score,
+    OfferRequest, accepts_input_quote, supplier_samples, supplier_start, supplier_stride,
+    supply_score,
 };
 use demand::BuyerDemand;
-use ranking::{CandidateRank, group_winner};
 pub(super) use spatial::SearchAxis;
 mod empty;
 mod filter;
 mod fuel;
 pub(in crate::simulation) mod grain;
 mod index;
+pub(super) mod local;
 mod road;
 pub(in crate::simulation) use road::SIDE as ROAD_TILE_SIDE;
 
@@ -65,7 +66,7 @@ pub(in crate::simulation) enum SearchStage {
     Search,
     SearchIndexed,
     GrainFirms,
-    GrainDealerTiles,
+    RefreshGrainSupply,
     SearchGrain,
     #[cfg_attr(not(test), allow(dead_code))]
     SearchFuel,
@@ -226,17 +227,16 @@ impl GpuPass<SearchInput> for Search {
                         sync_cube();
                     }
                 }
-                SearchStage::GrainDealerTiles => grain::dealer_tiles(
+                SearchStage::RefreshGrainSupply => grain::refresh_supply(
                     &EconomyView::new(&mut input.state, &input.actors, &input.config),
                     &input.spatial,
-                    &mut input.searches,
-                    &input.control,
-                    &input.parameters,
+                    &mut input.scratch,
                 ),
                 SearchStage::GrainFirms => grain::collect_firms(
                     &EconomyView::new(&mut input.state, &input.actors, &input.config),
                     &input.spatial,
                     &mut input.searches,
+                    &mut input.scratch,
                     &input.control,
                 ),
                 SearchStage::Search | SearchStage::SearchGrain | SearchStage::SearchIndexed => {

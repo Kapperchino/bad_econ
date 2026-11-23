@@ -23,7 +23,7 @@ impl ProvisionMarket {
     ) -> Result<()> {
         simulation.provisioning = self.provisioning;
         let market = self.market;
-        let rounds = self.provisioning.rounds();
+        let rounds = self.provisioning.rounds(simulation.matching_rounds(market));
         (0..rounds).try_fold(MatchingState::Searching, |state, round| {
             match (state, self.provisioning, market, round + 1 == rounds) {
                 (MatchingState::Searching, _, _, _)
@@ -39,6 +39,17 @@ impl ProvisionMarket {
                 _ => Ok(MatchingState::Exhausted),
             }
         })?;
+        let parameters = simulation.parameters(
+            Phase::ProvisionPurchase,
+            market,
+            0,
+            simulation.metadata.actors.len(),
+        )?;
+        simulation.feedback_operation(
+            EconomyStage::RetailOrders,
+            simulation.metadata.actors.len() - simulation.config.first_firm as usize,
+            &parameters,
+        );
         simulation.matching_round = MATCHING_ROUNDS - 1;
         if let (Market::Household, Some(_), Provisioning::Standard | Provisioning::Choice) =
             (market, simulation.scenario.config().rent, self.provisioning)
@@ -66,9 +77,7 @@ impl Simulation {
         trace: Trace,
         evidence: &mut PhaseEvidence,
     ) -> Result<()> {
-        self.railways(RailStage::Access);
-        self.railways(RailStage::Routes);
-        self.railways(RailStage::Quotes);
+        self.refresh_freight_quotes();
         self.freight_activity = match self.freight_activity {
             #[cfg(test)]
             FreightActivity::Unconditional => FreightActivity::Unconditional,
@@ -94,8 +103,9 @@ impl Simulation {
         let routing = self.config.railway.replace_route_availability(availability);
         let result = ProvisionMarket::sequence(&self.scenario)
             .into_iter()
-            .filter(|request| match request.market {
-                Market::Consumer(Good::Coal | Good::Wood) => heating > 0,
+            .filter(|request| match (request.market, request.provisioning) {
+                (Market::Consumer(Good::Coal | Good::Wood), Provisioning::Minimum) => heating > 2,
+                (Market::Consumer(Good::Coal | Good::Wood), _) => heating > 0,
                 _ => true,
             })
             .try_for_each(|request| request.clear(self, trace, evidence));
@@ -111,7 +121,9 @@ impl Simulation {
             self.gpu(),
             &self.control,
             self.day as u32,
+            self.scenario.config().seed,
             &self.searches.requests,
+            &self.work.proposals,
         );
         self.fault_check()?;
         self.market_replay = MarketReplay::Reusable;

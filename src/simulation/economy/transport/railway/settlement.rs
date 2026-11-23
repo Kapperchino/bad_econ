@@ -1,5 +1,6 @@
 use super::*;
 use crate::simulation::DeviceEconomy;
+use crate::simulation::economy::parameters::{Discovery, MarketClock};
 
 use crate::domain::railway::{
     FREIGHT_ACCOUNT_WORDS as ACCOUNT_WORDS, FREIGHT_BOOKING_WORDS, FREIGHT_CLAIM_WORDS,
@@ -124,6 +125,49 @@ enum BookingState {
 }
 
 #[derive(CubeType, CubeLaunch)]
+struct FreightParameters {
+    #[cube(comptime)]
+    clock: MarketClock,
+    #[cube(comptime)]
+    discovery: Discovery,
+    good: u32,
+    day: u32,
+    count: u32,
+    offset: u32,
+    sort_count: u32,
+    sort_source: u32,
+}
+
+impl From<&EconomyParameters> for FreightParametersLaunch {
+    fn from(parameters: &EconomyParameters) -> Self {
+        Self {
+            clock: parameters.clock,
+            discovery: parameters.discovery,
+            good: parameters.good,
+            day: parameters.day,
+            count: parameters.count,
+            offset: parameters.offset,
+            sort_count: parameters.sort_count,
+            sort_source: parameters.sort_source,
+        }
+    }
+}
+
+#[cube]
+impl FreightParameters {
+    fn refresh(&mut self, config: &EconomyConfig) {
+        if comptime!(self.clock == MarketClock::Device) {
+            self.day = config.market_table[Good::COUNT];
+            self.good = config.market_table[Good::COUNT + 2usize];
+        }
+    }
+
+    fn active(&self, control: &[Atomic<u32>]) -> u32 {
+        orders::active_count(control, comptime!(self.discovery), self.sort_count)
+    }
+}
+
+#[derive(CubeType, CubeLaunch)]
 struct FreightSettlementInput {
     state: Box<[u32]>,
     actors: Box<[u32]>,
@@ -140,7 +184,7 @@ struct FreightSettlementInput {
     claim_source: u32,
     claim_offsets: u32,
     progress: Box<[Atomic<u32>]>,
-    parameters: EconomyParameters,
+    parameters: FreightParameters,
     #[cube(comptime)]
     stage: Stage,
     #[cube(comptime)]
@@ -154,7 +198,7 @@ impl GpuPass<FreightSettlementInput> for SettleFreight {
     type Output = ();
 
     fn execute(mut input: FreightSettlementInput) {
-        input.parameters.refresh(&mut input.config);
+        input.parameters.refresh(&input.config);
 
         if execution_enabled(&input.progress, &input.control, comptime!(input.execution)) {
             input.settle_freight(ABSOLUTE_POS as u32);

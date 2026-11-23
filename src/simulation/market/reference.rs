@@ -3,7 +3,7 @@ use crate::{
     domain::{Good, Market, Phase, PhaseEvidence},
     simulation::{
         Execution, Simulation, Trace,
-        economy::{EconomyStage, policy::MATCHING_ROUNDS},
+        economy::EconomyStage,
         execute, parallel,
         storage::{
             buffers::SchedulerBuffers,
@@ -225,7 +225,7 @@ impl ReferenceRound {
         matches!(
             (
                 self.market,
-                simulation.matching_round + 1 == MATCHING_ROUNDS
+                simulation.matching_round + 1 == simulation.matching_rounds(self.market)
             ),
             (
                 Market::Input(_) | Market::Consumer(_) | Market::Household,

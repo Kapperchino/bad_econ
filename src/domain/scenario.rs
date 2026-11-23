@@ -26,13 +26,19 @@ pub struct Scenario {
     production: supply::StartingProduction,
     starting_prices: prices::StartingPrices,
     retailers: std::collections::BTreeMap<u64, enterprise::Distributor>,
+    grain_markets: setup::GrainMarkets,
     initial_actors: std::sync::Arc<ActorRows>,
     initial_employment: employment::InitialEmployment,
     cohorts: Option<std::sync::Arc<cohorts::CohortLayout>>,
 }
 impl Scenario {
     fn agrarian_inputs(&self) -> std::collections::BTreeSet<Good> {
-        let mut inputs = std::collections::BTreeSet::from([Good::Bread, Good::Tools, Good::Wood]);
+        let mut inputs =
+            std::collections::BTreeSet::from([Good::Bread, Good::Tools, Good::Wood, Good::Coal]);
+        if let enterprise::HouseholdProduction::Available { .. } = self.config.household_production
+        {
+            inputs.extend([Good::Grain, Good::Flour]);
+        }
         for firm in self.initial_actors.firm_indices() {
             let good = Good::from_index(self.actor(firm).kind).expect("validated firm");
             inputs.extend(good.inputs().into_iter().flatten());
@@ -111,7 +117,7 @@ impl Scenario {
         };
         calendar::Weather { harvest, ..weather }
     }
-    fn initial_price(&self, good: Good) -> u32 {
+    pub(crate) fn initial_price(&self, good: Good) -> u32 {
         self.starting_prices.good(good)
     }
     pub fn opening_totals(&self) -> &InitialTotals {
@@ -175,6 +181,7 @@ impl Scenario {
     }
     pub fn fields(&self) -> usize {
         BASE_FIELDS
+            + super::RetailAccount::FIELDS
             + 2 * self.ring() * Good::COUNT
             + self.rail_geography.blocks(self.actors()) * railway::RailCapacityField::COUNT
     }
@@ -409,11 +416,20 @@ impl Scenario {
                     }
                 };
                 let retailer = self.retailers.get(&identity);
-                let position = match (kind, retailer) {
-                    (0, _) => match (
+                let position = match (kind, retailer, self.grain_markets.sites.get(&index)) {
+                    (0, _, _) => match (
                         config.household_production,
                         employment::InitialSettlement::new(&config).worker(index),
                     ) {
+                        (enterprise::HouseholdProduction::Available { .. }, None)
+                            if !self.grain_markets.villages.is_empty() =>
+                        {
+                            let village = (u64::from(position.x) * u64::from(config.map_size)
+                                + u64::from(position.y))
+                                % self.grain_markets.villages.len() as u64;
+                            self.source_actor(self.grain_markets.villages[village as usize])
+                                .position
+                        }
                         (enterprise::HouseholdProduction::Available { .. }, None) => self
                             .resources
                             .place(Good::Grain, identity, config, position),
@@ -428,7 +444,16 @@ impl Scenario {
                             None => position,
                         },
                     },
-                    (_, Some(_)) => position,
+                    (_, _, Some(site)) => self.source_actor(*site).position,
+                    (_, Some(store), _)
+                        if config.version >= 5
+                            && config.economy == Economy::Industrial
+                            && store.good == Good::Grain =>
+                    {
+                        self.resources
+                            .place(Good::Grain, identity, config, position)
+                    }
+                    (_, Some(_), _) => position,
                     _ => self.resources.place(
                         Good::from_index(kind).expect("generated firm good"),
                         identity,
@@ -443,11 +468,7 @@ impl Scenario {
                     owner: index as u32 % config.population_size(),
                     capacity: match (kind, retailer) {
                         (0, _) => 1,
-                        (_, Some(store)) => self.production.daily[kind as usize - 1]
-                            .div_ceil(u64::from(store.units_per_shift))
-                            .max(1)
-                            .min(u64::from(config.capacity))
-                            as u32,
+                        (_, Some(store)) => self.production.retail_capacity(config, store),
                         _ => self.production.capacities[kind as usize - 1],
                     },
                 }

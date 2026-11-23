@@ -28,9 +28,9 @@ use super::{
     pass::GpuPass,
     storage::{
         flags::{
-            ActorKind, COMPLETED_WORD, CONSTRUCTED_EVENTS_WORD, CONTROL_WORDS, EventStatus,
-            FaultFlags, InputMarket, KernelActorKind, KernelAuthorization, KernelEventStatus,
-            KernelFaults, MarketFlag, PROGRESS_WORD,
+            ActorKind, COMPLETED_WORD, CONSTRUCTED_EVENTS_WORD, CONTROL_WORDS, ConsumerMarket,
+            EventStatus, FaultFlags, InputMarket, KernelActorKind, KernelAuthorization,
+            KernelEventStatus, KernelFaults, MarketFlag, PROGRESS_WORD,
         },
         layout::*,
         state::*,
@@ -95,6 +95,7 @@ pub enum EconomyStage {
     GroupRadixLocal,
     GroupRadixScatter,
     InputQuotes,
+    RetailOrders,
 }
 
 impl EconomyStage {

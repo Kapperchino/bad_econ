@@ -59,8 +59,15 @@ impl Simulation {
                 phase: phase as u32,
                 actor: 0,
                 purpose: 0x5e771e,
-                index: u64::from(market.code()) * MATCHING_ROUNDS as u64
-                    + self.matching_round as u64,
+                index: match market != Market::Input(crate::domain::Good::Grain)
+                    || self.matching_round < MATCHING_ROUNDS
+                {
+                    true => {
+                        u64::from(market.code()) * MATCHING_ROUNDS as u64
+                            + self.matching_round as u64
+                    }
+                    false => ((u64::from(market.code()) + 1) << 32) | self.matching_round as u64,
+                },
             }
             .draw()
                 % self.metadata.actors.len().max(1) as u64) as u32,

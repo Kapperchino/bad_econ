@@ -1,6 +1,8 @@
 pub const MATCHING_ROUNDS: usize = 4;
 pub const RETAINED_LABOR_ROUND: usize = MATCHING_ROUNDS;
 pub const DISCOVERY_CANDIDATES: u32 = 8;
+pub const MAX_GRAIN_COLLECTION_ROUNDS: usize = 32;
+pub const GRAIN_MARKET_QUOTES: u32 = 32;
 pub const HOUSEHOLD_SEARCH_SAMPLES: u32 = 128;
 pub const COMMUTE_LEGS: u32 = 2;
 pub const POLICY_SCALE: u32 = 1000;

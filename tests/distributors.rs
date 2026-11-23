@@ -1,8 +1,11 @@
 use super::support;
 use anyhow::Result;
 use bad_econ::{
-    domain::{enterprise::Distributor, *},
-    simulation::Simulation,
+    domain::{
+        enterprise::{Distributor, HouseholdProduction},
+        *,
+    },
+    simulation::{Simulation, Trace},
 };
 
 fn economy() -> Result<Scenario> {
@@ -79,6 +82,36 @@ fn economy() -> Result<Scenario> {
 }
 
 #[test]
+fn buying_tools_preserves_the_delivered_cost_of_resale_stock_on_gpu() -> Result<()> {
+    let mut config = economy()?.config().clone();
+    config.household_production = HouseholdProduction::industrial();
+    let firms = &mut config.population.as_mut().unwrap().firms;
+    firms[2].good = Good::Tools;
+    firms[2].technique = Technique::new(60, 1, 1)?;
+    firms[2].price = 400;
+    firms[2].position = firms[1].position;
+    firms[2].inventories[Good::Tools as usize - 1] = 100;
+    let scenario = Scenario::new(config)?;
+    let dealer = scenario.index_of(5).unwrap();
+    let device = support::device(64)?;
+    for trace in [Trace::Discard, Trace::Record] {
+        let mut simulation = Simulation::new(scenario.clone(), device.clone())?;
+        for phase in Phase::ALL {
+            simulation.phase(phase, trace)?;
+        }
+        let settled = simulation.download()?;
+        let incoming = |good: Good| {
+            settled.values[(TRANSIT_FIELDS + good as usize - 1) * settled.actors.len() + dealer]
+        };
+        assert!(incoming(Good::Bread) > 0);
+        assert_eq!(incoming(Good::Tools), 2);
+        assert_eq!(settled.get(Field::ReplacementCost, dealer), 13);
+        simulation.checkpoint()?.restore()?;
+    }
+    Ok(())
+}
+
+#[test]
 fn grocery_restock_delivery_staffing_and_resale_conserve_food_and_cash() -> Result<()> {
     let scenario = economy()?;
     let mut simulation = Simulation::new(scenario.clone(), support::device(64)?)?;
@@ -93,7 +126,7 @@ fn grocery_restock_delivery_staffing_and_resale_conserve_food_and_cash() -> Resu
     assert_eq!(second.get(Field::Produced, 4), 0);
     assert_eq!(simulation.snapshot.produced[Good::Bread as usize - 1], 0);
     assert!(second.get(Field::RetailOpen, 4) > 0);
-    assert_eq!(second.get(Field::ReplacementCost, 4), 10);
+    assert_eq!(second.get(Field::ReplacementCost, 4), 13);
     assert!(second.get(Field::Price, 4) > 10);
     simulation.advance()?;
     assert!(simulation.snapshot.consumed > 0);

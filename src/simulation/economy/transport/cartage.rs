@@ -10,6 +10,17 @@ pub(in crate::simulation::economy) fn rate(config: &EconomyConfig, days: u32) ->
 }
 
 #[cube]
+pub(in crate::simulation::economy) fn road_price(
+    config: &EconomyConfig,
+    control: &[Atomic<u32>],
+    quote: Ticks,
+    distance: u32,
+    days: u32,
+) -> Ticks {
+    plus(quote, ticks(select(distance > 0, rate(config, days), 0), 0)).record(control)
+}
+
+#[cube]
 pub(in crate::simulation::economy) fn delivered_price(
     config: &EconomyConfig,
     quote: u32,
@@ -61,11 +72,13 @@ struct CartageInput {
     state: Box<[u32]>,
     actors: Box<[u32]>,
     drivers: Box<[u32]>,
+    roster: Box<[u32]>,
     manifest: Box<[u32]>,
     config: EconomyConfig,
     control: Box<[Atomic<u32>]>,
     day: u32,
     offset: u32,
+    round: u32,
     firms: u32,
     #[cube(comptime)]
     stage: CartageStage,
@@ -79,6 +92,38 @@ struct HaulGoods;
 impl System for Cartage {
     type Input = CartageInput;
     type Passes = gpu_passes![HaulGoods];
+}
+
+#[cube(launch)]
+fn available_carters(
+    state: &mut [u32],
+    config: &EconomyConfig,
+    drivers: &[u32],
+    roster: &mut [u32],
+    firms: u32,
+) {
+    let ledger = Ledger::new(state, config);
+    let index = ABSOLUTE_POS as u32;
+    let count = drivers.len() as u32 - firms;
+    if index < count {
+        let actor = drivers[(firms + index) as usize];
+        let available = ledger.number(Field::Time, actor) > 0
+            && ledger.number(Field::Worker, actor) != NO_ACTOR;
+        roster[index as usize] = u32::cast_from(available);
+    }
+}
+
+#[cube(launch)]
+fn assign_carters(drivers: &[u32], roster: &mut [u32], firms: u32) {
+    let index = ABSOLUTE_POS as u32;
+    let count = drivers.len() as u32 - firms;
+    if index < count {
+        let position = roster[index as usize];
+        let previous = select(index > 0, roster[(max(index, 1) - 1) as usize], 0);
+        if position > previous {
+            roster[(count + position - 1) as usize] = drivers[(firms + index) as usize];
+        }
+    }
 }
 
 #[cube(launch)]
@@ -197,16 +242,17 @@ impl GpuPass<CartageInput> for HaulGoods {
     fn execute(mut input: CartageInput) {
         let mut economy = EconomyView::new(&mut input.state, &input.actors, &input.config);
         let index = ABSOLUTE_POS as u32;
-        let start = match comptime!(input.stage) {
-            CartageStage::Household => input.firms,
-            _ => 0,
-        };
+        let partners = input.drivers.len() as u32 - input.firms;
         let count = match comptime!(input.stage) {
             CartageStage::Fleet => input.firms,
-            _ => input.drivers.len() as u32 - start,
+            CartageStage::Household => input.roster[(partners - 1) as usize],
+            CartageStage::Pay => input.drivers.len() as u32,
         };
         if index < count {
-            let driver = input.drivers[(start + index) as usize];
+            let driver = match comptime!(input.stage) {
+                CartageStage::Fleet | CartageStage::Pay => input.drivers[index as usize],
+                CartageStage::Household => input.roster[(partners + index) as usize],
+            };
             match comptime!(input.stage) {
                 CartageStage::Fleet | CartageStage::Household => {
                     let time_field = comptime!(match input.stage {
@@ -214,7 +260,7 @@ impl GpuPass<CartageInput> for HaulGoods {
                         _ => Field::Time,
                     });
                     let slots = ceildiv(input.config.actors, count);
-                    let first = (index + input.offset) % count;
+                    let first = (index + input.offset % count + input.round * count / 2) % count;
                     let mut slot = 0;
                     while slot < slots && economy.ledger.number(comptime!(time_field), driver) > 0 {
                         let client = first + ((slot + input.day % slots) % slots) * count;
@@ -255,7 +301,9 @@ pub(in crate::simulation) fn dispatch(
     }: DeviceEconomy<'_>,
     control: &CubeTensor,
     day: u32,
+    seed: u64,
     manifest: &CubeTensor,
+    roster: &CubeTensor,
 ) {
     let carriers = config.cartage_accounts.meta.num_elements() as u32;
     let partners = carriers - config.cartage_firms;
@@ -276,20 +324,46 @@ pub(in crate::simulation) fn dispatch(
         }
         false => Feature::Disabled,
     };
+    if partners > 0 {
+        let count = partners as usize;
+        let dim = CubeDim::new_1d(device.workgroup);
+        available_carters::launch(
+            &device.client,
+            device.count(count),
+            dim,
+            state.buffer_arg(),
+            config.launch(),
+            config.cartage_accounts.buffer_arg(),
+            roster.buffer_arg(),
+            config.cartage_firms,
+        );
+        parallel::scan(device, roster, 0, count);
+        assign_carters::launch(
+            &device.client,
+            device.count(count),
+            dim,
+            config.cartage_accounts.buffer_arg(),
+            roster.buffer_arg(),
+            config.cartage_firms,
+        );
+    }
     let fleet =
-        (config.cartage_firms > 0).then_some((CartageStage::Fleet, day, config.cartage_firms));
-    let households = (0..partners.min(4)).map(|round| {
-        (
-            CartageStage::Household,
-            ((1 + u64::from(day) * 4 + u64::from(round)) % u64::from(partners)) as u32,
-            partners,
-        )
-    });
-    for (stage, offset, count) in
-        fleet
-            .into_iter()
-            .chain(households)
-            .chain(std::iter::once((CartageStage::Pay, 0, carriers)))
+        (config.cartage_firms > 0).then_some((CartageStage::Fleet, day, 0, config.cartage_firms));
+    let rotation = crate::arithmetic::DrawKey {
+        seed,
+        day: day.into(),
+        phase: Phase::ProvisionPurchase as u32,
+        actor: 0,
+        purpose: 0x63617274,
+        index: 0,
+    }
+    .draw() as u32;
+    let households =
+        (0..partners.min(2)).map(|round| (CartageStage::Household, rotation, round, partners));
+    for (stage, offset, round, count) in fleet
+        .into_iter()
+        .chain(households)
+        .chain(std::iter::once((CartageStage::Pay, 0, 0, carriers)))
     {
         Cartage::launch_elements(
             device,
@@ -298,12 +372,14 @@ pub(in crate::simulation) fn dispatch(
                 state: state.buffer_arg(),
                 actors: actors.buffer_arg(),
                 drivers: config.cartage_accounts.buffer_arg(),
+                roster: roster.buffer_arg(),
                 manifest: manifest.buffer_arg(),
                 manifest_mode,
                 config: config.launch(),
                 control: control.buffer_arg(),
                 day,
                 offset,
+                round,
                 firms: config.cartage_firms,
                 stage,
             },

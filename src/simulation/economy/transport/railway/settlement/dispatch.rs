@@ -6,7 +6,7 @@ struct DispatchInput {
     dispatches: Box<[u32]>,
     workgroup: u32,
     config: EconomyConfig,
-    parameters: crate::simulation::economy::parameters::EconomyParameters,
+    parameters: FreightParameters,
     spatial: Box<[u32]>,
     #[cube(comptime)]
     resource_selection: ResourceSelection,
@@ -31,12 +31,12 @@ impl GpuPass<DispatchInput> for PrepareDispatch {
     type Output = ();
 
     fn execute(mut input: DispatchInput) {
-        input.parameters.refresh(&mut input.config);
+        input.parameters.refresh(&input.config);
         let active = input.control[CONSTRUCTED_EVENTS_WORD].load();
         let layout = FreightParticipants::new(
             &input.config,
             &input.spatial,
-            &input.parameters,
+            input.parameters.good,
             active,
             comptime!(input.resource_selection),
         );
@@ -154,7 +154,7 @@ pub fn launch_buffered(
                 dispatches: buffers.dispatches.buffer_arg(),
                 workgroup: device.workgroup,
                 config: config.launch(),
-                parameters: parameters.launch(),
+                parameters: parameters.into(),
                 spatial: spatial.buffer_arg(),
                 resource_selection,
             },
@@ -196,7 +196,7 @@ pub fn launch_buffered(
                 claim_source: claims::settlement_source(buffers),
                 claim_offsets: claims::offsets_start(buffers.claim_capacity),
                 progress: buffers.progress.buffer_arg(),
-                parameters: parameters.launch(),
+                parameters: parameters.into(),
                 stage,
                 resource_selection,
                 execution,
@@ -208,7 +208,7 @@ pub fn launch_buffered(
                     offset,
                     max_groups,
                 } => {
-                    let groups = max_groups.clamp(1, 512);
+                    let groups = max_groups.clamp(1, 32);
                     strided_freight::launch(
                         &device.client,
                         CubeCount::Static(groups, 1, 1),
@@ -285,14 +285,13 @@ impl FreightParticipants {
     fn new(
         config: &EconomyConfig,
         spatial: &[u32],
-        parameters: &crate::simulation::economy::parameters::EconomyParameters,
+        good: u32,
         active: u32,
         #[comptime] selection: ResourceSelection,
     ) -> Self {
         let cells = config.spatial_side * config.spatial_side;
         let base = 2 * (cells + 1 + config.actors);
         let firms = spatial[(base + cells) as usize];
-        let good = parameters.traded_good();
         let home = good == comptime!(Good::Bread as u32) || good == comptime!(Good::Grain as u32);
         let suppliers = spatial[cells as usize];
         let indexed = comptime!(selection == ResourceSelection::MarketSuppliers)
@@ -401,7 +400,7 @@ impl GpuPass<AdmissionInput> for AdmitFreightClaims {
 
 #[cube(launch)]
 fn strided_freight(mut input: FreightSettlementInput, counts: &[u32], offset: u32) {
-    input.parameters.refresh(&mut input.config);
+    input.parameters.refresh(&input.config);
     let groups = counts[offset as usize] * counts[offset as usize + 1];
     let mut group = CUBE_POS as u32;
     if execution_enabled(&input.progress, &input.control, comptime!(input.execution)) {
@@ -418,11 +417,11 @@ impl FreightSettlementInput {
         let actors = ActorTable::new(&self.actors);
         let cells = self.config.spatial_side * self.config.spatial_side;
         let base = 2 * (cells + 1 + self.config.actors);
-        let active = orders::active(&self.control, &self.parameters);
+        let active = self.parameters.active(&self.control);
         let layout = FreightParticipants::new(
             &self.config,
             &self.spatial,
-            &self.parameters,
+            self.parameters.good,
             active,
             comptime!(self.resource_selection),
         );

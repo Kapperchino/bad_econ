@@ -13,13 +13,14 @@ pub(super) fn prefix_slot(successes: &[Atomic<u32>], count: u32, peer: u32) -> u
 
 #[cube]
 pub(super) fn sample_order(
-    ledger: &Ledger<'_>,
+    economy: &EconomyView<'_>,
     successes: &[Atomic<u32>],
     parameters: &EconomyParameters,
     actor: u32,
     seller: u32,
     quantity: Ticks,
 ) {
+    let ledger = &economy.ledger;
     let config = ledger.config;
     let position = (actor + config.actors - parameters.settlement_rotation) % config.actors;
     let units = quantity.extract(LOW_WORD);
@@ -28,7 +29,13 @@ pub(super) fn sample_order(
         && units > 0
         && units <= u32::MAX / comptime!(PREFIX_BUYERS)
     {
-        let cost = times32(units, ledger.number(Field::Price, seller));
+        let terms = household_production::TradeFields::new(
+            &economy.actors,
+            config,
+            seller,
+            parameters.traded_good(),
+        );
+        let cost = times32(units, ledger.number_at(terms.price, seller));
         if !lt(ledger.value(Field::Cash, actor), cost) {
             let slot = prefix_slot(successes, config.actors, seller);
             successes[slot].fetch_add(units);
@@ -91,7 +98,7 @@ fn empty_order(
             economy.ledger.value_at(parameters.traded_good(), peer),
             zero(),
         )
-        && clearing::empty_seller_safe(&economy.ledger, parameters, peer)
+        && clearing::empty_seller_safe(economy, parameters, peer)
 }
 
 #[cube]

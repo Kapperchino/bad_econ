@@ -94,6 +94,7 @@ fn input_quotes_ignore_empty_and_distant_suppliers_on_gpu() -> Result<()> {
         )?],
     };
     let firms = &mut config.population.as_mut().unwrap().firms;
+    firms[0].capacity = 22;
     let mut empty = firms[0].clone();
     empty.identity = 5;
     empty.price = 1;

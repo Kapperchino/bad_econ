@@ -13,9 +13,16 @@ fn household_surplus_finances_construction_and_subsequent_paid_work() -> Result<
     let mut config = Scenario::baseline(252, 73, Experiment::Concentrated)?
         .config()
         .clone();
-    config.firms = 4;
+    config.firms = 5;
     config.entrepreneurship.interested_per_mille = 1000;
     config.household_production = HouseholdProduction::industrial();
+    config.land_access = Some(enterprise::LandAccess {
+        total_plots: 1,
+        allocations: vec![enterprise::LandGrant {
+            household: 1,
+            plots: 1,
+        }],
+    });
     config.demography.annual_births_per_million_fertile_women = 0;
     config.demography.mortality.background_annual_ppm = [0; 5];
     config.demography.mortality.occupational_annual_ppm = [0; Good::COUNT];
@@ -30,41 +37,58 @@ fn household_surplus_finances_construction_and_subsequent_paid_work() -> Result<
                 position: Position { x: 500, y: 500 },
                 cash: 5000,
                 inventories: if identity == 1 {
-                    Good::food([1000, 0, 4])
+                    Good::food([0, 1000, 4])
                 } else {
                     Good::food([0, 0, 4])
                 },
                 fatigue: 0,
             })
             .collect(),
-        firms: [Good::Tools, Good::Wood, Good::Bread, Good::Flour]
-            .into_iter()
-            .enumerate()
-            .map(|(index, good)| {
-                let mut inventories = [0; Good::COUNT];
-                inventories[good as usize - 1] = 2000;
-                FirmSeed {
-                    identity: 1000 + index as u64,
-                    position: Position { x: 500, y: 500 },
-                    owner: 2,
-                    good,
-                    cash: match good {
-                        Good::Tools | Good::Wood => 60,
-                        _ => 0,
-                    },
-                    inventories,
-                    capacity: 1,
-                    technique: Technique {
-                        labor_minutes: 60,
-                        input_ticks: 10 * u32::from(good.inputs()[0].is_some()),
-                        output_ticks: 10,
-                    },
-                    wage: 1,
-                    price: if good == Good::Bread { 60 } else { 10 },
-                }
-            })
-            .collect(),
+        firms: [
+            Good::Tools,
+            Good::Wood,
+            Good::Bread,
+            Good::Flour,
+            Good::Bread,
+        ]
+        .into_iter()
+        .enumerate()
+        .map(|(index, good)| {
+            let mut inventories = [0; Good::COUNT];
+            inventories[good as usize - 1] = 2000;
+            FirmSeed {
+                identity: 1000 + index as u64,
+                position: Position { x: 500, y: 500 },
+                owner: 2,
+                good,
+                cash: match good {
+                    Good::Tools | Good::Wood => 60,
+                    _ => 0,
+                },
+                inventories,
+                capacity: 1,
+                technique: Technique {
+                    labor_minutes: 60,
+                    input_ticks: 10 * u32::from(good.inputs()[0].is_some()),
+                    output_ticks: 10,
+                },
+                wage: 1,
+                price: if good == Good::Bread { 60 } else { 10 },
+            }
+        })
+        .collect(),
     });
+    let shop = &mut config.population.as_mut().unwrap().firms[4];
+    shop.cash = 100_000;
+    shop.inventories[Good::Bread as usize - 1] = 0;
+    config.distributors = vec![enterprise::Distributor {
+        firm: shop.identity,
+        good: Good::Bread,
+        handling_minutes: 60,
+        units_per_shift: 100,
+        reserve_days: 3,
+        margin_per_mille: 250,
+    }];
     let scenario = Scenario::new(config)?;
     let mut initial = scenario.initial()?;
     initial.day = 120;

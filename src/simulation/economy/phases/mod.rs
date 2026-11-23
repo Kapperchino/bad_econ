@@ -146,12 +146,26 @@ impl<'a> ActorDay<'a> {
             let distributor = economy.ledger.number(Field::EnterpriseModel, id) == 1;
             if distributor {
                 let stock = economy.ledger.value_at(kind.output(), id);
-                let demand = maximum(economy.ledger.value(Field::Demand, id), ticks(1, 0));
+                let mut demand = maximum(economy.ledger.value(Field::Demand, id), ticks(1, 0));
+                if kind.output() == comptime!(Good::Grain as u32) {
+                    let days = max(
+                        min(
+                            economy.ledger.number(Field::StockCoverage, id),
+                            config.coverage,
+                        ),
+                        1,
+                    );
+                    let daily_stock = CheckedTicks::ceiling_ratio(stock, 1, days).record(control);
+                    demand = maximum(demand, daily_stock);
+                }
                 let units = max(economy.ledger.number(Field::OutputTicks, id), 1);
-                let shifts = divide(
-                    plus(minimum(stock, demand), ticks(units - 1, 0)).record(control),
-                    units,
+                let sales = market::distribution::handling_demand(
+                    &*economy,
+                    control,
+                    id,
+                    minimum(stock, demand),
                 );
+                let shifts = divide(plus(sales, ticks(units - 1, 0)).record(control), units);
                 let capacity = ticks(economy.actors.capacity(id), 0);
                 planned = minimum(minimum(shifts, funded), capacity);
             }
@@ -185,7 +199,15 @@ impl<'a> ActorDay<'a> {
         if kind.is(comptime!(ActorKind::Household)) {
             employment::finish_day(economy, control, id);
         }
+        if kind.bits() == comptime!(Good::Grain as u32) {
+            farming::FarmSite::new(id, kind.output()).offer_wheat(
+                &mut economy.ledger,
+                control,
+                day,
+            );
+        }
         if economy.ledger.number(Field::EnterpriseModel, id) == 1 {
+            market::distribution::open(economy, control, id);
             let services = economy.ledger.value(Field::Pipeline, id);
             let services = property::PropertySite::new(id).scale_output(
                 &mut economy.ledger,
@@ -203,20 +225,16 @@ impl<'a> ActorDay<'a> {
             if comptime!(config.property_mode == Feature::Disabled) {
                 enterprises::construct_home(&mut economy.ledger, control, id);
             }
-            let rural = comptime!(config.economy == crate::domain::Economy::Agrarian)
-                || economy.ledger.number(Field::LandPlots, id) > 0;
-            let ration = times32(
-                economy.ledger.number(Field::NutritionNeed, id),
-                economy.ledger.number(Field::FoodPrice, id),
-            );
-            let unfunded = lt(economy.ledger.value(Field::Cash, id), ration);
+            let has_kitchen = food::HomeKitchen::available(&economy.ledger, id);
             let mut farm =
                 household_production::HouseholdFarm::new(&mut economy.ledger, control, id, day);
             farm.open_grain_quote();
-            if rural || unfunded {
+            if has_kitchen {
                 farm.produce();
+                farm.reserve_grain();
+            } else {
+                economy.ledger.set(Field::GrainReserve, id, zero());
             }
-            farm.reserve_grain();
         }
     }
 
@@ -256,12 +274,8 @@ impl<'a> ActorDay<'a> {
                 }
                 let bread = economy.ledger.value(Field::Bread, id);
                 let minimum_ration = economy.ledger.value(Field::NutritionNeed, id);
-                let reserve = food::HouseholdRation::new(&economy.ledger, id).consumption_reserve(
-                    &economy.ledger,
-                    control,
-                    id,
-                    day,
-                );
+                let reserve =
+                    food::HouseholdRation::new(&economy.ledger, id).consumption_reserve(config);
                 let available = maximum(minimum_ration, positive(bread, reserve));
                 let consumed = minimum(
                     minimum(bread, available),
@@ -280,7 +294,7 @@ impl<'a> ActorDay<'a> {
                 );
                 if comptime!(config.economy == crate::domain::Economy::Industrial) {
                     for offset in 0..Good::COUNT {
-                        let interval = config.consumption_intervals[offset];
+                        let interval = config.market_table[offset];
                         if interval > 1
                             && ((day + id) % max(interval, 1) == 0
                                 || consumption::scaled_luxury(config, offset as u32 + 1))
@@ -311,8 +325,17 @@ impl<'a> ActorDay<'a> {
                 if work == 0 {
                     fatigue = max(previous_fatigue, config.rest_recovery) - config.rest_recovery;
                 }
+                let workers = match comptime!(config.cohorts) {
+                    Feature::Enabled => max(economy.ledger.number(Field::EligibleWorkers, id), 1),
+                    Feature::Disabled => 1u32,
+                };
+                let home = economy.ledger.number(Field::HomeMinutes, id);
+                let research = economy.ledger.number(Field::ResearchMinutes, id);
+                let exertion = match comptime!(config.cohorts) {
+                    Feature::Enabled => (work + home + research) / workers,
+                    Feature::Disabled => work + research,
+                };
                 if comptime!(config.household_policy == Feature::Enabled) {
-                    let exertion = work + economy.ledger.number(Field::ResearchMinutes, id);
                     fatigue = KernelFatigue {
                         fatigue: previous_fatigue,
                         response: config.fatigue_response,
@@ -320,6 +343,12 @@ impl<'a> ActorDay<'a> {
                         rest_minutes: config.rest_minutes,
                     }
                     .next_fatigue();
+                } else if comptime!(config.cohorts == Feature::Enabled) {
+                    let tired = previous_fatigue + exertion * config.work_fatigue / 480;
+                    fatigue = min(
+                        max(tired, config.rest_recovery) - config.rest_recovery,
+                        POLICY_SCALE,
+                    );
                 }
                 economy.ledger.set_number(Field::Fatigue, id, fatigue);
             }
@@ -355,7 +384,8 @@ impl<'a> ActorDay<'a> {
         if !kind.is(comptime!(ActorKind::Household)) {
             let business = u32::cast_from(kind.bits() == comptime!(Good::Housing as u32))
                 + 2 * u32::cast_from(kind.bits() == comptime!(Good::Railway as u32));
-            let revenue = match business {
+            let revenue = match select(pricing::distributor(&economy.ledger, id), 3, business) {
+                3 => economy.ledger.value(Field::BusinessRevenue, id),
                 2 => zero(),
                 1 => minus(
                     economy.ledger.value(Field::RentalIncome, id),
@@ -408,11 +438,22 @@ impl<'a> ActorDay<'a> {
                 firm.advance_lifecycle(economy, day);
             }
             let old = economy.ledger.value(Field::Demand, id);
-            let signal = plus(
+            let mut signal = plus(
                 economy.ledger.value(Field::Sales, id),
                 economy.ledger.value(Field::Unfilled, id),
             )
             .record(control);
+            if pricing::distributor(&economy.ledger, id) {
+                market::distribution::close(economy, control, id);
+                signal = economy.ledger.value_at(
+                    pricing::retail_field(
+                        config,
+                        kind.output(),
+                        comptime!(crate::domain::RetailAccount::Orders),
+                    ),
+                    id,
+                );
+            }
             let demand = KernelObservation {
                 kind: comptime!(ObservationKind::Observed as u32),
                 value: signal,
@@ -420,8 +461,21 @@ impl<'a> ActorDay<'a> {
             .blend(old, config.forecast_weight, control);
             let pricing = pricing::FirmPricing::new(id, kind.output(), control);
             let target = pricing.inventory_target(&*economy, demand, day);
-            let excess = positive(economy.ledger.value_at(kind.output(), id), target);
-            let unfilled = economy.ledger.value(Field::Unfilled, id);
+            let stock = economy.ledger.value_at(kind.output(), id);
+            let mut excess = positive(stock, target);
+            let mut unfilled = economy.ledger.value(Field::Unfilled, id);
+            if comptime!(
+                config.economy == crate::domain::Economy::Industrial
+                    && config.home_mode == Feature::Enabled
+            ) && config.home.harvest_days < 365
+                && kind.output() == comptime!(Good::Grain as u32)
+                && farming::FarmSite::new(id, kind.output()).is_farm(&economy.ledger)
+            {
+                let days = farming::CropCalendar::new(config).on(day).days_to_harvest();
+                let shortage = divide(positive(target, stock), days);
+                excess = divide(excess, days);
+                unfilled = maximum(unfilled, shortage);
+            }
             let positive_sign = !lt(unfilled, excess);
             let magnitude = select(
                 positive_sign,

@@ -54,10 +54,7 @@ pub(super) fn prepare(
                 + u64::cast_from(config.starting_wage)
                     * comptime!(crate::domain::railway::CART_BILLABLE_MINUTES_PER_UNIT_DAY as u64));
         let mut station_floor = Shared::<[u32]>::new_slice(STATIONS);
-        if comptime!(config.railway.routes_enabled == Feature::Enabled)
-            && config.railway.nodes > 0
-            && config.railway.nodes <= comptime!(STATIONS as u32)
-        {
+        if config.railway.has_routes() && config.railway.nodes <= comptime!(STATIONS as u32) {
             let mut near_station = Shared::<[u32]>::new_slice(STATIONS);
             let mut farthest = u32::new(comptime!(i64::from(u32::MAX)));
             let mut station = UNIT_POS;
@@ -125,8 +122,7 @@ pub(super) fn prepare(
                     let near = nearest(x, last_x, sx) + nearest(y, last_y, sy);
                     let mut days = max(ceildiv(near, config.shipment_speed), 1);
                     let mut price = cartage::delivered_price(config, supply.quote, near, days);
-                    if comptime!(config.railway.routes_enabled == Feature::Enabled)
-                        && config.railway.nodes > 0
+                    if config.railway.has_routes()
                         && config.railway.nodes <= comptime!(STATIONS as u32)
                     {
                         let origin = config.railway.access[seller as usize * 2];

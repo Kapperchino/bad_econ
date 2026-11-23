@@ -200,7 +200,7 @@ pub(super) fn minimum_delivery_days(
     trip: u32,
 ) -> u32 {
     let mut days = max(ceildiv(trip, config.shipment_speed), 1);
-    if comptime!(config.railway.routes_enabled == Feature::Enabled) && config.railway.nodes > 0 {
+    if config.railway.has_routes() {
         let access = buyer_access + config.railway.access[seller as usize * 2 + 1];
         days = min(days, ceildiv(access, config.shipment_speed) + 1);
     }
@@ -246,14 +246,122 @@ pub(in crate::simulation::economy) fn coprime_stride(length: u32, offset: u32) -
 }
 
 #[cube]
+pub(in crate::simulation::economy) fn supplier_start(
+    economy: &EconomyView<'_>,
+    spatial: &[u32],
+    parameters: &EconomyParameters,
+    buyer: u32,
+    cell: u32,
+) -> u32 {
+    let config = economy.ledger.config;
+    let mut start = spatial[cell as usize];
+    let mut end = spatial[(cell + 1) as usize];
+    if comptime!(
+        parameters.market == MarketFlag::Input(InputMarket::Grain)
+            && config.economy == crate::domain::Economy::Industrial
+            && config.home_mode == Feature::Enabled
+    ) && end - start > HOUSEHOLD_SEARCH_SAMPLES
+        && !pricing::distributor(&economy.ledger, buyer)
+    {
+        let base = config.spatial_side * config.spatial_side + 1;
+        while start < end {
+            let middle = start + (end - start) / 2;
+            let seller = spatial[(base + middle) as usize];
+            if seller < config.first_firm {
+                start = middle + 1;
+            } else {
+                end = middle;
+            }
+        }
+    }
+    start
+}
+
+#[cube]
 pub(in crate::simulation::economy) fn supplier_samples(
+    config: &EconomyConfig,
     parameters: &EconomyParameters,
     length: u32,
 ) -> u32 {
-    match comptime!(parameters.market) {
-        MarketFlag::Household => min(length, HOUSEHOLD_SEARCH_SAMPLES),
-        _ => length,
+    let industrial = comptime!(
+        config.economy == crate::domain::Economy::Industrial
+            && config.home_mode == Feature::Enabled
+            && matches!(
+                parameters.market,
+                MarketFlag::Input(_) | MarketFlag::Consumer(_)
+            )
+    );
+    let staple = parameters.traded_good() == comptime!(Good::Grain as u32)
+        || parameters.traded_good() == comptime!(Good::Flour as u32);
+    let bounded = comptime!(parameters.market == MarketFlag::Household)
+        || (industrial && (staple || config.actors >= 4096));
+    select(bounded, min(length, HOUSEHOLD_SEARCH_SAMPLES), length)
+}
+
+#[cube]
+pub(super) fn input_target(
+    economy: &EconomyView<'_>,
+    parameters: &EconomyParameters,
+    buyer: u32,
+    wanted: Ticks,
+) -> Ticks {
+    let ledger = &economy.ledger;
+    let capacity = economy.actors.capacity(buyer);
+    let input = ledger.number(Field::InputTicks, buyer);
+    let mut target = times32(capacity, input);
+    if comptime!(
+        parameters.market == MarketFlag::Input(InputMarket::Grain)
+            && ledger.config.economy == crate::domain::Economy::Industrial
+    ) && economy.actors.kind(buyer).output() == comptime!(Good::Flour as u32)
+    {
+        let output = max(ledger.number(Field::OutputTicks, buyer), 1);
+        let needed = maximum(ledger.value(Field::Demand, buyer), ticks(1, 0));
+        let planned = minimum(needed, times32(capacity, output));
+        let shifts = ceildiv(planned.extract(LOW_WORD), output);
+        target = positive(times32(shifts, input), ledger.value(Field::Grain, buyer));
     }
+    minimum(wanted, target)
+}
+
+#[cube]
+pub(in crate::simulation::economy) fn accepts_input_quote(
+    economy: &EconomyView<'_>,
+    control: &[Atomic<u32>],
+    parameters: &EconomyParameters,
+    buyer: u32,
+    price: u32,
+) -> bool {
+    let ledger = &economy.ledger;
+    let config = ledger.config;
+    let output = economy.actors.kind(buyer).output();
+    let processor =
+        output == comptime!(Good::Flour as u32) || output == comptime!(Good::Bread as u32);
+    let mut accepts = true;
+    if comptime!(
+        matches!(parameters.market, MarketFlag::Input(_))
+            && config.economy == crate::domain::Economy::Industrial
+    ) && config.price_response > 0
+        && processor
+        && ledger.number(Field::EnterpriseModel, buyer)
+            == comptime!(crate::domain::enterprise::EnterpriseModel::Producer as u32)
+        && ledger.number(Field::FirstInput, buyer) == parameters.traded_good()
+    {
+        let inputs = ledger.number(Field::InputTicks, buyer);
+        let labor = times32(
+            ledger.number(Field::Wage, buyer),
+            ledger.number(Field::LaborMinutes, buyer),
+        );
+        let revenue = times32(
+            ledger.number(Field::Price, buyer),
+            ledger.number(Field::OutputTicks, buyer),
+        );
+        let cost = plus(labor, times32(inputs, price)).record(control);
+        let stock = ledger
+            .stock_with_transit(parameters.traded_good(), buyer)
+            .record(control);
+        accepts = !lt(revenue, cost) || lt(stock, ticks(inputs, 0));
+    }
+    accepts
 }
 
 #[cube]
@@ -272,9 +380,7 @@ pub(in crate::simulation::economy) fn supply_score(
             .kind(buyer)
             .is(comptime!(ActorKind::Household))
     {
-        let capacity = economy.actors.capacity(buyer);
-        let daily = times32(capacity, economy.ledger.number(Field::InputTicks, buyer));
-        let missing = positive(minimum(wanted, daily), amount);
+        let missing = positive(input_target(economy, parameters, buyer, wanted), amount);
         score = ticks(price.extract(LOW_WORD), missing.extract(LOW_WORD));
     }
     score
@@ -299,8 +405,7 @@ impl OfferRequest {
         let config = economy.ledger.config;
         let trip = economy.actors.distance(buyer, seller);
         let mut buyer_access = 0u32;
-        if comptime!(config.railway.routes_enabled == Feature::Enabled) && config.railway.nodes > 0
-        {
+        if config.railway.has_routes() {
             buyer_access = config.railway.access[buyer as usize * 2 + 1];
         }
         OfferRequest {
@@ -348,8 +453,9 @@ impl OfferRequest {
         let mut score = zero();
         let mut amount = zero();
         let mut accessible = dist <= config.search_radius;
-        if comptime!(market == MarketFlag::Input(InputMarket::Grain)) {
-            accessible = accessible && household_production::grain_counterparty(economy, id, firm);
+        if comptime!(matches!(market, MarketFlag::Input(_))) {
+            accessible = accessible
+                && household_production::counterparty(economy, id, firm, parameters.traded_good());
         }
         if accessible {
             let mut wage = economy.ledger.number(Field::Wage, firm);
@@ -434,15 +540,16 @@ impl OfferRequest {
                         let need = economy.ledger.number(Field::FoodNeed, id);
                         let bread = economy.ledger.number(Field::Bread, id);
                         let missing = max(need, bread) - bread;
-                        let preparation = food::HomeKitchen::new(&economy.ledger, id)
-                            .work(config, control, missing);
-                        let minutes = preparation.minutes;
+                        let flour = food::HomeKitchen::new(&economy.ledger, id)
+                            .flour_for_bread(control, ticks(missing, 0));
+                        let minutes = times(flour, config.home.baking_minutes).record(control);
                         let time = economy.ledger.number(Field::Time, id);
                         let committed = duration * shifts;
                         let remaining = max(time, committed) - committed
                             + economy.ledger.number(Field::HomeTime, id);
-                        let self_provision = missing > 0
-                            && !lt(economy.ledger.value(Field::Grain, id), preparation.grain);
+                        let self_provision = food::HomeKitchen::available(&economy.ledger, id)
+                            && missing > 0
+                            && !lt(economy.ledger.value(Field::Flour, id), flour);
                         let paid = times32(
                             wage,
                             economy.ledger.number(Field::LaborMinutes, firm) * shifts,
@@ -450,7 +557,9 @@ impl OfferRequest {
                         let food_cost =
                             times32(missing, economy.ledger.number(Field::FoodPrice, id));
                         eligible = eligible
-                            && !(self_provision && remaining < minutes && lt(paid, food_cost));
+                            && !(self_provision
+                                && lt(ticks(remaining, 0), minutes)
+                                && lt(paid, food_cost));
                     }
                     let incumbent = economy.ledger.number(Field::Job, id) == firm + 1;
                     let doubled = plus(score, score).record(control);
@@ -459,6 +568,7 @@ impl OfferRequest {
                         doubled.extract(HIGH_WORD),
                     );
                 } else {
+                    eligible = accepts_input_quote(economy, control, parameters, id, quote);
                     let offered = supply.offered;
                     let stocked = minimum(wanted, supply.available);
                     let payment = times(stocked, max(quote, 1u32));
@@ -555,8 +665,7 @@ pub(super) struct BuyerLocation {
 impl BuyerLocation {
     pub(super) fn new(actors: &ActorTable<'_>, config: &EconomyConfig, buyer: u32) -> Self {
         let mut access = 0u32;
-        if comptime!(config.railway.routes_enabled == Feature::Enabled) && config.railway.nodes > 0
-        {
+        if config.railway.has_routes() {
             access = config.railway.access[buyer as usize * 2 + 1];
         }
         BuyerLocation {

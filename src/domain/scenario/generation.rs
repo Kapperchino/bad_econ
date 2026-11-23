@@ -87,11 +87,17 @@ impl Scenario {
         config.household_liquidity = HouseholdLiquidity::PaycheckToPaycheck;
         config.behavior.wage_increment = 0;
         config.behavior.price_response = 1000;
+        let commercial_farm_spacing = employment::InitialSettlement::new(&config).spacing();
+        let mut grain_businesses = 0usize;
         config.distributors = (0..config.firms)
             .map(|firm| (firm, generated_good(&config, firm as usize)))
             .filter(|&(firm, good)| match good {
                 Good::Bread => firm % 3 == 0,
-                Good::Grain => firm % 3 == 1,
+                Good::Grain => {
+                    let merchant = !grain_businesses.is_multiple_of(commercial_farm_spacing);
+                    grain_businesses += 1;
+                    merchant
+                }
                 _ => false,
             })
             .map(|(firm, good)| enterprise::Distributor {
@@ -99,7 +105,10 @@ impl Scenario {
                 good,
                 handling_minutes: 5,
                 units_per_shift: 24,
-                reserve_days: 3,
+                reserve_days: match good {
+                    Good::Grain => crate::domain::calendar::DAYS_PER_YEAR,
+                    _ => 3,
+                },
                 margin_per_mille: 250,
             })
             .collect();
@@ -170,7 +179,7 @@ impl Scenario {
                     Some(layout) => layout.rows[actor].cash,
                     None => self.initial_employment.cash(config, actor)?,
                 },
-                _ => config.firm_cash,
+                _ => self.production.working_cash(config, retailer)?,
             };
             state.set(Field::Cash, actor, cash);
             let farmers = match (kind, &self.cohorts) {
@@ -222,7 +231,7 @@ impl Scenario {
                             Economy::Agrarian => {
                                 u64::from(entry.capacity) * u64::from(config.packet_output)
                             }
-                            Economy::Industrial => self.production.daily[kind as usize - 1],
+                            Economy::Industrial => self.production.daily(output, retailer),
                         },
                     );
                 }

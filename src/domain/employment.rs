@@ -3,6 +3,7 @@ use super::{
     calendar::{CalendarDate, DAYS_PER_YEAR, HarvestSeason},
     enterprise::{Distributor, EnterpriseModel, HouseholdProduction},
     prices::StartingPrices,
+    supply::StartingProduction,
 };
 
 #[repr(u32)]
@@ -112,8 +113,7 @@ struct EmployerSlots {
 impl InitialEmployment {
     pub fn new(
         config: &ScenarioConfig,
-        capacities: &[u32; Good::COUNT],
-        daily: &[u64; Good::COUNT],
+        production: &StartingProduction,
         retailers: &std::collections::BTreeMap<u64, Distributor>,
     ) -> Self {
         match (
@@ -144,15 +144,17 @@ impl InitialEmployment {
                         let good = super::scenario::generated_good(config, firm);
                         let index = good as usize - 1;
                         let actor = config.population_size() as usize + firm;
-                        let (output, capacity) = match (retailers.get(&(actor as u64 + 1)), good) {
+                        let retailer = retailers.get(&(actor as u64 + 1));
+                        let (output, capacity) = match (retailer, good) {
                             (Some(store), _) => (store.units_per_shift, config.capacity),
                             (None, Good::Railway) => (1, 0),
                             (None, _) => (
                                 super::food::technique(config, good).output_ticks,
-                                capacities[index],
+                                production.capacities[index],
                             ),
                         };
-                        slots += daily[index]
+                        slots += production
+                            .daily(good, retailer)
                             .div_ceil(u64::from(output))
                             .max(1)
                             .min(u64::from(capacity)) as usize;

@@ -40,7 +40,6 @@ impl TaxBracket {
 }
 #[derive(CubeType, CubeLaunch, Clone, Copy, Default)]
 pub struct HomeProduction {
-    pub milling_minutes: u32,
     pub baking_minutes: u32,
     pub cultivation_minutes: u32,
     pub harvest_start: u32,
@@ -57,14 +56,13 @@ impl HomeProduction {
                 ..Self::default()
             },
             crate::domain::enterprise::HouseholdProduction::Available {
-                milling_minutes,
                 baking_minutes,
                 cultivation_minutes,
                 harvest_start,
                 harvest_days,
                 annual_yield_per_plot,
+                ..
             } => Self {
-                milling_minutes,
                 baking_minutes,
                 cultivation_minutes,
                 harvest_start,
@@ -76,7 +74,6 @@ impl HomeProduction {
     }
     pub fn launch(self) -> HomeProductionLaunch {
         HomeProductionLaunch {
-            milling_minutes: self.milling_minutes,
             baking_minutes: self.baking_minutes,
             cultivation_minutes: self.cultivation_minutes,
             harvest_start: self.harvest_start,
@@ -93,6 +90,9 @@ pub struct EconomyConfig {
     pub state_stride: u32,
     pub fields: u32,
     pub ring: u32,
+    pub grain_rounds: u32,
+    pub first_firm: u32,
+    pub retail_rotation: u32,
     pub search_radius: u32,
     pub map_size: u32,
     pub commute_speed: u32,
@@ -111,7 +111,8 @@ pub struct EconomyConfig {
     #[cube(comptime)]
     pub cohorts: Feature,
     pub home: HomeProduction,
-    pub consumption_intervals: Box<[u32]>,
+    pub opening_prices: Box<[u32]>,
+    pub market_table: Box<[u32]>,
     pub work_cap: u32,
     pub reserved_minutes: u32,
     pub forecast_weight: u32,
@@ -195,6 +196,9 @@ pub struct Configuration {
     pub state_stride: u32,
     pub fields: u32,
     pub ring: u32,
+    pub grain_rounds: u32,
+    pub first_firm: u32,
+    pub retail_rotation: u32,
     pub search_radius: u32,
     pub map_size: u32,
     pub commute_speed: u32,
@@ -209,7 +213,8 @@ pub struct Configuration {
     pub economy: crate::domain::Economy,
     pub cohorts: Feature,
     pub home: HomeProduction,
-    pub consumption_intervals: burn_wgpu::CubeTensor,
+    opening_prices: burn_wgpu::CubeTensor,
+    pub market_table: burn_wgpu::CubeTensor,
     pub work_cap: u32,
     pub reserved_minutes: u32,
     pub forecast_weight: u32,
@@ -241,6 +246,7 @@ pub struct Configuration {
     pub property_mode: Feature,
     pub property_regions: burn_wgpu::CubeTensor,
     pub grain_farms: burn_wgpu::CubeTensor,
+    pub farm_market: super::market::farm_offers::FarmMarket,
     pub cartage_accounts: burn_wgpu::CubeTensor,
     pub cartage_firms: u32,
     pub rental_accounts: burn_wgpu::CubeTensor,
@@ -253,7 +259,8 @@ impl Configuration {
         &self,
     ) -> impl Iterator<Item = &burn_wgpu::CubeTensor> + Clone {
         [
-            &self.consumption_intervals,
+            &self.opening_prices,
+            &self.market_table,
             &self.price_table,
             &self.property_regions,
             &self.grain_farms,
@@ -395,6 +402,21 @@ impl Configuration {
         cartage: CartageAccounts,
     ) -> Self {
         let config = scenario.config();
+        let collection_days = config
+            .distributors
+            .iter()
+            .filter(|store| store.good == Good::Grain)
+            .map(|store| store.reserve_days.min(config.coverage.max(1)) as usize)
+            .sum::<usize>();
+        let grain_rounds = match (config.economy, collection_days) {
+            (crate::domain::Economy::Industrial, 1..) => {
+                scenario.population_rows().div_ceil(collection_days).clamp(
+                    super::policy::MATCHING_ROUNDS,
+                    super::policy::MAX_GRAIN_COLLECTION_ROUNDS,
+                )
+            }
+            _ => super::policy::MATCHING_ROUNDS,
+        };
         Self {
             heating_per_person: crate::domain::calendar::Weather::on_day(state.day)
                 .heating_units_per_person,
@@ -409,6 +431,18 @@ impl Configuration {
             state_stride: state.actors.len() as u32,
             fields: scenario.fields() as u32,
             ring: scenario.ring() as u32,
+            grain_rounds: grain_rounds as u32,
+            first_firm: scenario.population_rows() as u32,
+            retail_rotation: (config.distributors.len() as u32)
+                .div_ceil(
+                    super::policy::DISCOVERY_CANDIDATES.saturating_mul(
+                        config
+                            .map_size
+                            .div_ceil(config.search_radius)
+                            .saturating_pow(2),
+                    ),
+                )
+                .clamp(1, Good::COUNT as u32),
             search_radius: config.search_radius,
             map_size: config.map_size,
             commute_speed: config.commute_speed,
@@ -429,6 +463,7 @@ impl Configuration {
             cohorts: Feature::from(config.people.as_ref()),
             home: HomeProduction::new(config.household_production, config.prices[0]),
             property_mode: Feature::from(config.property.as_ref()),
+            farm_market: super::market::farm_offers::FarmMarket::new(device, &state.actors),
             grain_farms: device.tensor(
                 &state
                     .actors
@@ -467,11 +502,12 @@ impl Configuration {
                     Feature::Enabled
                 }
             },
-            consumption_intervals: device.tensor(
+            opening_prices: device.tensor(&Good::ALL.map(|good| scenario.initial_price(good))),
+            market_table: device.tensor(
                 &Good::ALL
                     .map(Good::consumption_interval)
                     .into_iter()
-                    .chain([0; 5])
+                    .chain(std::iter::repeat_n(0, 5 + 2 * state.actors.len()))
                     .collect::<Vec<_>>(),
             ),
             work_cap: config.work_cap,
@@ -540,6 +576,9 @@ impl Configuration {
             state_stride: self.state_stride,
             fields: self.fields,
             ring: self.ring,
+            grain_rounds: self.grain_rounds,
+            first_firm: self.first_firm,
+            retail_rotation: self.retail_rotation,
             search_radius: self.search_radius,
             map_size: self.map_size,
             commute_speed: self.commute_speed,
@@ -554,7 +593,8 @@ impl Configuration {
             economy: self.economy,
             cohorts: self.cohorts,
             home: self.home.launch(),
-            consumption_intervals: self.consumption_intervals.buffer_arg(),
+            opening_prices: self.opening_prices.buffer_arg(),
+            market_table: self.market_table.buffer_arg(),
             work_cap: self.work_cap,
             reserved_minutes: self.reserved_minutes,
             forecast_weight: self.forecast_weight,

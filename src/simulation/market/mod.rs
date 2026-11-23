@@ -53,9 +53,10 @@ impl MarketReplay {
     fn clock(self, program: MarketProgram) -> MarketClock {
         match (self, program) {
             (Self::Reusable, _)
-            | (Self::RegistryGrowth, MarketProgram::Consumer(_) | MarketProgram::Input) => {
-                MarketClock::Device
-            }
+            | (
+                Self::RegistryGrowth,
+                MarketProgram::Consumer(_) | MarketProgram::HouseholdGoods | MarketProgram::Input,
+            ) => MarketClock::Device,
             _ => MarketClock::Scalars,
         }
     }
@@ -74,9 +75,9 @@ pub(super) enum Provisioning {
 }
 
 impl Provisioning {
-    pub(super) fn rounds(self) -> usize {
+    pub(super) fn rounds(self, standard: usize) -> usize {
         match self {
-            Self::Standard => MATCHING_ROUNDS,
+            Self::Standard => standard,
             Self::Minimum => MATCHING_ROUNDS - 1,
             Self::Choice => 1,
         }
@@ -177,6 +178,15 @@ impl Simulation {
         trace: Trace,
         evidence: &mut PhaseEvidence,
     ) -> Result<MatchingState> {
+        if crate::simulation::economy::market::farm_offers::FarmMarket::takes_offers(
+            market,
+            self.config.home_mode,
+        ) {
+            let parameters = self.parameters(phase, market, 0, self.metadata.actors.len())?;
+            self.config
+                .farm_market
+                .collect(self.gpu(), &self.spatial, &self.control, &parameters);
+        }
         match self.market_execution {
             _ if self.market_has_freight(market) => {
                 self.device_market(market, phase, trace, evidence)
@@ -235,6 +245,25 @@ impl Simulation {
         self.readback_bytes +=
             profile.resolve(market, self.matching_round, &self.config, &self.control)?;
         Ok(matching)
+    }
+
+    fn matching_rounds(&self, market: Market) -> usize {
+        match market {
+            Market::Input(Good::Grain) => self.config.grain_rounds as usize,
+            Market::Input(good) | Market::Consumer(good)
+                if self.config.food_income == FoodIncome::PurchasingPower
+                    && !matches!(
+                        good,
+                        Good::Grain | Good::Flour | Good::Bread | Good::Coal | Good::Wood
+                    ) =>
+            {
+                match market {
+                    Market::Input(_) => 1,
+                    _ => 2,
+                }
+            }
+            _ => MATCHING_ROUNDS,
+        }
     }
 
     fn market_has_freight(&self, market: Market) -> bool {
@@ -398,7 +427,11 @@ impl<'a> MarketRound<'a> {
             }
             _ => MatchingState::Searching,
         };
-        match (self.trace, self.market, self.index + 1 < MATCHING_ROUNDS) {
+        match (
+            self.trace,
+            self.market,
+            self.index + 1 < simulation.matching_rounds(self.market),
+        ) {
             (Trace::Discard, Market::Input(_), true) => {
                 let count = match constructed {
                     Some(count) => count,
@@ -421,9 +454,10 @@ impl<'a> MarketRound<'a> {
     }
 
     fn record_feedback(mut self, simulation: &Simulation) {
-        if let (Market::Input(_) | Market::Consumer(_) | Market::Household, true) =
-            (self.market, self.index + 1 == MATCHING_ROUNDS)
-        {
+        if let (Market::Input(_) | Market::Consumer(_) | Market::Household, true) = (
+            self.market,
+            self.index + 1 == simulation.matching_rounds(self.market),
+        ) {
             self.parameters.status_start = 4 * self.count as u32;
             orders::feedback_boundary(
                 &simulation.device,

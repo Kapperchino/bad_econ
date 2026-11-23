@@ -60,6 +60,27 @@ impl<'a> ObservationTotals<'a> {
         self.values[metric] = plus(self.values[metric], value).record(self.control);
     }
 
+    fn price(&mut self, good: u32, price: Ticks) {
+        self.add((SummaryLayout::PRICE_COUNTS + good) as usize, ticks(1, 0));
+        self.values[(SummaryLayout::PRICE_MINIMA + good) as usize] = minimum(
+            self.values[(SummaryLayout::PRICE_MINIMA + good) as usize],
+            price,
+        );
+        self.values[(SummaryLayout::PRICE_MAXIMA + good) as usize] = maximum(
+            self.values[(SummaryLayout::PRICE_MAXIMA + good) as usize],
+            price,
+        );
+        self.add((SummaryLayout::PRICE_TOTALS + good) as usize, price);
+        self.add(
+            (SummaryLayout::PRICE_SQUARES + good) as usize,
+            times32(price.extract(LOW_WORD), price.extract(LOW_WORD)),
+        );
+        self.values[SummaryLayout::MINIMUM_PRICE as usize] =
+            minimum(self.values[SummaryLayout::MINIMUM_PRICE as usize], price);
+        self.values[SummaryLayout::MAXIMUM_PRICE as usize] =
+            maximum(self.values[SummaryLayout::MAXIMUM_PRICE as usize], price);
+    }
+
     fn write(&self, bundles: &mut [u32], id: u32) {
         for metric in 0u32..SummaryLayout::METRICS as u32 {
             let base = (id * SummaryLayout::METRICS as u32 + metric) * TICK_WORDS as u32;
@@ -267,35 +288,23 @@ impl<'a> EconomyView<'a> {
                             );
                             if pricing::stocked::<Ledger>(&self.ledger, actor, k.output()) {
                                 let price = self.ledger.value(Field::Price, actor);
-                                totals.add(
-                                    (SummaryLayout::PRICE_COUNTS + good) as usize,
-                                    ticks(1, 0),
-                                );
-                                totals.values[(SummaryLayout::PRICE_MINIMA + good) as usize] =
-                                    minimum(
-                                        totals.values
-                                            [(SummaryLayout::PRICE_MINIMA + good) as usize],
-                                        price,
+                                totals.price(good, price);
+                            }
+                            if pricing::distributor(&self.ledger, actor) {
+                                for item in 1..Good::COUNT as u32 + 1 {
+                                    let field = pricing::retail_field(
+                                        config,
+                                        item,
+                                        comptime!(crate::domain::RetailAccount::Quote),
                                     );
-                                totals.values[(SummaryLayout::PRICE_MAXIMA + good) as usize] =
-                                    maximum(
-                                        totals.values
-                                            [(SummaryLayout::PRICE_MAXIMA + good) as usize],
-                                        price,
-                                    );
-                                totals.add((SummaryLayout::PRICE_TOTALS + good) as usize, price);
-                                totals.add(
-                                    (SummaryLayout::PRICE_SQUARES + good) as usize,
-                                    times32(price.extract(LOW_WORD), price.extract(LOW_WORD)),
-                                );
-                                totals.values[SummaryLayout::MINIMUM_PRICE as usize] = minimum(
-                                    totals.values[SummaryLayout::MINIMUM_PRICE as usize],
-                                    price,
-                                );
-                                totals.values[SummaryLayout::MAXIMUM_PRICE as usize] = maximum(
-                                    totals.values[SummaryLayout::MAXIMUM_PRICE as usize],
-                                    price,
-                                );
+                                    let price = self.ledger.value_at(field, actor);
+                                    if item != k.output()
+                                        && !equal(price, zero())
+                                        && !equal(self.ledger.value_at(item, actor), zero())
+                                    {
+                                        totals.price(item - 1, price);
+                                    }
+                                }
                             }
                         }
                     }

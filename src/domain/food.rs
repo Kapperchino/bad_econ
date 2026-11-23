@@ -25,6 +25,7 @@ pub enum WheatHusbandry {
 }
 
 impl WheatHusbandry {
+    pub(crate) const DIRECT_MILL_HECTARES: u32 = 100;
     pub(crate) const ROTATION_FIELDS: u32 = 4;
     pub(crate) const GROSS_PARTS: u32 = 8;
     pub(crate) const MARKETABLE_PARTS: u32 = 7;

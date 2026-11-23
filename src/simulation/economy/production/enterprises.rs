@@ -368,7 +368,10 @@ impl<'a> FirmPolicy<'a> {
         let firm = self.firm;
         let config = ledger.config;
         let sales = ledger.value(Field::Sales, firm);
-        let replacement = times(sales, ledger.number(Field::ReplacementCost, firm)).record(control);
+        let replacement = ledger.value_at(
+            config.fields - comptime!(crate::domain::RetailAccount::REPLACEMENT_EXPENSE as u32),
+            firm,
+        );
         let shifts = ledger.number(Field::Plan, firm) - ledger.number(Field::Slots, firm);
         let payroll = times(
             times32(
@@ -629,10 +632,22 @@ impl<'a> FirmPolicy<'a> {
             );
             let capacity = ticks(economy.actors.capacity(firm), 0);
             let packets = minimum(minimum(forecast, funded), capacity);
-            available = positive(
-                cash,
-                times(labor, packets.extract(LOW_WORD)).record(control),
-            );
+            let mut payroll = times(labor, packets.extract(LOW_WORD)).record(control);
+            if distributor {
+                let days = economy.ledger.number(Field::StockCoverage, firm) + config.ring;
+                let stock = economy
+                    .ledger
+                    .stock_with_transit(economy.actors.kind(firm).output(), firm)
+                    .record(control);
+                let handling = CheckedTicks::ceiling_ratio(stock, 1, output).record(control);
+                let shifts = maximum(handling, times(packets, days).record(control));
+                payroll = plus(
+                    times(shifts, labor.extract(LOW_WORD)).record(control),
+                    times32(days - 1, config.firm_rent),
+                )
+                .record(control);
+            }
+            available = positive(cash, payroll);
         }
         if !economy
             .actors

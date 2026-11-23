@@ -233,17 +233,31 @@ impl ObservationSnapshot {
                                 snapshot.minimum_wage.min(state.get(Field::Wage, i));
                             snapshot.maximum_wage =
                                 snapshot.maximum_wage.max(state.get(Field::Wage, i));
-                            let stocked = kind == Good::Housing as u32
-                                || kind == Good::Railway as u32
-                                || state.get(Field::inventory(Good::from_index(kind)?), i) > 0;
-                            if stocked {
-                                snapshot.markets[j]
-                                    .prices
-                                    .include(state.get(Field::Price, i))?;
-                                snapshot.minimum_price =
-                                    snapshot.minimum_price.min(state.get(Field::Price, i));
-                                snapshot.maximum_price =
-                                    snapshot.maximum_price.max(state.get(Field::Price, i));
+                            let dealer = state.get(Field::EnterpriseModel, i)
+                                == enterprise::EnterpriseModel::Distributor as u64;
+                            for good in Good::ALL {
+                                let primary = good as u32 == kind;
+                                let stocked = state.get(Field::inventory(good), i) > 0
+                                    || (primary && matches!(good, Good::Housing | Good::Railway));
+                                if stocked && (primary || dealer) {
+                                    let price = match primary {
+                                        true => state.get(Field::Price, i),
+                                        false => {
+                                            let field = scenario.fields()
+                                                - super::RetailAccount::FIELDS
+                                                + good as usize
+                                                - 1;
+                                            state.values[field * state.actors.len() + i]
+                                        }
+                                    };
+                                    if primary || price > 0 {
+                                        snapshot.markets[good as usize - 1]
+                                            .prices
+                                            .include(price)?;
+                                        snapshot.minimum_price = snapshot.minimum_price.min(price);
+                                        snapshot.maximum_price = snapshot.maximum_price.max(price);
+                                    }
+                                }
                             }
                         }
                         snapshot.produced[j] =

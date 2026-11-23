@@ -329,7 +329,7 @@ pub(in crate::simulation) fn discover(
                 || kind == comptime!(Good::Wood as u32)
                 || kind == comptime!(Good::Coal as u32)
                 || (comptime!(config.economy == crate::domain::Economy::Industrial)
-                    && config.consumption_intervals[kind as usize - 1] > 1);
+                    && config.market_table[kind as usize - 1] > 1);
             if traded && !lt(stock, ticks(24, 0)) {
                 let quote = price * 1250 / 1000 + ceildiv(60 * wage + config.firm_rent, 24);
                 let revenue = times32(24, quote);

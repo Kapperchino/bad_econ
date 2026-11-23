@@ -55,7 +55,7 @@ impl PurchaseRequest {
         };
         match comptime!(parameters.market) {
             MarketFlag::Input(_) => {
-                order.prepare_input(economy, control, id, &kind, good);
+                order.prepare_input(economy, control, id, &kind, good, parameters.day);
             }
             MarketFlag::Consumer(_) => {
                 let purchase = consumption::HouseholdPurchase::new(
@@ -65,22 +65,70 @@ impl PurchaseRequest {
             }
             MarketFlag::Household => {
                 order.search = kind.is(comptime!(ActorKind::Household));
-                order.wanted = ticks(
-                    food::HouseholdRation::new(&economy.ledger, id).purchase(config, parameters)
-                        * (config.coverage + config.ring - 1),
-                    0,
-                );
+                let ledger = &economy.ledger;
+                let ration = food::HouseholdRation::new(ledger, id);
+                let days = config.coverage + config.ring - 1;
+                order.wanted = times32(ration.purchase(config, parameters), days);
+                if food::HomeKitchen::available(ledger, id) {
+                    let flour = ledger
+                        .stock_with_transit(comptime!(Good::Flour as u32), id)
+                        .record(control);
+                    let usable = minimum(
+                        minimum(order.wanted, flour),
+                        food::HomeKitchen::flour_capacity(ledger, id, days),
+                    );
+                    let bakeable = food::HomeKitchen::new(ledger, id).bread_from_flour(usable);
+                    order.wanted =
+                        maximum(ticks(ration.minimum(), 0), positive(order.wanted, bakeable));
+                }
             }
             _ => (),
         }
         if good > 0 {
-            order.wanted = positive(
-                order.wanted,
-                economy.ledger.stock_with_transit(good, id).record(control),
-            );
-            order.purchasing_power = minimum(
+            let held = economy.ledger.stock_with_transit(good, id).record(control);
+            let gap = positive(order.wanted, held);
+            if comptime!(
+                config.food_income == crate::domain::food::FoodIncome::PurchasingPower
+                    && matches!(
+                        parameters.market,
+                        MarketFlag::Input(_) | MarketFlag::Household
+                    )
+            ) && kind.is(comptime!(ActorKind::Household))
+                && (good == Good::Flour as u32 || good == Good::Bread as u32)
+            {
+                let daily =
+                    food::HouseholdRation::new(&economy.ledger, id).purchase(config, parameters);
+                let cycle = times32(daily, config.coverage);
+                let reorder_gap = if good == Good::Flour as u32 {
+                    food::HomeKitchen::new(&economy.ledger, id).flour_for_bread(control, cycle)
+                } else {
+                    cycle
+                };
+                order.search = order.search && (lt(reorder_gap, gap) || equal(held, zero()));
+            }
+            order.wanted = gap;
+            if comptime!(parameters.market == MarketFlag::Input(InputMarket::Grain)) {
+                let dealer = pricing::distributor(&economy.ledger, id);
+                let mill = comptime!(config.economy == crate::domain::Economy::Industrial)
+                    && kind.output() == comptime!(Good::Flour as u32)
+                    && economy.ledger.number(Field::FirstInput, id) == good;
+                let units = select(
+                    dealer,
+                    economy.ledger.number(Field::OutputTicks, id),
+                    economy.ledger.number(Field::InputTicks, id),
+                );
+                let capacity = times32(economy.actors.capacity(id), units);
+                let rounds = config.grain_rounds;
+                let lot = divide(
+                    plus(capacity, ticks(rounds - 1 - parameters.matching_round, 0))
+                        .record(control),
+                    rounds,
+                );
+                order.wanted = select(dealer || mill, minimum(order.wanted, lot), order.wanted);
+            }
+            order.purchasing_power = positive(
                 order.purchasing_power,
-                positive(cash, economy.ledger.value(Field::CartagePayable, id)),
+                economy.ledger.value(Field::CartagePayable, id),
             );
             order.search = order.search
                 && !equal(order.wanted, zero())
@@ -96,6 +144,7 @@ impl PurchaseRequest {
         id: u32,
         k: &KernelActorKind,
         good: u32,
+        day: u32,
     ) {
         self.purchasing_power =
             enterprises::FirmPolicy::new(id, control).purchasing_power(&*economy);
@@ -111,9 +160,28 @@ impl PurchaseRequest {
             0u32,
         );
         if economy.ledger.number(Field::EnterpriseModel, id) == 1 {
-            search = good == k.output();
+            let secondary = economy.ledger.value_at(
+                pricing::retail_field(
+                    config,
+                    good,
+                    comptime!(crate::domain::RetailAccount::Demand),
+                ),
+                id,
+            );
+            search = good == k.output() || !equal(secondary, zero());
             let forecast = maximum(economy.ledger.value(Field::Demand, id), ticks(1, 0));
-            wanted = pricing.distributor_target(&*economy, forecast);
+            wanted = if good == k.output() {
+                pricing.distributor_target(&*economy, forecast, day)
+            } else {
+                times(
+                    secondary,
+                    min(
+                        config.coverage,
+                        economy.ledger.number(Field::StockCoverage, id),
+                    ) + config.ring,
+                )
+                .record(control)
+            };
         }
         if !k.is(comptime!(ActorKind::Household))
             && economy.ledger.number(Field::EnterpriseModel, id) == 0
@@ -145,20 +213,30 @@ impl PurchaseRequest {
             .record(control);
         }
         if k.is(comptime!(ActorKind::Household))
-            && comptime!(config.home_mode == Feature::Enabled)
-            && good == comptime!(Good::Grain as u32)
-            && (comptime!(config.economy == crate::domain::Economy::Agrarian)
-                || economy.ledger.number(Field::LandPlots, id) > 0)
+            && (good == comptime!(Good::Grain as u32) || good == comptime!(Good::Flour as u32))
+            && food::HomeKitchen::available(&economy.ledger, id)
             && economy.ledger.number(Field::LivingMembers, id) > 0
         {
             search = true;
-            let near_term = times32(
-                economy.ledger.number(Field::FoodNeed, id),
-                config.coverage + config.ring,
-            );
-            let reserve = economy.ledger.value(Field::GrainReserve, id);
-            let quoting = economy.ledger.number(Field::GrainQuote, id) > 0;
-            wanted = select(quoting, minimum(near_term, reserve), near_term);
+            wanted = if good == comptime!(Good::Grain as u32) {
+                household_production::seed_reserve(&economy.ledger, control, id)
+            } else {
+                let days = config.coverage + config.ring - 1;
+                let bread = economy
+                    .ledger
+                    .stock_with_transit(comptime!(Good::Bread as u32), id)
+                    .record(control);
+                let needed = positive(
+                    times32(economy.ledger.number(Field::FoodNeed, id), days),
+                    bread,
+                );
+                let flour =
+                    food::HomeKitchen::new(&economy.ledger, id).flour_for_bread(control, needed);
+                minimum(
+                    flour,
+                    food::HomeKitchen::flour_capacity(&economy.ledger, id, days),
+                )
+            };
         }
         let investment = economy.ledger.number(Field::InvestmentGood, id) > 0;
         if k.is(comptime!(ActorKind::Household))

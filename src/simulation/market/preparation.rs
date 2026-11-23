@@ -36,7 +36,7 @@ struct OrderSearch<'a> {
 #[derive(Clone, Copy)]
 enum GrainSearch {
     Standard,
-    DealerTiles,
+    FirmIndex,
 }
 
 impl MarketRound<'_> {
@@ -109,10 +109,10 @@ impl MarketRound<'_> {
 impl<'a> OrderSearch<'a> {
     fn new(round: MarketRound<'a>, simulation: &Simulation, collection: OrderCollection) -> Self {
         let members = match (round.market, simulation.config.home_mode) {
-            (Market::Household | Market::Input(Good::Bread) | Market::Consumer(Good::Bread), _)
-            | (Market::Input(Good::Grain) | Market::Consumer(Good::Grain), Feature::Enabled) => {
-                round.count
-            }
+            (
+                Market::Household | Market::Consumer(Good::Bread) | Market::Input(Good::Bread),
+                Feature::Disabled,
+            ) => round.count,
             _ => simulation.metadata.actors.firms(),
         };
         Self {
@@ -171,8 +171,10 @@ impl<'a> OrderSearch<'a> {
                 .hardware
                 .plane_size_min,
         ) {
-            (Market::Input(Good::Grain), Feature::Enabled, 1, 4096.., ScanMode::Plane, 32) => {
-                GrainSearch::DealerTiles
+            (Market::Input(Good::Grain), Feature::Enabled, 1, 4096.., ScanMode::Plane, 32)
+                if simulation.config.economy != crate::domain::Economy::Industrial =>
+            {
+                GrainSearch::FirmIndex
             }
             _ => GrainSearch::Standard,
         }
@@ -184,8 +186,12 @@ impl<'a> OrderSearch<'a> {
         {
             self.launch(simulation, SearchStage::Index);
         }
-        if let GrainSearch::DealerTiles = grain {
-            self.launch(simulation, SearchStage::GrainFirms);
+        if let GrainSearch::FirmIndex = grain {
+            let stage = match self.round.index {
+                0 => SearchStage::GrainFirms,
+                _ => SearchStage::RefreshGrainSupply,
+            };
+            self.launch(simulation, stage);
         }
         if let Market::Consumer(_) = self.round.market {
             self.launch(simulation, SearchStage::EmptySort);
@@ -206,9 +212,6 @@ impl<'a> OrderSearch<'a> {
         self.round
             .launch_stage(simulation, EconomyStage::MarketBoundary, 1);
         self.report_input_quotes(simulation)?;
-        if let GrainSearch::DealerTiles = grain {
-            self.launch(simulation, GrainDealerTiles);
-        }
         if let (OrderCollection::ConsumerMask, 262_144.., 1) = (
             self.collection,
             self.round.count,
@@ -219,7 +222,7 @@ impl<'a> OrderSearch<'a> {
         let stage = match (self.round.market, grain) {
             (Market::Consumer(_) | Market::Household, _) => SearchSpatialFuel,
             (Market::Input(Good::Bread), _) => SearchIndexed,
-            (Market::Input(Good::Grain), GrainSearch::DealerTiles) => SearchGrain,
+            (Market::Input(Good::Grain), GrainSearch::FirmIndex) => SearchGrain,
             _ => Search,
         };
         self.launch(simulation, stage);
@@ -270,11 +273,7 @@ impl<'a> OrderSearch<'a> {
         let workgroup = match (stage, &simulation.device.cube) {
             (PrepareSelected, Device::Metal(_)) => 256,
             (Search | SearchGrain, _) => 32,
-            (
-                SearchIndexed | EmptySort | GrainDealerTiles | FilterBuyers | Prepare
-                | PrepareCandidates,
-                _,
-            ) => 256,
+            (SearchIndexed | EmptySort | FilterBuyers | Prepare | PrepareCandidates, _) => 256,
             _ => simulation.device.workgroup,
         };
         let status_reset = match (self.round.market, self.round.trace) {
@@ -317,8 +316,7 @@ impl<'a> OrderSearch<'a> {
         let groups = count.div_ceil(workgroup as usize);
         let dispatches = &simulation.searches.dispatches;
         match (stage, &device.cube) {
-            (SearchSpatialFuel | GrainFirms, _) => device.count(count).into(),
-            (GrainDealerTiles, _) => CubeCount::Static(128, search::grain::DEALERS, 1).into(),
+            (SearchSpatialFuel | GrainFirms | RefreshGrainSupply, _) => device.count(count).into(),
             (RoadCandidates, _) => CubeCount::Static(search::ROAD_TILE_SIDE.pow(2), 1, 1).into(),
             (EmptySort, _) => CubeCount::Static(1, 1, 1).into(),
             (EmptyBounds, _) => device

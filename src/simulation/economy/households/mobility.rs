@@ -40,32 +40,40 @@ impl LocalNeeds {
             let offset = sample * (length / samples) + sample * (length % samples) / samples;
             let seller =
                 spatial[(segment + cells + 1 + (offset + day + destination) % length) as usize];
-            let good = economy.actors.kind(seller).output();
-            let relevant = good == comptime!(Good::Bread as u32)
-                || good == comptime!(Good::Coal as u32)
-                || good == comptime!(Good::Wood as u32);
-            if relevant {
-                let trip = economy.actors.distance(destination, seller);
-                let available = economy.ledger.number(Field::EnterpriseStatus, seller)
-                    < comptime!(crate::domain::enterprise::EnterpriseState::Liquidating as u32)
-                    && trip <= config.search_radius
-                    && household_production::offers(&*economy, seller, good);
-                let price = economy.ledger.number(Field::Price, seller);
-                needs.bread = select(
-                    available && price > 0 && good == comptime!(Good::Bread as u32),
-                    min(needs.bread, price),
-                    needs.bread,
-                );
-                needs.coal = select(
-                    available && price > 0 && good == comptime!(Good::Coal as u32),
-                    min(needs.coal, price),
-                    needs.coal,
-                );
-                needs.wood = select(
-                    available && price > 0 && good == comptime!(Good::Wood as u32),
-                    min(needs.wood, price),
-                    needs.wood,
-                );
+            let output = economy.actors.kind(seller).output();
+            let dealer = pricing::distributor(&economy.ledger, seller);
+            #[unroll]
+            for good in [Good::Bread as u32, Good::Coal as u32, Good::Wood as u32] {
+                let relevant = output == good || dealer;
+                if relevant {
+                    let trip = economy.actors.distance(destination, seller);
+                    let available = economy.ledger.number(Field::EnterpriseStatus, seller)
+                        < comptime!(crate::domain::enterprise::EnterpriseState::Liquidating as u32)
+                        && trip <= config.search_radius
+                        && household_production::offers(&*economy, seller, good);
+                    let terms = household_production::TradeFields::new(
+                        &economy.actors,
+                        config,
+                        seller,
+                        good,
+                    );
+                    let price = economy.ledger.number_at(terms.price, seller);
+                    needs.bread = select(
+                        available && price > 0 && good == comptime!(Good::Bread as u32),
+                        min(needs.bread, price),
+                        needs.bread,
+                    );
+                    needs.coal = select(
+                        available && price > 0 && good == comptime!(Good::Coal as u32),
+                        min(needs.coal, price),
+                        needs.coal,
+                    );
+                    needs.wood = select(
+                        available && price > 0 && good == comptime!(Good::Wood as u32),
+                        min(needs.wood, price),
+                        needs.wood,
+                    );
+                }
             }
         }
         needs
@@ -135,7 +143,19 @@ pub(in crate::simulation::economy) fn work_target(
     let nearby = employer > 0
         && economy.actors.distance(household, max(employer, 1) - 1) <= config.commute_speed;
     let scheduled = (day + household) % 30 == 0;
-    let needed = select(rural, scheduled, !nearby);
+    let plots = economy.ledger.number(Field::LandPlots, household);
+    let cultivation = CheckedTicks::ceiling_ratio(
+        times32(plots, config.home.annual_yield_per_plot),
+        config.home.cultivation_minutes,
+        max(farming::CropCalendar::new(config).on(day).growing_days, 1),
+    )
+    .value;
+    let remaining = positive(
+        economy.ledger.value(Field::HouseholdBudget, household),
+        economy.ledger.value(Field::Hours, household),
+    );
+    let displaced = lt(remaining, cultivation);
+    let needed = select(rural, scheduled && displaced, !nearby);
     let sustainable = !rural || (employer > 0 && lt(minimum_daily, expected));
     let fee = select(nearby, 0u32, 100u32);
     let funded = !lt(economy.ledger.value(Field::Cash, household), ticks(fee, 0));

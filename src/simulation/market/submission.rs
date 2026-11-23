@@ -89,19 +89,18 @@ impl MarketRound<'_> {
 
     pub(super) fn submit(self, simulation: &mut Simulation) -> Result<MarketSubmission> {
         let key = self.graph_key(simulation);
-        let submission = match key.scope {
-            GraphScope::PrepareOrders => self.submit_sparse_input(simulation, key)?,
-            GraphScope::FullMarket => {
-                let sort_source = match self.parameters.clock {
-                    MarketClock::Scalars => self.prepare_and_settle(simulation)?,
-                    MarketClock::Device => self.run_graph(simulation, key, |simulation| {
-                        self.prepare_and_settle(simulation)
-                    })?,
-                };
-                MarketSubmission {
-                    sort_source,
-                    constructed: None,
-                }
+        let submission = if key.scope == GraphScope::PrepareOrders {
+            self.submit_sparse_input(simulation, key)?
+        } else {
+            let sort_source = match self.parameters.clock {
+                MarketClock::Scalars => self.prepare_and_settle(simulation)?,
+                MarketClock::Device => self.run_graph(simulation, key, |simulation| {
+                    self.prepare_and_settle(simulation)
+                })?,
+            };
+            MarketSubmission {
+                sort_source,
+                constructed: None,
             }
         };
         Ok(submission)
@@ -139,7 +138,7 @@ impl MarketRound<'_> {
     }
 
     fn submit_sparse_input(
-        mut self,
+        self,
         simulation: &mut Simulation,
         key: MarketKey,
     ) -> Result<MarketSubmission> {
@@ -154,27 +153,63 @@ impl MarketRound<'_> {
         }
         let orders = simulation.observe_input_orders()?;
         let count = orders.count;
-        if count > INPUT_TILE {
-            self.compact_sparse_input(simulation);
-        }
-        let sort_source = match (count, orders.routing) {
+        let sort_source = match (count, self.parameters.clock) {
             (0, _) => 0,
+            (_, MarketClock::Device) => {
+                let capacity = match count {
+                    1..=DIRECT_INPUT_TILE => DIRECT_INPUT_TILE,
+                    1..=INPUT_TILE => INPUT_TILE,
+                    _ => count.next_power_of_two().min(self.count),
+                };
+                let routing = orders.routing;
+                self.run_graph(
+                    simulation,
+                    MarketKey {
+                        scope: GraphScope::SettleInput { routing, capacity },
+                        ..key
+                    },
+                    |simulation| {
+                        self.settle_sparse_input(
+                            simulation,
+                            InputOrders {
+                                count: capacity,
+                                routing,
+                            },
+                        )
+                    },
+                )?
+            }
+            (_, MarketClock::Scalars) => self.settle_sparse_input(simulation, orders)?,
+        };
+        Ok(MarketSubmission {
+            sort_source,
+            constructed: Some(count),
+        })
+    }
+
+    fn settle_sparse_input(
+        mut self,
+        simulation: &mut Simulation,
+        orders: InputOrders,
+    ) -> Result<u32> {
+        match (orders.count, orders.routing) {
             (1..=DIRECT_INPUT_TILE, RouteAvailability::Dormant) => {
-                self.sort_input_tile(simulation, count);
+                self.sort_input_tile(simulation);
                 self.parameters.sort_source = 0;
                 self.launch_stage(
                     simulation,
                     EconomyStage::SettleInputTile,
                     simulation.device.workgroup as usize,
                 );
-                0
+                Ok(0)
             }
-            _ => self.settle_orders(simulation, Some(orders))?,
-        };
-        Ok(MarketSubmission {
-            sort_source,
-            constructed: Some(count),
-        })
+            _ => {
+                if orders.count > INPUT_TILE {
+                    self.compact_sparse_input(simulation);
+                }
+                self.settle_orders(simulation, Some(orders))
+            }
+        }
     }
 }
 

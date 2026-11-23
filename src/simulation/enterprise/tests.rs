@@ -60,6 +60,12 @@ fn cached_migration_needs_preserve_destinations_and_compacted_records_on_gpu() -
                 initial.set(Field::Employed, owner, u64::from(employed));
                 initial.set(Field::LivingMembers, owner, 1);
                 initial.set(Field::LandPlots, owner, u64::from(rural));
+                initial.set(Field::HouseholdBudget, owner, 480);
+                initial.set(
+                    Field::Hours,
+                    owner,
+                    if (64..100).contains(&owner) { 480 } else { 20 },
+                );
                 initial.set(Field::IncomeForecast, owner, 4_800_000);
                 initial.set(
                     Field::FoodPrice,
@@ -140,8 +146,8 @@ fn cached_migration_needs_preserve_destinations_and_compacted_records_on_gpu() -
             let values = decode(&values);
             let start = Field::MoveTarget as usize * actual.config.state_stride as usize;
             let targets = &values[start..start + scenario.config().households as usize];
-            assert!(targets[128..].iter().all(|&target| target == 0));
-            let farm_moves = (64..128)
+            assert!(targets[100..].iter().all(|&target| target == 0));
+            let farm_moves = (64..100)
                 .filter(|&owner| targets[owner] > 0)
                 .collect::<Vec<_>>();
             assert!(

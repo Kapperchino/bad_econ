@@ -247,6 +247,9 @@ impl Simulation {
 
     fn local(&mut self, phase: Phase) -> Result<()> {
         let parameters = self.parameters(phase, Market::Labor, 0, self.metadata.actors.len())?;
+        if let Phase::Proposal = phase {
+            self.refresh_freight_quotes();
+        }
         if matches!(phase, Phase::Proposal | Phase::AccountsDecisions) {
             self.economy(
                 EconomyStage::InputQuotes,
@@ -283,6 +286,13 @@ impl Simulation {
         economy::property::landlords::launch(self.gpu(), &self.control, phase);
         self.fault_check()
     }
+    pub(in crate::simulation) fn refresh_freight_quotes(&self) {
+        use economy::transport::railway::RailStage;
+        self.railways(RailStage::Access);
+        self.railways(RailStage::Routes);
+        self.railways(RailStage::Quotes);
+    }
+
     pub(in crate::simulation) fn railways(&self, stage: economy::transport::railway::RailStage) {
         let started = Instant::now();
         economy::transport::railway::launch(self.gpu(), &self.control, stage);

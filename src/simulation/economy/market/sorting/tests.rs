@@ -439,14 +439,16 @@ fn input_tile_preserves_seller_ranges_and_rotated_buyer_priority_on_gpu() -> Res
             )
         });
         buffers.reset(&device, &case);
+        let mut clock = vec![0; crate::domain::Good::COUNT + 2];
+        clock[crate::domain::Good::COUNT + 1] = parameters.settlement_rotation;
         sort_input_tile(
             &device,
             &device.tensor(&jobs),
             &proposals,
             &buffers.scratch,
             &buffers.control,
-            &parameters,
-            orders,
+            &device.tensor(&clock),
+            parameters.count,
         );
         let actual = device.read(&buffers.scratch)?;
         for (slot, &buyer) in expected.iter().enumerate() {

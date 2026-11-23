@@ -36,6 +36,14 @@ impl ControlLayout {
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub enum InputMarket {
     Grain,
+    Flour,
+    Other,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+pub enum ConsumerMarket {
+    Fuel,
+    Luxury,
     Other,
 }
 
@@ -43,7 +51,7 @@ pub enum InputMarket {
 pub enum MarketFlag {
     Labor,
     Input(InputMarket),
-    Consumer(Good),
+    Consumer(ConsumerMarket),
     Household,
     Payroll,
     Distribution,
@@ -53,8 +61,13 @@ impl From<Market> for MarketFlag {
         match market {
             Market::Labor => Self::Labor,
             Market::Input(Good::Grain) => Self::Input(InputMarket::Grain),
+            Market::Input(Good::Flour) => Self::Input(InputMarket::Flour),
             Market::Input(_) => Self::Input(InputMarket::Other),
-            Market::Consumer(good) => Self::Consumer(good),
+            Market::Consumer(Good::Coal | Good::Wood) => Self::Consumer(ConsumerMarket::Fuel),
+            Market::Consumer(Good::LuxuryClothes | Good::LuxuryFurniture) => {
+                Self::Consumer(ConsumerMarket::Luxury)
+            }
+            Market::Consumer(_) => Self::Consumer(ConsumerMarket::Other),
             Market::Household => Self::Household,
             Market::Payroll => Self::Payroll,
             Market::Distribution => Self::Distribution,

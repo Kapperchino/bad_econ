@@ -67,7 +67,12 @@ struct QuantityBalances {
 #[cube]
 impl QuantityBalances {
     fn new(economy: &mut EconomyView<'_>, peer: u32, good: u32) -> Self {
-        let terms = household_production::TradeFields::new(&economy.actors, peer, good);
+        let terms = household_production::TradeFields::new(
+            &economy.actors,
+            economy.ledger.config,
+            peer,
+            good,
+        );
         QuantityBalances {
             cash: economy.ledger.value(Field::Cash, peer),
             stock: economy.ledger.value_at(good, peer),

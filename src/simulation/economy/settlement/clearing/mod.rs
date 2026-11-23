@@ -92,7 +92,8 @@ pub(in crate::simulation::economy) fn buyer_settlement(
         proposals[actor as usize * ProposalLayout::WORDS + ProposalLayout::QUANTITY_LOW],
         proposals[actor as usize * ProposalLayout::WORDS + ProposalLayout::QUANTITY_HIGH],
     );
-    let terms = household_production::TradeFields::new(&economy.actors, other, good);
+    let terms =
+        household_production::TradeFields::new(&economy.actors, economy.ledger.config, other, good);
     let price = economy.ledger.value_at(terms.price, other);
     let cost = times(quantity, price.extract(LOW_WORD)).record(control);
     let retained = household_production::reserve(&*economy, other, good);
@@ -142,13 +143,14 @@ pub(in crate::simulation::economy) fn buyer_settlement(
             economy.ledger.set(Field::CartagePayable, actor, payable);
             economy.ledger.set(Field::RoadFreight, actor, waiting);
         }
+        let delivered = cartage::road_price(config, control, price, trip, route.days);
         if good == comptime!(Good::Bread as u32)
             && economy
                 .actors
                 .kind(actor)
                 .is(comptime!(ActorKind::Household))
         {
-            economy.ledger.set(Field::FoodPrice, actor, price);
+            economy.ledger.set(Field::FoodPrice, actor, delivered);
         }
         for input in 0u32..2 {
             if economy
@@ -159,12 +161,13 @@ pub(in crate::simulation::economy) fn buyer_settlement(
                 economy.ledger.set_at(
                     comptime!(Field::FirstInputCost as u32) + input,
                     actor,
-                    price,
+                    delivered,
                 );
             }
         }
-        if economy.ledger.number(Field::EnterpriseModel, actor) == 1 {
-            economy.ledger.set(Field::ReplacementCost, actor, price);
+        if pricing::distributor(&economy.ledger, actor) {
+            let cost_field = pricing::cost_field(config, economy.actors.kind(actor).output(), good);
+            economy.ledger.set_at(cost_field, actor, delivered);
         }
         economy
             .ledger
@@ -205,17 +208,24 @@ fn empty_seller_quantity(
 
 #[cube]
 pub(in crate::simulation::economy) fn empty_seller_safe(
-    ledger: &Ledger<'_>,
+    economy: &EconomyView<'_>,
     parameters: &EconomyParameters,
     peer: u32,
 ) -> bool {
+    let ledger = &economy.ledger;
     let config = ledger.config;
     let quantity = select(
         empty_seller_bulk(config, parameters),
         ticks(u32::MAX, 0),
         ticks(1, 0),
     );
-    let quote = ledger.number(Field::Price, peer);
+    let terms = household_production::TradeFields::new(
+        &economy.actors,
+        config,
+        peer,
+        parameters.traded_good(),
+    );
+    let quote = ledger.number_at(terms.price, peer);
     let cost = times(quantity, quote);
     let cash = plus(ledger.value(Field::Cash, peer), cost.value);
     let sales = plus(ledger.value(Field::Sales, peer), quantity);
@@ -237,8 +247,12 @@ pub(in crate::simulation::economy) fn empty_seller_settlement(
 ) -> KernelEventStatus {
     let config = economy.ledger.config;
     let quantity = empty_seller_quantity(config, proposals, parameters, actor);
-    let terms =
-        household_production::TradeFields::new(&economy.actors, peer, parameters.traded_good());
+    let terms = household_production::TradeFields::new(
+        &economy.actors,
+        economy.ledger.config,
+        peer,
+        parameters.traded_good(),
+    );
     let quote = economy.ledger.number_at(terms.price, peer);
     let cost = times(quantity, quote).record(control);
     let cash = plus(economy.ledger.value(Field::Cash, peer), cost);
@@ -325,7 +339,12 @@ impl PeerBalances {
                 balances.cash = economy.ledger.value(Field::Cash, peer);
                 balances.stock = economy.ledger.value_at(good, peer);
                 balances.reserve = household_production::reserve(&*economy, peer, good);
-                let terms = household_production::TradeFields::new(&economy.actors, peer, good);
+                let terms = household_production::TradeFields::new(
+                    &economy.actors,
+                    economy.ledger.config,
+                    peer,
+                    good,
+                );
                 balances.sales = economy.ledger.value_at(terms.sales, peer);
                 balances.quote = economy.ledger.number_at(terms.price, peer);
             }
@@ -488,7 +507,13 @@ impl PeerBalances {
                 economy.ledger.set(Field::Cash, peer, self.cash);
                 economy.ledger.set_at(good, peer, self.stock);
                 economy.ledger.set_at(
-                    household_production::TradeFields::new(&economy.actors, peer, good).sales,
+                    household_production::TradeFields::new(
+                        &economy.actors,
+                        economy.ledger.config,
+                        peer,
+                        good,
+                    )
+                    .sales,
                     peer,
                     self.sales,
                 );

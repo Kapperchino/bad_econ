@@ -281,8 +281,8 @@ pub(in crate::simulation) fn sort_input_tile(
     proposals: &CubeTensor,
     scratch: &CubeTensor,
     control: &CubeTensor,
-    parameters: &EconomyParameters,
-    orders: usize,
+    clock: &CubeTensor,
+    actors: u32,
 ) {
     input_tile::launch(
         &device.client,
@@ -292,10 +292,8 @@ pub(in crate::simulation) fn sort_input_tile(
         proposals.buffer_arg(),
         scratch.buffer_arg(),
         control.buffer_arg(),
-        parameters.count,
-        parameters.settlement_rotation,
-        orders as u32,
-        orders.next_power_of_two() as u32,
+        clock.buffer_arg(),
+        actors,
     );
 }
 
@@ -305,11 +303,12 @@ fn input_tile(
     proposals: &[u32],
     scratch: &mut [u32],
     control: &[Atomic<u32>],
+    clock: &[u32],
     count: u32,
-    rotation: u32,
-    orders: u32,
-    length: u32,
 ) {
+    let orders = control[crate::simulation::storage::flags::CONSTRUCTED_EVENTS_WORD].load();
+    let rotation = clock[crate::domain::Good::COUNT + 1usize];
+    let length = 1u32 << (32 - (max(orders, 1) - 1).leading_zeros());
     let mut keys = Shared::<[u64]>::new_slice(INPUT_TILE);
     let mut slot = UNIT_POS;
     while slot < length {

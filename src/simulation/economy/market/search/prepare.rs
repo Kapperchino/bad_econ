@@ -59,10 +59,9 @@ impl SearchInput {
             let mut wanted = ticks(0u32, 0u32);
             let household_demand = match comptime!(parameters.market) {
                 MarketFlag::Input(_) => {
-                    let grain = parameters.traded_good() == Good::Grain as u32
-                        && comptime!(config.home_mode == Feature::Enabled)
-                        && (comptime!(config.economy == crate::domain::Economy::Agrarian)
-                            || economy.ledger.number(Field::LandPlots, id) > 0)
+                    let farm_inputs = (good == comptime!(Good::Grain as u32)
+                        || good == comptime!(Good::Flour as u32))
+                        && food::HomeKitchen::available(&economy.ledger, id)
                         && economy.ledger.number(Field::LivingMembers, id) > 0;
                     let investment = (parameters.traded_good() == Good::Tools as u32
                         || parameters.traded_good() == Good::Wood as u32)
@@ -75,7 +74,7 @@ impl SearchInput {
                     let construction = parameters.traded_good() == Good::Construction as u32
                         && economy.ledger.number(Field::ProjectStatus, id)
                             == comptime!(crate::domain::property::ProjectStatus::Building as u32);
-                    u32::cast_from(grain || investment || construction)
+                    u32::cast_from(farm_inputs || investment || construction)
                 }
                 _ => u32::new(1),
             };
@@ -128,7 +127,10 @@ impl SearchInput {
 
                     if comptime!(
                         round == PreparationRound::Capture
-                            && market == MarketFlag::Input(InputMarket::Grain)
+                            && matches!(
+                                market,
+                                MarketFlag::Input(InputMarket::Grain | InputMarket::Flour)
+                            )
                     ) {
                         eligible =
                             select(k.is(comptime!(ActorKind::Household)), searching, eligible);
@@ -141,7 +143,7 @@ impl SearchInput {
                     }
                     if comptime!(
                         round == PreparationRound::Capture
-                            && matches!(market, MarketFlag::Consumer(Good::Coal | Good::Wood))
+                            && matches!(market, MarketFlag::Consumer(ConsumerMarket::Fuel))
                             && config.food_income
                                 == crate::domain::food::FoodIncome::PurchasingPower
                     ) && !searching
@@ -162,6 +164,18 @@ impl SearchInput {
                             && lt(held, comfort);
                     }
                     if searching {
+                        if comptime!(matches!(market, MarketFlag::Input(_))) {
+                            local::staple(
+                                &*economy,
+                                spatial,
+                                control,
+                                parameters,
+                                id,
+                                wanted,
+                                purchasing_power,
+                            )
+                            .store(proposals, id);
+                        }
                         BuyerDemand {
                             wanted,
                             purchasing_power,

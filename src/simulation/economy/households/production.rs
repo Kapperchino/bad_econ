@@ -1,4 +1,3 @@
-use crate::domain::enterprise::EnterpriseModel;
 use crate::simulation::economy::*;
 
 #[cube]
@@ -20,12 +19,7 @@ pub(in crate::simulation::economy) fn reserve(
             0,
         );
     }
-    if economy
-        .actors
-        .kind(actor)
-        .is(comptime!(ActorKind::Household))
-        && good == comptime!(Good::Grain as u32)
-    {
+    if good == comptime!(Good::Grain as u32) {
         held = economy.ledger.value(Field::GrainReserve, actor);
     }
     if economy.ledger.number(Field::EnterpriseModel, actor) == 1 {
@@ -45,14 +39,24 @@ pub(in crate::simulation::economy) struct TradeFields {
 
 #[cube]
 impl TradeFields {
-    pub fn new(actors: &ActorTable<'_>, seller: u32, good: u32) -> Self {
+    pub fn new(actors: &ActorTable<'_>, config: &EconomyConfig, seller: u32, good: u32) -> Self {
         let grain = good == comptime!(Good::Grain as u32)
             && actors.kind(seller).is(comptime!(ActorKind::Household));
         TradeFields {
             price: select(
                 grain,
                 comptime!(Field::GrainQuote as u32),
-                comptime!(Field::Price as u32),
+                select(
+                    good > 0
+                        && !actors.kind(seller).is(comptime!(ActorKind::Household))
+                        && actors.kind(seller).output() != good,
+                    pricing::retail_field(
+                        config,
+                        good,
+                        comptime!(crate::domain::RetailAccount::Quote),
+                    ),
+                    comptime!(Field::Price as u32),
+                ),
             ),
             sales: select(
                 grain,
@@ -76,7 +80,9 @@ pub(in crate::simulation::economy) fn supplier(
             && good == comptime!(Good::Grain as u32)
             && economy.ledger.number(Field::LivingMembers, actor) > 0
             && economy.ledger.number(Field::GrainQuote, actor) > 0);
-    k.output() == good || (k.is(comptime!(ActorKind::Household)) && household_good)
+    pricing::distributor(&economy.ledger, actor)
+        || k.output() == good
+        || (k.is(comptime!(ActorKind::Household)) && household_good)
 }
 
 #[cube]
@@ -93,33 +99,49 @@ pub(in crate::simulation::economy) fn offers(
 }
 
 #[cube]
-pub(in crate::simulation::economy) fn grain_dealer(economy: &EconomyView<'_>, buyer: u32) -> bool {
-    economy.actors.kind(buyer).output() == comptime!(Good::Grain as u32)
-        && economy.ledger.number(Field::EnterpriseModel, buyer)
-            == comptime!(EnterpriseModel::Distributor as u32)
-}
-
-#[cube]
-pub(in crate::simulation::economy) fn grain_counterparty(
+pub(in crate::simulation::economy) fn counterparty(
     economy: &EconomyView<'_>,
     buyer: u32,
     seller: u32,
+    good: u32,
 ) -> bool {
-    let buyer_is_dealer = grain_dealer(economy, buyer);
-    let seller_is_dealer = economy.ledger.number(Field::EnterpriseModel, seller)
-        == comptime!(EnterpriseModel::Distributor as u32);
-    select(
-        economy
-            .actors
-            .kind(seller)
-            .is(comptime!(ActorKind::Household)),
-        buyer_is_dealer,
-        !(seller_is_dealer && buyer_is_dealer),
-    )
+    let buyer_is_dealer = pricing::distributor(&economy.ledger, buyer);
+    let seller_is_dealer = pricing::distributor(&economy.ledger, seller);
+    let output = economy.actors.kind(seller).output();
+    if buyer_is_dealer {
+        !seller_is_dealer
+    } else if good == comptime!(Good::Grain as u32) {
+        seller_is_dealer
+            || (economy.actors.kind(buyer).output() == comptime!(Good::Flour as u32)
+                && farming::FarmSite::new(seller, output).sells_direct(&economy.ledger))
+    } else {
+        output > 0 || comptime!(economy.ledger.config.home_mode == Feature::Disabled)
+    }
 }
 
 const SEED_RETURN: u32 = crate::domain::food::WheatHusbandry::GROSS_PARTS;
 const SALES_WINDOW: u32 = 30;
+
+#[cube]
+fn seed_required(control: &[Atomic<u32>], work: Ticks, minutes: u32) -> Ticks {
+    let batch = minutes * comptime!(SEED_RETURN);
+    divide(plus(work, ticks(batch - 1, 0)).record(control), batch)
+}
+
+#[cube]
+pub(in crate::simulation::economy) fn seed_reserve(
+    ledger: &Ledger<'_>,
+    control: &[Atomic<u32>],
+    actor: u32,
+) -> Ticks {
+    let plots = ledger.number(Field::LandPlots, actor);
+    let minutes = ledger.config.home.cultivation_minutes;
+    let annual = times32(plots, ledger.config.home.annual_yield_per_plot * minutes);
+    positive(
+        seed_required(control, annual, minutes),
+        seed_required(control, ledger.value(Field::CropWork, actor), minutes),
+    )
+}
 
 #[derive(CubeType)]
 pub(in crate::simulation::economy) struct HouseholdFarm<'a> {
@@ -156,39 +178,28 @@ impl<'a> HouseholdFarm<'a> {
             .increase_at(control, PRODUCTION_FIELDS as u32 + good - 1, actor, amount);
     }
 
-    fn grain_for_food(&self, days: u32) -> Ticks {
+    fn grain_to_fund_meals(&self, target: Ticks) -> Ticks {
         let actor = self.actor;
-        let control = self.control;
-        let config = self.ledger.config;
-        let ration = food::HouseholdRation::new(&self.ledger, actor);
-        let bread = positive(
-            times32(ration.reserve(config), days),
-            self.ledger.value(Field::Bread, actor),
-        );
         let kitchen = food::HomeKitchen::new(&self.ledger, actor);
-        let flour = kitchen.flour_for_bread(control, bread);
-        kitchen.grain_for_flour(
-            control,
-            positive(flour, self.ledger.value(Field::Flour, actor)),
-        )
-    }
-
-    fn seed_required(&self, work: Ticks, minutes: u32) -> Ticks {
-        let control = self.control;
-        let batch = minutes * comptime!(SEED_RETURN);
-        divide(plus(work, ticks(batch - 1, 0)).record(control), batch)
-    }
-
-    fn unplanted_seed(&self, plots: u32) -> Ticks {
-        let actor = self.actor;
-        let config = self.ledger.config;
-        let minutes = config.home.cultivation_minutes;
-        let annual = times32(plots, config.home.annual_yield_per_plot * minutes);
-        let sown = self.ledger.value(Field::CropWork, actor);
-        positive(
-            self.seed_required(annual, minutes),
-            self.seed_required(sown, minutes),
-        )
+        let bread = self
+            .ledger
+            .stock_with_transit(comptime!(Good::Bread as u32), actor)
+            .record(self.control);
+        let missing = positive(target, bread);
+        let flour = minimum(
+            missing,
+            self.ledger
+                .stock_with_transit(comptime!(Good::Flour as u32), actor)
+                .record(self.control),
+        );
+        let loaves = positive(missing, kitchen.bread_from_flour(flour));
+        let quote = max(self.ledger.number(Field::GrainQuote, actor), 1);
+        let cost = times(loaves, self.ledger.number(Field::FoodPrice, actor)).record(self.control);
+        let available = positive(
+            self.ledger.value(Field::Cash, actor),
+            self.ledger.value(Field::CartagePayable, actor),
+        );
+        CheckedTicks::ceiling_ratio(positive(cost, available), 1, quote).record(self.control)
     }
 
     pub fn open_grain_quote(&mut self) {
@@ -204,17 +215,27 @@ impl<'a> HouseholdFarm<'a> {
     pub fn reserve_grain(&mut self) {
         let actor = self.actor;
         let control = self.control;
+        let seed = seed_reserve(&self.ledger, control, actor);
         let config = self.ledger.config;
-        let plots = self.ledger.number(Field::LandPlots, actor);
-        let seed = self.unplanted_seed(plots);
-        let days = select(
-            plots > 0,
-            self.date.days_to_harvest(),
-            config.coverage + config.ring,
-        );
-        let food = self.grain_for_food(days);
-        self.ledger
-            .set(Field::GrainReserve, actor, plus(seed, food).record(control));
+        let reserve =
+            if comptime!(config.food_income == crate::domain::food::FoodIncome::PurchasingPower) {
+                let stock = self.ledger.value(Field::Grain, actor);
+                let daily_lot = CheckedTicks::ceiling_ratio(
+                    positive(stock, seed),
+                    1,
+                    self.date.days_to_harvest(),
+                )
+                .record(control);
+                let meals = times32(
+                    self.ledger.number(Field::NutritionNeed, actor),
+                    config.coverage + config.ring,
+                );
+                let food_budget = self.grain_to_fund_meals(times(meals, 2).record(control));
+                maximum(seed, positive(stock, maximum(daily_lot, food_budget)))
+            } else {
+                seed
+            };
+        self.ledger.set(Field::GrainReserve, actor, reserve);
     }
 
     pub fn close_grain_sales(&mut self) {
@@ -234,20 +255,36 @@ impl<'a> HouseholdFarm<'a> {
         )
         .record(control);
         self.ledger.set(Field::ExpectedGrainSales, actor, forecast);
-        let stock = self.ledger.value(Field::Grain, actor);
-        let reserve = self.ledger.value(Field::GrainReserve, actor);
-        let surplus = positive(stock, reserve);
-        let expected = ratio(forecast, self.date.days_to_harvest(), 365).record(control);
         let quote = self.ledger.number(Field::GrainQuote, actor);
-        if self.day % comptime!(SALES_WINDOW) == comptime!(SALES_WINDOW - 1)
+        if self.day % comptime!(SALES_WINDOW)
+            == comptime!(SALES_WINDOW - 1) - actor % comptime!(SALES_WINDOW)
             && config.price_response > 0
             && quote > 0
         {
+            let surplus = positive(
+                self.ledger.value(Field::Grain, actor),
+                seed_reserve(&self.ledger, control, actor),
+            );
+            let days = self.date.days_to_harvest();
+            let expected = ratio(forecast, days, 365).record(control);
+            let daily = max(
+                self.ledger.number(Field::FoodNeed, actor),
+                self.ledger.number(Field::NutritionNeed, actor),
+            );
+            let for_sale = minimum(surplus, self.grain_to_fund_meals(times32(daily, days)));
             let step = max(ceildiv(quote * config.price_response, 20 * POLICY_SCALE), 1);
-            let cheaper = max(quote, step + config.minimum_price) - step;
+            let production_cost = min(
+                config.maximum_price,
+                ceildiv(
+                    config.starting_wage * config.home.cultivation_minutes * comptime!(SEED_RETURN),
+                    comptime!(SEED_RETURN - 1),
+                ),
+            );
+            let floor = min(quote, max(config.minimum_price, production_cost));
+            let cheaper = max(quote, step + floor) - step;
             let dearer = min(quote + step, config.maximum_price);
             let next = select(
-                lt(expected, surplus),
+                lt(expected, for_sale),
                 cheaper,
                 select(lt(surplus, expected), dearer, quote),
             );
@@ -278,17 +315,20 @@ impl<'a> HouseholdFarm<'a> {
             );
         let sales = self.ledger.value(Field::ExpectedGrainSales, actor);
         let horizon = self.date.days_to_harvest() + 365;
-        let demand = plus(
-            self.grain_for_food(horizon),
+        let daily = max(
+            self.ledger.number(Field::FoodNeed, actor),
+            self.ledger.number(Field::NutritionNeed, actor),
+        );
+        let demand = maximum(
+            self.grain_to_fund_meals(times32(daily, horizon)),
             select(
                 profitable,
                 ratio(maximum(sales, ticks(plots, 0)), horizon, 365).record(control),
                 zero(),
             ),
-        )
-        .record(control);
-        let seed = self.seed_required(times(annual, minutes).record(control), minutes);
-        let sown_seed = self.seed_required(standing, minutes);
+        );
+        let seed = seed_required(control, times(annual, minutes).record(control), minutes);
+        let sown_seed = seed_required(control, standing, minutes);
         let needed = positive(
             plus(demand, seed).record(control),
             plus(grain, sown_seed).record(control),
@@ -297,9 +337,8 @@ impl<'a> HouseholdFarm<'a> {
             annual,
             ratio(needed, comptime!(SEED_RETURN), comptime!(SEED_RETURN - 1)).record(control),
         );
-        let seed_available = positive(grain, self.grain_for_food(1));
         let seed_funded_work = times(
-            plus(sown_seed, minimum(seed_available, seed)).record(control),
+            plus(sown_seed, minimum(grain, seed)).record(control),
             minutes * comptime!(SEED_RETURN),
         )
         .record(control);
@@ -313,7 +352,7 @@ impl<'a> HouseholdFarm<'a> {
         );
         let work = minimum(minimum(ticks(time, 0), times32(plots, pace)), remaining);
         let planted = plus(standing, work).record(control);
-        let spent = minus(self.seed_required(planted, minutes), sown_seed);
+        let spent = minus(seed_required(control, planted, minutes), sown_seed);
         self.ledger.set(Field::CropWork, actor, planted);
         self.ledger.set(Field::Grain, actor, minus(grain, spent));
         self.ledger
@@ -344,7 +383,7 @@ impl<'a> HouseholdFarm<'a> {
             .set_number(Field::HarvestYear, actor, self.date.year);
     }
 
-    fn prepare_food(&mut self, plots: u32, mut time: u32) -> u32 {
+    fn bake_bread(&mut self, mut time: u32) -> u32 {
         let actor = self.actor;
         let control = self.control;
         let config = self.ledger.config;
@@ -359,43 +398,6 @@ impl<'a> HouseholdFarm<'a> {
         );
         let bread_needed = positive(target, self.ledger.value(Field::Bread, actor));
         let kitchen = food::HomeKitchen::new(&self.ledger, actor);
-        let flour_needed = positive(
-            kitchen.flour_for_bread(control, bread_needed),
-            self.ledger.value(Field::Flour, actor),
-        );
-        let missing = positive(
-            self.ledger.value(Field::NutritionNeed, actor),
-            self.ledger.value(Field::Bread, actor),
-        );
-        let basic_flour = kitchen.flour_for_bread(control, missing);
-        let baking_time = minimum(
-            ticks(time, 0),
-            times(basic_flour, config.home.baking_minutes).record(control),
-        )
-        .extract(LOW_WORD);
-        let grain = self.ledger.value(Field::Grain, actor);
-        let seed = self.unplanted_seed(plots);
-        let household_food = self.grain_for_food(config.coverage + config.ring);
-        let available_grain = minimum(grain, maximum(positive(grain, seed), household_food));
-        let milled = minimum(
-            minimum(
-                kitchen.grain_for_flour(control, flour_needed),
-                available_grain,
-            ),
-            ticks(
-                (time - baking_time) / max(config.home.milling_minutes, 1),
-                0,
-            ),
-        );
-        let flour_output = kitchen.mill(control, milled);
-        self.ledger
-            .set_number(Field::MillingRemainder, actor, flour_output.remainder);
-        let milled_minutes = milled.extract(LOW_WORD) * config.home.milling_minutes;
-        time -= milled_minutes;
-        self.ledger.set(Field::Grain, actor, minus(grain, milled));
-        self.ledger
-            .increase_at(control, USED_FIELDS as u32, actor, milled);
-        self.output(comptime!(Good::Flour as u32), flour_output.quantity);
         let baked = minimum(
             minimum(
                 kitchen.flour_for_bread(control, bread_needed),
@@ -411,12 +413,7 @@ impl<'a> HouseholdFarm<'a> {
         self.ledger.set(Field::Flour, actor, minus(flour, baked));
         self.ledger
             .increase_at(control, USED_FIELDS as u32 + 1, actor, baked);
-        self.ledger.increase(
-            control,
-            Field::Used,
-            actor,
-            plus(milled, baked).record(control),
-        );
+        self.ledger.increase(control, Field::Used, actor, baked);
         self.output(comptime!(Good::Bread as u32), bread_output.quantity);
         time
     }
@@ -468,7 +465,7 @@ impl<'a> HouseholdFarm<'a> {
                 self.harvest(plots);
             }
         }
-        time = self.prepare_food(plots, time);
+        time = self.bake_bread(time);
         time = self.gather_firewood(plots, time);
         let construction = self.ledger.number(Field::HomeMinutes, actor);
         self.ledger

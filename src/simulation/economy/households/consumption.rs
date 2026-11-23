@@ -65,7 +65,7 @@ pub(in crate::simulation::economy) fn durable_use(
     day: u32,
 ) -> Ticks {
     if scaled_luxury(config, good) {
-        let interval = max(config.consumption_intervals[good as usize - 1], 1);
+        let interval = max(config.market_table[good as usize - 1], 1);
         let whole = divide(stock, interval);
         let remainder = minus(stock, times(whole, interval).value).extract(LOW_WORD);
         plus(whole, ticks(u32::cast_from(day % interval < remainder), 0)).value
@@ -119,10 +119,7 @@ impl<'a, 'b> HouseholdPurchase<'a, 'b> {
         let market = comptime!(parameters.market);
         let living_household = economy.actors.kind(id).is(comptime!(ActorKind::Household))
             && economy.ledger.number(Field::LivingMembers, id) > 0;
-        if comptime!(matches!(
-            market,
-            MarketFlag::Consumer(Good::Coal | Good::Wood)
-        )) {
+        if comptime!(matches!(market, MarketFlag::Consumer(ConsumerMarket::Fuel))) {
             order.wanted = self.fuel_target(good);
             let held = economy.ledger.stock_with_transit(good, id).record(control);
             order.search = living_household
@@ -138,9 +135,9 @@ impl<'a, 'b> HouseholdPurchase<'a, 'b> {
         } else {
             let luxury = comptime!(matches!(
                 market,
-                MarketFlag::Consumer(Good::LuxuryClothes | Good::LuxuryFurniture)
+                MarketFlag::Consumer(ConsumerMarket::Luxury)
             ));
-            let interval = config.consumption_intervals[good as usize - 1];
+            let interval = config.market_table[good as usize - 1];
             let until_due =
                 (interval - (parameters.day + id) % max(interval, 1)) % max(interval, 1);
             order.search = living_household
@@ -163,8 +160,28 @@ impl<'a, 'b> HouseholdPurchase<'a, 'b> {
             order.search = order.search
                 && !lt(food, reserve)
                 && lt(cash_reserve, economy.ledger.value(Field::Cash, id));
+            if comptime!(config.food_income == crate::domain::food::FoodIncome::PurchasingPower) {
+                let days = food::HomeKitchen::budget_days(&economy.ledger, id, parameters.day);
+                let wage = divide(
+                    economy.ledger.value(Field::IncomeForecast, id),
+                    POLICY_SCALE,
+                );
+                let meals = times32(
+                    food::HouseholdRation::new(&economy.ledger, id).minimum(),
+                    economy.ledger.number(Field::FoodPrice, id),
+                );
+                let seasonal_reserve = select(
+                    food::HomeKitchen::available(&economy.ledger, id),
+                    times(positive(meals, wage), days).record(control),
+                    zero(),
+                );
+                order.purchasing_power = positive(
+                    order.purchasing_power,
+                    maximum(cash_reserve, seasonal_reserve),
+                );
+            }
             if luxury {
-                order.purchasing_power = self.budget(good);
+                order.purchasing_power = minimum(order.purchasing_power, self.budget(good));
             }
             order.search = order.search && !equal(order.purchasing_power, zero());
             order.wanted = ticks(consumers(&economy.ledger, id), 0);
@@ -192,7 +209,7 @@ impl<'a, 'b> HouseholdPurchase<'a, 'b> {
             let quote = pricing::ReplacementMarket::new(spatial, control, parameters.day)
                 .quote(economy, household, good);
             let price = select(quote > 0, quote, config.maximum_price);
-            let interval = config.consumption_intervals[good as usize - 1];
+            let interval = config.market_table[good as usize - 1];
             let allowance = times(
                 divide(budget, 180),
                 interval + config.coverage + config.ring,
@@ -220,24 +237,33 @@ impl<'a, 'b> HouseholdPurchase<'a, 'b> {
         for sample in 0..rotation.samples() {
             let rotated = rotation.member(sample);
             let seller = spatial[(segment + cells + 1 + rotated) as usize];
-            let output = economy.actors.kind(seller).output();
-            let relevant =
-                output == comptime!(Good::Coal as u32) || output == comptime!(Good::Wood as u32);
-            if relevant {
-                let price = economy.ledger.number(Field::Price, seller);
-                let trip = economy.actors.distance(household, seller);
-                let available = economy.ledger.number(Field::EnterpriseStatus, seller)
-                    < comptime!(crate::domain::enterprise::EnterpriseState::Liquidating as u32)
-                    && household_production::offers(economy, seller, output)
-                    && trip <= config.search_radius
-                    && price > 0
-                    && !lt(cash, ticks(price, 0));
-                let units = select(output == comptime!(Good::Coal as u32), 2u32, 1u32);
-                let days = max(ceildiv(trip, config.shipment_speed), 1);
-                let score = price * (2 / units) * (config.ring + 1) + days;
-                if available && score < best {
-                    selected = output;
-                    best = score;
+            let primary = economy.actors.kind(seller).output();
+            let dealer = pricing::distributor(&economy.ledger, seller);
+            #[unroll]
+            for output in [Good::Coal as u32, Good::Wood as u32] {
+                let relevant = primary == output || dealer;
+                if relevant {
+                    let terms = household_production::TradeFields::new(
+                        &economy.actors,
+                        config,
+                        seller,
+                        output,
+                    );
+                    let price = economy.ledger.number_at(terms.price, seller);
+                    let trip = economy.actors.distance(household, seller);
+                    let available = economy.ledger.number(Field::EnterpriseStatus, seller)
+                        < comptime!(crate::domain::enterprise::EnterpriseState::Liquidating as u32)
+                        && household_production::offers(economy, seller, output)
+                        && trip <= config.search_radius
+                        && price > 0
+                        && !lt(cash, ticks(price, 0));
+                    let units = select(output == comptime!(Good::Coal as u32), 2u32, 1u32);
+                    let days = max(ceildiv(trip, config.shipment_speed), 1);
+                    let score = price * (2 / units) * (config.ring + 1) + days;
+                    if available && score < best {
+                        selected = output;
+                        best = score;
+                    }
                 }
             }
         }

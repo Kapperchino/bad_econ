@@ -51,6 +51,12 @@ impl EconomyInput {
         );
         if !guarded || market.is_open() {
             match comptime!(self.stage) {
+                EconomyStage::RetailOrders => market::distribution::record(
+                    economy,
+                    control,
+                    parameters.traded_good(),
+                    id + config.first_firm,
+                ),
                 EconomyStage::InputQuotes => {
                     pricing::ReplacementMarket::new(&*spatial, control, parameters.day)
                         .refresh(economy, id)
@@ -125,7 +131,9 @@ impl EconomyInput {
                 EconomyStage::IndexFill => {
                     indexing::index_fill(config, spatial, bundles, parameters, id)
                 }
-                EconomyStage::IndexPrices => indexing::index_prices(&economy.ledger, spatial),
+                EconomyStage::IndexPrices => {
+                    indexing::index_prices(&*economy, spatial, parameters.traded_good())
+                }
                 EconomyStage::FirmRent => rent::collect(economy, control, id, rent::Tenants::Firms),
                 EconomyStage::HouseholdRent => {
                     rent::collect(economy, control, id, rent::Tenants::Households)

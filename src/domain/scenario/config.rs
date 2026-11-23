@@ -6,7 +6,7 @@ use crate::domain::{
 use anyhow::{Result, anyhow};
 use serde::{Deserialize, Serialize};
 
-pub const SCENARIO_VERSION: u32 = 2;
+pub const SCENARIO_VERSION: u32 = 5;
 
 #[derive(Clone, Copy, Debug, Serialize, Deserialize, PartialEq, Eq, clap::ValueEnum)]
 pub enum Experiment {
@@ -186,7 +186,7 @@ impl ScenarioConfig {
             .map(|population| Population::new(population, &config))
             .transpose()?;
         let bounds = [
-            config.version == SCENARIO_VERSION,
+            (2..=SCENARIO_VERSION).contains(&config.version),
             match config.people {
                 Some(people) => (1..=1_000_000_000).contains(&people),
                 None => ScenarioConfig::HOUSEHOLDS.contains(&config.households),
@@ -321,7 +321,7 @@ impl TryFrom<ScenarioDocument> for ScenarioConfig {
         let mut value = document.0;
         match value.get("version").and_then(serde_json::Value::as_u64) {
             Some(1) => {
-                value["version"] = SCENARIO_VERSION.into();
+                value["version"] = 2.into();
                 if let Some(behavior) = value
                     .get_mut("behavior")
                     .and_then(serde_json::Value::as_object_mut)
@@ -349,9 +349,9 @@ impl TryFrom<ScenarioDocument> for ScenarioConfig {
                     }
                 }
             }
-            Some(2) => (),
+            Some(version) if (2..=u64::from(SCENARIO_VERSION)).contains(&version) => (),
             _ => Err(anyhow!(
-                "unsupported scenario format; expected version 1 or 2"
+                "unsupported scenario format; expected version 1 through {SCENARIO_VERSION}"
             ))?,
         }
         let current = CurrentScenario::deserialize(value)?;

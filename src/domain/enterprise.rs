@@ -347,7 +347,11 @@ impl Distributor {
     pub fn new(distributor: Self) -> Result<Self> {
         match (1..=480).contains(&distributor.handling_minutes)
             && (1..=100).contains(&distributor.units_per_shift)
-            && (1..=30).contains(&distributor.reserve_days)
+            && (1..=match distributor.good {
+                Good::Grain => super::calendar::DAYS_PER_YEAR,
+                _ => 30,
+            })
+                .contains(&distributor.reserve_days)
             && distributor.margin_per_mille <= 1000
         {
             true => Ok(distributor),

@@ -3,11 +3,27 @@ use crate::{arithmetic::hex, ledger::Coordinate};
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 
-pub const STATE_HASH_VERSION: &str = "bad-econ/state/CubekV2/v31";
+pub const STATE_HASH_VERSION: &str = "bad-econ/state/CubekV2/v32";
 pub const USED_FIELDS: usize = Field::CartageCapacity as usize + 1;
 pub const TRANSIT_FIELDS: usize = USED_FIELDS + Good::COUNT;
 pub const CONSUMPTION_FIELDS: usize = TRANSIT_FIELDS + Good::COUNT;
 pub const PRODUCTION_FIELDS: usize = CONSUMPTION_FIELDS + Good::COUNT;
+#[repr(u32)]
+#[derive(Clone, Copy)]
+pub enum RetailAccount {
+    Quote,
+    Cost,
+    Demand,
+    Orders,
+}
+
+impl RetailAccount {
+    pub const FIELDS: usize = 4 * Good::COUNT + 3;
+    pub const PRIOR_SALES: usize = 3;
+    pub const PRIOR_UNFILLED: usize = 2;
+    pub const REPLACEMENT_EXPENSE: usize = 1;
+}
+
 pub const BASE_FIELDS: usize = PRODUCTION_FIELDS + Good::COUNT;
 
 #[repr(u32)]

@@ -103,7 +103,7 @@ impl SearchInput {
                             length = stocked;
                             cursor = empty_suppliers.stock_cursor(&*searches, stocked, cursor);
                         }
-                        let limit = begin + supplier_samples(parameters, length);
+                        let limit = begin + supplier_samples(config, parameters, length);
                         let mut stride = 1u32;
                         if comptime!(parameters.market == MarketFlag::Household)
                             && length > HOUSEHOLD_SEARCH_SAMPLES
@@ -335,6 +335,7 @@ impl SearchInput {
                         if indexed {
                             let terms = household_production::TradeFields::new(
                                 &economy.actors,
+                                economy.ledger.config,
                                 chosen,
                                 parameters.traded_good(),
                             );
@@ -356,12 +357,7 @@ impl SearchInput {
                     quantity = select(missing_supply, affordable, minimum(affordable, available));
                     if comptime!(collection == OrderCollection::ConsumerMask) && !missing_supply {
                         filter::sample_order(
-                            &economy.ledger,
-                            successes,
-                            parameters,
-                            id,
-                            chosen,
-                            quantity,
+                            &*economy, successes, parameters, id, chosen, quantity,
                         );
                     }
                 }

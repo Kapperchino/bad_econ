@@ -159,6 +159,34 @@ impl FarmSite {
         crop && ledger.number(Field::EnterpriseModel, self.actor) == 0
     }
 
+    pub fn sells_direct(&self, ledger: &Ledger<'_>) -> bool {
+        let required = ticks(comptime!(WheatHusbandry::DIRECT_MILL_HECTARES), 0);
+        self.good == comptime!(Good::Grain as u32)
+            && !lt(
+                ledger.value(Field::OccupiedPlots, self.actor),
+                positive(required, ledger.value(Field::FarmHectares, self.actor)),
+            )
+    }
+
+    pub fn offer_wheat(&self, ledger: &mut Ledger<'_>, control: &[Atomic<u32>], day: u32) {
+        let date = CropCalendar::new(ledger.config).on(day);
+        if date.rotates_wheat(self.good) && !date.continuous() && self.is_farm(&*ledger) {
+            let firm = self.actor;
+            let stock = ledger.value(Field::Grain, firm);
+            let daily =
+                CheckedTicks::ceiling_ratio(stock, 1, date.days_to_harvest()).record(control);
+            let orders = minimum(
+                ledger.value(Field::Demand, firm),
+                times(daily, ledger.config.coverage).record(control),
+            );
+            ledger.set(
+                Field::GrainReserve,
+                firm,
+                positive(stock, maximum(daily, orders)),
+            );
+        }
+    }
+
     fn hectares(&self, ledger: &Ledger<'_>, control: &[Atomic<u32>]) -> Ticks {
         plus(
             ledger.value(Field::FarmHectares, self.actor),

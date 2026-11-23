@@ -220,10 +220,31 @@ impl FreightSettlementInput {
         self.bookings[buyer as usize * FREIGHT_BOOKING_WORDS] =
             comptime!(BookingState::Retrying as u32);
         if allowed {
-            let good = self.parameters.traded_good();
+            let good = self.parameters.good;
             let base = BASE_FIELDS as u32 + (good - 1) * self.config.ring;
             let old_field = cartage::waiting_field(&self.config, good, booking.road_days);
             let mut ledger = Ledger::new(&mut self.state, &self.config);
+            let actors = ActorTable::new(&self.actors);
+            let terms = household_production::TradeFields::new(&actors, &self.config, seller, good);
+            let price = ledger.value_at(terms.price, seller);
+            if good == comptime!(Good::Bread as u32)
+                && actors.kind(buyer).is(comptime!(ActorKind::Household))
+            {
+                ledger.set(Field::FoodPrice, buyer, price);
+            }
+            for input in 0u32..2 {
+                if ledger.number_at(comptime!(Field::FirstInput as u32) + input, buyer) == good {
+                    ledger.set_at(
+                        comptime!(Field::FirstInputCost as u32) + input,
+                        buyer,
+                        price,
+                    );
+                }
+            }
+            if pricing::distributor(&ledger, buyer) {
+                let field = pricing::cost_field(&self.config, actors.kind(buyer).output(), good);
+                ledger.set_at(field, buyer, price);
+            }
             let payable = ledger.value(Field::CartagePayable, buyer);
             let waived =
                 times(amount, cartage::rate(&self.config, booking.road_days)).record(&self.control);
@@ -276,7 +297,7 @@ impl FreightSettlementInput {
     }
 
     pub(super) fn initialize_booking(&mut self, invocation: u32) {
-        if invocation < orders::active(&self.control, &self.parameters) {
+        if invocation < self.parameters.active(&self.control) {
             let buyer = self.booking_buyer(invocation);
             let status = KernelEventStatus::load(
                 &mut self.scratch,

@@ -54,7 +54,7 @@ impl Supply {
         #[comptime] source: SupplySource,
     ) -> Self {
         if comptime!(
-            source == SupplySource::Index
+            matches!(source, SupplySource::Index | SupplySource::Grain)
                 || matches!(
                     parameters.market,
                     MarketFlag::Consumer(_) | MarketFlag::Household
@@ -68,9 +68,15 @@ impl Supply {
 
     pub fn new(economy: &EconomyView<'_>, actor: u32, good: u32) -> Self {
         let kind = economy.actors.kind(actor);
-        let producer = !kind.is(comptime!(ActorKind::Household)) && kind.output() == good;
+        let producer = !kind.is(comptime!(ActorKind::Household))
+            && (kind.output() == good || pricing::distributor(&economy.ledger, actor));
         let supplier = household_production::supplier(economy, actor, good);
-        let terms = household_production::TradeFields::new(&economy.actors, actor, good);
+        let terms = household_production::TradeFields::new(
+            &economy.actors,
+            economy.ledger.config,
+            actor,
+            good,
+        );
         let available = positive(
             economy.ledger.value_at(good, actor),
             household_production::reserve(economy, actor, good),
@@ -185,8 +191,7 @@ impl SupplierBlockStats {
         self.stocked = !reduce_minimum(!self.stocked, comptime!(reduction));
         self.maximum_available = !reduce_minimum(!self.maximum_available, comptime!(reduction));
         self.maximum_quote = !reduce_minimum(!self.maximum_quote, comptime!(reduction));
-        if comptime!(config.railway.routes_enabled == Feature::Enabled) && config.railway.nodes > 0
-        {
+        if config.railway.has_routes() {
             self.min_access = reduce_minimum(self.min_access, comptime!(reduction));
         }
     }
@@ -291,9 +296,7 @@ impl SearchInput {
                     scratch[(5 * config.actors + member) as usize] = empty::key(config, x, y);
                 }
                 let mut access = u32::new(comptime!(i64::from(u32::MAX)));
-                if comptime!(config.railway.routes_enabled == Feature::Enabled)
-                    && config.railway.nodes > 0
-                {
+                if config.railway.has_routes() {
                     access = config.railway.access[actor as usize * 2 + 1];
                 }
                 stats.collect(&supply, x, y, access);
@@ -356,8 +359,7 @@ impl<'a> SupplierBlock<'a> {
     fn delivery_days(&self, buyer: &BuyerLocation, distance: u32) -> u32 {
         let config = self.config;
         let mut days = max(ceildiv(distance, config.shipment_speed), 1);
-        if comptime!(config.railway.routes_enabled == Feature::Enabled) && config.railway.nodes > 0
-        {
+        if config.railway.has_routes() {
             let seller_access = self.field(comptime!(BlockField::MinAccess));
             days = min(
                 days,
