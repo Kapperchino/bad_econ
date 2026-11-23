@@ -1,0 +1,312 @@
+use cubecl_core::{self as cubecl, prelude::*};
+use cubecl_ir::{
+    attributes::{BoolAttr, FloatAttr, IndexAttr, ZeroAttr},
+    dialect::general::*,
+    interfaces::TypedExt,
+    prelude::*,
+    types::{
+        VectorType,
+        scalar::{Float32Type, IndexType},
+    },
+};
+use pliron::{
+    attribute::{Attribute, attr_cast},
+    builtin::{attributes::IntegerAttr, ops::ConstantOp, types::IntegerType},
+};
+
+use crate::compiler::wgsl::{
+    lower::lower_binop,
+    to_wgsl::{AttrToWgsl, TypeExtWgsl, wasm_inventory_root, wgsl_op, wgsl_op_with_out},
+    value::WgslValue,
+};
+
+wasm_inventory_root!(BoolAndOp);
+
+wgsl_op_with_out!(BoolAndOp; |op, ctx| {
+    format!("{} && {}", op.lhs(ctx).name(ctx), op.rhs(ctx).name(ctx))
+});
+wgsl_op_with_out!(BoolOrOp; |op, ctx| {
+    format!("{} || {}", op.lhs(ctx).name(ctx), op.rhs(ctx).name(ctx))
+});
+wgsl_op_with_out!(BoolNotOp; |op, ctx| {
+    format!("!{}", op.input(ctx).name(ctx))
+});
+
+wgsl_op_with_out!(CastOp; |op, ctx| {
+    fmt_cast_to(ctx, op.input(ctx), op.result_type(ctx))
+});
+wgsl_op_with_out!(ReinterpretCastOp; |op, ctx| {
+    let to = op.result_type(ctx);
+    if let Some(cast) = fmt_f16_pair_reinterpret(ctx, op.input(ctx), to) {
+        return cast;
+    }
+    format!("bitcast<{}>({})", to.to_wgsl(ctx), op.input(ctx).name(ctx))
+});
+
+/// A reinterpret between 32-bit lanes and twice as many `f16` lanes, through `unpack2x16float`
+/// and `pack2x16float`: naga types a `bitcast` that changes the lane count as its input's shape,
+/// so `bitcast<vec2<f16>>(u32)` reads back as an `f32` scalar and fails validation once indexed.
+/// The `f16` to `f32` round trip is exact.
+fn fmt_f16_pair_reinterpret(ctx: &Context, value: Value, to: TypeHandle) -> Option<String> {
+    let from = value.get_type(ctx);
+    let (from_size, to_size) = (from.vector_size(ctx), to.vector_size(ctx));
+    let (from_elem, to_elem) = (from.scalar_ty(ctx), to.scalar_ty(ctx));
+    let name = value.name(ctx);
+    let lane = |size: usize, i: usize| {
+        if size > 1 {
+            format!("{name}[{i}]")
+        } else {
+            name.to_string()
+        }
+    };
+    let join = |ty: TypeHandle, parts: Vec<String>| {
+        if parts.len() > 1 {
+            format!("{}({})", ty.to_wgsl(ctx), parts.join(", "))
+        } else {
+            parts.concat()
+        }
+    };
+
+    if to_elem.is_float16(ctx) && !from_elem.is_float16(ctx) && to_size == 2 * from_size {
+        let parts = (0..from_size)
+            .map(|i| {
+                let word = lane(from_size, i);
+                format!("vec2<f16>(unpack2x16float(bitcast<u32>({word})))")
+            })
+            .collect();
+        return Some(join(to, parts));
+    }
+    if from_elem.is_float16(ctx) && !to_elem.is_float16(ctx) && from_size == 2 * to_size {
+        let elem = to_elem.to_wgsl(ctx);
+        let parts = (0..to_size)
+            .map(|i| {
+                let (lo, hi) = (lane(from_size, 2 * i), lane(from_size, 2 * i + 1));
+                format!("bitcast<{elem}>(pack2x16float(vec2<f32>(f32({lo}), f32({hi}))))")
+            })
+            .collect();
+        return Some(join(to, parts));
+    }
+    None
+}
+
+wgsl_op_with_out!(SelectOp; |op, ctx| {
+    let t = op.true_value(ctx).name(ctx);
+    let f = op.false_value(ctx).name(ctx);
+    format!("select({f}, {t}, {})", op.condition(ctx).name(ctx))
+});
+
+wgsl_op!(FreeOp, |_, _| String::new());
+wgsl_op!(PrintfOp, |_, _| String::new()); // Unsupported
+wgsl_op!(CommentOp, |op, ctx| {
+    let comment = op.comment(ctx).as_str().to_owned();
+    if comment.contains('\n') {
+        format!("/* {comment} */\n")
+    } else {
+        format!("// {comment}\n")
+    }
+});
+
+wgsl_op_with_out!(ConstantOp; |op, ctx| attr_to_wgsl(ctx, &*op.get_value(ctx)));
+
+pub fn attr_to_wgsl(ctx: &Context, attr: &dyn Attribute) -> String {
+    let Some(attr) = attr_cast::<dyn AttrToWgsl>(attr) else {
+        panic!("Constant value must implement `AttrToWgsl`")
+    };
+    attr.to_wgsl(ctx)
+}
+
+#[attr_interface_impl]
+impl AttrToWgsl for IndexAttr {
+    fn to_wgsl(&self, ctx: &Context) -> String {
+        format!("{}({})", IndexType::get(ctx).to_wgsl(ctx), self.0)
+    }
+}
+
+#[attr_interface_impl]
+impl AttrToWgsl for IntegerAttr {
+    fn to_wgsl(&self, ctx: &Context) -> String {
+        let ty = self.get_type().to_handle();
+        let val = self.value();
+        // naga can't seem to parse literals > i64::MAX or i64::MIN atm.
+        // Work around this by emitting instructions to construct these literals.
+        if ty.is_unsigned_int(ctx) && val.to_u64() > i64::MAX as u64 {
+            let as_i64 = val.to_u64() as i64;
+            if as_i64 == i64::MIN {
+                "bitcast<u64>(i64(-9223372036854775807) - 1)".into()
+            } else {
+                format!("bitcast<u64>(i64({as_i64}))")
+            }
+        } else if ty.is_signed_int(ctx) && val.to_i64() == i64::MIN {
+            "(i64(-9223372036854775807) - 1)".into()
+        } else {
+            let val = val.to_string_decimal(ty.is_signed_int(ctx));
+            format!("{}({val})", ty.to_wgsl(ctx))
+        }
+    }
+}
+
+#[attr_interface_impl]
+impl AttrToWgsl for FloatAttr {
+    fn to_wgsl(&self, ctx: &Context) -> String {
+        let float = self.float_type(ctx);
+        // Format through f64 so finite f16/f32 values are represented exactly.
+        // The rounded APFloat spelling of f32::MAX exceeds the valid f32 range.
+        let value = float.value_to_f64(self.val);
+        let ty = self.ty.to_wgsl(ctx);
+        if value.is_finite() {
+            format!("{ty}({value:?})")
+        } else {
+            non_finite_literal(&ty, value)
+        }
+    }
+}
+
+/// `value`, an infinity or a NaN, as an expression of the float type `ty`: WGSL spells neither, so
+/// its bits are cast. An `f16`'s are half of a `u32`, read back out of the pair; an `f64` widens
+/// the `f32`.
+fn non_finite_literal(ty: &str, value: f64) -> String {
+    let single = (value as f32).to_bits();
+    match ty {
+        "f16" => format!(
+            "bitcast<vec2<f16>>({:#x}u).x",
+            half::f16::from_f64(value).to_bits()
+        ),
+        "f64" => format!("f64(bitcast<f32>({single:#x}u))"),
+        _ => format!("bitcast<f32>({single:#x}u)"),
+    }
+}
+
+#[attr_interface_impl]
+impl AttrToWgsl for BoolAttr {
+    fn to_wgsl(&self, _ctx: &Context) -> String {
+        format!("{}", self.0)
+    }
+}
+
+#[attr_interface_impl]
+impl AttrToWgsl for ZeroAttr {
+    fn to_wgsl(&self, ctx: &Context) -> String {
+        format!("{}()", self.ty.to_wgsl(ctx))
+    }
+}
+
+pub fn fmt_cast_to(ctx: &Context, value: Value, to: TypeHandle) -> String {
+    let from = value.get_type(ctx);
+    let from_elem = from.scalar_ty(ctx);
+    let to_elem = to.scalar_ty(ctx);
+
+    // Naga u64/i64 has weird limitations. We work around by first bitcasting to a 64-bit
+    // type matching the target's signedness, then casting to the 32-bit target.
+    let is_64bit = from_elem.is_int_of_width(ctx, 64);
+    let is_32bit_target = to_elem.is_int_of_width(ctx, 32);
+    if is_64bit && is_32bit_target {
+        // Choose bitcast type based on target signedness (u32 -> u64, i32 -> i64)
+        let to_elem = TypedHandle::<IntegerType>::from_handle(to_elem, ctx).unwrap();
+        let bitcast_elem = IntegerType::get(ctx, 64, to_elem.deref(ctx).signedness());
+        let bitcast_ty = same_vec_with_elem(ctx, from, bitcast_elem.into());
+
+        let to_ty = to.to_wgsl(ctx);
+        let bitcast_ty = bitcast_ty.to_wgsl(ctx);
+        return format!("{to_ty}(bitcast<{bitcast_ty}>({}))", value.name(ctx));
+    }
+
+    // WGSL doesn't support direct bool to f16 casts, can go through f32 first.
+    if from_elem.is_bool(ctx) && to_elem.is_float16(ctx) {
+        let f32_ty = same_vec_with_elem(ctx, to, Float32Type::get(ctx).into()).to_wgsl(ctx);
+        return format!("{}({f32_ty}({}))", to.to_wgsl(ctx), value.name(ctx));
+    }
+
+    format!("{}({})", to.to_wgsl(ctx), value.name(ctx))
+}
+
+fn same_vec_with_elem(ctx: &Context, maybe_vec: TypeHandle, elem: TypeHandle) -> TypeHandle {
+    let vec = maybe_vec.vector_size(ctx);
+    if vec > 1 {
+        VectorType::get(ctx, elem, vec).to_handle()
+    } else {
+        elem
+    }
+}
+
+lower_binop!(BoolAndOp, unroll_bool_and, |op, ctx| {
+    op.result_type(ctx).vector_size(ctx) > 1
+});
+lower_binop!(BoolOrOp, unroll_bool_or, |op, ctx| {
+    op.result_type(ctx).vector_size(ctx) > 1
+});
+
+#[cube]
+#[allow(clippy::extra_unused_type_parameters)]
+fn unroll_bool_and<T: Scalar, N: Size>(
+    lhs: Vector<bool, N>,
+    rhs: Vector<bool, N>,
+) -> Vector<bool, N> {
+    let mut out = Vector::empty();
+    #[unroll]
+    for i in 0..lhs.vector_size() {
+        out.insert(i, lhs.extract(i) & rhs.extract(i));
+    }
+    out
+}
+
+#[cube]
+#[allow(clippy::extra_unused_type_parameters)]
+fn unroll_bool_or<T: Scalar, N: Size>(
+    lhs: Vector<bool, N>,
+    rhs: Vector<bool, N>,
+) -> Vector<bool, N> {
+    let mut out = Vector::empty();
+    #[unroll]
+    for i in 0..lhs.vector_size() {
+        out.insert(i, lhs.extract(i) | rhs.extract(i));
+    }
+    out
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// WGSL spells no infinity or NaN: each is its type's bits, cast.
+    #[test]
+    fn non_finite_literals_are_cast_bits() {
+        let ctx = Context::new();
+        let literal =
+            |ty: TypeHandle, value: f64| FloatAttr::from_f64(&ctx, ty, value).to_wgsl(&ctx);
+        let f32_ty = Float32Type::get(&ctx).to_handle();
+        assert_eq!(literal(f32_ty, f64::INFINITY), "bitcast<f32>(0x7f800000u)");
+        assert_eq!(
+            literal(f32_ty, f64::NEG_INFINITY),
+            "bitcast<f32>(0xff800000u)"
+        );
+        assert_eq!(
+            non_finite_literal("f16", f64::INFINITY),
+            "bitcast<vec2<f16>>(0x7c00u).x"
+        );
+        assert_eq!(
+            non_finite_literal("f64", f64::NEG_INFINITY),
+            "f64(bitcast<f32>(0xff800000u))"
+        );
+        assert!(literal(f32_ty, f64::NAN).starts_with("bitcast<f32>(0x7fc"));
+    }
+
+    #[test]
+    fn f32_boundary_literals_preserve_value() {
+        let ctx = Context::new();
+        let ty = Float32Type::get(&ctx).to_handle();
+        for value in [f32::MIN, f32::MAX] {
+            let literal = FloatAttr::from_f64(&ctx, ty, f64::from(value)).to_wgsl(&ctx);
+            let decimal = literal
+                .strip_prefix("f32(")
+                .unwrap()
+                .strip_suffix(')')
+                .unwrap();
+            // Check before f32 rounding, which can hide an out-of-range literal.
+            assert_eq!(
+                decimal.parse::<f64>().unwrap(),
+                f64::from(value),
+                "{literal}"
+            );
+        }
+    }
+}

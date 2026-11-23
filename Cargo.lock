@@ -3683,8 +3683,6 @@ dependencies = [
 [[package]]
 name = "cubecl-wgpu"
 version = "0.12.0-pre.2"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "982709e60c3ccce9eb1d60d3ff2aecc9fceb6c534e7a16971fcf6d3143425b5e"
 dependencies = [
  "ash",
  "bytemuck",
@@ -3709,6 +3707,7 @@ dependencies = [
  "pliron",
  "thiserror 2.0.21",
  "tracel-ash",
+ "tracel-rspirv",
  "wasm-bindgen-futures",
  "wgpu",
 ]
