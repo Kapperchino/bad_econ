@@ -3,8 +3,8 @@ use crate::{
     domain::Phase,
     simulation::{
         Device,
-        layout::{NO_ACTOR, ProposalLayout},
         parallel::ScanMode,
+        storage::layout::{NO_ACTOR, ProposalLayout},
     },
 };
 use anyhow::Result;
@@ -68,7 +68,7 @@ fn empty_indirect_queues_skip_work_after_active_dispatches_on_gpu() -> Result<()
 fn compaction_and_ranges_preserve_buffers_after_unlatched_faults_on_gpu() -> Result<()> {
     use crate::{
         domain::{Experiment, Good, Market, Scenario},
-        simulation::{Simulation, economy::market::search, layout::ProposalLayout},
+        simulation::{Simulation, economy::market::search, storage::layout::ProposalLayout},
     };
     let scenario = Scenario::baseline(97, 42, Experiment::Baseline)?;
     let simulation = Simulation::new(scenario, crate::simulation::tests::device(64)?)?;
@@ -142,7 +142,7 @@ fn compaction_and_ranges_preserve_buffers_after_unlatched_faults_on_gpu() -> Res
 fn indexed_feedback_ignores_stale_statuses_and_matches_dense_feedback_on_gpu() -> Result<()> {
     use crate::{
         domain::{Experiment, Field, Market, Scenario},
-        simulation::{Simulation, encode, layout::TICK_WORDS},
+        simulation::{Simulation, encode, storage::layout::TICK_WORDS},
     };
     #[derive(Clone, Copy)]
     enum FeedbackCase {
@@ -410,9 +410,9 @@ impl ProposalCase {
                 .memory_dedicated_allocation(144, |_| device.empty(36)),
         };
         let parameters = EconomyParameters {
-            clock: crate::simulation::parameters::MarketClock::Scalars,
+            clock: crate::simulation::economy::parameters::MarketClock::Scalars,
             scan: self.scan,
-            empty_orders: crate::simulation::parameters::EmptyOrderMode::Settle,
+            empty_orders: crate::simulation::economy::parameters::EmptyOrderMode::Settle,
             day: 0,
             matching_round: 0,
             settlement_rotation: self.rotation as u32,

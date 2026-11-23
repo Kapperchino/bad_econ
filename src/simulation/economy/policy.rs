@@ -9,7 +9,7 @@ pub const PRICE_INDEX_BITS: u32 = 5;
 pub const PRICE_INDEX_LIMIT: u32 = 1 << PRICE_INDEX_BITS;
 pub const MINIMUM_WAGE: u32 = 1;
 pub const MAXIMUM_WAGE: u32 = 10_000;
-use super::words::*;
+use crate::simulation::storage::words::*;
 use cubecl::prelude::*;
 
 #[derive(CubeType, Clone, Copy)]

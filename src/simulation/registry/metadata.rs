@@ -2,10 +2,10 @@ use super::records::PendingRecord;
 use crate::domain::{ActorRows, Scenario};
 use crate::simulation::{
     Device,
-    layout::ActorLayout,
+    gpu::tensor,
     pass::GpuPass,
+    storage::layout::ActorLayout,
     system::{AsBufferArg, System, gpu_passes},
-    tensor,
 };
 use burn_wgpu::CubeTensor;
 use bytemuck::{Pod, Zeroable};

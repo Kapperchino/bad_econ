@@ -1,18 +1,21 @@
-use super::{Simulation, economy, finance, flags::FaultFlags, layout::*, research};
+use crate::simulation::{
+    Simulation, economy, finance, research,
+    storage::{flags::FaultFlags, layout::*},
+};
 #[cfg(test)]
-use super::{economy::EconomyStage, reduction, tensor};
+use crate::simulation::{economy::EconomyStage, gpu::tensor, reduction};
 use crate::{arithmetic::add, domain::*};
 use anyhow::Result;
 
 #[cfg(test)]
 #[derive(Clone, Copy)]
-pub(super) enum AuditExecution {
+pub(in crate::simulation) enum AuditExecution {
     Tiled,
     Original,
 }
 
 impl Simulation {
-    pub(super) fn account_research_readbacks(&mut self) {
+    pub(in crate::simulation) fn account_research_readbacks(&mut self) {
         let total = self
             .research
             .as_ref()
@@ -24,7 +27,7 @@ impl Simulation {
     pub fn observe(&mut self) -> Result<ObservationSnapshot> {
         self.observe_rings(economy::accounting::audit::RingValidation::All)
     }
-    pub(super) fn observe_rings(
+    pub(in crate::simulation) fn observe_rings(
         &mut self,
         rings: economy::accounting::audit::RingValidation<'_>,
     ) -> Result<ObservationSnapshot> {

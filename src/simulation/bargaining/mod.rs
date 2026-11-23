@@ -1,7 +1,6 @@
 use super::{
     Device,
-    flags::FaultFlags,
-    layout::WORD_BYTES,
+    storage::{flags::FaultFlags, layout::WORD_BYTES},
     system::{AsBufferArg, System},
 };
 use crate::ledger::TickLayout;
@@ -10,6 +9,7 @@ use bytemuck::{Pod, Zeroable};
 use std::mem::offset_of;
 
 mod kernels;
+pub mod negotiation;
 pub use kernels::{
     HouseholdQuote, KernelBargainingFactors, KernelHousehold, KernelWageBounds, bargaining_weight,
     employer_ceiling, household_quote, inverse_bracket, second_offer, wage_bounds,

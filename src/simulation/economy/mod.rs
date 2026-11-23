@@ -1,7 +1,10 @@
 pub(super) mod accounting;
+pub(super) mod configuration;
 pub(super) mod households;
 pub(super) mod market;
+pub(super) mod parameters;
 pub(super) mod phases;
+pub(super) mod policy;
 pub(super) mod production;
 pub(super) mod property;
 pub(super) mod settlement;
@@ -16,27 +19,25 @@ use settlement::{batch, clearing, events, groups, scheduler};
 use transport::{cartage, railway};
 
 use super::{
-    flags::{
-        ActorKind, COMPLETED_WORD, CONSTRUCTED_EVENTS_WORD, CONTROL_WORDS, EventStatus, FaultFlags,
-        InputMarket, KernelActorKind, KernelAuthorization, KernelEventStatus, KernelFaults,
-        MarketFlag, PROGRESS_WORD,
-    },
     households::{KernelFatigue, KernelObservation, ObservationKind},
-    layout::*,
     negotiation::{NegotiationRequest, NegotiationStatus, legal_grid_rate, negotiate},
     parallel::{
         self, Reduction,
         workgroup::{self, TickTree, WorkgroupTree},
     },
-    parameters::{Discovery, EconomyParameters},
     pass::GpuPass,
-    payroll::PayrollAccrual,
-    policy::*,
-    state::*,
+    storage::{
+        flags::{
+            ActorKind, COMPLETED_WORD, CONSTRUCTED_EVENTS_WORD, CONTROL_WORDS, EventStatus,
+            FaultFlags, InputMarket, KernelActorKind, KernelAuthorization, KernelEventStatus,
+            KernelFaults, MarketFlag, PROGRESS_WORD,
+        },
+        layout::*,
+        state::*,
+        words::*,
+    },
     system::{AsBufferArg, System, gpu_passes},
-    words::*,
 };
-use crate::simulation::configuration::{EconomyConfig, Feature};
 use crate::{
     domain::{
         BASE_FIELDS, CONSUMPTION_FIELDS, Field, Good, PRODUCTION_FIELDS, Phase, TRANSIT_FIELDS,
@@ -45,11 +46,15 @@ use crate::{
     ledger::{AuthorizationFlags, EMPTY, LEG_WORDS, LegLayout, MAX_LEGS},
 };
 use clearing::{PeerBalances, PeerOffer, actor_settlement};
+use configuration::{EconomyConfig, Feature};
 use cubecl::prelude::*;
 use events::{EventStorage, construct};
 use market::demand::{PurchaseRequest, trial_packet};
 use market::orders::{LATCH_WORD, RANGE_SLOTS_WORD};
+use parameters::{Discovery, EconomyParameters};
+use policy::*;
 use proposals::MarketProposal;
+use settlement::payroll::PayrollAccrual;
 use settlement::scheduler::{Posting, apply};
 pub(super) use systems::{EconomyInputLaunch, EconomySystem};
 

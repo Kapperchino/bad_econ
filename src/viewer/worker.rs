@@ -272,7 +272,7 @@ fn publish(
 }
 
 struct ObservationUpdate {
-    companies: Vec<crate::simulation::company_report::Business>,
+    companies: Vec<crate::simulation::reporting::company_report::Business>,
     firms: Vec<Actor>,
     identities: Vec<u64>,
 }

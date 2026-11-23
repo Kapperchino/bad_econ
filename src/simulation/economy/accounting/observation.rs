@@ -1,6 +1,6 @@
 use crate::simulation::{
     economy::*,
-    state::{EconomyViewExpand, LedgerExpand},
+    storage::state::{EconomyViewExpand, LedgerExpand},
 };
 
 #[cube]

@@ -246,7 +246,7 @@ pub(in crate::simulation) fn settle_consumers(
     scratch: &burn_wgpu::CubeTensor,
     control: &burn_wgpu::CubeTensor,
     dispatches: &burn_wgpu::CubeTensor,
-    parameters: &crate::simulation::parameters::EconomyParameters,
+    parameters: &crate::simulation::economy::parameters::EconomyParameters,
 ) {
     let input = || SettlementInputLaunch {
         state: state.buffer_arg(),
@@ -497,7 +497,7 @@ mod tests {
             ] {
                 state.set(field, peer, amount);
             }
-            let padded = crate::simulation::tensor::state_values(
+            let padded = crate::simulation::gpu::tensor::state_values(
                 &state.values,
                 count,
                 actual.config.state_stride as usize,

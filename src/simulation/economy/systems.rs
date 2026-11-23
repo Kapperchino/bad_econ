@@ -58,7 +58,7 @@ impl EconomyInput {
                 EconomyStage::MarketBoundary => {
                     if id == 0 {
                         control[LATCH_WORD]
-                            .store(control[crate::simulation::flags::FAULT_WORD].load());
+                            .store(control[crate::simulation::storage::flags::FAULT_WORD].load());
                     }
                 }
                 EconomyStage::ProposeCompact | EconomyStage::ProposeRetainedCompact => {
@@ -79,7 +79,7 @@ impl EconomyInput {
                     orders::compact_proposal(peer, bundles, parameters, id);
                 }
                 EconomyStage::GroupCompactFill => {
-                    if control[crate::simulation::flags::FAULT_WORD].load() == 0 {
+                    if control[crate::simulation::storage::flags::FAULT_WORD].load() == 0 {
                         orders::compact_fill(proposals, bundles, control, parameters, id);
                     }
                 }
@@ -94,7 +94,7 @@ impl EconomyInput {
                         .record_supplier(&*spatial, config, id)
                 }
                 EconomyStage::GroupRanges => {
-                    if control[crate::simulation::flags::FAULT_WORD].load() == 0 {
+                    if control[crate::simulation::storage::flags::FAULT_WORD].load() == 0 {
                         orders::OrderRanges::new(bundles, control, parameters)
                             .record_order(config, id);
                     }

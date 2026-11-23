@@ -79,12 +79,13 @@ impl CandidateTile {
 
     pub(super) fn clear_faults(&self, lane: usize, #[comptime] market: MarketFlag) {
         if comptime!(market == MarketFlag::Labor) {
-            self.faults[lane * CONTROL_WORDS + crate::simulation::flags::FAULT_WORD].store(0);
+            self.faults[lane * CONTROL_WORDS + crate::simulation::storage::flags::FAULT_WORD]
+                .store(0);
         }
     }
 
     pub(super) fn faults(&self, lane: usize) -> u32 {
-        self.faults[lane * CONTROL_WORDS + crate::simulation::flags::FAULT_WORD].load()
+        self.faults[lane * CONTROL_WORDS + crate::simulation::storage::flags::FAULT_WORD].load()
     }
 
     pub(super) fn publish_search(&mut self, considered: u32, saw_supply: u32) {

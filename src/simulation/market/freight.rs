@@ -8,7 +8,7 @@ use crate::simulation::{
             Wave,
         },
     },
-    layout::WORD_BYTES,
+    storage::layout::WORD_BYTES,
 };
 use anyhow::Result;
 

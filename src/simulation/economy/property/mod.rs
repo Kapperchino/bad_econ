@@ -7,7 +7,7 @@ use crate::domain::{
 };
 use crate::simulation::DeviceEconomy;
 use crate::simulation::economy::*;
-use crate::simulation::{Device, configuration::Configuration};
+use crate::simulation::{Device, economy::configuration::Configuration};
 use burn_wgpu::CubeTensor;
 
 #[cfg(test)]

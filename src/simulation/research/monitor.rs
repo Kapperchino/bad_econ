@@ -6,7 +6,7 @@ use super::{
 };
 use crate::{
     domain::{Good, research::RESEARCH_SCALE},
-    simulation::{layout::TICK_WORDS, words::*},
+    simulation::storage::{layout::TICK_WORDS, words::*},
 };
 use cubecl::prelude::*;
 

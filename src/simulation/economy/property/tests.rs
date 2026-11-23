@@ -95,7 +95,7 @@ fn bulk_consolidation_preserves_nearest_whole_grants_and_ties_on_gpu() -> Result
             .actors
             .iter()
             .map(|actor| ActorLayout::new(&actor, &scenario))
-            .collect::<crate::simulation::layout::ActorMetadataRows>()
+            .collect::<crate::simulation::storage::layout::ActorMetadataRows>()
             .words(),
     );
     let spatial = parcel_index(&device, &actors, &spatial, &config);

@@ -1,4 +1,5 @@
-use super::{Device, tensor};
+use super::tensor;
+use crate::simulation::Device;
 use anyhow::Result;
 use burn::tensor::Shape;
 use burn_wgpu::CubeTensor;
@@ -6,13 +7,13 @@ use sha2::{Digest, Sha256};
 
 #[derive(Clone, Copy)]
 #[repr(u8)]
-pub(super) enum Stream {
+pub(in crate::simulation) enum Stream {
     Research = 0,
     Strikes = 1,
     Demography = 2,
 }
 
-pub(super) fn samples(
+pub(in crate::simulation) fn samples(
     device: &Device,
     seed: u64,
     day: u64,

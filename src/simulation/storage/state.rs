@@ -1,14 +1,14 @@
 use super::{
-    configuration::EconomyConfig,
     flags::KernelActorKind,
     layout::{ActorLayout, LOW_WORD},
     words::*,
 };
 use crate::domain::{Field, TRANSIT_FIELDS};
+use crate::simulation::economy::configuration::EconomyConfig;
 use cubecl::prelude::*;
 
 #[derive(CubeType)]
-pub(super) struct BalanceBuffer<'a> {
+pub(in crate::simulation) struct BalanceBuffer<'a> {
     words: &'a mut [u32],
 }
 
@@ -28,7 +28,7 @@ impl<'a> BalanceBuffer<'a> {
 }
 
 #[derive(CubeType)]
-pub(super) struct ActorBalances<'a> {
+pub(in crate::simulation) struct ActorBalances<'a> {
     balances: BalanceBuffer<'a>,
     stride: u32,
 }
@@ -67,7 +67,7 @@ impl<'a> ActorBalances<'a> {
 }
 
 #[derive(CubeType)]
-pub(super) struct EconomyView<'a> {
+pub(in crate::simulation) struct EconomyView<'a> {
     pub ledger: Ledger<'a>,
     pub actors: ActorTable<'a>,
 }
@@ -83,7 +83,7 @@ impl<'a> EconomyView<'a> {
 }
 
 #[derive(CubeType)]
-pub(super) struct Ledger<'a> {
+pub(in crate::simulation) struct Ledger<'a> {
     pub words: &'a mut [u32],
     pub config: &'a EconomyConfig,
 }
@@ -134,7 +134,7 @@ impl<'a> Ledger<'a> {
 }
 
 #[derive(CubeType)]
-pub(super) struct LedgerColumn<'a> {
+pub(in crate::simulation) struct LedgerColumn<'a> {
     words: &'a [u32],
     start: u32,
 }
@@ -154,7 +154,7 @@ impl<'a> LedgerColumn<'a> {
 }
 
 #[cube]
-pub(super) trait ReadLedger: CubeType {
+pub(in crate::simulation) trait ReadLedger: CubeType {
     fn value_at(&self, field: u32, actor: u32) -> Ticks;
     fn number_at(&self, field: u32, actor: u32) -> u32;
     fn value(&self, #[comptime] field: Field, actor: u32) -> Ticks;
@@ -196,7 +196,7 @@ read_ledger!(
 );
 
 #[derive(CubeType)]
-pub(super) struct TickLedger<'a> {
+pub(in crate::simulation) struct TickLedger<'a> {
     balances: &'a [Ticks],
     pub config: &'a EconomyConfig,
 }
@@ -216,7 +216,7 @@ read_ledger!(
 );
 
 #[derive(CubeType)]
-pub(super) struct ActorTable<'a> {
+pub(in crate::simulation) struct ActorTable<'a> {
     words: &'a [u32],
     stride: usize,
 }

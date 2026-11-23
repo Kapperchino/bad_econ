@@ -15,7 +15,7 @@ pub(crate) use word_layout;
 
 macro_rules! row_layout {
     ($rows:ident, $record:ident { $first:ident : $first_ty:ty => $first_constant:ident $(, $field:ident : $ty:ty => $constant:ident)* $(,)? }) => {
-        $crate::simulation::rows::word_layout!($record {
+        $crate::simulation::storage::rows::word_layout!($record {
             $first: $first_ty => $first_constant,
             $($field: $ty => $constant),*
         });

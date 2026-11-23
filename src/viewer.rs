@@ -53,7 +53,7 @@ struct Display {
     comparison: Option<ComparisonRun>,
     inspection: Option<Inspection>,
     firms: Vec<Actor>,
-    companies: Vec<crate::simulation::company_report::Business>,
+    companies: Vec<crate::simulation::reporting::company_report::Business>,
     identities: Vec<u64>,
     status: DisplayState,
     error: Option<String>,

@@ -15,7 +15,7 @@ use self::{
 };
 use super::{
     Device,
-    flags::{CONTROL_WORDS, FaultFlags},
+    storage::flags::{CONTROL_WORDS, FaultFlags},
     system::System,
 };
 use crate::arithmetic::hex;
@@ -557,21 +557,21 @@ impl ResearchRuntime {
     fn dispatch(&self, device: &Device, launch: ResearchLaunch<'_>) -> Result<()> {
         device.write(&self.control, &[0; CONTROL_WORDS]);
         let samples = match launch.stage {
-            ResearchStage::Strike => super::random::samples(
+            ResearchStage::Strike => super::gpu::random::samples(
                 device,
                 self.seed,
                 u64::from(launch.day),
-                super::random::Stream::Strikes,
+                super::gpu::random::Stream::Strikes,
                 [self.work_items],
             )?,
-            ResearchStage::Attempt => super::random::samples(
+            ResearchStage::Attempt => super::gpu::random::samples(
                 device,
                 self.seed,
                 u64::from(launch.day),
-                super::random::Stream::Research,
+                super::gpu::random::Stream::Research,
                 [self.work_items],
             )?,
-            _ => super::tensor::empty(device, [0]),
+            _ => super::gpu::tensor::empty(device, [0]),
         };
         let count = match launch.stage {
             ResearchStage::Summary => self.summary_shards.meta.shape()[0] / 2,
@@ -737,12 +737,12 @@ impl ResearchRuntime {
     }
 
     pub fn save_audited(&self, device: &Device) -> Result<()> {
-        super::tensor::copy(device, &self.state, &self.audited);
+        super::gpu::tensor::copy(device, &self.state, &self.audited);
         Ok(())
     }
 
     pub fn restore_audited(&self, device: &Device) -> Result<()> {
-        super::tensor::copy(device, &self.audited, &self.state);
+        super::gpu::tensor::copy(device, &self.audited, &self.state);
         device.write(&self.control, &[0; CONTROL_WORDS]);
         Ok(())
     }

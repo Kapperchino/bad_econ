@@ -2,7 +2,7 @@ use super::{
     credit::{CreditCapacity, CreditTerms},
     *,
 };
-use crate::simulation::{
+use crate::simulation::storage::{
     flags::{CONSTRUCTED_EVENTS_WORD, KernelFaults},
     layout::{HIGH_WORD, LOW_WORD},
     state::BalanceBuffer,

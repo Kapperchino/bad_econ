@@ -1,18 +1,17 @@
 use super::{
+    FreightActivity, FreightExecution, MarketReplay, MatchingState, ProvisionMarket, Provisioning,
+};
+use crate::domain::{Good, Market, Phase, PhaseEvidence};
+use crate::simulation::{
     Simulation, Trace,
     economy::{
         self, EconomyStage,
+        policy::MATCHING_ROUNDS,
         transport::railway::{self, RailStage},
     },
-    layout::WORD_BYTES,
-    market::{
-        FreightActivity, FreightExecution, MarketReplay, MatchingState, ProvisionMarket,
-        Provisioning,
-    },
-    policy::MATCHING_ROUNDS,
     settlement,
+    storage::layout::WORD_BYTES,
 };
-use crate::domain::{Good, Market, Phase, PhaseEvidence};
 use anyhow::Result;
 
 impl ProvisionMarket {
@@ -62,7 +61,11 @@ impl ProvisionMarket {
     }
 }
 impl Simulation {
-    pub(super) fn provision(&mut self, trace: Trace, evidence: &mut PhaseEvidence) -> Result<()> {
+    pub(in crate::simulation) fn provision(
+        &mut self,
+        trace: Trace,
+        evidence: &mut PhaseEvidence,
+    ) -> Result<()> {
         self.railways(RailStage::Access);
         self.railways(RailStage::Routes);
         self.railways(RailStage::Quotes);

@@ -1,15 +1,18 @@
 #[cfg(target_endian = "big")]
-use super::encode;
+use crate::simulation::encode;
 #[cfg(test)]
-use super::{AuditExecution, RegistryExecution};
-use super::{
-    CopyDirection, Device, Simulation,
-    buffers::PhaseBuffers,
-    configuration, demography, economy, finance,
-    layout::*,
+use crate::simulation::{AuditExecution, RegistryExecution};
+use crate::simulation::{
+    CopyDirection, Device, Simulation, demography,
+    economy::{self, configuration},
+    finance,
+    gpu::tensor,
     management,
-    market::{FreightActivity, FreightExecution, MarketExecution, MarketReplay, Provisioning},
-    market_graphs, orders, ownership, registry, research, tensor,
+    market::{
+        FreightActivity, FreightExecution, MarketExecution, MarketReplay, Provisioning, graphs,
+    },
+    orders, ownership, registry, research,
+    storage::{buffers::PhaseBuffers, layout::*},
 };
 use crate::{domain::*, runtime::RuntimeState};
 use anyhow::{Result, anyhow};
@@ -32,7 +35,7 @@ impl Simulation {
         let restored = checkpoint.restore()?;
         Self::from_state(restored.scenario, restored.state, device)
     }
-    pub(super) fn from_state(
+    pub(in crate::simulation) fn from_state(
         scenario: Scenario,
         mut initial: State,
         mut device: Device,
@@ -161,7 +164,7 @@ impl Simulation {
             work,
             searches,
             market_sort: economy::market::sorting::MarketSort::default(),
-            market_graphs: market_graphs::MarketGraphs::default(),
+            market_graphs: graphs::MarketGraphs::default(),
             market_replay: MarketReplay::Reusable,
             freight_activity: FreightActivity::Active,
             freight_execution: FreightExecution::Synchronous,
@@ -198,7 +201,11 @@ impl Simulation {
         }
     }
 
-    pub(super) fn replace(&mut self, scenario: Scenario, state: State) -> Result<()> {
+    pub(in crate::simulation) fn replace(
+        &mut self,
+        scenario: Scenario,
+        state: State,
+    ) -> Result<()> {
         let device = self.device.clone();
         #[cfg(test)]
         let registry_execution = self.registry_execution;

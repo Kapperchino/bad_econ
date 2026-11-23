@@ -105,11 +105,11 @@ fn execution_enabled(
     match comptime!(execution) {
         Execution::Immediate(_) => true,
         Execution::Buffered(Wave::Initial) => {
-            control[crate::simulation::flags::FAULT_WORD].load() == 0
+            control[crate::simulation::storage::flags::FAULT_WORD].load() == 0
         }
         Execution::Buffered(Wave::Retry) => {
             progress[comptime!(Wave::Retry as usize)].load() > 0
-                && control[crate::simulation::flags::FAULT_WORD].load() == 0
+                && control[crate::simulation::storage::flags::FAULT_WORD].load() == 0
         }
     }
 }

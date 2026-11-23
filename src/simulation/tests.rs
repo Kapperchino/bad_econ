@@ -2,9 +2,11 @@ use super::*;
 use super::{
     economy::EconomyStage,
     enterprise,
-    flags::{CONTROL_WORDS, FaultFlags},
-    layout::*,
     registry::records::PendingRecord,
+    storage::{
+        flags::{CONTROL_WORDS, FaultFlags},
+        layout::*,
+    },
     system::{AsBufferArg, System},
 };
 pub(super) use crate::tests::support::device;
@@ -681,7 +683,7 @@ fn gpu_firm_growth_matches_full_rebuild_with_births_and_migration() -> Result<()
         gpu.commit_entries(&entries, plan, &pending.records, RegistryAudit::Full)
             .context("GPU growth")?;
         if gpu.actors().len() <= previous_stride as usize {
-            assert!(market_graphs::same_buffer(&previous_state, &gpu.state));
+            assert!(tensor::same_buffer(&previous_state, &gpu.state));
         }
         assert!(gpu.audited.shares_prefix(&previous_audited));
         assert!(gpu.config.state_stride as usize > gpu.actors().len());

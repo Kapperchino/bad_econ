@@ -1,12 +1,17 @@
-use super::Device;
+use super::FreightExecution;
 use crate::domain::Good;
+use crate::simulation::{
+    Device, Simulation,
+    economy::{policy::RETAINED_LABOR_ROUND, transport::railway::RouteAvailability},
+    gpu::tensor::same_buffer,
+};
 use anyhow::Result;
 use burn::tensor::StreamId;
 use burn_wgpu::CubeTensor;
 use cubecl::client::Graph;
 
 #[derive(Default)]
-pub(super) struct MarketGraphs {
+pub(in crate::simulation) struct MarketGraphs {
     bindings: Option<Bindings>,
     entries: Vec<RecordedMarket>,
     replays: usize,
@@ -45,8 +50,8 @@ pub(super) struct MarketKey {
     pub market: MarketProgram,
     pub phase: crate::domain::Phase,
     pub preparation: Preparation,
-    pub routing: super::economy::transport::railway::RouteAvailability,
-    pub freight: super::FreightExecution,
+    pub routing: RouteAvailability,
+    pub freight: FreightExecution,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -95,9 +100,7 @@ pub(super) enum Preparation {
 impl Preparation {
     pub(super) fn new(market: crate::domain::Market, round: usize) -> Self {
         match (market, round) {
-            (crate::domain::Market::Labor, super::policy::RETAINED_LABOR_ROUND) => {
-                Self::RetainedLabor
-            }
+            (crate::domain::Market::Labor, RETAINED_LABOR_ROUND) => Self::RetainedLabor,
             (_, 0) => Self::First,
             _ => Self::Repeat,
         }
@@ -129,7 +132,7 @@ impl Bindings {
 }
 
 impl MarketGraphs {
-    pub(super) fn report(&self, day: u64) {
+    pub(in crate::simulation) fn report(&self, day: u64) {
         if std::env::var_os("BAD_ECON_PROFILE_GRAPHS").is_some() {
             eprintln!(
                 "GRAPHS {day} records={} replays={} invalidations={} entries={}",
@@ -181,9 +184,9 @@ impl MarketGraphs {
 
     pub(super) fn run(
         &mut self,
-        simulation: &mut super::Simulation,
+        simulation: &mut Simulation,
         key: MarketKey,
-        mut encode: impl FnMut(&mut super::Simulation) -> Result<u32>,
+        mut encode: impl FnMut(&mut Simulation) -> Result<u32>,
     ) -> Result<u32> {
         let device = simulation.device.clone();
         self.bind(&device, key.market, simulation.market_graph_buffers());
@@ -263,10 +266,12 @@ mod tests {
     use crate::simulation::system::AsBufferArg;
     use crate::simulation::{
         FreightActivity, Simulation, Trace,
-        economy::market::sorting::MarketSort,
+        economy::{
+            market::sorting::MarketSort,
+            parameters::{EconomyParameters, MarketClock},
+        },
         encode,
-        parameters::{EconomyParameters, MarketClock},
-        tensor,
+        gpu::tensor,
     };
     use cubecl::prelude::*;
 
@@ -317,9 +322,8 @@ mod tests {
                     market: market.into(),
                     phase: Phase::ProvisionPurchase,
                     preparation: Preparation::First,
-                    routing:
-                        crate::simulation::economy::transport::railway::RouteAvailability::Dormant,
-                    freight: crate::simulation::FreightExecution::Synchronous,
+                    routing: RouteAvailability::Dormant,
+                    freight: FreightExecution::Synchronous,
                 };
                 graphs.bind(&device, key.market, std::iter::once(&counter));
                 assert_eq!(
@@ -360,11 +364,11 @@ mod tests {
             market: MarketProgram::Household,
             phase: Phase::ProvisionPurchase,
             preparation: Preparation::First,
-            routing: crate::simulation::economy::transport::railway::RouteAvailability::Dormant,
-            freight: crate::simulation::FreightExecution::Synchronous,
+            routing: RouteAvailability::Dormant,
+            freight: FreightExecution::Synchronous,
         };
         let fallback = MarketKey {
-            routing: crate::simulation::economy::transport::railway::RouteAvailability::Available,
+            routing: RouteAvailability::Available,
             ..key
         };
         let run = |graphs: &mut MarketGraphs, key: MarketKey, counter: &CubeTensor| {
@@ -430,10 +434,7 @@ mod tests {
                 actual.phase(phase, Trace::Discard)?;
                 expected.phase(phase, Trace::Discard)?;
                 if let Phase::ProvisionPurchase = phase {
-                    for routing in [
-                        crate::simulation::economy::transport::railway::RouteAvailability::Available,
-                        crate::simulation::economy::transport::railway::RouteAvailability::Dormant,
-                    ] {
+                    for routing in [RouteAvailability::Available, RouteAvailability::Dormant] {
                         assert!(actual.market_graphs.entries.iter().any(|entry| {
                             entry.key.routing == routing
                                 && matches!(entry.key.market, MarketProgram::Household)
@@ -442,7 +443,7 @@ mod tests {
                 }
                 assert_eq!(
                     actual.config.railway.route_availability(),
-                    crate::simulation::economy::transport::railway::RouteAvailability::Available,
+                    RouteAvailability::Available,
                 );
                 assert_eq!(actual.download()?, expected.download()?, "{phase:?}");
             }
@@ -498,24 +499,4 @@ mod tests {
         assert_eq!(actual.download()?, expected.download()?);
         Ok(())
     }
-}
-
-pub(super) fn same_buffer(recorded: &CubeTensor, current: &CubeTensor) -> bool {
-    (
-        recorded.handle.memory.descriptor(),
-        recorded.handle.service,
-        recorded.handle.offset_start,
-        recorded.handle.offset_end,
-        recorded.handle.size(),
-        &recorded.meta,
-        recorded.dtype,
-    ) == (
-        current.handle.memory.descriptor(),
-        current.handle.service,
-        current.handle.offset_start,
-        current.handle.offset_end,
-        current.handle.size(),
-        &current.meta,
-        current.dtype,
-    )
 }

@@ -1,9 +1,9 @@
 use super::demand::FoodSearchResult;
-use crate::simulation::configuration::Configuration;
+use crate::simulation::economy::configuration::Configuration;
 use crate::simulation::economy::*;
 use crate::simulation::{
-    flags::InputMarket,
     orders::{LATCH_WORD, SEARCHES_WORD},
+    storage::flags::InputMarket,
 };
 mod candidates;
 mod demand;
@@ -285,7 +285,7 @@ impl GpuPass<SearchInput> for Search {
                 SearchStage::Compact => {
                     let mut economy =
                         EconomyView::new(&mut input.state, &input.actors, &input.config);
-                    if input.control[crate::simulation::flags::FAULT_WORD].load() == 0 {
+                    if input.control[crate::simulation::storage::flags::FAULT_WORD].load() == 0 {
                         compact(
                             &input.proposals,
                             &input.searches,
@@ -316,7 +316,7 @@ impl GpuPass<SearchInput> for Search {
                                     );
                                     if comptime!(
                                         input.parameters.empty_orders
-                                            == crate::simulation::parameters::EmptyOrderMode::FeedbackOnly
+                                            == crate::simulation::economy::parameters::EmptyOrderMode::FeedbackOnly
                                     ) {
                                         let position = (actor + input.parameters.count
                                             - input.parameters.settlement_rotation)
@@ -368,7 +368,8 @@ pub(in crate::simulation::economy) fn record_wide_order(
     quantity: Ticks,
 ) {
     if comptime!(
-        parameters.empty_orders == crate::simulation::parameters::EmptyOrderMode::FeedbackOnly
+        parameters.empty_orders
+            == crate::simulation::economy::parameters::EmptyOrderMode::FeedbackOnly
     ) && (quantity.extract(HIGH_WORD) > 0 || equal(quantity, zero()))
     {
         control[orders::WIDE_ORDERS_WORD].fetch_or(select(

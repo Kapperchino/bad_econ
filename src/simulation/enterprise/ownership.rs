@@ -1,15 +1,17 @@
 use crate::domain::{Field, Good, State, enterprise::EstateStatus};
 use crate::simulation::DeviceEconomy;
-use crate::simulation::configuration::EconomyConfig;
+use crate::simulation::economy::configuration::EconomyConfig;
 #[cfg(test)]
-use crate::simulation::layout::ActorLayout;
+use crate::simulation::storage::layout::ActorLayout;
 use crate::simulation::{
     Device,
-    flags::FaultFlags,
     pass::GpuPass,
-    state::{ActorTable, ReadLedger, ReadLedgerExpand, TickLedger},
+    storage::{
+        flags::FaultFlags,
+        state::{ActorTable, ReadLedger, ReadLedgerExpand, TickLedger},
+        words::*,
+    },
     system::{AsBufferArg, System, gpu_passes},
-    words::*,
 };
 use anyhow::{Context, Result};
 use burn_wgpu::CubeTensor;
@@ -403,8 +405,8 @@ mod tests {
         Experiment, Scenario,
         enterprise::{Ownership, OwnershipShare},
     };
-    use crate::simulation::configuration::Configuration;
-    use crate::simulation::{encode, layout::ActorMetadataRows};
+    use crate::simulation::economy::configuration::Configuration;
+    use crate::simulation::{encode, storage::layout::ActorMetadataRows};
     use std::collections::BTreeMap;
 
     #[test]

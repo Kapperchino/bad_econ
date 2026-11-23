@@ -1,5 +1,8 @@
-use super::flags::{InputMarket, MarketFlag};
 use crate::domain::{Good, Phase};
+use crate::simulation::{
+    parallel::ScanMode,
+    storage::flags::{InputMarket, MarketFlag},
+};
 use cubecl::prelude::*;
 
 #[derive(Clone, Copy, Debug, Hash, PartialEq, Eq)]
@@ -26,7 +29,7 @@ pub struct EconomyParameters {
     #[cube(comptime)]
     pub clock: MarketClock,
     #[cube(comptime)]
-    pub scan: super::parallel::ScanMode,
+    pub scan: ScanMode,
     #[cube(comptime)]
     pub empty_orders: EmptyOrderMode,
     pub day: u32,

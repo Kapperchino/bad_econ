@@ -222,7 +222,7 @@ impl MatchSelection {
         if comptime!(parameters.market == MarketFlag::Labor) {
             let faults = candidates.faults(UNIT_POS as usize);
             if visited && faults != 0 {
-                control[crate::simulation::flags::FAULT_WORD].fetch_or(faults);
+                control[crate::simulation::storage::flags::FAULT_WORD].fetch_or(faults);
             }
         }
         let score = offer.score;
@@ -274,7 +274,7 @@ impl MatchSelection {
                 if comptime!(parameters.market == MarketFlag::Labor) {
                     let faults = candidates.faults(slot);
                     if faults != 0 {
-                        control[crate::simulation::flags::FAULT_WORD].fetch_or(faults);
+                        control[crate::simulation::storage::flags::FAULT_WORD].fetch_or(faults);
                     }
                 }
                 self.seen_supply = self.seen_supply || candidates.seen_supply[slot] != 0;

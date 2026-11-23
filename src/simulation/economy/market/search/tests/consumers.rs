@@ -361,7 +361,7 @@ fn filtered_empty_consumer_orders_preserve_state_feedback_and_diagnostics_on_gpu
                 _ => 0,
             };
             assert_eq!(
-                expected[crate::simulation::flags::FAULT_WORD],
+                expected[crate::simulation::storage::flags::FAULT_WORD],
                 faults,
                 "{orders:?}, round {round}"
             );
@@ -375,8 +375,8 @@ fn filtered_empty_consumer_orders_preserve_state_feedback_and_diagnostics_on_gpu
             let expected_feedback = device.read(&full.work.feedback)?;
             let actual_feedback = device.read(&filtered.work.feedback)?;
             assert_eq!(
-                actual_feedback[crate::simulation::flags::FAULT_WORD],
-                expected_feedback[crate::simulation::flags::FAULT_WORD]
+                actual_feedback[crate::simulation::storage::flags::FAULT_WORD],
+                expected_feedback[crate::simulation::storage::flags::FAULT_WORD]
             );
             assert_eq!(
                 &actual_feedback[CONTROL_WORDS..],

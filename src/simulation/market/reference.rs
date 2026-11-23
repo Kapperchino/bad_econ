@@ -3,13 +3,13 @@ use crate::{
     domain::{Good, Market, Phase, PhaseEvidence},
     simulation::{
         Execution, Simulation, Trace,
-        buffers::SchedulerBuffers,
-        economy::EconomyStage,
-        execute,
-        flags::{EventStatus, FaultFlags},
-        layout::DISCOVERY_BLOCK,
-        parallel,
-        policy::MATCHING_ROUNDS,
+        economy::{EconomyStage, policy::MATCHING_ROUNDS},
+        execute, parallel,
+        storage::{
+            buffers::SchedulerBuffers,
+            flags::{EventStatus, FaultFlags},
+            layout::DISCOVERY_BLOCK,
+        },
     },
 };
 use anyhow::Result;

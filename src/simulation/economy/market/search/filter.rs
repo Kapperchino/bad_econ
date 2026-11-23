@@ -2,7 +2,7 @@ use super::*;
 use crate::simulation::economy::market::orders::{
     COMPACTION_BLOCK, WIDE_ORDERS_WORD, filtered_count,
 };
-use crate::simulation::parameters::EmptyOrderMode;
+use crate::simulation::economy::parameters::EmptyOrderMode;
 
 const PREFIX_BUYERS: u32 = 8192;
 
@@ -210,7 +210,7 @@ pub(super) fn finish(
 ) {
     if comptime!(parameters.empty_orders == EmptyOrderMode::FeedbackOnly)
         && control[WIDE_ORDERS_WORD].load() == 0
-        && control[crate::simulation::flags::FAULT_WORD].load() == 0
+        && control[crate::simulation::storage::flags::FAULT_WORD].load() == 0
     {
         let cells = config.spatial_side * config.spatial_side;
         let member = ABSOLUTE_POS as u32;

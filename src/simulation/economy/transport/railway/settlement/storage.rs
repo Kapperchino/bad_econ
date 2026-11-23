@@ -236,7 +236,7 @@ pub fn reserve_market_claims(
 ) -> anyhow::Result<()> {
     let values = device.client.read(vec![
         word_range(&config.railway.freight.progress, CLAIM_COUNT, 2),
-        word_range(control, crate::simulation::flags::FAULT_WORD, 1),
+        word_range(control, crate::simulation::storage::flags::FAULT_WORD, 1),
     ])?;
     let count = u64::from_le_bytes(values[0][..8].try_into()?);
     let faults = u32::from_le_bytes(values[1][..4].try_into()?);
@@ -271,7 +271,7 @@ impl WaveBookings {
     ) -> anyhow::Result<Self> {
         let values = device.client.read(vec![
             word_range(&config.railway.freight.progress, Wave::Initial as usize, 2),
-            word_range(control, crate::simulation::flags::FAULT_WORD, 1),
+            word_range(control, crate::simulation::storage::flags::FAULT_WORD, 1),
         ])?;
         Ok(Self {
             initial: u32::from_le_bytes(values[0][..4].try_into()?),
@@ -288,7 +288,7 @@ pub fn prepare_market_claims(
 ) -> anyhow::Result<ClaimPreparation> {
     let values = device.client.read(vec![
         word_range(&config.railway.freight.progress, CLAIM_COUNT, 2),
-        word_range(control, crate::simulation::flags::FAULT_WORD, 1),
+        word_range(control, crate::simulation::storage::flags::FAULT_WORD, 1),
         word_range(control, orders::SEARCHES_WORD, 1),
     ])?;
     let count = u64::from_le_bytes(values[0][..8].try_into()?);

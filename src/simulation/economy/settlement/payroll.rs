@@ -1,10 +1,10 @@
-use super::{
+use crate::domain::PAYROLL_SCALE;
+use crate::simulation::economy::configuration::EconomyConfig;
+use crate::simulation::storage::{
     flags::{FaultFlags, KernelFaults},
     layout::*,
     words::*,
 };
-use crate::domain::PAYROLL_SCALE;
-use crate::simulation::configuration::EconomyConfig;
 use cubecl::prelude::*;
 
 #[derive(CubeType, Clone, Copy)]
@@ -97,11 +97,11 @@ impl PayrollAccrual {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::simulation::configuration::{Configuration, TaxBracket};
+    use crate::simulation::economy::configuration::{Configuration, TaxBracket};
     use crate::simulation::system::AsBufferArg;
     use crate::simulation::{
-        flags::{CONTROL_WORDS, FAULT_WORD},
-        policy::{KernelStarts, proposed_starts},
+        economy::policy::{KernelStarts, proposed_starts},
+        storage::flags::{CONTROL_WORDS, FAULT_WORD},
     };
     use anyhow::Result;
 

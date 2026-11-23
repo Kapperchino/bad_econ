@@ -1,6 +1,6 @@
 use super::*;
-use crate::simulation::layout::{DISCOVERY_BLOCK, SpatialIndex};
-use crate::simulation::state::ActorTable;
+use crate::simulation::storage::layout::{DISCOVERY_BLOCK, SpatialIndex};
+use crate::simulation::storage::state::ActorTable;
 
 #[derive(CubeType, CubeLaunch)]
 struct SpatialGrowth {
@@ -549,7 +549,7 @@ fn migrate_rows(
 mod tests {
     use super::*;
     use crate::domain::Experiment;
-    use crate::simulation::layout::{ActorLayout, ActorMetadataRows};
+    use crate::simulation::storage::layout::{ActorLayout, ActorMetadataRows};
 
     #[test]
     fn migrating_spatial_growth_matches_complete_indexes_on_gpu() -> Result<()> {

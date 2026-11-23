@@ -1,8 +1,8 @@
 use super::acquisitions::PURCHASE;
 use crate::domain::{Field, Good, enterprise::EnterpriseState};
-use crate::simulation::configuration::EconomyConfig;
-use crate::simulation::state::*;
-use crate::simulation::words::*;
+use crate::simulation::economy::configuration::EconomyConfig;
+use crate::simulation::storage::state::*;
+use crate::simulation::storage::words::*;
 use cubecl::prelude::*;
 
 pub(in crate::simulation) const PRODUCER_ENTRY: u32 = 8 << 24;

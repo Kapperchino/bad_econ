@@ -1,5 +1,5 @@
 use crate::simulation::DeviceEconomy;
-use crate::simulation::configuration::EconomyConfig;
+use crate::simulation::economy::configuration::EconomyConfig;
 mod commit;
 pub(super) mod entries;
 mod growth;
@@ -12,11 +12,13 @@ mod systems;
 mod transitions;
 use super::{
     Device, enterprise,
-    layout::ActorLayout as A,
     pass::GpuPass,
-    state::{EconomyView, ReadLedger, ReadLedgerExpand},
+    storage::{
+        layout::ActorLayout as A,
+        state::{EconomyView, ReadLedger, ReadLedgerExpand},
+        words::*,
+    },
     system::{AsBufferArg, System, gpu_passes},
-    words::*,
 };
 use crate::domain::{ActorRows, Field, Position, Scenario, State};
 use anyhow::{Context, Result};
@@ -281,7 +283,8 @@ fn transition(
             }
             if (kind == 3 || kind == 10)
                 && comptime!(
-                    config.property_mode == crate::simulation::configuration::Feature::Enabled
+                    config.property_mode
+                        == crate::simulation::economy::configuration::Feature::Enabled
                         || config.economy == crate::domain::Economy::Industrial
                 )
             {
@@ -356,7 +359,7 @@ pub(super) fn patch_capacity(
 pub(super) fn extend_actors(
     device: &Device,
     actors: &CubeTensor,
-    additions: &super::layout::ActorMetadataRows,
+    additions: &super::storage::layout::ActorMetadataRows,
 ) -> CubeTensor {
     let additions = device.tensor(&additions.words());
     let output = device.empty(actors.meta.num_elements() + additions.meta.num_elements());

@@ -16,11 +16,10 @@ pub use valuation::*;
 
 use super::{
     Device,
-    flags::FaultFlags,
-    layout::WORD_BYTES,
+    gpu::tensor,
     reduction,
+    storage::{flags::FaultFlags, layout::WORD_BYTES},
     system::{AsBufferArg, System},
-    tensor,
 };
 use anyhow::{Context, Result, anyhow};
 use burn_wgpu::CubeTensor;

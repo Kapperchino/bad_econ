@@ -1,12 +1,12 @@
-use super::{
-    bargaining::{KernelBargainingFactors, KernelWageBounds},
-    configuration::Feature,
-    layout::LOW_WORD,
-    policy::MAXIMUM_WAGE,
-    words::*,
-};
+use super::{KernelBargainingFactors, KernelWageBounds};
 use crate::domain::{PAYROLL_SCALE, bargaining::BargainingPolicy};
-use crate::simulation::configuration::EconomyConfig;
+use crate::simulation::{
+    economy::{
+        configuration::{EconomyConfig, Feature},
+        policy::MAXIMUM_WAGE,
+    },
+    storage::{layout::LOW_WORD, words::*},
+};
 use cubecl::prelude::*;
 
 #[derive(CubeType, CubeLaunch, Clone, Copy, Default)]
@@ -320,14 +320,14 @@ pub fn negotiate(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::simulation::configuration::{Configuration, TaxBracket};
-    use crate::simulation::layout::HIGH_WORD;
+    use crate::simulation::economy::configuration::{Configuration, TaxBracket};
+    use crate::simulation::storage::layout::HIGH_WORD;
     use crate::simulation::system::AsBufferArg;
     use crate::{
         ledger::TickLayout,
         simulation::{
             Device,
-            flags::{CONTROL_WORDS, FAULT_WORD},
+            storage::flags::{CONTROL_WORDS, FAULT_WORD},
         },
     };
     use anyhow::Result;

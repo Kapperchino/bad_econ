@@ -31,7 +31,7 @@ impl SpatialIndex {
     pub fn new(scenario: &Scenario, state: &State) -> Self {
         Self::from_actors(scenario, &state.actors)
     }
-    pub(super) fn from_actors(scenario: &Scenario, actors: &ActorRows) -> Self {
+    pub(in crate::simulation) fn from_actors(scenario: &Scenario, actors: &ActorRows) -> Self {
         let config = scenario.config();
         let side = config.map_size.div_ceil(config.search_radius);
         let cells = (side * side) as usize;
@@ -307,10 +307,10 @@ impl ObservationControlLayout {
     }
 }
 
-pub(super) fn encode(values: &[u64]) -> Vec<TickLayout> {
+pub(in crate::simulation) fn encode(values: &[u64]) -> Vec<TickLayout> {
     values.iter().copied().map(TickLayout::from).collect()
 }
-pub(super) fn decode(words: &[u32]) -> Vec<u64> {
+pub(in crate::simulation) fn decode(words: &[u32]) -> Vec<u64> {
     bytemuck::cast_slice::<u32, TickLayout>(words)
         .iter()
         .copied()

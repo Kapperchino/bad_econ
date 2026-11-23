@@ -20,7 +20,7 @@ pub(in crate::simulation) enum MarketStart {
 impl MarketStart {
     pub(in crate::simulation) fn launch(
         self,
-        buffers: crate::simulation::buffers::EconomyBuffers<'_>,
+        buffers: crate::simulation::storage::buffers::EconomyBuffers<'_>,
         parameters: &EconomyParameters,
     ) {
         let crate::simulation::DeviceEconomy { device, config, .. } = buffers.economy;
@@ -57,7 +57,7 @@ fn start_market(
     let id = ABSOLUTE_POS as u32;
     if id == 0 {
         parameters.write_clock(clock, heating);
-        control[LATCH_WORD].store(control[crate::simulation::flags::FAULT_WORD].load());
+        control[LATCH_WORD].store(control[crate::simulation::storage::flags::FAULT_WORD].load());
         control[CONSTRUCTED_EVENTS_WORD].store(0);
         control[RANGE_SLOTS_WORD].store(0);
         control[orders::SEARCHES_WORD].store(0);
@@ -69,7 +69,8 @@ fn start_market(
             control[search::GRAIN_FIRMS_WORD].store(0);
         }
         if comptime!(
-            parameters.empty_orders == crate::simulation::parameters::EmptyOrderMode::FeedbackOnly
+            parameters.empty_orders
+                == crate::simulation::economy::parameters::EmptyOrderMode::FeedbackOnly
         ) {
             control[orders::WIDE_ORDERS_WORD].store(0);
         }
@@ -84,7 +85,7 @@ fn start_market(
         start,
         MarketStart::ResetCandidatesAndOrders | MarketStart::ResetOrders
     )) && id < parameters.count
-        && control[crate::simulation::flags::FAULT_WORD].load() == 0
+        && control[crate::simulation::storage::flags::FAULT_WORD].load() == 0
     {
         KernelEventStatus::new(comptime!(EventStatus::Inactive))
             .store(outcomes, 4 * parameters.count + id);

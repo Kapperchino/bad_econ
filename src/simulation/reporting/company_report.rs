@@ -1,11 +1,11 @@
-use super::{
-    Simulation, decode,
-    layout::{TICK_BYTES, TICK_WORDS},
-};
 use crate::domain::{
     Actor, Field,
     company::{BusinessLine, CompanySize},
     enterprise::EnterpriseState,
+};
+use crate::simulation::{
+    Simulation, decode,
+    storage::layout::{TICK_BYTES, TICK_WORDS},
 };
 use anyhow::Result;
 use std::collections::BTreeMap;

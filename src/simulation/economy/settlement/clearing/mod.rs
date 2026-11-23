@@ -1,4 +1,4 @@
-use crate::simulation::configuration::{EconomyConfig, Feature};
+use crate::simulation::economy::configuration::{EconomyConfig, Feature};
 use crate::simulation::economy::*;
 use crate::simulation::scheduler::settle;
 

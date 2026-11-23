@@ -1,10 +1,12 @@
-use super::{Simulation, decode, layout::TICK_BYTES, profiling_day, tensor};
 use crate::domain::{Checkpoint, State};
+use crate::simulation::{
+    Simulation, decode, gpu::tensor, profiling_day, storage::layout::TICK_BYTES,
+};
 use anyhow::Result;
 use std::time::Instant;
 
 #[derive(Clone, Copy)]
-pub(super) enum CopyDirection {
+pub(in crate::simulation) enum CopyDirection {
     Save,
     Restore,
 }
@@ -28,7 +30,10 @@ impl Simulation {
         }
         Ok(values)
     }
-    pub(super) fn state_snapshot(&mut self, direction: CopyDirection) -> Result<State> {
+    pub(in crate::simulation) fn state_snapshot(
+        &mut self,
+        direction: CopyDirection,
+    ) -> Result<State> {
         let values = self.read_state(direction)?;
         let research = self
             .research
@@ -55,7 +60,7 @@ impl Simulation {
     pub fn download(&mut self) -> Result<State> {
         self.state_snapshot(CopyDirection::Save)
     }
-    pub(super) fn copy_audited(&mut self, direction: CopyDirection) -> Result<()> {
+    pub(in crate::simulation) fn copy_audited(&mut self, direction: CopyDirection) -> Result<()> {
         let started = Instant::now();
         let profile =
             self.day == profiling_day() && std::env::var_os("BAD_ECON_PROFILE_STAGES").is_some();

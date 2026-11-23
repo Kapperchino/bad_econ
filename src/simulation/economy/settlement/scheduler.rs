@@ -1,14 +1,16 @@
 use crate::ledger::{EMPTY, LEG_WORDS, LegLayout, MAX_LEGS};
 use crate::simulation::{
-    flags::{
-        COMPLETED_WORD, CONTROL_WORDS, DependencyFlag, EventStatus, FaultFlags,
-        KernelAuthorization, KernelEventStatus, KernelFaults, PROGRESS_WORD, record_dependency,
-    },
-    layout::*,
-    parameters::SchedulerParameters,
+    economy::parameters::SchedulerParameters,
     pass::GpuPass,
+    storage::{
+        flags::{
+            COMPLETED_WORD, CONTROL_WORDS, DependencyFlag, EventStatus, FaultFlags,
+            KernelAuthorization, KernelEventStatus, KernelFaults, PROGRESS_WORD, record_dependency,
+        },
+        layout::*,
+        words::*,
+    },
     system::{System, gpu_passes},
-    words::*,
 };
 use cubecl::prelude::*;
 

@@ -1,5 +1,5 @@
 use super::*;
-use crate::simulation::{decode, layout::TICK_WORDS};
+use crate::simulation::{decode, storage::layout::TICK_WORDS};
 use anyhow::anyhow;
 
 pub(super) enum Staging {

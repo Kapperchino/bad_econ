@@ -13,8 +13,8 @@ pub const FAULT_WORD: usize = offset_of!(ControlLayout, faults) / size_of::<u32>
 pub const COMPLETED_WORD: usize = offset_of!(ControlLayout, completed) / size_of::<u32>();
 pub const DEPENDENCY_FLAGS_WORD: usize = offset_of!(ControlLayout, phase_data) / size_of::<u32>();
 pub const CONSTRUCTED_EVENTS_WORD: usize = offset_of!(ControlLayout, phase_data) / size_of::<u32>();
-pub(super) const CLAIM_CAPACITY_LOW_WORD: usize = CONTROL_WORDS + 5;
-pub(super) const CLAIM_CAPACITY_HIGH_WORD: usize = CONTROL_WORDS + 6;
+pub(in crate::simulation) const CLAIM_CAPACITY_LOW_WORD: usize = CONTROL_WORDS + 5;
+pub(in crate::simulation) const CLAIM_CAPACITY_HIGH_WORD: usize = CONTROL_WORDS + 6;
 
 #[repr(C)]
 #[derive(Clone, Copy, Pod, Zeroable)]
@@ -296,7 +296,7 @@ pub fn record_dependency(control: &[Atomic<u32>], #[comptime] flag: DependencyFl
 mod tests {
     use super::*;
     use crate::simulation::system::AsBufferArg;
-    use crate::simulation::{Device, ops::TEST_WORKGROUP};
+    use crate::simulation::{Device, gpu::device::TEST_WORKGROUP};
 
     #[cube(launch)]
     fn concurrent_flags(control: &[Atomic<u32>]) {

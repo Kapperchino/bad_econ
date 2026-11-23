@@ -1,4 +1,4 @@
-use crate::simulation::flags::{FaultFlags, KernelFaults};
+use crate::simulation::storage::flags::{FaultFlags, KernelFaults};
 use cubecl::prelude::*;
 
 pub const ENTRY_WORDS: usize = 3;

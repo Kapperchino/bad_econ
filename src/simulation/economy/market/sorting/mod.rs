@@ -1,12 +1,12 @@
 use super::orders;
 use crate::simulation::{
     Device,
-    market_graphs::same_buffer,
+    economy::parameters::EconomyParameters,
+    gpu::tensor::same_buffer,
     parallel,
-    parameters::EconomyParameters,
     pass::GpuPass,
+    storage::words::ceildiv,
     system::{AsBufferArg, System, gpu_passes},
-    words::ceildiv,
 };
 use anyhow::Result;
 use burn::tensor::StreamId;
@@ -62,13 +62,13 @@ impl SortKeys {
     pub fn for_market(
         market: crate::domain::Market,
         households: u32,
-        home_mode: crate::simulation::configuration::Feature,
+        home_mode: crate::simulation::economy::configuration::Feature,
     ) -> Self {
         use crate::domain::{Good, Market};
         match market {
             Market::Labor => Self::Firms { households },
             Market::Input(Good::Grain) | Market::Consumer(Good::Grain)
-                if home_mode == crate::simulation::configuration::Feature::Enabled =>
+                if home_mode == crate::simulation::economy::configuration::Feature::Enabled =>
             {
                 Self::Actors
             }
@@ -141,7 +141,7 @@ struct SortPlan {
     count: u32,
     source: u32,
     active: u32,
-    discovery: crate::simulation::parameters::Discovery,
+    discovery: crate::simulation::economy::parameters::Discovery,
     scan: parallel::ScanMode,
     keys: SortKeys,
     radix: Radix,
@@ -319,10 +319,11 @@ fn input_tile(
                 searches[(comptime!(crate::simulation::economy::market::search::INPUT_BUYERS_FIELD)
                     * count
                     + slot) as usize];
-            let peer = proposals[actor as usize * crate::simulation::layout::ProposalLayout::WORDS
-                + crate::simulation::layout::ProposalLayout::ACTOR];
-            crate::simulation::flags::KernelEventStatus::new(comptime!(
-                crate::simulation::flags::EventStatus::Inactive
+            let peer = proposals[actor as usize
+                * crate::simulation::storage::layout::ProposalLayout::WORDS
+                + crate::simulation::storage::layout::ProposalLayout::ACTOR];
+            crate::simulation::storage::flags::KernelEventStatus::new(comptime!(
+                crate::simulation::storage::flags::EventStatus::Inactive
             ))
             .store(scratch, 4 * count + actor);
             let priority = select(
@@ -610,7 +611,8 @@ impl GpuPass<SortDispatchInput> for PrepareSort {
     type Output = ();
 
     fn execute(mut input: SortDispatchInput) {
-        let active = input.control[crate::simulation::flags::CONSTRUCTED_EVENTS_WORD].load();
+        let active =
+            input.control[crate::simulation::storage::flags::CONSTRUCTED_EVENTS_WORD].load();
         let groups = ceildiv(active, input.source_workgroup);
         orders::store_dispatch(
             &mut input.dispatches,

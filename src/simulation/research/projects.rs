@@ -6,7 +6,7 @@ use super::{
 };
 use crate::{
     domain::{Field, Good, research::RESEARCH_SCALE},
-    simulation::{
+    simulation::storage::{
         rows::RowIndex,
         state::{ReadLedger, ReadLedgerExpand},
         words::*,

@@ -1,9 +1,8 @@
 use super::{BARGAINING_SCALE, RequestLayout, ResultLayout};
 use crate::simulation::{
-    flags::KernelFaults,
     pass::GpuPass,
+    storage::{flags::KernelFaults, words::*},
     system::{System, gpu_passes},
-    words::*,
 };
 use cubecl::prelude::*;
 

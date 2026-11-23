@@ -5,10 +5,9 @@ use crate::domain::{
 };
 use crate::simulation::{
     Device,
-    configuration::{Configuration, EconomyConfig},
-    state::*,
+    economy::configuration::{Configuration, EconomyConfig},
+    storage::{state::*, words::*},
     system::AsBufferArg,
-    words::*,
 };
 use anyhow::Result;
 use burn_wgpu::CubeTensor;

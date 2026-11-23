@@ -3,10 +3,12 @@ use super::{
     RequestLayout, ResultLayout, ServiceLayout,
 };
 use crate::simulation::{
-    layout::{HIGH_WORD, LOW_WORD},
     pass::GpuPass,
+    storage::{
+        layout::{HIGH_WORD, LOW_WORD},
+        words::*,
+    },
     system::{System, gpu_passes},
-    words::*,
 };
 use cubecl::prelude::*;
 

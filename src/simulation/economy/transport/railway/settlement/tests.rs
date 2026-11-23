@@ -17,26 +17,26 @@ fn freight_capacity_reuse_refreshes_claim_offsets_after_actor_growth_on_gpu() ->
         * (FREIGHT_CLAIM_WORDS + crate::domain::railway::FREIGHT_CLAIM_SORT_WORDS);
     buffers.claims = device.empty(claim_words + actors + regions + 1);
     let updated = buffers.updated(&device, actors + 1, regions);
-    assert!(crate::simulation::market_graphs::same_buffer(
+    assert!(crate::simulation::gpu::tensor::same_buffer(
         &buffers.resources,
         &updated.resources
     ));
-    assert!(crate::simulation::market_graphs::same_buffer(
+    assert!(crate::simulation::gpu::tensor::same_buffer(
         &buffers.accounts,
         &updated.accounts
     ));
-    assert!(!crate::simulation::market_graphs::same_buffer(
+    assert!(!crate::simulation::gpu::tensor::same_buffer(
         &buffers.claims,
         &updated.claims
     ));
     assert!(updated.claims.meta.num_elements() >= claim_words + capacity + regions + 1);
     let retained = updated.updated(&device, capacity, regions);
-    assert!(crate::simulation::market_graphs::same_buffer(
+    assert!(crate::simulation::gpu::tensor::same_buffer(
         &updated.claims,
         &retained.claims
     ));
     let grown = retained.updated(&device, capacity + 1, regions);
-    assert!(!crate::simulation::market_graphs::same_buffer(
+    assert!(!crate::simulation::gpu::tensor::same_buffer(
         &retained.accounts,
         &grown.accounts
     ));
@@ -94,7 +94,7 @@ fn reused_freight_after_firm_entry_matches_rebuilt_markets_and_cash_on_gpu() -> 
         .iter()
         .zip(reused.config.railway.freight.graph_buffers())
     {
-        assert!(crate::simulation::market_graphs::same_buffer(before, after));
+        assert!(crate::simulation::gpu::tensor::same_buffer(before, after));
     }
     reused.copy_audited(crate::simulation::CopyDirection::Save)?;
     let mut expected = rebuilt.download()?;
@@ -265,7 +265,7 @@ struct FitBudget {
 
 struct FitFixture {
     simulation: Simulation,
-    parameters: crate::simulation::parameters::EconomyParameters,
+    parameters: crate::simulation::economy::parameters::EconomyParameters,
     output: burn_wgpu::CubeTensor,
     workers: u32,
 }
@@ -554,7 +554,8 @@ fn check_fit_route(route: FitRoute) -> Result<()> {
                     _ => assert_eq!(values[2], 2),
                 }
                 values.push(
-                    device.read(&fixture.simulation.control)?[crate::simulation::flags::FAULT_WORD],
+                    device.read(&fixture.simulation.control)?
+                        [crate::simulation::storage::flags::FAULT_WORD],
                 );
                 observations.push(values);
             }
@@ -678,7 +679,9 @@ fn route_visit_bounds_follow_cached_service_and_preserve_zero_region_fits_on_gpu
             fixture.launch(quantity, method);
             let mut values = device.read_range(&fixture.output, 0, 4)?;
             assert_eq!(values[1..], [0, 1, 0]);
-            values.push(device.read(&simulation.control)?[crate::simulation::flags::FAULT_WORD]);
+            values.push(
+                device.read(&simulation.control)?[crate::simulation::storage::flags::FAULT_WORD],
+            );
             observations.push(values);
         }
         assert_eq!(observations[0], observations[1], "quantity {quantity}");
@@ -1074,7 +1077,7 @@ fn freight_execution(
         _ => assert_eq!(waves, 1),
     }
     assert_eq!(
-        device.read(&simulation.control)?[crate::simulation::flags::FAULT_WORD],
+        device.read(&simulation.control)?[crate::simulation::storage::flags::FAULT_WORD],
         0
     );
     let mut actual = state.clone();
@@ -1195,7 +1198,7 @@ fn market_claim_preparation_reads_gpu_searches_and_propagates_prior_faults() -> 
     let preparation = prepare_market_claims(&device, &mut simulation.config, &simulation.control)?;
     assert!(matches!(preparation.claims, ClaimWork::Ready));
     assert_eq!(preparation.searches, 0);
-    control[crate::simulation::flags::FAULT_WORD] = FaultFlags::ARITHMETIC_OVERFLOW.bits();
+    control[crate::simulation::storage::flags::FAULT_WORD] = FaultFlags::ARITHMETIC_OVERFLOW.bits();
     device.write(&simulation.control, &control);
     let error = prepare_market_claims(&device, &mut simulation.config, &simulation.control)
         .err()
@@ -1264,8 +1267,8 @@ fn buffered_claim_admission_preserves_zero_wide_counts_and_prior_faults_on_gpu()
             dispatch: AdmissionDispatch::Empty,
         },
     ] {
-        let mut control = vec![0; crate::simulation::flags::CLAIM_CAPACITY_HIGH_WORD + 1];
-        control[crate::simulation::flags::FAULT_WORD] = case.faults.bits();
+        let mut control = vec![0; crate::simulation::storage::flags::CLAIM_CAPACITY_HIGH_WORD + 1];
+        control[crate::simulation::storage::flags::FAULT_WORD] = case.faults.bits();
         let progress = [7, 11, case.count as u32, (case.count >> 32) as u32, 13];
         let mut dispatches = vec![37; FREIGHT_DISPATCH_WORDS];
         dispatches[..3].copy_from_slice(&[3, 2, 1]);
@@ -1293,10 +1296,11 @@ fn buffered_claim_admission_preserves_zero_wide_counts_and_prior_faults_on_gpu()
         match case.faults.is_empty() {
             true => {
                 if case.count > capacity {
-                    control[crate::simulation::flags::FAULT_WORD] =
+                    control[crate::simulation::storage::flags::FAULT_WORD] =
                         FaultFlags::CLAIM_CAPACITY.bits();
-                    control[crate::simulation::flags::CLAIM_CAPACITY_LOW_WORD] = case.count as u32;
-                    control[crate::simulation::flags::CLAIM_CAPACITY_HIGH_WORD] =
+                    control[crate::simulation::storage::flags::CLAIM_CAPACITY_LOW_WORD] =
+                        case.count as u32;
+                    control[crate::simulation::storage::flags::CLAIM_CAPACITY_HIGH_WORD] =
                         (case.count >> 32) as u32;
                     expected_progress[CLAIM_COUNT] = 0;
                     expected_progress[CLAIM_COUNT + 1] = 0;
@@ -1384,8 +1388,8 @@ fn disabled_buffered_freight_retry_preserves_all_settlement_buffers_on_gpu() -> 
         (0, FaultFlags::empty()),
         (1, FaultFlags::ARITHMETIC_OVERFLOW),
     ] {
-        let mut control = vec![0; crate::simulation::flags::CLAIM_CAPACITY_HIGH_WORD + 1];
-        control[crate::simulation::flags::FAULT_WORD] = faults.bits();
+        let mut control = vec![0; crate::simulation::storage::flags::CLAIM_CAPACITY_HIGH_WORD + 1];
+        control[crate::simulation::storage::flags::FAULT_WORD] = faults.bits();
         let progress = [7, retry_bookings, 17, 0, 13];
         let mut stale_dispatches = initial_dispatches.clone();
         stale_dispatches[CLAIM_ACTIVE_DISPATCH..CLAIM_ACTIVE_DISPATCH + 3]

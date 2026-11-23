@@ -1,10 +1,12 @@
 use crate::simulation::{
     Device,
-    flags::{FaultFlags, KernelFaults},
     parallel::workgroup::{self, WorkgroupTree},
     pass::GpuPass,
+    storage::{
+        flags::{FaultFlags, KernelFaults},
+        words::{Ticks, ticks},
+    },
     system::{AsBufferArg, System, gpu_passes},
-    words::{Ticks, ticks},
 };
 use anyhow::{Context, Result};
 use burn_wgpu::CubeTensor;
@@ -225,7 +227,7 @@ pub(in crate::simulation) fn summary(
     control: &CubeTensor,
     groups: &CubeTensor,
 ) -> Result<()> {
-    use crate::simulation::layout::SummaryLayout as S;
+    use crate::simulation::storage::layout::SummaryLayout as S;
     SummaryReduction::launch_elements(
         device,
         S::METRICS * device.workgroup as usize,
@@ -328,7 +330,7 @@ pub(in crate::simulation) fn reduce_metric<'a>(
 
 #[cube]
 fn summary_tiles(input: &[Ticks], output: &mut [Ticks], control: &[Atomic<u32>], groups: &[u32]) {
-    use crate::simulation::layout::SummaryLayout as S;
+    use crate::simulation::storage::layout::SummaryLayout as S;
     let metric = CUBE_POS as u32;
     if metric < S::METRICS as u32 {
         let minimum = metric == S::MINIMUM_WAGE
@@ -369,7 +371,7 @@ pub(in crate::simulation) fn original_summary(
     control: &CubeTensor,
     groups: usize,
 ) -> Result<()> {
-    use crate::simulation::layout::SummaryLayout as S;
+    use crate::simulation::storage::layout::SummaryLayout as S;
     let input = TensorHandle::new_contiguous(
         [groups, S::METRICS],
         input.handle.clone(),
@@ -446,7 +448,7 @@ fn store_columns(input: &[u64], output: &mut [u64], start: u32) {
 #[cfg(test)]
 fn summary_operation(metric: u32) -> ReduceOperationConfig {
     use crate::domain::Good;
-    use crate::simulation::layout::SummaryLayout as S;
+    use crate::simulation::storage::layout::SummaryLayout as S;
     match metric {
         S::MINIMUM_WAGE | S::MINIMUM_PRICE => ReduceOperationConfig::Min,
         S::MAXIMUM_WAGE | S::MAXIMUM_PRICE => ReduceOperationConfig::Max,
@@ -661,8 +663,8 @@ mod tests {
 
     #[test]
     fn summary_reductions_preserve_wide_totals_extrema_and_overflow_on_gpu() -> Result<()> {
-        use crate::simulation::flags::CONTROL_WORDS;
-        use crate::simulation::layout::SummaryLayout as S;
+        use crate::simulation::storage::flags::CONTROL_WORDS;
+        use crate::simulation::storage::layout::SummaryLayout as S;
         let device = crate::simulation::tests::device(64)?;
         let groups = 257;
         let values = (0..groups * S::METRICS)

@@ -1,24 +1,26 @@
-use super::{
+use super::{flags::CONTROL_WORDS, layout::*};
+use crate::simulation::{
     Device,
-    configuration::Configuration,
-    economy::{self, EconomyStage, market::orders},
-    flags::CONTROL_WORDS,
-    layout::*,
-    parameters::{EconomyParameters, SchedulerParameters},
+    economy::{
+        self, EconomyStage,
+        configuration::Configuration,
+        market::orders,
+        parameters::{EconomyParameters, SchedulerParameters},
+    },
     scheduler::{self, SchedulerStage},
     system::{AsBufferArg, System},
 };
 use burn_wgpu::CubeTensor;
 
 #[derive(Clone, Copy)]
-pub(super) struct DeviceEconomy<'a> {
+pub(in crate::simulation) struct DeviceEconomy<'a> {
     pub device: &'a Device,
     pub state: &'a CubeTensor,
     pub actors: &'a CubeTensor,
     pub config: &'a Configuration,
 }
 
-pub(super) struct PhaseBuffers {
+pub(in crate::simulation) struct PhaseBuffers {
     pub proposals: CubeTensor,
     pub events: CubeTensor,
     pub scratch: CubeTensor,
@@ -58,7 +60,7 @@ impl BufferSizes {
 }
 
 impl PhaseBuffers {
-    pub(super) fn new(device: &Device, actors: usize, batch_limit: u32) -> Self {
+    pub(in crate::simulation) fn new(device: &Device, actors: usize, batch_limit: u32) -> Self {
         let sizes = BufferSizes::for_actors(actors, batch_limit);
         Self {
             events: device.empty(sizes.events),
@@ -70,7 +72,12 @@ impl PhaseBuffers {
         }
     }
 
-    pub(super) fn resized(&self, device: &Device, actors: usize, batch_limit: u32) -> Self {
+    pub(in crate::simulation) fn resized(
+        &self,
+        device: &Device,
+        actors: usize,
+        batch_limit: u32,
+    ) -> Self {
         let sizes = BufferSizes::for_actors(actors, batch_limit);
         Self {
             proposals: device.resize_scratch(&self.proposals, sizes.proposals),
@@ -83,7 +90,7 @@ impl PhaseBuffers {
     }
 }
 
-pub(super) struct EconomyBuffers<'a> {
+pub(in crate::simulation) struct EconomyBuffers<'a> {
     pub economy: DeviceEconomy<'a>,
     pub spatial: &'a CubeTensor,
     pub proposals: &'a CubeTensor,
@@ -92,7 +99,7 @@ pub(super) struct EconomyBuffers<'a> {
 }
 
 #[derive(Clone, Copy)]
-pub(super) struct SchedulerBuffers<'a> {
+pub(in crate::simulation) struct SchedulerBuffers<'a> {
     pub state: &'a CubeTensor,
     pub events: &'a CubeTensor,
     pub scratch: &'a CubeTensor,
@@ -101,7 +108,7 @@ pub(super) struct SchedulerBuffers<'a> {
 }
 
 impl EconomyBuffers<'_> {
-    pub(super) fn launch_input(
+    pub(in crate::simulation) fn launch_input(
         &self,
         stage: EconomyStage,
         parameters: &EconomyParameters,
@@ -119,7 +126,12 @@ impl EconomyBuffers<'_> {
         }
     }
 
-    pub(super) fn run(&self, stage: EconomyStage, count: usize, parameters: &EconomyParameters) {
+    pub(in crate::simulation) fn run(
+        &self,
+        stage: EconomyStage,
+        count: usize,
+        parameters: &EconomyParameters,
+    ) {
         match (stage, parameters.phase) {
             (EconomyStage::Local, crate::domain::Phase::Opening) => {
                 economy::phases::opening::launch(
@@ -140,7 +152,7 @@ impl EconomyBuffers<'_> {
 }
 
 impl SchedulerBuffers<'_> {
-    pub(super) fn schedule(
+    pub(in crate::simulation) fn schedule(
         &self,
         device: &Device,
         stage: SchedulerStage,

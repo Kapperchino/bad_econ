@@ -1,6 +1,6 @@
 use crate::domain::enterprise::FoodAccess;
 use crate::domain::enterprise::{EnterpriseModel, EnterpriseState};
-use crate::simulation::configuration::Feature;
+use crate::simulation::economy::configuration::Feature;
 use crate::simulation::economy::*;
 
 #[cube]

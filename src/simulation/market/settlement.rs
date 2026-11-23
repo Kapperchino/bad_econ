@@ -3,11 +3,14 @@ use crate::{
     domain::{Good, Market},
     simulation::{
         Simulation,
-        configuration::Feature,
         economy::{
             EconomyStage,
-            market::orders,
-            market::sorting::{self, INPUT_TILE, MarketSort, SortKeys},
+            configuration::Feature,
+            market::{
+                orders,
+                sorting::{self, INPUT_TILE, MarketSort, SortKeys},
+            },
+            parameters::MarketClock,
             settlement::batch::{
                 self,
                 labor::{LaborExecution, LaborInputLaunch, LaborSettlement},
@@ -16,8 +19,7 @@ use crate::{
             },
             transport::railway::settlement::Stage as FreightStage,
         },
-        parameters::MarketClock,
-        profiling::MarketProfile,
+        runtime::profiling::MarketProfile,
         system::{AsBufferArg, System},
     },
 };

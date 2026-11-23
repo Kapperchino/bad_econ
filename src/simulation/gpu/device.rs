@@ -1,10 +1,11 @@
-use super::{layout::WORD_BYTES, memory::MemoryBudget};
+use super::memory::MemoryBudget;
+use crate::simulation::storage::layout::WORD_BYTES;
 use anyhow::{Context, Result, anyhow};
 use burn::tensor::{DType, Shape};
 use burn_wgpu::{CubeTensor, WgpuSetup, wgpu};
 use cubecl::{CubeCount, CubeDim, client::Client};
 
-pub(super) const MAX_WORKGROUP_SIZE: u32 = 256;
+pub(in crate::simulation) const MAX_WORKGROUP_SIZE: u32 = 256;
 const WORKGROUP_SIZES: [u32; 4] = [32, 64, 128, MAX_WORKGROUP_SIZE];
 const DEDICATED_BUFFER_BYTES: usize = 1024 * 1024;
 const STATE_BUFFER_BYTES: usize = 16 * 1024 * 1024;
@@ -180,13 +181,16 @@ impl Device {
         };
         self.upload(words, allocation)
     }
-    pub(super) fn record_tensor<T: bytemuck::Pod>(&self, records: &[T]) -> CubeTensor {
+    pub(in crate::simulation) fn record_tensor<T: bytemuck::Pod>(
+        &self,
+        records: &[T],
+    ) -> CubeTensor {
         match records {
             [] => self.tensor(bytemuck::cast_slice(&[T::zeroed()])),
             records => self.tensor(bytemuck::cast_slice(records)),
         }
     }
-    pub(super) fn dedicated_tensor(&self, words: &[u32]) -> CubeTensor {
+    pub(in crate::simulation) fn dedicated_tensor(&self, words: &[u32]) -> CubeTensor {
         self.upload(words, TensorAllocation::Dedicated)
     }
     fn upload(&self, words: &[u32], allocation: TensorAllocation) -> CubeTensor {
@@ -228,7 +232,11 @@ impl Device {
             DType::U32,
         )
     }
-    pub(super) fn resize_scratch(&self, previous: &CubeTensor, words: usize) -> CubeTensor {
+    pub(in crate::simulation) fn resize_scratch(
+        &self,
+        previous: &CubeTensor,
+        words: usize,
+    ) -> CubeTensor {
         let bytes = (words * WORD_BYTES) as u64;
         let mut handle = match previous.handle.size() >= bytes {
             true => previous.handle.clone(),
@@ -246,7 +254,7 @@ impl Device {
             DType::U32,
         )
     }
-    pub(super) fn state_buffer(&self, words: usize) -> CubeTensor {
+    pub(in crate::simulation) fn state_buffer(&self, words: usize) -> CubeTensor {
         match words * WORD_BYTES {
             bytes if (STATE_BUFFER_BYTES..256 * 1024 * 1024).contains(&bytes) => {
                 let granularity = (bytes / 16).next_power_of_two().max(STATE_BUFFER_BYTES);
@@ -330,13 +338,16 @@ impl Device {
     pub fn sync(&self) -> Result<()> {
         pollster::block_on(self.client.sync()).map_err(Into::into)
     }
-    pub(super) fn memory_usage(&self) -> cubecl::MemoryUsage {
+    pub(in crate::simulation) fn memory_usage(&self) -> cubecl::MemoryUsage {
         self.client
             .memory_report(cubecl::MemoryScope::Device)
             .usage()
     }
 
-    pub(super) fn reclaim_memory(&self, additional_bytes: u64) -> Result<cubecl::MemoryUsage> {
+    pub(in crate::simulation) fn reclaim_memory(
+        &self,
+        additional_bytes: u64,
+    ) -> Result<cubecl::MemoryUsage> {
         let usage = self.memory_usage();
         match usage.bytes_reserved.saturating_add(additional_bytes) <= self.memory_budget.bytes() {
             true => Ok(usage),
@@ -347,7 +358,7 @@ impl Device {
             }
         }
     }
-    pub(super) fn count(&self, count: usize) -> CubeCount {
+    pub(in crate::simulation) fn count(&self, count: usize) -> CubeCount {
         cubecl::calculate_cube_count_elemwise(
             &self.client,
             count.max(1),
@@ -411,7 +422,7 @@ mod tests {
         assert_eq!(reserved(), before);
         let values = vec![0; words];
         let source = device.tensor(&values);
-        let snapshot = crate::simulation::tensor::SnapshotCopy::new(&device, words);
+        let snapshot = crate::simulation::gpu::tensor::SnapshotCopy::new(&device, words);
         snapshot.save(&device, &source, &target);
         assert_eq!(device.read(&target)?, values);
         Ok(())

@@ -1,8 +1,8 @@
 use super::{
     flags::{FaultFlags, KernelFaults},
     layout::*,
-    policy::{PRICE_INDEX_BITS, PRICE_INDEX_LIMIT},
 };
+use crate::simulation::economy::policy::{PRICE_INDEX_BITS, PRICE_INDEX_LIMIT};
 use cubecl::prelude::*;
 
 pub type Ticks = Vector<u32, Const<TICK_WORDS>>;
@@ -248,7 +248,7 @@ mod tests {
     use crate::{
         arithmetic::DrawKey,
         ledger::TickLayout,
-        simulation::{Device, ops::TEST_WORKGROUP},
+        simulation::{Device, gpu::device::TEST_WORKGROUP},
     };
     use anyhow::Result;
     use bytemuck::{Pod, Zeroable};

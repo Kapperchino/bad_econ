@@ -472,7 +472,8 @@ impl SearchProbe {
         Ok(SearchOutcome {
             proposal,
             state: device.read(&simulation.state)?,
-            faults: device.read(&simulation.control)?[crate::simulation::flags::FAULT_WORD],
+            faults: device.read(&simulation.control)?
+                [crate::simulation::storage::flags::FAULT_WORD],
         })
     }
 }
@@ -557,7 +558,7 @@ impl SearchProbe {
             queue,
             payload: requests[count..5 * count].to_vec(),
             statuses: device.read_range(&simulation.work.scratch, 4 * count, count)?,
-            faults: control[crate::simulation::flags::FAULT_WORD],
+            faults: control[crate::simulation::storage::flags::FAULT_WORD],
         })
     }
 }

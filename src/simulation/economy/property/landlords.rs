@@ -400,7 +400,7 @@ mod tests {
     use crate::domain::{
         Experiment, Scenario, enterprise::ExpansionPolicy, landlords::RentalRegistry,
     };
-    use crate::simulation::configuration::Configuration;
+    use crate::simulation::economy::configuration::Configuration;
     use crate::simulation::{decode, encode, tests::device};
     use anyhow::Result;
 

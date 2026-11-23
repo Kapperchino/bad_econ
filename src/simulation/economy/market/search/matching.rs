@@ -54,7 +54,8 @@ impl SearchInput {
             };
             let mut selection = MatchSelection::new(comptime!(parameters.market));
             let lanes = comptime!(match source {
-                index::SupplySource::Index => crate::simulation::ops::MAX_WORKGROUP_SIZE as usize,
+                index::SupplySource::Index =>
+                    crate::simulation::gpu::device::MAX_WORKGROUP_SIZE as usize,
                 _ => 32usize,
             });
             let mut candidates = CandidateTile::new(lanes, comptime!(parameters.market));

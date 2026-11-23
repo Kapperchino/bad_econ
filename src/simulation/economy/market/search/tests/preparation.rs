@@ -165,7 +165,7 @@ fn consumer_preparation_clears_inactive_requests_and_preserves_captured_retries_
                     demand: requests[count..5 * count].to_vec(),
                     candidates,
                     statuses: device.read_range(&simulation.work.scratch, 4 * count, count)?,
-                    faults: control[crate::simulation::flags::FAULT_WORD],
+                    faults: control[crate::simulation::storage::flags::FAULT_WORD],
                 });
                 control[SEARCHES_WORD] = 0;
                 device.write(&simulation.control, &control);

@@ -1,10 +1,10 @@
 use super::*;
 use crate::simulation::{
-    flags::KernelFaults,
     parallel::{
         ScanHierarchy, ScanMode,
         workgroup::{TickTree, WorkgroupTree},
     },
+    storage::flags::KernelFaults,
 };
 
 pub(super) struct Scan {

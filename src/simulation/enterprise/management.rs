@@ -1,11 +1,13 @@
 use crate::domain::{Field, State, enterprise::EnterpriseState};
-use crate::simulation::configuration::{Configuration, EconomyConfig, Feature};
+use crate::simulation::economy::configuration::{Configuration, EconomyConfig, Feature};
 use crate::simulation::{
     Device,
     pass::GpuPass,
-    state::{Ledger, ReadLedger, ReadLedgerExpand},
+    storage::{
+        state::{Ledger, ReadLedger, ReadLedgerExpand},
+        words::*,
+    },
     system::{AsBufferArg, System, gpu_passes},
-    words::*,
 };
 use burn_wgpu::CubeTensor;
 use cubecl::prelude::*;

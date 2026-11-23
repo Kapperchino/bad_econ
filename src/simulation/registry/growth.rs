@@ -5,8 +5,10 @@ use crate::{
     simulation::{
         DeviceEconomy, MarketReplay, Simulation, economy,
         enterprise::{management, ownership},
-        layout::{ActorLayout, ActorMetadataRows, TICK_WORDS, WORD_BYTES},
-        market_graphs, profiling, tensor,
+        gpu::tensor,
+        market::graphs,
+        runtime::profiling,
+        storage::layout::{ActorLayout, ActorMetadataRows, TICK_WORDS, WORD_BYTES},
     },
 };
 use anyhow::{Result, anyhow};
@@ -76,7 +78,7 @@ impl Simulation {
         registry_audit: RegistryAudit,
     ) -> Result<()> {
         let mut checkpoint = profiling::audit_checkpoints(&self.device, self.day);
-        self.market_graphs = market_graphs::MarketGraphs::default();
+        self.market_graphs = graphs::MarketGraphs::default();
         checkpoint("ReleaseGraphs");
         let newborns = newborn_count(births);
         let next_identity = self.identity_after_births(newborns)?;
@@ -226,7 +228,7 @@ impl Simulation {
                 .resized(&self.device, count, self.scenario.config().batch_size),
             searches,
             market_sort: economy::market::sorting::MarketSort::default(),
-            market_graphs: market_graphs::MarketGraphs::default(),
+            market_graphs: graphs::MarketGraphs::default(),
             market_replay: match self.device.cube {
                 cubecl::Device::Metal(_) => MarketReplay::Reusable,
                 _ => MarketReplay::RegistryGrowth,

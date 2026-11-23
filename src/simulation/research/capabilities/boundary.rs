@@ -99,8 +99,8 @@ impl DeviceCapabilityGraph {
             true => {
                 let adjacency = device.empty((self.nodes * self.row_words).max(1));
                 let labels = device.empty(self.nodes.max(1));
-                crate::simulation::tensor::copy(device, &self.adjacency, &adjacency);
-                crate::simulation::tensor::copy(device, &self.labels, &labels);
+                crate::simulation::gpu::tensor::copy(device, &self.adjacency, &adjacency);
+                crate::simulation::gpu::tensor::copy(device, &self.labels, &labels);
                 for pivot in retained..self.nodes {
                     BoundaryElimination::launch_elements(
                         device,
@@ -141,7 +141,7 @@ impl DeviceCapabilityGraph {
 
     pub fn closure(&self, device: &Device) -> Result<CapabilityClosure> {
         let labels = device.empty(self.nodes.max(1));
-        crate::simulation::tensor::copy(device, &self.labels, &labels);
+        crate::simulation::gpu::tensor::copy(device, &self.labels, &labels);
         propagate_until_stable(device, self.nodes, |changed| {
             BoundaryPropagation::launch_elements(
                 device,

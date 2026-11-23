@@ -1,7 +1,7 @@
 use super::staging::{StagedRows, Staging, Transfer, transfer};
 use super::*;
 use crate::domain::Good;
-use crate::simulation::{encode, enterprise, layout::TICK_WORDS};
+use crate::simulation::{encode, enterprise, storage::layout::TICK_WORDS};
 use std::collections::BTreeSet;
 
 pub(in crate::simulation) fn state_capacity(count: usize) -> usize {

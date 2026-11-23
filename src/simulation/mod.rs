@@ -1,72 +1,49 @@
 pub mod analytics;
 pub mod bargaining;
-mod buffers;
-mod checkpoint;
-#[cfg(feature = "viewer")]
-pub(crate) mod company_report;
-mod configuration;
 mod demography;
-mod dispatch;
 mod economy;
 mod enterprise;
 pub mod finance;
-mod flags;
+mod gpu;
 pub mod households;
-mod initialization;
-mod inspection;
-mod layout;
-mod ledger_execution;
-mod lifecycle;
 mod market;
-mod market_graphs;
-mod memory;
-pub mod negotiation;
-mod observation;
-mod ops;
 mod parallel;
-mod parameters;
-pub mod pass;
-mod payroll;
-mod policy;
-mod profiling;
-mod provision;
-mod random;
 mod registry;
+pub(crate) mod reporting;
 pub mod research;
-mod rows;
-mod state;
-pub mod system;
-mod tensor;
+mod runtime;
+mod storage;
 #[cfg(test)]
 mod tests;
-mod words;
 
 #[cfg(test)]
 use crate::domain::Market;
 use crate::domain::{ActorRows, ObservationSnapshot, Phase, Scenario, State};
 use crate::runtime::{PhaseTiming, RuntimeState};
-use buffers::DeviceEconomy;
+pub use bargaining::negotiation;
 use burn_wgpu::CubeTensor;
-use checkpoint::CopyDirection;
+#[cfg(test)]
+use economy::settlement::ledger::Execution;
+use economy::settlement::ledger::execute;
+pub use economy::settlement::ledger::{LedgerResult, ledger};
 use economy::{market::orders, settlement::scheduler, transport::railway::settlement};
 use enterprise::{management, ownership};
-use layout::{decode, encode};
-#[cfg(test)]
-use ledger_execution::Execution;
-use ledger_execution::execute;
-pub use ledger_execution::{LedgerResult, ledger};
-#[cfg(test)]
-use lifecycle::ClaimCapacityDemand;
+use gpu::tensor;
+pub use gpu::{device::Device, memory::MemoryBudget, pass, system};
+use market::graphs::MarketGraphs;
 use market::{FreightActivity, FreightExecution, MarketExecution, MarketReplay, Provisioning};
-pub use memory::MemoryBudget;
-#[cfg(test)]
-use observation::AuditExecution;
-pub use ops::Device;
 use parallel::reduction;
-use profiling::profiling_day;
 use registry::RegistryAudit;
 #[cfg(test)]
 use registry::RegistryExecution;
+#[cfg(test)]
+use reporting::observation::AuditExecution;
+use runtime::checkpoint::CopyDirection;
+#[cfg(test)]
+use runtime::lifecycle::ClaimCapacityDemand;
+use runtime::profiling::profiling_day;
+use storage::buffers::{self, DeviceEconomy};
+use storage::layout::{decode, encode};
 
 #[derive(Clone, Copy, Debug)]
 pub enum Trace {
@@ -89,12 +66,12 @@ pub struct Simulation {
     audited: tensor::AuditedBuffer,
     snapshot_copy: tensor::SnapshotCopy,
     actors: CubeTensor,
-    config: configuration::Configuration,
+    config: economy::configuration::Configuration,
     spatial: CubeTensor,
     work: buffers::PhaseBuffers,
     searches: orders::SearchBuffers,
     market_sort: economy::market::sorting::MarketSort,
-    market_graphs: market_graphs::MarketGraphs,
+    market_graphs: MarketGraphs,
     market_replay: MarketReplay,
     freight_activity: FreightActivity,
     freight_execution: FreightExecution,

@@ -6,14 +6,16 @@ mod scan;
 mod support;
 mod systems;
 
-use super::rows::{RowIndex, row_layout};
+use super::storage::rows::{RowIndex, row_layout};
 use super::{
     Device,
-    flags::{CONTROL_WORDS, FaultFlags},
-    layout::{TICK_WORDS, WORD_BYTES},
     pass::GpuPass,
+    storage::{
+        flags::{CONTROL_WORDS, FaultFlags},
+        layout::{TICK_WORDS, WORD_BYTES},
+        words::*,
+    },
     system::{AsBufferArg, System, gpu_passes},
-    words::*,
 };
 use crate::{domain::finance::*, ledger::Coordinate};
 use anyhow::{Context, Result, anyhow};
@@ -306,7 +308,7 @@ impl FinanceRuntime {
         );
         let control = device.read(&self.control)?;
         self.last_event_count
-            .set(super::flags::ControlLayout::new(&control)?.phase_data as usize);
+            .set(super::storage::flags::ControlLayout::new(&control)?.phase_data as usize);
         FaultFlags::read(&control)?.into_result()
     }
 
@@ -345,7 +347,7 @@ impl FinanceRuntime {
                 let control = device.read(&self.control)?;
                 FaultFlags::read(&control)?.into_result()?;
                 self.last_event_count
-                    .set(super::flags::ControlLayout::new(&control)?.phase_data as usize);
+                    .set(super::storage::flags::ControlLayout::new(&control)?.phase_data as usize);
                 self.last_support_count.set(self.last_event_count.get());
                 SupportPosting::launch_elements(
                     device,

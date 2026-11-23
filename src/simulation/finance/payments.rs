@@ -3,9 +3,11 @@ use crate::{
     ledger::{Decision, EMPTY, LEG_WORDS, LegLayout, MAX_LEGS, TickLayout},
     simulation::{
         Trace,
-        buffers::SchedulerBuffers,
-        flags::ControlLayout,
-        layout::{EVENT_WORDS, LinkLayout, MIN_BUFFER_WORDS, ScratchLayout},
+        storage::{
+            buffers::SchedulerBuffers,
+            flags::ControlLayout,
+            layout::{EVENT_WORDS, LinkLayout, MIN_BUFFER_WORDS, ScratchLayout},
+        },
     },
 };
 

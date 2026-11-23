@@ -167,7 +167,7 @@ pub(in crate::simulation::economy) fn collect(
 mod tests {
     use super::*;
     use crate::domain::{Experiment, RentPolicy, Scenario};
-    use crate::simulation::{configuration::Configuration, decode, encode, tests::device};
+    use crate::simulation::{decode, economy::configuration::Configuration, encode, tests::device};
     use anyhow::Result;
 
     #[cube(launch)]

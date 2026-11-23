@@ -248,7 +248,7 @@ impl SearchInput {
                 let actor = spatial[(cells + 1 + member) as usize];
                 if comptime!(
                     parameters.empty_orders
-                        == crate::simulation::parameters::EmptyOrderMode::FeedbackOnly
+                        == crate::simulation::economy::parameters::EmptyOrderMode::FeedbackOnly
                         && matches!(parameters.market, MarketFlag::Consumer(_))
                 ) {
                     successes[orders::filtered_count(config.actors, actor) as usize].store(0);

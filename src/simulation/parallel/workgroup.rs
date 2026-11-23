@@ -1,7 +1,9 @@
 use crate::simulation::{
-    flags::KernelFaults,
-    ops::MAX_WORKGROUP_SIZE,
-    words::{Ticks, plus},
+    gpu::device::MAX_WORKGROUP_SIZE,
+    storage::{
+        flags::KernelFaults,
+        words::{Ticks, plus},
+    },
 };
 use cubecl::prelude::*;
 

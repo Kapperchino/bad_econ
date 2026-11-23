@@ -1,6 +1,7 @@
-use super::layout::WORD_BITS;
-use super::negotiation::BargainingConfig;
-use crate::simulation::system::AsBufferArg;
+use super::transport::railway;
+use crate::simulation::{
+    Device, negotiation::BargainingConfig, storage::layout::WORD_BITS, system::AsBufferArg,
+};
 use crate::{
     arithmetic::PRICE_TABLE,
     domain::{Good, Scenario, State},
@@ -96,7 +97,7 @@ pub struct EconomyConfig {
     pub map_size: u32,
     pub commute_speed: u32,
     pub shipment_speed: u32,
-    pub railway: super::economy::transport::railway::RailNetwork,
+    pub railway: railway::RailNetwork,
     pub household_need: u32,
     pub food_medium_salary: u32,
     pub food_rich_salary: u32,
@@ -157,7 +158,7 @@ struct CartageAccounts {
 }
 
 impl CartageAccounts {
-    fn new(device: &super::Device, state: &State) -> Self {
+    fn new(device: &Device, state: &State) -> Self {
         let mut carriers = state
             .actors
             .firm_indices()
@@ -198,7 +199,7 @@ pub struct Configuration {
     pub map_size: u32,
     pub commute_speed: u32,
     pub shipment_speed: u32,
-    pub railway: super::economy::transport::railway::Network,
+    pub railway: railway::Network,
     pub household_need: u32,
     pub food_medium_salary: u32,
     pub food_rich_salary: u32,
@@ -248,7 +249,9 @@ pub struct Configuration {
     pub industrial_expansion: u32,
 }
 impl Configuration {
-    pub(super) fn graph_buffers(&self) -> impl Iterator<Item = &burn_wgpu::CubeTensor> + Clone {
+    pub(in crate::simulation) fn graph_buffers(
+        &self,
+    ) -> impl Iterator<Item = &burn_wgpu::CubeTensor> + Clone {
         [
             &self.consumption_intervals,
             &self.price_table,
@@ -261,9 +264,9 @@ impl Configuration {
         .chain(self.railway.graph_buffers())
     }
 
-    pub fn new(device: &super::Device, scenario: &Scenario, state: &State) -> Self {
+    pub fn new(device: &Device, scenario: &Scenario, state: &State) -> Self {
         let rentals = crate::domain::landlords::RentalRegistry::new(scenario, state);
-        let railway = super::economy::transport::railway::Network::new(device, scenario, state);
+        let railway = railway::Network::new(device, scenario, state);
         Self::with_rentals(
             device,
             scenario,
@@ -277,7 +280,7 @@ impl Configuration {
     #[cfg(test)]
     pub fn updated(
         &self,
-        device: &super::Device,
+        device: &Device,
         scenario: &Scenario,
         previous: &crate::domain::ActorRows,
         state: &State,
@@ -293,7 +296,7 @@ impl Configuration {
 
     pub fn updated_for_registry(
         &self,
-        device: &super::Device,
+        device: &Device,
         scenario: &Scenario,
         previous: &crate::domain::ActorRows,
         state: &State,
@@ -310,7 +313,7 @@ impl Configuration {
 
     fn updated_using(
         &self,
-        device: &super::Device,
+        device: &Device,
         scenario: &Scenario,
         previous: &crate::domain::ActorRows,
         state: &State,
@@ -360,7 +363,7 @@ impl Configuration {
 
     pub fn update_rentals(
         &mut self,
-        device: &super::Device,
+        device: &Device,
         scenario: &Scenario,
         state: &State,
         changes: impl IntoIterator<Item = usize>,
@@ -384,11 +387,11 @@ impl Configuration {
     }
 
     fn with_rentals(
-        device: &super::Device,
+        device: &Device,
         scenario: &Scenario,
         state: &State,
         rentals: crate::domain::landlords::RentalRegistry,
-        railway: super::economy::transport::railway::Network,
+        railway: railway::Network,
         cartage: CartageAccounts,
     ) -> Self {
         let config = scenario.config();
@@ -685,7 +688,7 @@ mod tests {
                 rebuilt.rental_accounts.meta.num_elements(),
                 rebuilt.rental_businesses,
             ) {
-                assert!(crate::simulation::market_graphs::same_buffer(
+                assert!(crate::simulation::gpu::tensor::same_buffer(
                     &previous_accounts,
                     &cached.rental_accounts,
                 ));

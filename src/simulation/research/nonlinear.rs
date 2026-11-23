@@ -1,4 +1,4 @@
-use super::super::words::{divide, times32};
+use super::super::storage::words::{divide, times32};
 use cubecl::prelude::*;
 
 pub const PROBABILITY_SCALE: u32 = 1_000_000;

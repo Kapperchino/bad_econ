@@ -1,11 +1,12 @@
 use crate::simulation::{
-    configuration::{EconomyConfig, Feature},
-    flags::*,
+    economy::{
+        configuration::{EconomyConfig, Feature},
+        parameters::*,
+    },
     parallel,
-    parameters::*,
     pass::GpuPass,
+    storage::{flags::*, words::ceildiv},
     system::{AsBufferArg, System, gpu_passes},
-    words::ceildiv,
 };
 use cubecl::prelude::*;
 
@@ -261,7 +262,7 @@ fn prepare_counts(
     preparation_resets: u32,
     preparation_workgroup: u32,
 ) {
-    control[LATCH_WORD].store(control[crate::simulation::flags::FAULT_WORD].load());
+    control[LATCH_WORD].store(control[crate::simulation::storage::flags::FAULT_WORD].load());
     let mut counts = Array::<u32>::new(12usize);
     counts[0usize] = control[SEARCHES_WORD].load();
     counts[1usize] = ceildiv(control[CONSTRUCTED_EVENTS_WORD].load(), workgroup);
@@ -462,7 +463,8 @@ pub(in crate::simulation) fn compact_fill(
     }
     if id < count {
         let actor = (id + parameters.settlement_rotation) % count;
-        let peer = proposals[actor as usize * crate::simulation::layout::ProposalLayout::WORDS];
+        let peer =
+            proposals[actor as usize * crate::simulation::storage::layout::ProposalLayout::WORDS];
         if peer != u32::MAX {
             let mut slot = scratch[(6 * count + id) as usize] - 1;
             if block > 0 {

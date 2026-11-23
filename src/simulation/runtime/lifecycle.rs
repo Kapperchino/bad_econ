@@ -1,15 +1,18 @@
-use super::{
+use crate::simulation::{
     CopyDirection, Simulation, Trace,
-    economy::{self, EconomyStage},
+    economy::{
+        self, EconomyStage,
+        policy::{self, MATCHING_ROUNDS},
+    },
     finance,
-    flags::{self, CONTROL_WORDS, FaultFlags},
-    layout::*,
-    market::FreightExecution,
-    market_graphs,
-    policy::{self, MATCHING_ROUNDS},
+    market::{FreightExecution, graphs},
     profiling_day,
     registry::RegistryAudit,
     settlement,
+    storage::{
+        flags::{self, CONTROL_WORDS, FaultFlags},
+        layout::*,
+    },
 };
 use crate::{
     arithmetic::add,
@@ -23,7 +26,7 @@ use std::time::Instant;
 const MILLISECONDS_PER_SECOND: f64 = 1000.0;
 
 #[derive(Debug)]
-pub(super) struct ClaimCapacityDemand {
+pub(in crate::simulation) struct ClaimCapacityDemand {
     records: std::num::NonZeroU64,
 }
 
@@ -40,21 +43,21 @@ impl std::fmt::Display for ClaimCapacityDemand {
 impl std::error::Error for ClaimCapacityDemand {}
 
 impl Simulation {
-    pub(super) fn clear_control(&self) {
+    pub(in crate::simulation) fn clear_control(&self) {
         self.device.write(
             &self.control,
             bytemuck::cast_slice(&[ObservationControlLayout::zeroed()]),
         );
     }
 
-    pub(super) fn fault_check(&mut self) -> Result<()> {
+    pub(in crate::simulation) fn fault_check(&mut self) -> Result<()> {
         let faults = self
             .device
             .read_range(&self.control, flags::FAULT_WORD, 1)?;
         self.readback_bytes += WORD_BYTES as u64;
         self.fault_result(faults[0])
     }
-    pub(super) fn fault_result(&mut self, bits: u32) -> Result<()> {
+    pub(in crate::simulation) fn fault_result(&mut self, bits: u32) -> Result<()> {
         let mut faults = FaultFlags::new(bits)?;
         let capacity = faults.contains(FaultFlags::CLAIM_CAPACITY);
         faults.remove(FaultFlags::CLAIM_CAPACITY);
@@ -280,7 +283,7 @@ impl Simulation {
         economy::property::landlords::launch(self.gpu(), &self.control, phase);
         self.fault_check()
     }
-    pub(super) fn railways(&self, stage: economy::transport::railway::RailStage) {
+    pub(in crate::simulation) fn railways(&self, stage: economy::transport::railway::RailStage) {
         let started = Instant::now();
         economy::transport::railway::launch(self.gpu(), &self.control, stage);
         if self.day + 1 == profiling_day() && std::env::var_os("BAD_ECON_PROFILE_STAGES").is_some()
@@ -335,7 +338,7 @@ impl Simulation {
                 };
             })?;
             self.status = previous_status.clone();
-            self.market_graphs = market_graphs::MarketGraphs::default();
+            self.market_graphs = graphs::MarketGraphs::default();
             result = self.run_day();
         }
         result

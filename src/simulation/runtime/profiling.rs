@@ -1,27 +1,27 @@
-use super::{
+use crate::domain::Market;
+use crate::simulation::{
     Device,
-    configuration::Configuration,
+    economy::configuration::Configuration,
     settlement::{Stage, Wave, WaveBookings},
 };
-use crate::domain::Market;
 use anyhow::Result;
 use burn_wgpu::CubeTensor;
 use cubecl::{client::ProfileWindow, profile::ProfileDuration};
 use std::{cell::RefCell, fmt::Debug, time::Instant};
 
-pub(super) enum MarketProfile {
+pub(in crate::simulation) enum MarketProfile {
     Disabled,
     Enabled(RefCell<Vec<Measurement>>),
     Freight(RefCell<FreightProfile>),
 }
 
-pub(super) struct Measurement {
+pub(in crate::simulation) struct Measurement {
     family: &'static str,
     stage: String,
     duration: ProfileDuration,
 }
 
-pub(super) struct FreightProfile {
+pub(in crate::simulation) struct FreightProfile {
     device: Device,
     window: Option<ProfileWindow>,
     dispatches: usize,
@@ -68,7 +68,7 @@ impl FreightProfile {
 }
 
 impl MarketProfile {
-    pub(super) fn new(device: &Device, day: u64) -> Self {
+    pub(in crate::simulation) fn new(device: &Device, day: u64) -> Self {
         match day == profiling_day() {
             true if std::env::var_os("BAD_ECON_PROFILE_FREIGHT").is_some() => {
                 Self::Freight(RefCell::new(FreightProfile {
@@ -85,7 +85,7 @@ impl MarketProfile {
         }
     }
 
-    pub(super) fn freight(
+    pub(in crate::simulation) fn freight(
         &self,
         device: &Device,
         stage: Stage,
@@ -129,7 +129,7 @@ impl MarketProfile {
         }
     }
 
-    pub(super) fn start(&self, device: &Device) -> Option<ProfileWindow> {
+    pub(in crate::simulation) fn start(&self, device: &Device) -> Option<ProfileWindow> {
         match self {
             Self::Disabled | Self::Freight(_) => None,
             Self::Enabled(_) => Some(
@@ -141,7 +141,7 @@ impl MarketProfile {
         }
     }
 
-    pub(super) fn end(
+    pub(in crate::simulation) fn end(
         &self,
         device: &Device,
         window: Option<ProfileWindow>,
@@ -160,7 +160,7 @@ impl MarketProfile {
         }
     }
 
-    pub(super) fn resolve(
+    pub(in crate::simulation) fn resolve(
         self,
         market: Market,
         round: usize,
@@ -198,7 +198,10 @@ impl MarketProfile {
     }
 }
 
-pub(super) fn audit_checkpoints(device: &Device, day: u64) -> impl FnMut(&str) + use<> {
+pub(in crate::simulation) fn audit_checkpoints(
+    device: &Device,
+    day: u64,
+) -> impl FnMut(&str) + use<> {
     let mut profile = (day == profiling_day()
         && std::env::var_os("BAD_ECON_PROFILE_STAGES").is_some())
     .then(|| (device.clone(), Instant::now()));
@@ -215,7 +218,7 @@ pub(super) fn audit_checkpoints(device: &Device, day: u64) -> impl FnMut(&str) +
     }
 }
 
-pub(super) fn profiling_day() -> u64 {
+pub(in crate::simulation) fn profiling_day() -> u64 {
     static DAY: std::sync::OnceLock<u64> = std::sync::OnceLock::new();
     *DAY.get_or_init(|| match std::env::var("BAD_ECON_PROFILE_DAY") {
         Ok(day) => day

@@ -284,7 +284,7 @@ impl<'a> GroupedOrders<'a> {
             sync_storage();
             if UNIT_POS == 0 {
                 self.control[LATCH_WORD]
-                    .store(self.control[crate::simulation::flags::FAULT_WORD].load());
+                    .store(self.control[crate::simulation::storage::flags::FAULT_WORD].load());
             }
             sync_storage();
             if self.control[LATCH_WORD].load() == 0 {

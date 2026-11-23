@@ -8,7 +8,7 @@ mod systems;
 use super::registry::records::PendingRecord;
 use super::{
     Device,
-    layout::WORD_BYTES,
+    storage::layout::WORD_BYTES,
     system::{AsBufferArg, System},
 };
 use crate::domain::{Phase, Scenario, State, demography::*};
@@ -353,17 +353,17 @@ impl DemographyRuntime {
             PopulationModel::Individuals
         };
         let samples = match stage {
-            Stage::Mortality => super::random::samples(
+            Stage::Mortality => super::gpu::random::samples(
                 device,
                 self.seed,
                 day,
-                super::random::Stream::Demography,
+                super::gpu::random::Stream::Demography,
                 match model {
                     PopulationModel::Individuals => [self.count, 5],
                     PopulationModel::Cohorts => [count, 1],
                 },
             )?,
-            _ => super::tensor::empty(device, [0]),
+            _ => super::gpu::tensor::empty(device, [0]),
         };
         *self.snapshot.lock().expect("person snapshot state") = PersonSnapshot::Dirty;
         HouseholdDemography::launch_elements(
@@ -405,10 +405,10 @@ impl DemographyRuntime {
         let mut snapshot = self.snapshot.lock().expect("person snapshot state");
         match (direction, *snapshot) {
             (super::CopyDirection::Save, PersonSnapshot::Dirty) => {
-                super::tensor::copy_contiguous(device, &self.people, &self.audited);
+                super::gpu::tensor::copy_contiguous(device, &self.people, &self.audited);
             }
             (super::CopyDirection::Restore, _) => {
-                super::tensor::copy_contiguous(device, &self.audited, &self.people);
+                super::gpu::tensor::copy_contiguous(device, &self.audited, &self.people);
             }
             (super::CopyDirection::Save, PersonSnapshot::Current) => (),
         }
@@ -456,7 +456,7 @@ impl DemographyRuntime {
         &self,
         device: &Device,
         state: &CubeTensor,
-        config: &super::configuration::Configuration,
+        config: &super::economy::configuration::Configuration,
     ) -> Result<PopulationObservation> {
         match self.count {
             0 => cohorts::observation(device, state, config, self.initial_population),
@@ -467,7 +467,7 @@ impl DemographyRuntime {
         &self,
         device: &Device,
         state: &CubeTensor,
-        config: &super::configuration::Configuration,
+        config: &super::economy::configuration::Configuration,
     ) -> Result<PopulationObservation> {
         let shards = device.tensor(&[0; OBSERVATION_SHARDS * OBSERVATION_METRICS]);
         let output = device.empty(OBSERVATION_METRICS);
@@ -535,7 +535,7 @@ impl DemographyRuntime {
         stride: u32,
         previous: &Self,
     ) {
-        if !super::market_graphs::same_buffer(&self.people, &previous.people) {
+        if !super::gpu::tensor::same_buffer(&self.people, &previous.people) {
             let remapping = match self
                 .range_counts
                 .iter()

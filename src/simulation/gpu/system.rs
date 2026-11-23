@@ -1,4 +1,4 @@
-use super::{Device, pass::GpuPass};
+use crate::simulation::{Device, pass::GpuPass};
 use burn_wgpu::CubeTensor;
 use cubecl::prelude::*;
 use std::marker::PhantomData;
@@ -42,7 +42,7 @@ impl<Input: CubeType, First: GpuPass<Input>, Next: GpuPass<First::Output>> GpuPa
     }
 }
 
-pub(super) trait AsBufferArg {
+pub(in crate::simulation) trait AsBufferArg {
     fn buffer_arg(&self) -> BufferArg;
 }
 

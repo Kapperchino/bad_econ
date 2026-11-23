@@ -6,7 +6,7 @@ struct DispatchInput {
     dispatches: Box<[u32]>,
     workgroup: u32,
     config: EconomyConfig,
-    parameters: crate::simulation::parameters::EconomyParameters,
+    parameters: crate::simulation::economy::parameters::EconomyParameters,
     spatial: Box<[u32]>,
     #[cube(comptime)]
     resource_selection: ResourceSelection,
@@ -113,7 +113,7 @@ pub fn launch(
     proposals: &CubeTensor,
     scratch: &CubeTensor,
     control: &CubeTensor,
-    parameters: &crate::simulation::parameters::EconomyParameters,
+    parameters: &crate::simulation::economy::parameters::EconomyParameters,
     stage: Stage,
 ) {
     launch_buffered(
@@ -140,7 +140,7 @@ pub fn launch_buffered(
     proposals: &CubeTensor,
     scratch: &CubeTensor,
     control: &CubeTensor,
-    parameters: &crate::simulation::parameters::EconomyParameters,
+    parameters: &crate::simulation::economy::parameters::EconomyParameters,
     stage: Stage,
     execution: Execution,
     resource_selection: ResourceSelection,
@@ -228,7 +228,7 @@ pub fn launch_buffered(
 fn settlement_dispatch(
     device: &Device,
     config: &Configuration,
-    parameters: &crate::simulation::parameters::EconomyParameters,
+    parameters: &crate::simulation::economy::parameters::EconomyParameters,
     stage: Stage,
     execution: Execution,
 ) -> crate::simulation::system::Dispatch {
@@ -285,7 +285,7 @@ impl FreightParticipants {
     fn new(
         config: &EconomyConfig,
         spatial: &[u32],
-        parameters: &crate::simulation::parameters::EconomyParameters,
+        parameters: &crate::simulation::economy::parameters::EconomyParameters,
         active: u32,
         #[comptime] selection: ResourceSelection,
     ) -> Self {
@@ -363,10 +363,11 @@ impl GpuPass<AdmissionInput> for AdmitFreightClaims {
             if comptime!(matches!(input.execution, Execution::Buffered(_)))
                 && lt(ticks(input.capacity, 0), demand)
             {
-                input.control[crate::simulation::flags::CLAIM_CAPACITY_LOW_WORD].store(count);
-                input.control[crate::simulation::flags::CLAIM_CAPACITY_HIGH_WORD]
+                input.control[crate::simulation::storage::flags::CLAIM_CAPACITY_LOW_WORD]
+                    .store(count);
+                input.control[crate::simulation::storage::flags::CLAIM_CAPACITY_HIGH_WORD]
                     .store(demand.extract(HIGH_WORD));
-                input.control[crate::simulation::flags::FAULT_WORD]
+                input.control[crate::simulation::storage::flags::FAULT_WORD]
                     .fetch_or(comptime!(FaultFlags::CLAIM_CAPACITY.bits()));
                 AtomicBalance::at(&input.progress, CLAIM_COUNT).store(zero());
                 count = 0;

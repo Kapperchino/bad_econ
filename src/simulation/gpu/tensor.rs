@@ -1,4 +1,4 @@
-use super::{
+use crate::simulation::{
     Device,
     pass::GpuPass,
     system::{AsBufferArg, System, gpu_passes},
@@ -12,16 +12,20 @@ use cubek::{
     std::InputBinding,
 };
 
-pub(super) const SNAPSHOT_PARTS: usize = 4;
-pub(super) const SNAPSHOT_BLOCK_WORDS: usize = SNAPSHOT_PARTS * 32 * 4;
+pub(in crate::simulation) const SNAPSHOT_PARTS: usize = 4;
+pub(in crate::simulation) const SNAPSHOT_BLOCK_WORDS: usize = SNAPSHOT_PARTS * 32 * 4;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
-pub(super) enum RingMaskState {
+pub(in crate::simulation) enum RingMaskState {
     Empty,
     Unknown,
 }
 
-pub(super) fn reset_ring_mask(device: &Device, mask: &CubeTensor, state: RingMaskState) {
+pub(in crate::simulation) fn reset_ring_mask(
+    device: &Device,
+    mask: &CubeTensor,
+    state: RingMaskState,
+) {
     RingMaskReset::launch_elements(
         device,
         mask.meta.num_elements(),
@@ -61,7 +65,7 @@ impl GpuPass<RingMaskInput> for ResetRingMask {
     }
 }
 
-pub(super) fn state_values(
+pub(in crate::simulation) fn state_values(
     values: &[u64],
     actors: usize,
     stride: usize,
@@ -82,7 +86,7 @@ pub(super) fn state_values(
     }
 }
 
-pub(super) fn vector_width(device: &Device, elements: usize) -> usize {
+pub(in crate::simulation) fn vector_width(device: &Device, elements: usize) -> usize {
     device
         .client
         .io_optimized_vector_sizes(size_of::<f32>())
@@ -91,7 +95,11 @@ pub(super) fn vector_width(device: &Device, elements: usize) -> usize {
         .unwrap_or(1)
 }
 
-pub(super) fn floats(device: &Device, shape: impl Into<Shape>, values: &[f32]) -> CubeTensor {
+pub(in crate::simulation) fn floats(
+    device: &Device,
+    shape: impl Into<Shape>,
+    values: &[f32],
+) -> CubeTensor {
     let shape = shape.into();
     assert_eq!(
         shape.num_elements(),
@@ -113,7 +121,7 @@ pub(super) fn floats(device: &Device, shape: impl Into<Shape>, values: &[f32]) -
     )
 }
 
-pub(super) fn empty(device: &Device, shape: impl Into<Shape>) -> CubeTensor {
+pub(in crate::simulation) fn empty(device: &Device, shape: impl Into<Shape>) -> CubeTensor {
     let shape = shape.into();
     let handle = device
         .client
@@ -127,7 +135,7 @@ pub(super) fn empty(device: &Device, shape: impl Into<Shape>) -> CubeTensor {
     )
 }
 
-pub(super) fn reshape(tensor: &CubeTensor, shape: impl Into<Shape>) -> CubeTensor {
+pub(in crate::simulation) fn reshape(tensor: &CubeTensor, shape: impl Into<Shape>) -> CubeTensor {
     let shape = shape.into();
     assert_eq!(
         shape.num_elements(),
@@ -147,7 +155,7 @@ pub(super) fn reshape(tensor: &CubeTensor, shape: impl Into<Shape>) -> CubeTenso
     )
 }
 
-pub(super) fn matmul(
+pub(in crate::simulation) fn matmul(
     device: &Device,
     left: &CubeTensor,
     right: &CubeTensor,
@@ -175,7 +183,11 @@ pub(super) fn matmul(
     }
 }
 
-pub(super) fn uniform(device: &Device, shape: impl Into<Shape>, seed: u64) -> Result<CubeTensor> {
+pub(in crate::simulation) fn uniform(
+    device: &Device,
+    shape: impl Into<Shape>,
+    seed: u64,
+) -> Result<CubeTensor> {
     let output = empty(device, shape);
     if output.meta.num_elements() > 0 {
         cubek::random::random_uniform(
@@ -190,7 +202,27 @@ pub(super) fn uniform(device: &Device, shape: impl Into<Shape>, seed: u64) -> Re
     Ok(output)
 }
 
-pub(super) fn copy(device: &Device, source: &CubeTensor, target: &CubeTensor) {
+pub(in crate::simulation) fn same_buffer(recorded: &CubeTensor, current: &CubeTensor) -> bool {
+    (
+        recorded.handle.memory.descriptor(),
+        recorded.handle.service,
+        recorded.handle.offset_start,
+        recorded.handle.offset_end,
+        recorded.handle.size(),
+        &recorded.meta,
+        recorded.dtype,
+    ) == (
+        current.handle.memory.descriptor(),
+        current.handle.service,
+        current.handle.offset_start,
+        current.handle.offset_end,
+        current.handle.size(),
+        &current.meta,
+        current.dtype,
+    )
+}
+
+pub(in crate::simulation) fn copy(device: &Device, source: &CubeTensor, target: &CubeTensor) {
     cubecl::std::tensor::copy_into(
         &device.client,
         source.clone().binding(),
@@ -199,7 +231,11 @@ pub(super) fn copy(device: &Device, source: &CubeTensor, target: &CubeTensor) {
     );
 }
 
-pub(super) fn copy_contiguous(device: &Device, source: &CubeTensor, target: &CubeTensor) {
+pub(in crate::simulation) fn copy_contiguous(
+    device: &Device,
+    source: &CubeTensor,
+    target: &CubeTensor,
+) {
     match source.meta.num_elements().is_multiple_of(4) {
         true => ContiguousCopy::launch_elements(
             device,
@@ -215,7 +251,7 @@ pub(super) fn copy_contiguous(device: &Device, source: &CubeTensor, target: &Cub
 }
 
 #[derive(Clone, Default)]
-pub(super) struct AuditedBuffer {
+pub(in crate::simulation) struct AuditedBuffer {
     segments: Vec<CubeTensor>,
     capacity: usize,
 }
@@ -243,13 +279,13 @@ fn word_slice(tensor: &CubeTensor, offset: usize, words: usize) -> CubeTensor {
 }
 
 impl AuditedBuffer {
-    pub(super) fn additional_words(&self, words: usize) -> usize {
+    pub(in crate::simulation) fn additional_words(&self, words: usize) -> usize {
         words
             .saturating_sub(self.capacity)
             .next_multiple_of(SNAPSHOT_BLOCK_WORDS)
     }
 
-    pub(super) fn extended(&self, device: &Device, words: usize) -> Self {
+    pub(in crate::simulation) fn extended(&self, device: &Device, words: usize) -> Self {
         let mut next = self.clone();
         let additional = self.additional_words(words);
         if additional > 0 {
@@ -275,7 +311,11 @@ impl AuditedBuffer {
         })
     }
 
-    pub(super) fn read(&self, device: &Device, live: &CubeTensor) -> Result<Vec<u32>> {
+    pub(in crate::simulation) fn read(
+        &self,
+        device: &Device,
+        live: &CubeTensor,
+    ) -> Result<Vec<u32>> {
         let mut words = Vec::with_capacity(live.meta.num_elements());
         for part in self.parts(live) {
             words.extend(device.read(&part.audited)?);
@@ -283,25 +323,25 @@ impl AuditedBuffer {
         Ok(words)
     }
 
-    pub(super) fn restore(&self, device: &Device, live: &CubeTensor) {
+    pub(in crate::simulation) fn restore(&self, device: &Device, live: &CubeTensor) {
         for part in self.parts(live) {
             copy_contiguous(device, &part.audited, &part.live);
         }
     }
 
     #[cfg(test)]
-    pub(super) fn shares_prefix(&self, previous: &Self) -> bool {
+    pub(in crate::simulation) fn shares_prefix(&self, previous: &Self) -> bool {
         self.segments.len() >= previous.segments.len()
             && self
                 .segments
                 .iter()
                 .zip(&previous.segments)
-                .all(|(a, b)| super::market_graphs::same_buffer(a, b))
+                .all(|(a, b)| same_buffer(a, b))
     }
 }
 
 #[derive(Clone)]
-pub(super) enum SnapshotCopy {
+pub(in crate::simulation) enum SnapshotCopy {
     Full,
     Sparse {
         nonzero: CubeTensor,
@@ -310,7 +350,7 @@ pub(super) enum SnapshotCopy {
 }
 
 impl SnapshotCopy {
-    pub(super) fn new(device: &Device, words: usize) -> Self {
+    pub(in crate::simulation) fn new(device: &Device, words: usize) -> Self {
         let properties = device.client.properties();
         match words >= 1024
             && words.is_multiple_of(4)
@@ -329,11 +369,16 @@ impl SnapshotCopy {
     }
 
     #[cfg(test)]
-    pub(super) fn save(&self, device: &Device, source: &CubeTensor, target: &CubeTensor) {
+    pub(in crate::simulation) fn save(
+        &self,
+        device: &Device,
+        source: &CubeTensor,
+        target: &CubeTensor,
+    ) {
         self.save_range(device, source, target, 0, 0, 0);
     }
 
-    pub(super) fn save_state(
+    pub(in crate::simulation) fn save_state(
         &self,
         device: &Device,
         source: &CubeTensor,
@@ -355,7 +400,7 @@ impl SnapshotCopy {
         }
     }
 
-    pub(super) fn ring_mask(&self) -> Option<&CubeTensor> {
+    pub(in crate::simulation) fn ring_mask(&self) -> Option<&CubeTensor> {
         match self {
             Self::Full => None,
             Self::Sparse { current, .. } => Some(current),

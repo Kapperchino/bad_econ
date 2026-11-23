@@ -1,5 +1,5 @@
 use crate::simulation::DeviceEconomy;
-use crate::simulation::state::*;
+use crate::simulation::storage::state::*;
 pub(super) mod acquisitions;
 mod formation;
 pub(super) mod management;
@@ -19,14 +19,14 @@ use super::{
     registry::records::{
         CountRecords, ProposedRecord, RecordBuffers, RecordCountBuffers, RecordCountBuffersLaunch,
     },
+    storage::words::*,
     system::{AsBufferArg, System, gpu_passes},
-    words::*,
 };
 use crate::domain::{
     Field, Good,
     enterprise::{EnterpriseState, EntrepreneurialInterest, EstateStatus},
 };
-use crate::simulation::configuration::{EconomyConfig, Feature};
+use crate::simulation::economy::configuration::{EconomyConfig, Feature};
 use burn_wgpu::CubeTensor;
 use cubecl::{CubeDim, prelude::*};
 

@@ -109,7 +109,7 @@ fn cached_migration_needs_preserve_destinations_and_compacted_records_on_gpu() -
             ] {
                 device.write(
                     &simulation.state,
-                    bytemuck::cast_slice(&encode(&crate::simulation::tensor::state_values(
+                    bytemuck::cast_slice(&encode(&crate::simulation::gpu::tensor::state_values(
                         &initial.values,
                         initial.actors.len(),
                         simulation.config.state_stride as usize,

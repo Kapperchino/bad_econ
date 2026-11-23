@@ -1,7 +1,7 @@
 use super::{kernels::ResearchInput, layout::*};
 use crate::{
     domain::{Field, Good},
-    simulation::{
+    simulation::storage::{
         flags::{FaultFlags, KernelFaults},
         layout::TICK_WORDS,
         rows::RowIndex,

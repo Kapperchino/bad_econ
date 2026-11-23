@@ -1,22 +1,25 @@
-use super::MarketRound;
+use super::{MarketRound, graphs::Preparation};
 use crate::{
     domain::{Good, Market},
     simulation::{
         Simulation, Trace,
-        configuration::Feature,
         economy::{
             EconomyStage,
-            market::indexing,
-            market::orders,
-            market::search::{
-                self, MarketSearch, OrderCollection, SearchInputLaunch, SearchStage, StatusReset,
+            configuration::Feature,
+            market::{
+                indexing, orders,
+                search::{
+                    self, MarketSearch, OrderCollection, SearchInputLaunch, SearchStage,
+                    StatusReset,
+                },
             },
+            parameters::EmptyOrderMode,
         },
-        flags,
-        layout::{DISCOVERY_BLOCK, WORD_BYTES},
-        market_graphs::Preparation,
         parallel::{self, ScanMode},
-        parameters::EmptyOrderMode,
+        storage::{
+            flags,
+            layout::{DISCOVERY_BLOCK, WORD_BYTES},
+        },
         system::{AsBufferArg, Dispatch, System},
     },
 };

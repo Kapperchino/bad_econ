@@ -1,9 +1,9 @@
-use super::{
+use crate::domain::*;
+use crate::simulation::{
     Simulation, decode,
     economy::EconomyStage,
-    layout::{TICK_BYTES, TICK_WORDS},
+    storage::layout::{TICK_BYTES, TICK_WORDS},
 };
-use crate::domain::*;
 use anyhow::Result;
 
 impl Simulation {

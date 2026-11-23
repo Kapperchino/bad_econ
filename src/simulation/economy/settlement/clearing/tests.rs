@@ -495,8 +495,8 @@ fn compacted_goods_buyers_match_event_checks_rejections_and_faults_on_gpu() -> R
             );
             let control = device.read(&simulation.control)?;
             assert_eq!(
-                control[crate::simulation::flags::FAULT_WORD],
-                device.read(&expected_control)?[crate::simulation::flags::FAULT_WORD]
+                control[crate::simulation::storage::flags::FAULT_WORD],
+                device.read(&expected_control)?[crate::simulation::storage::flags::FAULT_WORD]
             );
             assert_eq!(control[CONSTRUCTED_EVENTS_WORD], 1);
             assert_eq!(

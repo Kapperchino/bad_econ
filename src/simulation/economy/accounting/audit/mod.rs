@@ -94,10 +94,10 @@ impl AuditInput<'_> {
             _ => ring_tracking,
         };
         if let (RingValidation::All, Some(mask)) = (&self.rings, self.ring_mask) {
-            crate::simulation::tensor::reset_ring_mask(
+            crate::simulation::gpu::tensor::reset_ring_mask(
                 device,
                 mask,
-                crate::simulation::tensor::RingMaskState::Empty,
+                crate::simulation::gpu::tensor::RingMaskState::Empty,
             );
         }
         let ring_mask = self.ring_mask.unwrap_or(self.control);
@@ -322,7 +322,7 @@ impl<'a> LedgerAudit<'a> {
     fn mark_transit(&self, actor: u32, field: u32, amount: Ticks) {
         let config = self.ledger.config;
         let block = (field * config.state_stride + actor) * 2
-            / crate::simulation::tensor::SNAPSHOT_BLOCK_WORDS as u32;
+            / crate::simulation::gpu::tensor::SNAPSHOT_BLOCK_WORDS as u32;
         match comptime!(self.tracking) {
             RingTracking::ObservedPlane => {
                 let present = plane_any(!equal(amount, zero()));

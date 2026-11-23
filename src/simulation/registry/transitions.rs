@@ -1,10 +1,12 @@
 use super::commit::{RegistryAudit, apply_records, newborn_count};
 use super::{self as registry, records::PendingRecord, settlement::SettlementBatch};
 use crate::simulation::{
-    Simulation, configuration,
-    economy::{self, transport::railway::Network},
+    Simulation,
+    economy::{self, configuration, transport::railway::Network},
     enterprise::{management, ownership},
-    market_graphs, profiling, tensor,
+    gpu::tensor,
+    market::graphs,
+    runtime::profiling,
 };
 use anyhow::{Context, Result, anyhow};
 use std::time::Instant;
@@ -31,7 +33,7 @@ impl RegistryBindings {
 
     fn commit(self, simulation: &mut Simulation) {
         let reused = |current: &mut burn_wgpu::CubeTensor, previous| {
-            if !market_graphs::same_buffer(current, &previous) {
+            if !tensor::same_buffer(current, &previous) {
                 tensor::copy_contiguous(&simulation.device, current, &previous);
                 *current = previous;
             }
@@ -127,7 +129,7 @@ impl SettlementRuntimes {
         }
         if let Some(railway) = self.railway {
             simulation.config.railway = railway;
-            simulation.market_graphs = market_graphs::MarketGraphs::default();
+            simulation.market_graphs = graphs::MarketGraphs::default();
         }
     }
 }

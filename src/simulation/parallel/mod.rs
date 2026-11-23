@@ -3,8 +3,8 @@ mod systems;
 pub(super) mod workgroup;
 use super::{
     Device,
+    storage::words::ceildiv,
     system::{AsBufferArg, System},
-    words::ceildiv,
 };
 use burn_wgpu::CubeTensor;
 use cubecl::prelude::*;
@@ -187,9 +187,11 @@ mod tests {
                         let offset = 7;
                         let mut words = vec![u32::MAX; offset + bound * 2 + 256];
                         words[offset..offset + count].copy_from_slice(&input);
-                        let mut control = vec![0; crate::simulation::flags::CONTROL_WORDS + 3];
-                        control[crate::simulation::flags::CONSTRUCTED_EVENTS_WORD] = active as u32;
-                        control[crate::simulation::flags::FAULT_WORD] = match state {
+                        let mut control =
+                            vec![0; crate::simulation::storage::flags::CONTROL_WORDS + 3];
+                        control[crate::simulation::storage::flags::CONSTRUCTED_EVENTS_WORD] =
+                            active as u32;
+                        control[crate::simulation::storage::flags::FAULT_WORD] = match state {
                             ActiveScanState::Ready => 0,
                             ActiveScanState::Faulted => 1,
                         };
@@ -422,7 +424,7 @@ fn scan_active_blocks(
     let count = ceildiv(
         histogram_bins
             * ceildiv(
-                control[crate::simulation::flags::CONSTRUCTED_EVENTS_WORD].load(),
+                control[crate::simulation::storage::flags::CONSTRUCTED_EVENTS_WORD].load(),
                 source_workgroup,
             ),
         divisor,
@@ -469,7 +471,7 @@ fn add_active_offsets(
     let count = ceildiv(
         histogram_bins
             * ceildiv(
-                control[crate::simulation::flags::CONSTRUCTED_EVENTS_WORD].load(),
+                control[crate::simulation::storage::flags::CONSTRUCTED_EVENTS_WORD].load(),
                 source_workgroup,
             ),
         divisor,

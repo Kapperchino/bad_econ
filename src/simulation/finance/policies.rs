@@ -1,5 +1,5 @@
 use super::*;
-use crate::simulation::flags::KernelFaults;
+use crate::simulation::storage::flags::KernelFaults;
 
 #[derive(Clone, Debug)]
 pub struct LendingInput {

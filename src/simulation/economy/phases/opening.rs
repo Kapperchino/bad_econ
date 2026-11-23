@@ -1,5 +1,5 @@
 use crate::simulation::economy::*;
-use crate::simulation::{Device, configuration::Configuration};
+use crate::simulation::{Device, economy::configuration::Configuration};
 use burn_wgpu::CubeTensor;
 
 #[derive(Clone, Copy, Debug, Hash, PartialEq, Eq)]

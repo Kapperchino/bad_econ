@@ -4,11 +4,13 @@ use super::{
 };
 use crate::domain::Field;
 use crate::simulation::{
-    configuration::{EconomyConfig, Feature},
+    economy::configuration::{EconomyConfig, Feature},
     pass::GpuPass,
-    state::{ActorBalances, Ledger, ReadLedger, ReadLedgerExpand},
+    storage::{
+        state::{ActorBalances, Ledger, ReadLedger, ReadLedgerExpand},
+        words::*,
+    },
     system::{System, gpu_passes},
-    words::*,
 };
 use cubecl::prelude::*;
 

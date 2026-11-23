@@ -2,8 +2,8 @@ use super::*;
 use crate::{
     domain::Phase,
     simulation::{
-        flags::{CONSTRUCTED_EVENTS_WORD, CONTROL_WORDS, FAULT_WORD, MarketFlag},
-        parameters::Discovery,
+        economy::parameters::Discovery,
+        storage::flags::{CONSTRUCTED_EVENTS_WORD, CONTROL_WORDS, FAULT_WORD, MarketFlag},
     },
 };
 
@@ -238,9 +238,9 @@ fn actor_and_firm_sort_graphs_survive_alternating_keyspaces_on_gpu() -> Result<(
 impl SortCase {
     fn parameters(&self) -> EconomyParameters {
         EconomyParameters {
-            clock: crate::simulation::parameters::MarketClock::Scalars,
+            clock: crate::simulation::economy::parameters::MarketClock::Scalars,
             scan: self.scan,
-            empty_orders: crate::simulation::parameters::EmptyOrderMode::Settle,
+            empty_orders: crate::simulation::economy::parameters::EmptyOrderMode::Settle,
             day: self.active as u32,
             matching_round: 0,
             settlement_rotation: self.active as u32,
@@ -403,7 +403,8 @@ fn graph_sort_rebuilds_after_buffer_layout_device_workgroup_thread_and_stream_ch
 #[test]
 fn input_tile_preserves_seller_ranges_and_rotated_buyer_priority_on_gpu() -> Result<()> {
     use crate::simulation::{
-        economy::market::search::INPUT_BUYERS_FIELD, flags::EventStatus, layout::ProposalLayout,
+        economy::market::search::INPUT_BUYERS_FIELD,
+        storage::{flags::EventStatus, layout::ProposalLayout},
     };
     let device = crate::simulation::tests::device(64)?;
     let capacity = 2 * INPUT_TILE + 1;

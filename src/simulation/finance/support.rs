@@ -1,5 +1,5 @@
 use super::*;
-use crate::simulation::{
+use crate::simulation::storage::{
     flags::CONSTRUCTED_EVENTS_WORD,
     layout::{HIGH_WORD, LOW_WORD, TICK_BITS, WORD_BITS, WORD_TOP_BIT},
     state::BalanceBuffer,

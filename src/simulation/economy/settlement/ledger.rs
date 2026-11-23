@@ -1,24 +1,26 @@
-use super::{
-    Device, Trace,
-    buffers::SchedulerBuffers,
-    decode, encode,
-    flags::{CONTROL_WORDS, ControlLayout, DependencyShape, EventStatus, SchedulerControl},
-    layout::*,
-    parameters::SchedulerParameters,
-    scheduler::SchedulerStage,
-};
 use crate::ledger::{Bundle, Decision, MAX_LEGS, OrderedEvents};
+use crate::simulation::{
+    Device, Trace, decode,
+    economy::parameters::SchedulerParameters,
+    encode,
+    scheduler::SchedulerStage,
+    storage::{
+        buffers::SchedulerBuffers,
+        flags::{CONTROL_WORDS, ControlLayout, DependencyShape, EventStatus, SchedulerControl},
+        layout::*,
+    },
+};
 use anyhow::{Context, Result, anyhow};
 use bytemuck::Zeroable;
 
-pub(super) struct Execution {
-    pub(super) decisions: Vec<Decision>,
-    pub(super) depth: usize,
-    pub(super) events: usize,
-    pub(super) readback_bytes: u64,
-    pub(super) status_start: usize,
+pub(in crate::simulation) struct Execution {
+    pub(in crate::simulation) decisions: Vec<Decision>,
+    pub(in crate::simulation) depth: usize,
+    pub(in crate::simulation) events: usize,
+    pub(in crate::simulation) readback_bytes: u64,
+    pub(in crate::simulation) status_start: usize,
 }
-pub(super) fn execute(
+pub(in crate::simulation) fn execute(
     device: &Device,
     buffers: SchedulerBuffers<'_>,
     count: usize,

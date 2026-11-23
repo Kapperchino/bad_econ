@@ -4,7 +4,7 @@ use super::{
 };
 use crate::{
     domain::{Field, research::RESEARCH_SCALE},
-    simulation::{
+    simulation::storage::{
         state::{ReadLedger, ReadLedgerExpand},
         words::*,
     },

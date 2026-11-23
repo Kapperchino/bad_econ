@@ -1,20 +1,24 @@
-use super::{
+use crate::domain::{Good, Market, Phase};
+use crate::simulation::{
     DeviceEconomy, Simulation,
-    buffers::EconomyBuffers,
-    economy::EconomyStage,
-    flags::{CONTROL_WORDS, FaultFlags},
-    layout::*,
+    economy::{
+        EconomyStage,
+        parameters::{self, Discovery, EconomyParameters},
+        policy::MATCHING_ROUNDS,
+    },
     market::{MarketExecution, Provisioning},
     parallel,
-    parameters::{self, Discovery, EconomyParameters},
-    policy::MATCHING_ROUNDS,
+    storage::{
+        buffers::EconomyBuffers,
+        flags::{CONTROL_WORDS, FaultFlags},
+        layout::*,
+    },
 };
-use crate::domain::{Good, Market, Phase};
 use anyhow::{Context, Result};
 use burn_wgpu::CubeTensor;
 
 impl Simulation {
-    pub(super) fn gpu(&self) -> DeviceEconomy<'_> {
+    pub(in crate::simulation) fn gpu(&self) -> DeviceEconomy<'_> {
         DeviceEconomy {
             device: &self.device,
             state: &self.state,
@@ -23,7 +27,7 @@ impl Simulation {
         }
     }
 
-    pub(super) fn parameters(
+    pub(in crate::simulation) fn parameters(
         &self,
         phase: Phase,
         market: Market,
@@ -40,7 +44,7 @@ impl Simulation {
             }
         }
         Ok(EconomyParameters {
-            clock: crate::simulation::parameters::MarketClock::Scalars,
+            clock: crate::simulation::economy::parameters::MarketClock::Scalars,
             scan: parallel::ScanMode::new(&self.device),
             empty_orders: parameters::EmptyOrderMode::Settle,
             day,
@@ -82,7 +86,7 @@ impl Simulation {
             sort_count: 0,
         })
     }
-    pub(super) fn market_buffers(&self) -> EconomyBuffers<'_> {
+    pub(in crate::simulation) fn market_buffers(&self) -> EconomyBuffers<'_> {
         EconomyBuffers {
             economy: self.gpu(),
             spatial: &self.spatial,
@@ -92,7 +96,7 @@ impl Simulation {
         }
     }
 
-    pub(super) fn economy(
+    pub(in crate::simulation) fn economy(
         &self,
         entry: EconomyStage,
         count: usize,
@@ -107,7 +111,7 @@ impl Simulation {
         .run(entry, count, parameters);
     }
 
-    pub(super) fn feedback_operation(
+    pub(in crate::simulation) fn feedback_operation(
         &self,
         stage: EconomyStage,
         count: usize,
@@ -127,7 +131,7 @@ impl Simulation {
         .run(stage, count, parameters);
     }
 
-    pub(super) fn apply_feedback(&mut self) -> Result<()> {
+    pub(in crate::simulation) fn apply_feedback(&mut self) -> Result<()> {
         let parameters = self.parameters(Phase::ProvisionPurchase, Market::Household, 0, 0)?;
         self.feedback_operation(
             EconomyStage::ApplyFeedback,

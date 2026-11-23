@@ -2,7 +2,7 @@ use super::{
     Dashboard,
     ui::{self, ActorSelection, UiAction},
 };
-use crate::{domain::company::AcquisitionScope, simulation::company_report::Business};
+use crate::{domain::company::AcquisitionScope, simulation::reporting::company_report::Business};
 use bevy::prelude::*;
 use std::cmp::Ordering;
 

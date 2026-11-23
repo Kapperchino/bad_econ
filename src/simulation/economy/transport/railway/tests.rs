@@ -100,7 +100,7 @@ fn unchanged_railway_companies_reuse_buffers_and_refresh_remapped_sites_on_gpu()
             (&original.companies, &cached.companies),
             (&original.access_rights, &cached.access_rights),
         ] {
-            assert!(crate::simulation::market_graphs::same_buffer(before, after));
+            assert!(crate::simulation::gpu::tensor::same_buffer(before, after));
         }
     }
     let operators = scenario
@@ -122,11 +122,11 @@ fn unchanged_railway_companies_reuse_buffers_and_refresh_remapped_sites_on_gpu()
     state.actors.set(operators[1], first);
     let remapped = extended.updated(&device, &scenario, &state);
     let rebuilt = Network::new(&device, &scenario, &state);
-    assert!(!crate::simulation::market_graphs::same_buffer(
+    assert!(!crate::simulation::gpu::tensor::same_buffer(
         &extended.companies,
         &remapped.companies
     ));
-    assert!(!crate::simulation::market_graphs::same_buffer(
+    assert!(!crate::simulation::gpu::tensor::same_buffer(
         &extended.access_rights,
         &remapped.access_rights
     ));
@@ -350,7 +350,7 @@ fn exact_route_cache_initializes_empty_service_and_invalidates_company_access_on
         (&before.regions, &after.regions),
         (&before.segment_regions, &after.segment_regions),
     ] {
-        assert!(crate::simulation::market_graphs::same_buffer(
+        assert!(crate::simulation::gpu::tensor::same_buffer(
             original, retained
         ));
     }
@@ -653,7 +653,7 @@ fn cached_quotes_match_exhaustive_carriers_on_gpu() -> Result<()> {
 #[test]
 fn repeated_input_initialization_resets_prior_suppliers_and_preserves_faults_on_gpu() -> Result<()>
 {
-    use crate::simulation::{Market, encode, flags::FAULT_WORD};
+    use crate::simulation::{Market, encode, storage::flags::FAULT_WORD};
 
     #[derive(Clone, Copy, Debug)]
     enum ResetCase {

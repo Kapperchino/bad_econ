@@ -25,7 +25,7 @@ fn plane_ring_masks_match_individual_marks_with_partial_actor_groups_on_gpu() ->
         }
         simulation.device.write(
             &simulation.state,
-            bytemuck::cast_slice(&encode(&crate::simulation::tensor::state_values(
+            bytemuck::cast_slice(&encode(&crate::simulation::gpu::tensor::state_values(
                 &state.values,
                 count,
                 simulation.config.state_stride as usize,
@@ -41,10 +41,10 @@ fn plane_ring_masks_match_individual_marks_with_partial_actor_groups_on_gpu() ->
             (parallel::ScanMode::Plane, 32, 32) => RingTracking::ObservedPlane,
             _ => RingTracking::Observed,
         };
-        crate::simulation::tensor::reset_ring_mask(
+        crate::simulation::gpu::tensor::reset_ring_mask(
             &simulation.device,
             mask,
-            crate::simulation::tensor::RingMaskState::Empty,
+            crate::simulation::gpu::tensor::RingMaskState::Empty,
         );
         ActorValidation::launch(
             &simulation.device,
@@ -64,10 +64,10 @@ fn plane_ring_masks_match_individual_marks_with_partial_actor_groups_on_gpu() ->
             },
         );
         let coalesced = simulation.device.read(mask)?;
-        crate::simulation::tensor::reset_ring_mask(
+        crate::simulation::gpu::tensor::reset_ring_mask(
             &simulation.device,
             mask,
-            crate::simulation::tensor::RingMaskState::Empty,
+            crate::simulation::gpu::tensor::RingMaskState::Empty,
         );
         let indices = simulation
             .device
@@ -94,7 +94,7 @@ fn plane_ring_masks_match_individual_marks_with_partial_actor_groups_on_gpu() ->
             let field = field + actor % 2 * Good::COUNT * scenario.ring();
             let word = (field * simulation.config.state_stride as usize + actor) * TICK_WORDS;
             assert_eq!(
-                coalesced[word / crate::simulation::tensor::SNAPSHOT_BLOCK_WORDS],
+                coalesced[word / crate::simulation::gpu::tensor::SNAPSHOT_BLOCK_WORDS],
                 1
             );
         }
@@ -332,7 +332,7 @@ fn reused_capacity_snapshot_preserves_existing_gpu_faults_on_gpu() -> Result<()>
     )?
     .expect("capacity registry plan");
     let mut control = simulation.device.read(&simulation.control)?;
-    control[crate::simulation::flags::FAULT_WORD] = FaultFlags::ARITHMETIC_OVERFLOW.bits();
+    control[crate::simulation::storage::flags::FAULT_WORD] = FaultFlags::ARITHMETIC_OVERFLOW.bits();
     simulation.device.write(&simulation.control, &control);
     let actors = simulation.metadata.actors.clone();
     let error = simulation

@@ -2,13 +2,13 @@ use super::{
     DemographyPolicy, PersonLayout as P, PopulationModel, Stage,
     systems::{DemographyInput, DemographyInputExpand},
 };
-use crate::simulation::{configuration::Feature, economy::households::food::BreadDemand};
+use crate::simulation::economy::{configuration::Feature, households::food::BreadDemand};
 use crate::{
     domain::{
         Field,
         demography::{DAYS_PER_YEAR, PROBABILITY_SCALE},
     },
-    simulation::{state::*, words::*},
+    simulation::storage::{state::*, words::*},
 };
 use cubecl::prelude::*;
 

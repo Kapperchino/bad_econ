@@ -541,7 +541,7 @@ fn block_claim_sort_preserves_disabled_retries_and_prior_gpu_faults() -> Result<
             let probe = ClaimSortProbe::new(&device, 5000, 128, SortMethod::Block2048);
             probe.reset(&device);
             let mut control = vec![0; CONTROL_WORDS + 7];
-            control[crate::simulation::flags::FAULT_WORD] = faults.bits();
+            control[crate::simulation::storage::flags::FAULT_WORD] = faults.bits();
             device.write(&probe.control, &control);
             probe.sort(&device, execution);
             match (execution, faults.is_empty()) {

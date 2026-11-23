@@ -1,7 +1,7 @@
 use crate::domain::railway::{RAIL_ROUTE_WORDS as ROUTE_WORDS, RailCapacityField, RouteStorage};
 use crate::simulation::DeviceEconomy;
 use crate::simulation::economy::*;
-use crate::simulation::{Device, configuration::Configuration};
+use crate::simulation::{Device, economy::configuration::Configuration};
 use burn_wgpu::CubeTensor;
 
 #[cfg(test)]

@@ -4,7 +4,7 @@ use super::{
 };
 use crate::{
     domain::{ActorRows, demography::PopulationObservation},
-    simulation::{DeviceEconomy, Simulation, demography, enterprise, profiling},
+    simulation::{DeviceEconomy, Simulation, demography, enterprise, runtime::profiling},
 };
 use anyhow::{Context, Result, anyhow};
 use burn_wgpu::CubeTensor;

@@ -29,7 +29,7 @@ impl VectorRescaling {
         scale: f32,
     ) {
         let elements = values.meta.num_elements();
-        let launch = match crate::simulation::tensor::vector_width(device, elements) {
+        let launch = match crate::simulation::gpu::tensor::vector_width(device, elements) {
             4 => Self::launch_sized::<Const<4>>,
             3 => Self::launch_sized::<Const<3>>,
             2 => Self::launch_sized::<Const<2>>,
@@ -101,7 +101,7 @@ pub(super) struct Addition<'a> {
 impl Addition<'_> {
     pub(super) fn launch(&self, device: &Device) {
         let elements = self.output.meta.num_elements();
-        match crate::simulation::tensor::vector_width(device, elements) {
+        match crate::simulation::gpu::tensor::vector_width(device, elements) {
             4 => self.launch_sized::<Const<4>>(device),
             3 => self.launch_sized::<Const<3>>(device),
             2 => self.launch_sized::<Const<2>>(device),
@@ -545,7 +545,7 @@ impl GpuPass<SignedVectorReadInput> for EncodeSignedVector {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::simulation::tensor;
+    use crate::simulation::gpu::tensor;
     use anyhow::Result;
 
     #[test]

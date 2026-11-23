@@ -1,6 +1,6 @@
 use crate::domain::Good;
 use crate::ledger::TickLayout;
-use crate::simulation::rows::{row_layout, word_layout};
+use crate::simulation::storage::rows::{row_layout, word_layout};
 use bytemuck::{Pod, Zeroable};
 use cubecl::prelude::*;
 

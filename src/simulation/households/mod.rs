@@ -1,8 +1,7 @@
 mod kernels;
 use super::{
     Device,
-    flags::FaultFlags,
-    layout::WORD_BYTES,
+    storage::{flags::FaultFlags, layout::WORD_BYTES},
     system::{AsBufferArg, System},
 };
 use crate::ledger::TickLayout;
