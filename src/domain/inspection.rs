@@ -114,6 +114,10 @@ impl Inspection {
         value: impl Fn(Field) -> u64,
     ) -> Result<Self> {
         let contract_employer = state.actors.assigned_identity(value(Field::Job));
+        let enterprise_model = match value(Field::EnterpriseModel) {
+            1 => enterprise::EnterpriseModel::Distributor,
+            _ => enterprise::EnterpriseModel::Producer,
+        };
         Ok(Inspection {
             railway_business: (actor.kind == Good::Railway as u32).then(|| {
                 railway::RailwayBusiness {
@@ -171,15 +175,13 @@ impl Inspection {
             equipment_condition: value(Field::EquipmentCondition),
             safety_provision: value(Field::SafetyProvision),
             business_scale: (actor.kind > 0).then(|| {
-                enterprise::BusinessScale::for_business(
+                enterprise::BusinessScale::for_model(
                     &actor,
+                    enterprise_model,
                     value(Field::OccupiedPlots) * value(Field::OutputTicks),
                 )
             }),
-            enterprise_model: match value(Field::EnterpriseModel) {
-                1 => enterprise::EnterpriseModel::Distributor,
-                _ => enterprise::EnterpriseModel::Producer,
-            },
+            enterprise_model,
             enterprise_state: match actor.kind {
                 0 => None,
                 _ => Some(enterprise::EnterpriseState::from_index(value(

@@ -1,5 +1,5 @@
 use crate::domain::enterprise::FoodAccess;
-use crate::domain::enterprise::{EnterpriseModel, EnterpriseState};
+use crate::domain::enterprise::{BusinessScale, EnterpriseModel, EnterpriseState};
 use crate::simulation::economy::configuration::Feature;
 use crate::simulation::economy::*;
 
@@ -262,19 +262,33 @@ pub(in crate::simulation::economy) fn expand(
 #[cube]
 pub(in crate::simulation::economy) fn expands(economy: &EconomyView<'_>, firm: u32) -> bool {
     let config = economy.ledger.config;
+    let kind = economy.actors.kind(firm);
+    let industrial_goods = comptime!(
+        Good::ALL
+            .into_iter()
+            .filter(|&good| BusinessScale::industrial_producer(good))
+            .fold(0u32, |mask, good| mask | (1 << good as u32))
+    );
+    let industrial_producer = industrial_goods & (1u32 << kind.output()) != 0
+        && economy.ledger.number(Field::EnterpriseModel, firm)
+            == comptime!(EnterpriseModel::Producer as u32);
     let workers = economy.actors.capacity(firm);
     let homes = times32(
         economy.ledger.number(Field::OccupiedPlots, firm),
         economy.ledger.number(Field::OutputTicks, firm),
     );
     let capacity = select(
-        economy.actors.kind(firm).bits() == comptime!(Good::Housing as u32),
+        kind.bits() == comptime!(Good::Housing as u32),
         homes,
         ticks(workers, 0),
     );
+    let at_industrial_capacity = !lt(
+        capacity,
+        ticks(comptime!(BusinessScale::INDUSTRIAL_CAPACITY), 0),
+    );
     let draw = economy.actors.expansion_draw(firm);
     draw < select(
-        !lt(capacity, ticks(20, 0)),
+        industrial_producer || at_industrial_capacity,
         config.industrial_expansion,
         config.small_business_expansion,
     )

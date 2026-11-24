@@ -32,18 +32,42 @@ pub enum BusinessScale {
 }
 
 impl BusinessScale {
+    pub(crate) const INDUSTRIAL_CAPACITY: u32 = 20;
+
+    pub(crate) fn industrial_producer(good: Good) -> bool {
+        !matches!(
+            good,
+            Good::Bread
+                | Good::Clothes
+                | Good::LuxuryClothes
+                | Good::Furniture
+                | Good::LuxuryFurniture
+                | Good::Housing
+        )
+    }
+
     pub fn for_business(actor: &super::Actor, homes: u64) -> Self {
-        match (actor.kind, homes) {
-            (kind, 0..20) if kind == Good::Housing as u32 => Self::SmallBusiness,
-            (kind, _) if kind == Good::Housing as u32 => Self::Industrial,
+        Self::for_model(actor, EnterpriseModel::Producer, homes)
+    }
+
+    pub fn for_model(actor: &super::Actor, model: EnterpriseModel, homes: u64) -> Self {
+        match Good::from_index(actor.kind) {
+            Ok(Good::Housing) => Self::from_capacity(homes),
+            Ok(good) if model == EnterpriseModel::Producer && Self::industrial_producer(good) => {
+                Self::Industrial
+            }
             _ => Self::from_workers(actor.capacity),
         }
     }
 
     pub fn from_workers(workers: u32) -> Self {
-        match workers {
-            0..20 => Self::SmallBusiness,
-            _ => Self::Industrial,
+        Self::from_capacity(u64::from(workers))
+    }
+
+    fn from_capacity(capacity: u64) -> Self {
+        match capacity < u64::from(Self::INDUSTRIAL_CAPACITY) {
+            true => Self::SmallBusiness,
+            false => Self::Industrial,
         }
     }
 }
@@ -59,7 +83,7 @@ impl Default for ExpansionPolicy {
     fn default() -> Self {
         Self {
             small_business_per_mille: 80,
-            industrial_per_mille: 600,
+            industrial_per_mille: 800,
         }
     }
 }
