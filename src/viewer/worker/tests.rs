@@ -3,7 +3,7 @@ use crate::{
     domain::*,
     simulation::Device,
     viewer::{
-        Chart, Dashboard,
+        Chart, Dashboard, DashboardPage,
         presentation::PresentationPlugin,
         ui::{FirmMarker, MapMarkers},
     },
@@ -99,7 +99,7 @@ fn closed_firms_leave_the_map_navigation_and_inspector_on_gpu() -> Result<()> {
         data: publisher.data.clone(),
         selected: 4,
         chart: Chart::Businesses,
-        company_page: None,
+        page: DashboardPage::Metrics,
         period: super::super::model::Period::default(),
         series: super::super::model::SeriesSelection::All,
     });
@@ -230,7 +230,7 @@ fn company_dashboard_ranks_pages_and_opens_site_accounts_on_gpu() -> Result<()> 
             data: publisher.data.clone(),
             selected: 1,
             chart: Chart::Employment,
-            company_page: None,
+            page: DashboardPage::Metrics,
             period: Period::default(),
             series: SeriesSelection::All,
         })
@@ -285,7 +285,7 @@ fn company_dashboard_ranks_pages_and_opens_site_accounts_on_gpu() -> Result<()> 
         9
     );
     show(&mut app, UiAction::Menu(Menu::Overview));
-    assert!(app.world().resource::<Dashboard>().company_page.is_none());
+    assert!(app.world().resource::<Dashboard>().page == DashboardPage::Metrics);
     Ok(())
 }
 

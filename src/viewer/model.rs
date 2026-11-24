@@ -93,13 +93,6 @@ impl SeriesSelection {
             Self::Only(selected) => series == selected,
         }
     }
-    pub fn next(self, count: usize) -> Self {
-        match self {
-            Self::All => Self::Only(0),
-            Self::Only(index) if index + 1 < count => Self::Only(index + 1),
-            _ => Self::All,
-        }
-    }
 }
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Chart {
@@ -303,7 +296,7 @@ impl Chart {
             Self::Unemployment => "Unemployment rate",
             Self::Cash => "Liquid cash distribution",
             Self::Money => "Spendable cash by sector",
-            Self::Prices => "Mean asking prices, rounded to whole units",
+            Self::Prices => "Mean asking prices",
             Self::Production => "Goods produced per day",
             Self::Consumption => "Final consumption per day",
             Self::Inputs => "Goods used as inputs per day",
@@ -316,7 +309,7 @@ impl Chart {
             Self::Industries => "Open business sites by industry",
             Self::Businesses => "Business lifecycle",
             Self::BusinessChanges => "Business entries and closures per day",
-            Self::Wages => "Mean offered wages, rounded to whole units",
+            Self::Wages => "Mean offered wages",
             Self::Occupations => "Population by occupation",
             Self::Population => "Living population",
             Self::Demography => "Daily demographic change",
@@ -782,13 +775,12 @@ impl ChartRange {
     pub fn fraction(&self, value: f64) -> f64 {
         (value - self.minimum) / (self.maximum - self.minimum)
     }
-    pub fn scale_label(&self, chart: Chart) -> String {
-        format!(
-            "{} | days {}-{} | hover for exact values",
-            chart.unit(),
-            self.first_day,
-            self.last_day
-        )
+    pub fn day_fraction(&self, day: u64) -> f32 {
+        let span = self.last_day.saturating_sub(self.first_day);
+        match span {
+            0 => 1.0,
+            _ => (day.saturating_sub(self.first_day) as f64 / span as f64) as f32,
+        }
     }
 }
 

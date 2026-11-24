@@ -1,20 +1,28 @@
 use super::{
-    ActorSelection, Chart, Cue, Dashboard, DisplayState, Launch, Period, SeriesSelection, Speed,
-    UiAction, companies, feedback, model, presentation, ui,
+    ActorSelection, Chart, Cue, Dashboard, DashboardPage, DisplayState, Launch, Period,
+    SeriesSelection, Speed, UiAction, companies, feedback, model, presentation,
+    theme::{Appearance, AppearanceSettings, Surface, Theme, Tone},
+    ui,
 };
 use crate::runtime::RuntimeState;
 use anyhow::{Context, Result};
 use bevy::{
+    camera::RenderTarget,
     ecs::system::SystemParam,
-    input::{ButtonState, mouse::MouseButtonInput},
+    picking::pointer::{Location, PointerAction, PointerButton, PointerId, PointerInput},
     prelude::*,
     render::view::screenshot::{Screenshot, ScreenshotCaptured},
-    window::{CursorMoved, PrimaryWindow, WindowEvent},
+    ui::Checked,
+    window::{PrimaryWindow, WindowRef, WindowTheme, WindowThemeChanged},
 };
 use std::{
     io::Write,
     time::{Duration, Instant},
 };
+
+const VERIFICATION_POINTER: PointerId = PointerId::Custom(bevy::asset::uuid::uuid!(
+    "8a2262f7-77c2-4084-b0be-97881a1713ad"
+));
 
 pub(super) struct VerificationPlugin;
 impl Plugin for VerificationPlugin {
@@ -24,6 +32,9 @@ impl Plugin for VerificationPlugin {
             deadline: Instant::now() + Duration::from_secs(120),
             click: VerificationClick::Idle,
             capture_error: None,
+        })
+        .add_systems(Startup, |mut commands: Commands| {
+            commands.spawn(VERIFICATION_POINTER);
         })
         .add_systems(
             Update,
@@ -46,14 +57,16 @@ pub(super) struct Verification {
 enum VerificationClick {
     Idle,
     Move(UiAction),
-    Press(Entity),
-    Release(Entity),
+    Hover(UiAction),
+    Press { window: Entity, position: Vec2 },
+    Release { window: Entity, position: Vec2 },
 }
 #[derive(Clone, Copy, Debug)]
 enum VerificationState {
     Start,
     AwaitReset,
     AwaitDay,
+    FeedbackFrames(u32),
     AwaitFeedbackCapture,
     InspectHousehold,
     AwaitInspection,
@@ -75,7 +88,9 @@ enum VerificationState {
     AwaitCompanyCapture,
     LeaveCompanies,
     AwaitOverview,
+    AwaitOverviewHover,
     AwaitMenu(Chart),
+    AwaitCategoryChart(Chart),
     AwaitChart(Chart),
     Frames(u32),
     AwaitCapture,
@@ -86,6 +101,12 @@ enum VerificationState {
     Resize,
     CompactFrames(u32),
     AwaitCompactCapture,
+    AwaitLightOverride,
+    AwaitDarkOverride,
+    AwaitSystemSetting,
+    AwaitFinalLightOverride,
+    AppearanceFrames(u32),
+    AwaitAppearanceCapture,
     Complete,
 }
 #[derive(Clone, Copy, Debug)]
@@ -96,15 +117,24 @@ struct RetainedPresentation {
 
 #[derive(SystemParam)]
 struct VerificationPresentation<'w, 's> {
-    plots: Query<'w, 's, &'static Children, With<ui::Plot>>,
+    plots: Query<'w, 's, (&'static ui::Plot, &'static ComputedNode, &'static Children)>,
+    images: Query<'w, 's, &'static ImageNode>,
+    crosshairs: Query<'w, 's, &'static Visibility, With<ui::Crosshair>>,
+    cursor: Query<'w, 's, &'static Text, With<ui::CursorDate>>,
     legends: Query<'w, 's, &'static Children, With<ui::Legend>>,
     meshes: Query<'w, 's, &'static Mesh2d>,
-    windows: Query<'w, 's, &'static mut Window, With<PrimaryWindow>>,
+    windows: Query<'w, 's, (Entity, &'static mut Window), With<PrimaryWindow>>,
+    theme: Res<'w, Theme>,
+    appearance: Res<'w, AppearanceSettings>,
 }
 impl VerificationPresentation<'_, '_> {
     fn retained(&self) -> RetainedPresentation {
         assert_eq!(self.meshes.iter().count(), 1, "charts share one GPU mesh");
-        let children = self.plots.single().expect("plot children");
+        let (_, _, children) = self
+            .plots
+            .iter()
+            .find(|(plot, _, _)| **plot == ui::Plot::Preview(Chart::Employment))
+            .expect("employment plot children");
         assert!(
             children.len() <= 8,
             "plot UI must remain bounded independently of history"
@@ -114,6 +144,43 @@ impl VerificationPresentation<'_, '_> {
             legend: self.legends.single().expect("legend children")[0],
         }
     }
+    fn grid_plots(&self, menu: model::Menu) -> impl Iterator<Item = &Children> {
+        self.plots.iter().filter_map(move |(plot, node, children)| {
+            (matches!(plot, ui::Plot::Preview(chart) if chart.menu() == menu)
+                && node.size().min_element() > 0.0)
+                .then_some(children)
+        })
+    }
+
+    fn grid_ready(&self, menu: model::Menu) -> bool {
+        self.grid_plots(menu).count() == menu.charts().len()
+    }
+
+    fn assert_grid(&self, menu: model::Menu) {
+        let previews = self.grid_plots(menu);
+        let tiles = previews
+            .map(|children| {
+                children
+                    .iter()
+                    .find_map(|child| self.images.get(child).ok())
+                    .expect("preview image")
+            })
+            .collect::<Vec<_>>();
+        let texture = &tiles[0].image;
+        for (index, tile) in tiles.iter().enumerate() {
+            assert_eq!(&tile.image, texture, "preview charts share one GPU atlas");
+            let bounds = tile.rect.expect("preview region");
+            for other in &tiles[..index] {
+                let other = other.rect.expect("preview region");
+                let overlap = bounds.max.min(other.max) - bounds.min.max(other.min);
+                assert!(
+                    overlap.min_element() <= 0.0,
+                    "preview regions must be disjoint"
+                );
+            }
+        }
+    }
+
     fn assert_retained(&self, previous: RetainedPresentation) {
         let current = self.retained();
         assert_eq!(
@@ -135,6 +202,7 @@ fn verify(
     mut presentation: VerificationPresentation,
     mut commands: Commands,
     mut exit: MessageWriter<AppExit>,
+    mut appearances: MessageWriter<WindowThemeChanged>,
 ) {
     if let Some(dashboard) = dashboard {
         let display = dashboard.data.lock().expect("dashboard lock");
@@ -156,6 +224,18 @@ fn verify(
             _ => {
                 verification.state = match verification.state {
                     VerificationState::Start => {
+                        let (window, settings) =
+                            presentation.windows.single().expect("primary window");
+                        assert_eq!(presentation.appearance.selection, Appearance::System);
+                        assert_eq!(
+                            *presentation.theme,
+                            settings.window_theme.map(Theme::from).unwrap_or_default(),
+                            "startup appearance should follow the primary window"
+                        );
+                        appearances.write(WindowThemeChanged {
+                            window,
+                            theme: WindowTheme::Dark,
+                        });
                         verification.click = VerificationClick::Move(UiAction::Reset);
                         VerificationState::AwaitReset
                     }
@@ -165,10 +245,16 @@ fn verify(
                     }
                     VerificationState::AwaitDay if feedback.current() == Some(Cue::Stepped) => {
                         assert_eq!(display.snapshot.day, 1);
+                        VerificationState::FeedbackFrames(6)
+                    }
+                    VerificationState::FeedbackFrames(0) => {
                         commands
                             .spawn(Screenshot::primary_window())
                             .observe(capture_step_feedback);
                         VerificationState::AwaitFeedbackCapture
+                    }
+                    VerificationState::FeedbackFrames(frames) => {
+                        VerificationState::FeedbackFrames(frames - 1)
                     }
                     VerificationState::InspectHousehold => {
                         verification.click =
@@ -274,7 +360,7 @@ fn verify(
                         VerificationState::AwaitCompanies
                     }
                     VerificationState::AwaitCompanies
-                        if dashboard.company_page.is_some()
+                        if dashboard.page.company_page().is_some()
                             && matches!(verification.click, VerificationClick::Idle) =>
                     {
                         verification.click =
@@ -283,7 +369,8 @@ fn verify(
                     }
                     VerificationState::AwaitCompanyRanking
                         if dashboard
-                            .company_page
+                            .page
+                            .company_page()
                             .is_some_and(|page| page.ranking == companies::Ranking::Profit)
                             && matches!(verification.click, VerificationClick::Idle) =>
                     {
@@ -298,20 +385,58 @@ fn verify(
                         VerificationState::AwaitOverview
                     }
                     VerificationState::AwaitOverview
-                        if dashboard.company_page.is_none()
+                        if dashboard.page == DashboardPage::Metrics
+                            && presentation.grid_ready(model::Menu::Overview)
                             && matches!(verification.click, VerificationClick::Idle) =>
                     {
-                        VerificationState::Frames(3)
+                        presentation.assert_grid(model::Menu::Overview);
+                        verification.click =
+                            VerificationClick::Hover(UiAction::Chart(Chart::Employment));
+                        VerificationState::AwaitOverviewHover
+                    }
+                    VerificationState::AwaitOverviewHover
+                        if presentation
+                            .cursor
+                            .single()
+                            .is_ok_and(|text| text.0.contains("Cursor")) =>
+                    {
+                        assert_eq!(
+                            presentation
+                                .crosshairs
+                                .iter()
+                                .filter(|visibility| **visibility == Visibility::Inherited)
+                                .count(),
+                            4,
+                            "synchronized crosshair on each overview chart"
+                        );
+                        verification.click =
+                            VerificationClick::Move(UiAction::Chart(Chart::Employment));
+                        VerificationState::AwaitChart(Chart::Employment)
                     }
                     VerificationState::AwaitMenu(chart)
-                        if dashboard.chart.menu() == chart.menu()
+                        if dashboard.page == DashboardPage::Metrics
+                            && dashboard.chart.menu() == chart.menu()
+                            && presentation.grid_ready(chart.menu())
+                            && matches!(verification.click, VerificationClick::Idle) =>
+                    {
+                        presentation.assert_grid(chart.menu());
+                        let first = chart.menu().charts()[0];
+                        verification.click = VerificationClick::Move(UiAction::Chart(first));
+                        match first == chart {
+                            true => VerificationState::AwaitChart(chart),
+                            false => VerificationState::AwaitCategoryChart(chart),
+                        }
+                    }
+                    VerificationState::AwaitCategoryChart(chart)
+                        if dashboard.page == DashboardPage::Chart
                             && matches!(verification.click, VerificationClick::Idle) =>
                     {
                         verification.click = VerificationClick::Move(UiAction::Chart(chart));
                         VerificationState::AwaitChart(chart)
                     }
                     VerificationState::AwaitChart(chart)
-                        if dashboard.chart == chart
+                        if dashboard.page == DashboardPage::Chart
+                            && dashboard.chart == chart
                             && matches!(verification.click, VerificationClick::Idle) =>
                     {
                         VerificationState::Frames(3)
@@ -344,7 +469,8 @@ fn verify(
                                 VerificationState::AwaitPeriod(Period::All)
                             }
                             Period::All => {
-                                verification.click = VerificationClick::Move(UiAction::NextSeries);
+                                verification.click =
+                                    VerificationClick::Move(UiAction::FocusSeries(0));
                                 VerificationState::AwaitFocus
                             }
                         }
@@ -373,9 +499,10 @@ fn verify(
                             .windows
                             .single_mut()
                             .expect("primary window")
+                            .1
                             .resolution
                             .set(1280.0, 800.0);
-                        VerificationState::CompactFrames(8)
+                        VerificationState::CompactFrames(24)
                     }
                     VerificationState::CompactFrames(0) => {
                         commands
@@ -386,6 +513,52 @@ fn verify(
                     VerificationState::CompactFrames(frames) => {
                         VerificationState::CompactFrames(frames - 1)
                     }
+                    VerificationState::AwaitLightOverride
+                        if presentation.appearance.selection
+                            == Appearance::Override(Theme::Light)
+                            && matches!(verification.click, VerificationClick::Idle) =>
+                    {
+                        assert_eq!(*presentation.theme, Theme::Light);
+                        assert_eq!(presentation.appearance.system, Theme::Dark);
+                        verification.click = VerificationClick::Move(UiAction::ToggleDarkMode);
+                        VerificationState::AwaitDarkOverride
+                    }
+                    VerificationState::AwaitDarkOverride
+                        if presentation.appearance.selection
+                            == Appearance::Override(Theme::Dark)
+                            && matches!(verification.click, VerificationClick::Idle) =>
+                    {
+                        assert_eq!(*presentation.theme, Theme::Dark);
+                        appearances.write(WindowThemeChanged {
+                            window: presentation.windows.single().expect("primary window").0,
+                            theme: WindowTheme::Light,
+                        });
+                        VerificationState::AwaitSystemSetting
+                    }
+                    VerificationState::AwaitSystemSetting
+                        if presentation.appearance.system == Theme::Light =>
+                    {
+                        assert_eq!(*presentation.theme, Theme::Dark);
+                        verification.click = VerificationClick::Move(UiAction::ToggleDarkMode);
+                        VerificationState::AwaitFinalLightOverride
+                    }
+                    VerificationState::AwaitFinalLightOverride
+                        if presentation.appearance.selection
+                            == Appearance::Override(Theme::Light)
+                            && matches!(verification.click, VerificationClick::Idle) =>
+                    {
+                        assert_eq!(*presentation.theme, Theme::Light);
+                        VerificationState::AppearanceFrames(12)
+                    }
+                    VerificationState::AppearanceFrames(0) => {
+                        commands
+                            .spawn(Screenshot::primary_window())
+                            .observe(capture_light_frame);
+                        VerificationState::AwaitAppearanceCapture
+                    }
+                    VerificationState::AppearanceFrames(frames) => {
+                        VerificationState::AppearanceFrames(frames - 1)
+                    }
                     state => state,
                 };
             }
@@ -395,53 +568,78 @@ fn verify(
 
 fn verify_clicks(
     mut verification: ResMut<Verification>,
-    buttons: Query<(&UiAction, &ComputedNode, &UiGlobalTransform)>,
-    windows: Query<(Entity, &Window), With<PrimaryWindow>>,
-    mut input: MessageWriter<WindowEvent>,
+    dashboard: Res<Dashboard>,
+    buttons: Query<(
+        &UiAction,
+        &ComputedNode,
+        &UiGlobalTransform,
+        Has<ui::ChartTab>,
+    )>,
+    mut windows: Query<(Entity, &mut Window), With<PrimaryWindow>>,
+    mut input: MessageWriter<PointerInput>,
 ) {
     verification.click = match verification.click {
-        VerificationClick::Move(action) => windows
-            .single()
+        VerificationClick::Move(action) | VerificationClick::Hover(action) => windows
+            .single_mut()
             .ok()
-            .and_then(|(window, properties)| {
+            .and_then(|(window, mut properties)| {
                 buttons
                     .iter()
-                    .find(|(candidate, node, _)| {
-                        **candidate == action && node.size().min_element() > 0.0
+                    .find(|(candidate, node, _, tab)| {
+                        let target = match action {
+                            UiAction::Chart(_) => *tab == (dashboard.page == DashboardPage::Chart),
+                            _ => true,
+                        };
+                        target && **candidate == action && node.size().min_element() > 0.0
                     })
-                    .map(|(_, _, transform)| {
+                    .map(|(_, _, transform, _)| {
                         let position = transform.translation / properties.scale_factor();
                         assert!(
                             Rect::from_corners(Vec2::ZERO, properties.size()).contains(position),
                             "{action:?} lies outside the window at {position:?}"
                         );
-                        input.write(WindowEvent::CursorMoved(CursorMoved {
+                        input.write(pointer_input(
                             window,
                             position,
-                            delta: None,
-                        }));
-                        VerificationClick::Press(window)
+                            PointerAction::Move { delta: Vec2::ZERO },
+                        ));
+                        match verification.click {
+                            VerificationClick::Hover(_) => {
+                                properties.set_physical_cursor_position(Some(
+                                    transform.translation.as_dvec2(),
+                                ));
+                                VerificationClick::Idle
+                            }
+                            _ => VerificationClick::Press { window, position },
+                        }
                     })
             })
-            .unwrap_or(VerificationClick::Move(action)),
-        VerificationClick::Press(window) => {
-            input.write(WindowEvent::MouseButtonInput(MouseButtonInput {
+            .unwrap_or(verification.click),
+        VerificationClick::Press { window, position } => {
+            input.write(pointer_input(
                 window,
-                button: MouseButton::Left,
-                state: ButtonState::Pressed,
-            }));
-            VerificationClick::Release(window)
+                position,
+                PointerAction::Press(PointerButton::Primary),
+            ));
+            VerificationClick::Release { window, position }
         }
-        VerificationClick::Release(window) => {
-            input.write(WindowEvent::MouseButtonInput(MouseButtonInput {
+        VerificationClick::Release { window, position } => {
+            input.write(pointer_input(
                 window,
-                button: MouseButton::Left,
-                state: ButtonState::Released,
-            }));
+                position,
+                PointerAction::Release(PointerButton::Primary),
+            ));
             VerificationClick::Idle
         }
         VerificationClick::Idle => VerificationClick::Idle,
     };
+}
+
+fn pointer_input(window: Entity, position: Vec2, action: PointerAction) -> PointerInput {
+    let target = RenderTarget::Window(WindowRef::Entity(window))
+        .normalize(Some(window))
+        .expect("verification window target");
+    PointerInput::new(VERIFICATION_POINTER, Location { target, position }, action)
 }
 
 impl Verification {
@@ -480,9 +678,44 @@ fn capture_verified_frame(
         }
         _ => {
             let next = chart.next();
-            verification.click = VerificationClick::Move(UiAction::Menu(next.menu()));
-            verification.state = VerificationState::AwaitMenu(next);
+            (verification.click, verification.state) = match next.menu() == chart.menu() {
+                true => (
+                    VerificationClick::Move(UiAction::Chart(next)),
+                    VerificationState::AwaitChart(next),
+                ),
+                false => (
+                    VerificationClick::Move(UiAction::Menu(next.menu())),
+                    VerificationState::AwaitMenu(next),
+                ),
+            };
         }
+    }
+}
+
+#[derive(SystemParam)]
+struct RenderedAppearance<'w, 's> {
+    theme: Res<'w, Theme>,
+    surfaces: Query<'w, 's, (&'static Surface, &'static BackgroundColor)>,
+    switch: Query<'w, 's, Has<Checked>, With<ui::ThemeSwitch>>,
+    cameras: Query<'w, 's, (&'static Camera, &'static RenderTarget)>,
+}
+
+impl RenderedAppearance<'_, '_> {
+    fn verify(&self, expected: Theme) {
+        assert_eq!(*self.theme, expected, "viewer appearance");
+        assert_eq!(
+            self.switch.single().expect("dark mode switch"),
+            expected == Theme::Dark
+        );
+        assert!(
+            self.surfaces
+                .iter()
+                .all(|(surface, color)| color.0 == expected.color(surface.0))
+        );
+        assert!(self.cameras.iter().any(|(camera, target)| {
+            matches!(target, RenderTarget::Image(_))
+            && matches!(camera.clear_color, ClearColorConfig::Custom(color) if color == expected.color(Tone::Panel))
+        }), "chart render target should follow the viewer appearance");
     }
 }
 
@@ -490,8 +723,10 @@ fn capture_compact_frame(
     captured: On<ScreenshotCaptured>,
     buttons: Query<(&UiAction, &ComputedNode, &UiGlobalTransform)>,
     mut verification: ResMut<Verification>,
-    mut exit: MessageWriter<AppExit>,
+    appearance: RenderedAppearance,
 ) {
+    appearance.verify(Theme::Dark);
+    verification.capture(&captured.image, "compact");
     let viewport = Rect::from_corners(Vec2::ZERO, captured.image.size_f32());
     buttons
         .iter()
@@ -501,14 +736,26 @@ fn capture_compact_frame(
                 viewport.contains(transform.translation - node.size() / 2.0),
                 "{action:?} begins outside the compact window"
             );
+            let end = transform.translation + node.size() / 2.0;
             assert!(
-                viewport.contains(transform.translation + node.size() / 2.0),
-                "{action:?} ends outside the compact window"
+                viewport.contains(end),
+                "{action:?} ends at {end:?} outside {viewport:?}"
             );
         });
-    verification.capture(&captured.image, "compact");
+    verification.click = VerificationClick::Move(UiAction::ToggleDarkMode);
+    verification.state = VerificationState::AwaitLightOverride;
+}
+
+fn capture_light_frame(
+    captured: On<ScreenshotCaptured>,
+    appearance: RenderedAppearance,
+    mut verification: ResMut<Verification>,
+    mut exit: MessageWriter<AppExit>,
+) {
+    appearance.verify(Theme::Light);
+    verification.capture(&captured.image, "light");
     eprintln!(
-        "viewer interaction and layout verification passed: separate rendering and simulation queues, native mouse clicks, reset/step/comparison feedback, audited days, household and firm inspection, refreshed inspection, company rankings, all five chart menus and 29 charts, four history periods, series focus, retained GPU chart on speed and inspection changes, previous/next navigation, footer controls, compact window"
+        "viewer interaction and layout verification passed: separate rendering and simulation queues, UI pointer clicks, reset/step/comparison feedback, audited days, household and firm inspection, refreshed inspection, company rankings, five dashboard grids, all 29 metric detail views, synchronized hover, four shared history periods, series focus, retained GPU chart on speed and inspection changes, previous/next navigation, footer controls, compact window, system appearance and manual overrides"
     );
     match &verification.capture_error {
         None => {

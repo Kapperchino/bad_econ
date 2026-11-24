@@ -1,5 +1,6 @@
 use super::{
     Dashboard,
+    theme::Tone,
     ui::{self, ActorSelection, UiAction},
 };
 use crate::{domain::company::AcquisitionScope, simulation::reporting::company_report::Business};
@@ -19,7 +20,7 @@ pub(super) enum Ranking {
 impl Ranking {
     pub fn label(self) -> &'static str {
         match self {
-            Self::Size => "Largest businesses",
+            Self::Size => "Worker capacity",
             Self::Profit => "Highest profit",
             Self::Loss => "Lowest profit",
         }
@@ -96,18 +97,28 @@ pub(super) fn panel(parent: &mut ChildSpawnerCommands) {
     parent.spawn((
         CompanyPanel,
         Node { display: bevy::ui::Display::None, ..ui::report_panel() },
-        BackgroundColor(ui::PANEL), BorderColor::all(ui::RULE),
         ScrollPosition::default(), bevy::ui::RelativeCursorPosition::default(),
     )).with_children(|panel| {
-        panel.spawn(ui::text("Companies", 30.0, ui::PAPER));
-        panel.spawn(ui::text("Capacity counts worker places across open sites. Daily cash profit is measured before owner payouts and acquisitions.", 14.0, ui::MUTED));
+        panel.spawn(ui::text("Companies", 30.0, Tone::Text));
+        panel.spawn(ui::text("Capacity counts worker places across open sites. Daily cash profit is measured before owner payouts and acquisitions.", 14.0, Tone::Muted));
         panel.spawn(Node { flex_wrap: FlexWrap::Wrap, row_gap: px(4), ..ui::row(4.0) }).with_children(|controls| {
             for order in [Ranking::Size, Ranking::Profit, Ranking::Loss] {
                 ui::button(controls, UiAction::Rank(order), order.label());
             }
         });
-        panel.spawn((CompanyRows, ui::column(10.0)));
-        panel.spawn(ui::text("Companies prefer familiar products and business models. With capacity for 250 workers or 25 open sites, a company can also buy into a new line of business.", 12.0, ui::MUTED));
+        panel.spawn((
+            CompanyRows,
+            Node {
+                padding: UiRect::all(px(13)),
+                border: UiRect::all(px(1)),
+                border_radius: BorderRadius::all(px(8)),
+                flex_shrink: 0.0,
+                ..ui::column(12.0)
+            },
+            Tone::Panel.surface(),
+            Tone::Rule.outline(),
+        ));
+        panel.spawn(ui::text("Companies prefer familiar products and business models. With capacity for 250 workers or 25 open sites, a company can also buy into a new line of business.", 12.0, Tone::Muted));
     });
 }
 
@@ -116,7 +127,7 @@ fn changed(
     mut previous: Local<Option<(CompanyPage, u64)>>,
 ) -> bool {
     let current = dashboard.and_then(|dashboard| {
-        dashboard.company_page.map(|page| {
+        dashboard.page.company_page().map(|page| {
             (
                 page,
                 dashboard
@@ -134,12 +145,12 @@ fn changed(
 
 fn draw(
     dashboard: Res<Dashboard>,
-    mut panels: Query<(&mut Node, Has<CompanyPanel>), Or<(With<CompanyPanel>, With<ui::Report>)>>,
+    mut panels: Query<&mut Node, With<CompanyPanel>>,
     rows: Query<Entity, With<CompanyRows>>,
     mut commands: Commands,
 ) {
-    for (mut node, companies) in &mut panels {
-        let visibility = match companies == dashboard.company_page.is_some() {
+    for mut node in &mut panels {
+        let visibility = match dashboard.page.company_page().is_some() {
             true => bevy::ui::Display::Flex,
             false => bevy::ui::Display::None,
         };
@@ -147,7 +158,7 @@ fn draw(
             node.display = visibility;
         }
     }
-    if let (Some(page), Ok(container)) = (dashboard.company_page, rows.single()) {
+    if let (Some(page), Ok(container)) = (dashboard.page.company_page(), rows.single()) {
         let display = dashboard.data.lock().expect("dashboard lock");
         let mut businesses = display.companies.iter().collect::<Vec<_>>();
         businesses.sort_unstable_by(|a, b| page.ranking.compare(a, b));
@@ -171,12 +182,8 @@ fn distribution(
         _ => ["Profit", "Break-even", "Loss"],
     };
     let colors = match ranking {
-        Ranking::Size => [ui::MUTED, ui::GOLD, ui::PAPER],
-        _ => [
-            Color::srgb(0.60, 0.82, 0.62),
-            ui::MUTED,
-            Color::srgb(0.94, 0.60, 0.52),
-        ],
+        Ranking::Size => [Tone::Muted, Tone::Accent, Tone::Text],
+        _ => [Tone::Positive, Tone::Muted, Tone::Negative],
     };
     let counts = businesses.iter().fold([0usize; 3], |mut counts, business| {
         let band = match ranking {
@@ -199,7 +206,7 @@ fn distribution(
             parent.spawn(ui::text(
                 "Daily profits appear after the first day closes.",
                 13.0,
-                ui::MUTED,
+                Tone::Muted,
             ));
         }
         _ => {
@@ -222,7 +229,7 @@ fn distribution(
                                 height: percent(100),
                                 ..default()
                             },
-                            BackgroundColor(color),
+                            color.surface(),
                         ));
                     }
                 });
@@ -250,7 +257,7 @@ fn draw_rows(
     let current = page.current(count);
     match count {
         0 => {
-            parent.spawn(ui::text("No open companies on this day.", 15.0, ui::PAPER));
+            parent.spawn(ui::text("No open companies on this day.", 15.0, Tone::Text));
         }
         _ => {
             distribution(parent, businesses, page.ranking, day);
@@ -266,7 +273,7 @@ fn draw_rows(
                     header.spawn(ui::text(
                         format!("Day {day}  ·  Companies {}–{end} of {count}", start + 1),
                         14.0,
-                        ui::GOLD,
+                        Tone::Accent,
                     ));
                     header.spawn(ui::row(6.0)).with_children(|controls| {
                         if current > 0 {
@@ -285,70 +292,76 @@ fn draw_rows(
                         }
                     });
                 });
-            for business in &businesses[start..end] {
-                let line = business
-                    .line
-                    .map_or_else(|| "Multiple business lines".into(), |line| line.to_string());
-                parent
-                    .spawn((
-                        Node {
-                            padding: UiRect::all(px(8)),
-                            ..ui::column(4.0)
-                        },
-                        BackgroundColor(ui::INK),
-                    ))
-                    .with_children(|card| {
-                        card.spawn(Node {
-                            justify_content: JustifyContent::SpaceBetween,
-                            flex_wrap: FlexWrap::Wrap,
-                            ..ui::row(6.0)
-                        })
-                        .with_children(|heading| {
-                            heading.spawn(ui::text(
-                                format!("Company #{}  ·  {line}", business.identity),
-                                15.0,
-                                ui::PAPER,
-                            ));
-                            ui::button(
-                                heading,
-                                UiAction::Inspect(ActorSelection::Identity(business.open_site)),
-                                "Inspect site",
-                            );
-                        });
-                        let scope = match business.size.acquisition_scope() {
-                            AcquisitionScope::ExistingLines => "Existing lines only",
-                            AcquisitionScope::MayDiversify => "May diversify",
-                        };
-                        let sites = match business.size.sites {
-                            1 => "site",
-                            _ => "sites",
-                        };
-                        let (result, color) = match (day, business.profit) {
-                            (0, _) => ("Awaiting first close".into(), ui::MUTED),
-                            (_, 0) => ("Break-even".into(), ui::MUTED),
-                            (_, profit @ 1..) => {
-                                (format!("Profit  +{profit}"), Color::srgb(0.60, 0.82, 0.62))
-                            }
-                            (_, loss) => (format!("Loss  {loss}"), Color::srgb(0.94, 0.60, 0.52)),
-                        };
-                        card.spawn(Node {
-                            justify_content: JustifyContent::SpaceBetween,
-                            flex_wrap: FlexWrap::Wrap,
-                            ..ui::row(6.0)
-                        })
-                        .with_children(|metrics| {
-                            metrics.spawn(ui::text(
-                                format!(
-                                    "{} {sites}  ·  Worker capacity {}  ·  {scope}",
-                                    business.size.sites, business.size.worker_capacity
-                                ),
-                                13.0,
-                                ui::PAPER,
-                            ));
-                            metrics.spawn(ui::text(result, 14.0, color));
-                        });
+            parent.spawn(ui::column(0.0)).with_children(|table| {
+                table
+                    .spawn((table_row(), Tone::Canvas.surface(), Tone::Rule.outline()))
+                    .with_children(|heading| {
+                        for caption in ["Company", "Sites", "Capacity", "Daily cash profit", ""] {
+                            heading.spawn(ui::text(caption, 12.0, Tone::Muted));
+                        }
                     });
-            }
+                for business in &businesses[start..end] {
+                    business_row(table, business, day);
+                }
+            });
         }
     }
+}
+
+fn table_row() -> Node {
+    Node {
+        display: bevy::ui::Display::Grid,
+        grid_template_columns: vec![
+            GridTrack::flex(1.0),
+            GridTrack::px(46.0),
+            GridTrack::px(72.0),
+            GridTrack::px(119.0),
+            GridTrack::px(92.0),
+        ],
+        column_gap: px(9),
+        align_items: AlignItems::Center,
+        padding: UiRect::axes(px(10), px(9)),
+        border: UiRect::bottom(px(1)),
+        ..default()
+    }
+}
+
+fn business_row(parent: &mut ChildSpawnerCommands, business: &Business, day: u64) {
+    let line = business
+        .line
+        .map_or_else(|| "Multiple business lines".into(), |line| line.to_string());
+    let scope = match business.size.acquisition_scope() {
+        AcquisitionScope::ExistingLines => "Existing lines only",
+        AcquisitionScope::MayDiversify => "May diversify",
+    };
+    let (result, color) = match (day, business.profit) {
+        (0, _) => ("Awaiting first close".into(), Tone::Muted),
+        (_, 0) => ("Break-even".into(), Tone::Muted),
+        (_, profit @ 1..) => (format!("Profit  +{profit}"), Tone::Positive),
+        (_, loss) => (format!("Loss  {loss}"), Tone::Negative),
+    };
+    parent
+        .spawn((table_row(), Tone::Rule.outline()))
+        .with_children(|row| {
+            row.spawn(ui::column(3.0)).with_children(|company| {
+                company.spawn(ui::text(
+                    format!("Company #{}  ·  {line}", business.identity),
+                    14.0,
+                    Tone::Text,
+                ));
+                company.spawn(ui::text(scope, 11.0, Tone::Muted));
+            });
+            row.spawn(ui::text(business.size.sites.to_string(), 13.0, Tone::Text));
+            row.spawn(ui::text(
+                business.size.worker_capacity.to_string(),
+                13.0,
+                Tone::Text,
+            ));
+            row.spawn(ui::text(result, 13.0, color));
+            ui::button(
+                row,
+                UiAction::Inspect(ActorSelection::Identity(business.open_site)),
+                "Inspect site",
+            );
+        });
 }

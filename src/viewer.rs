@@ -4,6 +4,7 @@ mod graph;
 mod model;
 mod pacing;
 mod presentation;
+mod theme;
 mod ui;
 mod verification;
 mod worker;
@@ -14,6 +15,7 @@ use crate::{
 };
 use anyhow::Result;
 use bevy::{
+    input_focus::InputFocus,
     prelude::*,
     winit::{EventLoopProxyWrapper, WinitUserEvent},
 };
@@ -43,10 +45,28 @@ struct Dashboard {
     data: Arc<Mutex<Display>>,
     selected: u64,
     chart: Chart,
-    company_page: Option<companies::CompanyPage>,
+    page: DashboardPage,
     period: Period,
     series: SeriesSelection,
 }
+
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+enum DashboardPage {
+    #[default]
+    Metrics,
+    Chart,
+    Companies(companies::CompanyPage),
+}
+
+impl DashboardPage {
+    fn company_page(self) -> Option<companies::CompanyPage> {
+        match self {
+            Self::Companies(page) => Some(page),
+            _ => None,
+        }
+    }
+}
+
 struct Display {
     snapshot: ObservationSnapshot,
     history: VecDeque<ObservationSnapshot>,
@@ -138,10 +158,10 @@ pub fn run(scenario: Scenario, workgroup: u32, mode: ViewMode) -> Result<()> {
         scenario,
         workgroup,
     })
-    .insert_resource(ClearColor(Color::srgb(0.035, 0.045, 0.07)))
+    .insert_resource(ClearColor(theme::Theme::Light.color(theme::Tone::Canvas)))
     .add_plugins(DefaultPlugins.set(WindowPlugin {
         primary_window: Some(Window {
-            title: "Spatial industrial economy".into(),
+            title: "Spatial Economy".into(),
             resolution: (1600, 960).into(),
             resize_constraints: bevy::window::WindowResizeConstraints {
                 min_width: 1280.0,
@@ -153,6 +173,7 @@ pub fn run(scenario: Scenario, workgroup: u32, mode: ViewMode) -> Result<()> {
         ..Default::default()
     }))
     .add_plugins((
+        theme::ThemePlugin,
         ui::UiPlugin,
         companies::CompaniesPlugin,
         presentation::PresentationPlugin,
@@ -179,7 +200,7 @@ fn setup(mut commands: Commands, launch: Res<Launch>, event_loop: Res<EventLoopP
         data: data.clone(),
         selected: launch.scenario.identity(0).expect("first household"),
         chart: Chart::Employment,
-        company_page: None,
+        page: DashboardPage::Metrics,
         period: Period::default(),
         series: SeriesSelection::All,
     });
@@ -210,6 +231,8 @@ fn setup(mut commands: Commands, launch: Res<Launch>, event_loop: Res<EventLoopP
 
 fn controls(
     keys: Res<ButtonInput<KeyCode>>,
+    focus: Option<Res<InputFocus>>,
+    theme_switch: Query<(), With<ui::ThemeSwitch>>,
     launch: Res<Launch>,
     dashboard: Option<ResMut<Dashboard>>,
     mut actions: MessageReader<UiAction>,
@@ -234,14 +257,20 @@ fn controls(
             ),
         ),
         (KeyCode::KeyG, UiAction::NextChart),
+        (KeyCode::Escape, UiAction::Metrics),
     ];
+    let theme_focused = focus
+        .and_then(|focus| focus.get())
+        .is_some_and(|entity| theme_switch.contains(entity));
     let pending = actions
         .read()
         .copied()
         .chain(
             shortcuts
                 .into_iter()
-                .filter(|(key, _)| keys.just_pressed(*key))
+                .filter(|(key, _)| {
+                    keys.just_pressed(*key) && (*key != KeyCode::Space || !theme_focused)
+                })
                 .map(|(_, action)| action),
         )
         .collect::<Vec<_>>();
@@ -249,11 +278,11 @@ fn controls(
         pending.into_iter().for_each(|action| {
             let control = match action {
                 UiAction::Companies => {
-                    dashboard.company_page = Some(companies::CompanyPage::default());
+                    dashboard.page = DashboardPage::Companies(companies::CompanyPage::default());
                     None
                 }
                 UiAction::Rank(order) => {
-                    dashboard.company_page = Some(companies::CompanyPage::new(order));
+                    dashboard.page = DashboardPage::Companies(companies::CompanyPage::new(order));
                     None
                 }
                 UiAction::CompanyPage(direction) => {
@@ -263,20 +292,25 @@ fn controls(
                         .expect("dashboard lock")
                         .companies
                         .len();
-                    if let Some(page) = &mut dashboard.company_page {
+                    if let DashboardPage::Companies(page) = &mut dashboard.page {
                         page.turn(direction, count);
                     }
                     None
                 }
                 UiAction::Menu(menu) => {
-                    dashboard.company_page = None;
+                    dashboard.page = DashboardPage::Metrics;
                     dashboard.chart = menu.charts()[0];
                     dashboard.series = SeriesSelection::All;
                     None
                 }
                 UiAction::Chart(chart) => {
-                    dashboard.company_page = None;
+                    dashboard.page = DashboardPage::Chart;
                     dashboard.chart = chart;
+                    dashboard.series = SeriesSelection::All;
+                    None
+                }
+                UiAction::Metrics => {
+                    dashboard.page = DashboardPage::Metrics;
                     dashboard.series = SeriesSelection::All;
                     None
                 }
@@ -284,8 +318,13 @@ fn controls(
                     dashboard.period = period;
                     None
                 }
-                UiAction::NextSeries => {
-                    dashboard.series = dashboard.series.next(dashboard.chart.series().len());
+                UiAction::FocusSeries(index) => {
+                    dashboard.series = match dashboard.series {
+                        SeriesSelection::Only(selected) if selected == index => {
+                            SeriesSelection::All
+                        }
+                        _ => SeriesSelection::Only(index),
+                    };
                     None
                 }
                 UiAction::AllSeries => {
@@ -293,7 +332,7 @@ fn controls(
                     None
                 }
                 UiAction::NextChart => {
-                    dashboard.company_page = None;
+                    dashboard.page = DashboardPage::Chart;
                     dashboard.chart = dashboard.chart.next();
                     dashboard.series = SeriesSelection::All;
                     None
@@ -344,7 +383,7 @@ fn controls(
                         .map(Control::Inspect)
                     })
                 }
-                UiAction::Sound | UiAction::Motion => None,
+                UiAction::ToggleDarkMode | UiAction::Sound | UiAction::Motion => None,
             };
             if let Some(control) = control {
                 let _ = dashboard.sender.send(control);

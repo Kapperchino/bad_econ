@@ -12,9 +12,10 @@ path = "tests/gpu.rs"
 [features]
 default = ["compute"]
 compute = ["dep:burn", "dep:burn-wgpu", "dep:cubecl", "dep:cubek", "dep:pollster", "dep:ash", "dep:objc2", "dep:objc2-metal", "dep:sysinfo", "dep:windows"]
-viewer = ["compute", "dep:bevy", "dep:crossbeam-channel"]
+viewer = ["compute", "dep:accesskit", "dep:bevy", "dep:crossbeam-channel", "dep:dark-light"]
 
 [dependencies]
+accesskit = { version = "0.24", optional = true }
 anyhow = "1"
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
@@ -37,6 +38,9 @@ ash = { version = "=0.38.0", default-features = false, optional = true }
 
 [target.'cfg(any(windows, target_os = "linux", target_os = "android", target_os = "freebsd"))'.dependencies]
 cubecl = { version = "=0.12.0-pre.2", default-features = false, features = ["vulkan"], optional = true }
+
+[target.'cfg(target_os = "linux")'.dependencies]
+dark-light = { version = "3", optional = true }
 
 [target.'cfg(target_os = "macos")'.dependencies]
 burn = { version = "=0.23.0-pre.2", default-features = false, features = ["metal"], optional = true }

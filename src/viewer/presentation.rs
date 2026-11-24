@@ -1,10 +1,11 @@
 use super::{
-    Chart, Dashboard, Display,
-    graph::{self, GraphRenderer},
+    Chart, Dashboard, DashboardPage, Display,
+    graph::{self, GraphPanel, GraphRenderer, PLOT_MARGIN},
     model::{ChartRange, Menu, Period, SeriesSelection, ValueFormat},
+    theme::{Theme, Tone},
     ui::{
-        self, ActorSelection, ChartTab, FirmMarker, Label, Legend, MapMarkers, Plot, Region,
-        UiAction,
+        self, ActorSelection, ChartTab, Crosshair, CursorDate, FirmMarker, Label, Legend,
+        MapMarkers, Plot, Region, UiAction,
     },
 };
 use crate::{
@@ -14,6 +15,7 @@ use crate::{
 use bevy::{
     picking::{Pickable, hover::Hovered},
     prelude::*,
+    ui::RelativeCursorPosition,
     ui_widgets::Button,
 };
 use std::collections::BTreeMap;
@@ -25,8 +27,7 @@ impl Plugin for PresentationPlugin {
             Update,
             (
                 draw.run_if(needs_refresh),
-                draw_readout,
-                draw_plot.run_if(plot_changed),
+                (draw_plot, draw_cursor).chain(),
                 draw_legend.run_if(chart_changed),
                 draw_markers.run_if(map_changed),
             )
@@ -39,31 +40,43 @@ impl Plugin for PresentationPlugin {
 #[derive(SystemSet, Debug, Hash, PartialEq, Eq, Clone)]
 pub(super) struct PresentationSystems;
 
-#[derive(Clone, Copy, PartialEq)]
-struct PresentationVersion {
+const AXIS_WIDTH: f32 = 48.0;
+const DATE_HEIGHT: f32 = 20.0;
+const TOP_PADDING: f32 = 5.0;
+
+#[derive(PartialEq)]
+struct PlotVersion {
     revision: u64,
-    chart: Chart,
+    theme: Theme,
     period: Period,
     selection: SeriesSelection,
-    plot_size: Vec2,
+    plots: Vec<PlotLayout>,
+}
+
+#[derive(PartialEq)]
+struct PlotLayout {
+    entity: Entity,
+    chart: Chart,
     scale: f32,
+    size: UVec2,
 }
 
 #[derive(Clone, Copy, PartialEq)]
 struct LabelVersion {
     revision: u64,
+    theme: Theme,
     chart: Chart,
-    selection: SeriesSelection,
 }
 
 fn needs_refresh(
     dashboard: Option<Res<Dashboard>>,
+    theme: Option<Res<Theme>>,
     mut previous: Local<Option<LabelVersion>>,
 ) -> bool {
     let current = dashboard.map(|dashboard| LabelVersion {
+        theme: theme.as_deref().copied().unwrap_or_default(),
         revision: dashboard.data.lock().expect("dashboard lock").revision,
         chart: dashboard.chart,
-        selection: dashboard.series,
     });
     let changed = current != *previous;
     *previous = current;
@@ -72,6 +85,7 @@ fn needs_refresh(
 
 fn draw(
     dashboard: Option<Res<Dashboard>>,
+    theme: Option<Res<Theme>>,
     mut labels: Query<(&Label, &mut Text)>,
     mut regions: Query<(&Region, &mut BackgroundColor)>,
     mut tabs: Query<(&ChartTab, &mut Node)>,
@@ -80,26 +94,67 @@ fn draw(
         let display = dashboard.data.lock().expect("dashboard lock");
         let s = &display.snapshot;
         let chart = dashboard.chart;
+        let menu = chart.menu();
+        let metrics = metric_values(menu, s);
+        let prior = display
+            .history
+            .iter()
+            .rev()
+            .find(|point| point.day < s.day)
+            .map(|point| metric_values(menu, point));
         labels.iter_mut().for_each(|(kind, mut label)| {
             let value = match kind {
-                Label::Resources => format!("Population {}     Paid workers {}     Cash {}     Firms {}", number(s.population.living), number(s.employed), s.cash, number(s.firms)),
-                Label::Date => format!("{} | {} | {}°C\nDAY {:04} | {} | {}", s.weather.date, s.weather.season, s.weather.temperature_celsius, s.day, display.status.label(), display.speed.label()),
-                Label::Title => chart.menu().label().into(),
-                Label::Subtitle => chart.menu().description().into(),
-                Label::Summary => summary(chart.menu(), s),
+                Label::Seed => format!("Seed {}", display.seed),
+                Label::Date => format!(
+                    "Day {}   ·   {}   ·   {}°C",
+                    s.day, s.weather.date, s.weather.temperature_celsius
+                ),
+                Label::Status => match &display.status {
+                    super::model::DisplayState::Initializing => "Starting",
+                    super::model::DisplayState::Active(RuntimeState::Paused) => "Paused",
+                    super::model::DisplayState::Active(RuntimeState::Running) => "Running",
+                    super::model::DisplayState::Active(RuntimeState::Advancing(_)) => "Advancing",
+                    _ => "Fault",
+                }
+                .into(),
+                Label::Title => menu.label().into(),
+                Label::Subtitle => menu.description().into(),
+                Label::Summary => summary(menu, s),
                 Label::ChartTitle => chart.label().into(),
                 Label::ChartDescription => chart.description().into(),
-                Label::SeriesFocus => match dashboard.series {
-                    SeriesSelection::All => "Showing all series".into(),
-                    SeriesSelection::Only(index) => format!("Focused: {}", chart.series().get(index).cloned().unwrap_or_default()),
-                },
                 Label::Comparison => comparison_text(&display),
+                Label::MetricName(index) => metrics[*index].name.into(),
+                Label::MetricValue(index) => match display.history.is_empty() {
+                    true => "—".into(),
+                    false => number(metrics[*index].value),
+                },
+                Label::MetricChange(index) => prior.as_ref().map_or_else(
+                    || metrics[*index].unit.into(),
+                    |prior| {
+                        let change = metrics[*index].value as i128 - prior[*index].value as i128;
+                        format!(
+                            "{}{} vs prior day",
+                            match change.cmp(&0) {
+                                std::cmp::Ordering::Greater => "+",
+                                std::cmp::Ordering::Less => "−",
+                                std::cmp::Ordering::Equal => "",
+                            },
+                            number(change.unsigned_abs())
+                        )
+                    },
+                ),
                 Label::Inspection => inspection_text(&display),
-                Label::MapSummary => format!("{} accounts / {} people\n{} paid / {} unmet bread ticks\n{} firms opened / {} closed\n{} distributors / {} discoveries", number(s.households), number(s.population.living), number(s.employed), number(s.shortages), number(s.firm_entries), number(s.firm_closures), number(s.distributors), number(s.research.discoveries)),
-                Label::Error => display.error.clone().unwrap_or_else(|| match &display.status {
-                    super::model::DisplayState::Unavailable(message) => message.clone(),
-                    _ => String::new(),
-                }),
+                Label::MapSummary => format!(
+                    "{} open sites · select a marker to inspect",
+                    number(s.firms)
+                ),
+                Label::Error => display
+                    .error
+                    .clone()
+                    .unwrap_or_else(|| match &display.status {
+                        super::model::DisplayState::Unavailable(message) => message.clone(),
+                        _ => String::new(),
+                    }),
                 Label::ToggleRun => match display.status {
                     super::model::DisplayState::Active(RuntimeState::Running) => "Pause".into(),
                     _ => "Resume".into(),
@@ -120,52 +175,48 @@ fn draw(
         });
         let peak = s.regions.iter().copied().max().unwrap_or(1).max(1) as f32;
         regions.iter_mut().for_each(|(region, mut color)| {
-            color.set_if_neq(BackgroundColor(ui::region_color(
-                s.regions.get(region.0).copied().unwrap_or(0) as f32 / peak,
-            )));
+            let heat = s.regions.get(region.0).copied().unwrap_or(0) as f32 / peak;
+            color.set_if_neq(BackgroundColor(
+                theme
+                    .as_deref()
+                    .copied()
+                    .unwrap_or_default()
+                    .color(Tone::Region(heat)),
+            ));
         });
     }
 }
 
-fn plot_changed(
-    dashboard: Option<Res<Dashboard>>,
-    plots: Query<&ComputedNode, With<Plot>>,
-    mut previous: Local<Option<PresentationVersion>>,
-) -> bool {
-    let current = dashboard
-        .filter(|dashboard| dashboard.company_page.is_none())
-        .and_then(|dashboard| {
-            plots.single().ok().map(|node| PresentationVersion {
-                revision: dashboard
-                    .data
-                    .lock()
-                    .expect("dashboard lock")
-                    .observation_revision,
-                chart: dashboard.chart,
-                period: dashboard.period,
-                selection: dashboard.series,
-                plot_size: node.size() * node.inverse_scale_factor(),
-                scale: node.inverse_scale_factor(),
-            })
-        });
-    let changed = current.is_some() && current != *previous;
-    *previous = current;
-    changed
+fn active_chart(plot: Plot, dashboard: &Dashboard) -> Option<Chart> {
+    match (dashboard.page, plot) {
+        (DashboardPage::Metrics, Plot::Preview(chart))
+            if chart.menu() == dashboard.chart.menu() =>
+        {
+            Some(chart)
+        }
+        (DashboardPage::Chart, Plot::Detail) => Some(dashboard.chart),
+        _ => None,
+    }
 }
 
-fn chart_changed(
-    dashboard: Option<Res<Dashboard>>,
-    mut previous: Local<Option<(Chart, SeriesSelection)>>,
-) -> bool {
-    let current = dashboard.map(|dashboard| (dashboard.chart, dashboard.series));
+fn chart_changed(dashboard: Option<Res<Dashboard>>, mut previous: Local<Option<Chart>>) -> bool {
+    let current = dashboard.map(|dashboard| dashboard.chart);
     let changed = current != *previous;
     *previous = current;
     changed
 }
 
-fn map_changed(dashboard: Option<Res<Dashboard>>, mut previous: Local<Option<u64>>) -> bool {
-    let current =
-        dashboard.map(|dashboard| dashboard.data.lock().expect("dashboard lock").map_revision);
+fn map_changed(
+    dashboard: Option<Res<Dashboard>>,
+    theme: Option<Res<Theme>>,
+    mut previous: Local<Option<(u64, Theme)>>,
+) -> bool {
+    let current = dashboard.map(|dashboard| {
+        (
+            dashboard.data.lock().expect("dashboard lock").map_revision,
+            theme.as_deref().copied().unwrap_or_default(),
+        )
+    });
     let changed = current != *previous;
     *previous = current;
     changed
@@ -181,90 +232,142 @@ fn draw_legend(
             .entity(entity)
             .despawn_children()
             .with_children(|legend| {
-                dashboard
-                    .chart
-                    .series()
-                    .into_iter()
-                    .enumerate()
-                    .filter(|(series, _)| dashboard.series.includes(*series))
-                    .for_each(|(series, name)| {
-                        legend
-                            .spawn(Node {
-                                align_items: AlignItems::Center,
-                                column_gap: px(5),
-                                ..default()
-                            })
-                            .with_children(|item| {
-                                item.spawn((
-                                    Node {
-                                        width: px(8),
-                                        height: px(8),
-                                        ..default()
-                                    },
-                                    BackgroundColor(chart_color(dashboard.chart, series)),
-                                ));
-                                item.spawn(ui::text(name, 11.0, ui::MUTED));
-                            });
-                    });
+                ui::button(legend, UiAction::AllSeries, "All series");
+                for (index, name) in dashboard.chart.series().into_iter().enumerate() {
+                    ui::series_button(legend, index, &name, Tone::Series(dashboard.chart, index));
+                }
             });
     }
 }
 
 fn draw_plot(
-    dashboard: Res<Dashboard>,
-    plots: Query<(Entity, &ComputedNode), With<Plot>>,
+    dashboard: Option<Res<Dashboard>>,
+    theme: Option<Res<Theme>>,
+    plots: Query<(Entity, &Plot, &ComputedNode)>,
     mut renderer: GraphRenderer,
-    mut scales: Query<&mut Text, With<ui::ChartScale>>,
+    mut previous: Local<Option<PlotVersion>>,
     mut commands: Commands,
 ) {
-    if let Ok((entity, computed)) = plots.single() {
+    if let Some(dashboard) = dashboard {
+        let mut plots = plots
+            .iter()
+            .filter_map(|(entity, plot, node)| {
+                active_chart(*plot, &dashboard)
+                    .filter(|_| node.size().min_element() > 0.0)
+                    .map(|chart| {
+                        let scale = node.inverse_scale_factor();
+                        let size =
+                            node.size() * scale - Vec2::new(AXIS_WIDTH, DATE_HEIGHT + TOP_PADDING);
+                        PlotLayout {
+                            entity,
+                            chart,
+                            scale,
+                            size: (size / scale).floor().as_uvec2().max(UVec2::ONE),
+                        }
+                    })
+            })
+            .collect::<Vec<_>>();
+        plots.sort_unstable_by_key(|plot| plot.entity);
         let display = dashboard.data.lock().expect("dashboard lock");
-        let chart = dashboard.chart;
-        let range = ChartRange::new(
-            chart,
-            &display.snapshot,
-            &display.history,
-            display.comparison.as_ref(),
-            dashboard.period,
-            dashboard.series,
-        );
-        scales.iter_mut().for_each(|mut label| {
-            let value = range.scale_label(chart);
-            if label.0 != value {
-                label.0 = value;
+        let version = PlotVersion {
+            theme: theme.as_deref().copied().unwrap_or_default(),
+            revision: display.observation_revision,
+            period: dashboard.period,
+            selection: dashboard.series,
+            plots,
+        };
+        if !version.plots.is_empty() && previous.as_ref() != Some(&version) {
+            paint_plots(&display, &version, &mut renderer, &mut commands);
+        }
+        *previous = Some(version);
+    }
+}
+
+fn paint_plots(
+    display: &Display,
+    version: &PlotVersion,
+    renderer: &mut GraphRenderer,
+    commands: &mut Commands,
+) {
+    let tile = version
+        .plots
+        .iter()
+        .fold(UVec2::ONE, |tile, plot| tile.max(plot.size));
+    let columns = version.plots.len().min(2);
+    let rows = version.plots.len().div_ceil(columns);
+    let panels = version
+        .plots
+        .iter()
+        .enumerate()
+        .map(|(index, plot)| {
+            let origin = tile * UVec2::new((index % columns) as u32, (index / columns) as u32);
+            GraphPanel {
+                chart: plot.chart,
+                range: ChartRange::new(
+                    plot.chart,
+                    &display.snapshot,
+                    &display.history,
+                    display.comparison.as_ref(),
+                    version.period,
+                    version.selection,
+                ),
+                pixels: URect::from_corners(origin, origin + plot.size),
             }
-        });
-        let size = computed.size() * computed.inverse_scale_factor();
-        let area = Vec2::new((size.x - 52.0).max(1.0), (size.y - 30.0).max(1.0));
-        renderer.update(
-            &display,
-            chart,
-            &range,
-            area,
-            computed.inverse_scale_factor(),
-        );
+        })
+        .collect::<Vec<_>>();
+    renderer.update(
+        display,
+        &panels,
+        tile * UVec2::new(columns as u32, rows as u32),
+        1.0 / version.plots[0].scale,
+        version.theme,
+    );
+    for (layout, panel) in version.plots.iter().zip(&panels) {
+        let area = layout.size.as_vec2() * layout.scale;
+        let rect = Rect::from_corners(panel.pixels.min.as_vec2(), panel.pixels.max.as_vec2());
         commands
-            .entity(entity)
+            .entity(layout.entity)
             .despawn_children()
             .with_children(|plot| {
-                draw_axes(plot, &range, area, chart.value_format());
+                draw_axes(plot, &panel.range, area);
+                let mut image = ImageNode::new(renderer.image());
+                image.rect = Some(rect);
                 plot.spawn((
                     Node {
                         position_type: PositionType::Absolute,
-                        left: px(48),
-                        top: px(6),
+                        left: px(AXIS_WIDTH),
+                        top: px(TOP_PADDING),
                         width: px(area.x),
                         height: px(area.y),
                         ..default()
                     },
-                    ImageNode::new(renderer.image()),
+                    image,
                     Pickable::IGNORE,
-                ));
+                ))
+                .with_children(|graph| {
+                    graph.spawn((
+                        Crosshair,
+                        Visibility::Hidden,
+                        Node {
+                            position_type: PositionType::Absolute,
+                            top: px(PLOT_MARGIN),
+                            bottom: px(PLOT_MARGIN),
+                            width: px(1),
+                            ..default()
+                        },
+                        Tone::Crosshair.surface(),
+                        Pickable::IGNORE,
+                    ));
+                });
                 if display.history.is_empty() {
-                    plot.spawn(ui::text(
-                        "Waiting for the first observation...",
-                        12.0,
-                        ui::MUTED,
+                    plot.spawn((
+                        Node {
+                            position_type: PositionType::Absolute,
+                            left: px(AXIS_WIDTH + 12.0),
+                            top: px(TOP_PADDING + 12.0),
+                            ..default()
+                        },
+                        ui::text("Waiting for observations…", 12.0, Tone::Muted),
                     ));
                 }
             });
@@ -273,11 +376,13 @@ fn draw_plot(
 
 fn draw_markers(
     dashboard: Option<Res<Dashboard>>,
+    theme: Option<Res<Theme>>,
     containers: Query<Entity, With<MapMarkers>>,
     mut markers: Query<(Entity, &FirmMarker, &mut Node, &mut BackgroundColor)>,
     mut commands: Commands,
 ) {
     if let (Some(dashboard), Ok(container)) = (dashboard, containers.single()) {
+        let theme = theme.as_deref().copied().unwrap_or_default();
         let display = dashboard.data.lock().expect("dashboard lock");
         let mut firms = display
             .firms
@@ -297,10 +402,10 @@ fn draw_markers(
                             node.left = left;
                             node.top = top;
                         }
-                        color.set_if_neq(BackgroundColor(chart_color(
+                        color.set_if_neq(BackgroundColor(theme.color(Tone::Series(
                             Chart::Prices,
                             firm.kind.saturating_sub(1) as usize,
-                        )));
+                        ))));
                     }
                     None => {
                         commands.entity(entity).despawn();
@@ -327,11 +432,11 @@ fn draw_markers(
                     ..default()
                 },
                 UiTransform::from_translation(Val2::percent(-50, -50)),
-                BackgroundColor(chart_color(
+                BackgroundColor(theme.color(Tone::Series(
                     Chart::Prices,
                     firm.kind.saturating_sub(1) as usize,
-                )),
-                BorderColor::all(ui::INK),
+                ))),
+                BorderColor::all(theme.color(Tone::Panel)),
             ));
         });
     }
@@ -344,6 +449,67 @@ fn number(value: impl Into<u128>) -> String {
         1_000..1_000_000 => format!("{:.1}K", value as f64 / 1_000.0),
         1_000_000..1_000_000_000 => format!("{:.2}M", value as f64 / 1_000_000.0),
         _ => format!("{:.2}B", value as f64 / 1_000_000_000.0),
+    }
+}
+
+#[derive(Clone, Copy)]
+struct MetricValue {
+    name: &'static str,
+    unit: &'static str,
+    value: u128,
+}
+
+fn metric_values(menu: Menu, s: &ObservationSnapshot) -> [MetricValue; 4] {
+    let metric = |name, unit, value| MetricValue { name, unit, value };
+    let people = |name, value| metric(name, "people", u128::from(value));
+    let cash = |name, value| metric(name, "cash units", u128::from(value));
+    match menu {
+        Menu::Overview => [
+            people("Population", s.population.living),
+            people("Paid workers", s.employed),
+            metric("Open sites", "sites", u128::from(s.firms)),
+            cash("Total cash", s.cash),
+        ],
+        Menu::Market => [
+            metric(
+                "Available stock",
+                "goods ticks",
+                s.inventories.iter().map(|&value| u128::from(value)).sum(),
+            ),
+            metric(
+                "In transit",
+                "goods ticks",
+                s.transit.iter().map(|&value| u128::from(value)).sum(),
+            ),
+            metric("Unmet bread", "bread ticks", u128::from(s.shortages)),
+            metric("Distributors", "sites", u128::from(s.distributors)),
+        ],
+        Menu::Industry => [
+            metric("Open sites", "sites", u128::from(s.firms)),
+            metric("Site entries", "sites to date", u128::from(s.firm_entries)),
+            metric(
+                "Site closures",
+                "sites to date",
+                u128::from(s.firm_closures),
+            ),
+            metric("Discoveries", "to date", u128::from(s.research.discoveries)),
+        ],
+        Menu::Population => [
+            people("Living population", s.population.living),
+            people("Dependents", s.population.dependents),
+            people("Births to date", s.population.births),
+            metric(
+                "Housing shortage",
+                "accounts",
+                u128::from(s.homeless_households),
+            ),
+        ],
+        Menu::Finance => [
+            metric("Active loans", "loans", u128::from(s.active_loans)),
+            cash("Loan principal", s.loan_principal),
+            cash("Rent arrears", s.rent_arrears),
+            cash("Payroll reserves", s.payroll_reserves),
+        ],
     }
 }
 
@@ -412,86 +578,75 @@ fn summary(menu: Menu, s: &ObservationSnapshot) -> String {
 
 fn comparison_text(display: &Display) -> String {
     match &display.comparison {
-        Some(reference) => match reference.at_day(display.snapshot.day) {
-            Some(prior) => format!(
-                "Solid: seed {}  /  faint: seed {}\nSame-day change: paid workers {:+}, unmet bread {:+}",
-                display.seed,
-                reference.seed,
-                i128::from(display.snapshot.employed) - i128::from(prior.employed),
-                i128::from(display.snapshot.shortages) - i128::from(prior.shortages)
-            ),
-            None => format!(
-                "Seed {} / reference seed {}\nNo saved observation for day {} (reference ends at day {}).",
-                display.seed, reference.seed, display.snapshot.day, reference.horizon
-            ),
-        },
-        None => format!(
-            "SEED {}\nCompare seed saves this history and runs the next seed to the same day. Faint lines show the saved run.",
-            display.seed
+        Some(reference) => {
+            let current = &display.snapshot;
+            let difference = reference
+                .at_day(current.day)
+                .map_or_else(String::new, |prior| {
+                    let workers = i128::from(current.employed) - i128::from(prior.employed);
+                    let shortages = i128::from(current.shortages) - i128::from(prior.shortages);
+                    format!("  ·  Paid workers {workers:+}, unmet bread {shortages:+}")
+                });
+            format!(
+                "Seed {} (solid)  ·  Seed {} (faint, through day {}){difference}",
+                display.seed, reference.seed, reference.horizon
+            )
+        }
+        None => "Current run".into(),
+    }
+}
+
+fn axis_value(value: f64) -> String {
+    match value.abs() {
+        1_000.0.. => format!(
+            "{}{}",
+            if value < 0.0 { "−" } else { "" },
+            number(value.abs() as u128)
         ),
+        10.0.. => format!("{value:.0}"),
+        _ => format!("{value:.1}"),
     }
 }
 
-pub(super) fn chart_color(chart: Chart, series: usize) -> Color {
-    match (chart, series) {
-        (Chart::Deaths, 0) | (Chart::Demography, 1) => ui::MUTED,
-        (Chart::Deaths, 1) | (Chart::Demography, 2) => Color::srgb(0.88, 0.66, 0.33),
-        (Chart::Deaths, 2) | (Chart::Demography, 3) => Color::srgb(0.90, 0.42, 0.32),
-        (Chart::Deaths, 3) | (Chart::Demography, 4) => Color::srgb(0.48, 0.70, 0.85),
-        (Chart::Employment, 0) => Color::srgb(0.48, 0.78, 0.57),
-        (Chart::Employment | Chart::Credit, 1) => Color::srgb(0.90, 0.42, 0.32),
-        (_, 0) => ui::GOLD,
-        (_, 1) => Color::srgb(0.48, 0.70, 0.85),
-        (_, 2) => Color::srgb(0.48, 0.78, 0.57),
-        _ => Color::hsl((series as f32 * 137.5) % 360.0, 0.55, 0.65),
-    }
-}
-
-fn draw_axes(
-    parent: &mut ChildSpawnerCommands,
-    range: &ChartRange,
-    area: Vec2,
-    format: ValueFormat,
-) {
-    (0..=4).for_each(|row| {
-        let value = range.maximum - (range.maximum - range.minimum) * row as f64 / 4.0;
-        let caption = match (format, value) {
-            (ValueFormat::Money, _) => format!("{value:.0}"),
-            (_, value) if value.abs() >= 1000.0 => format!(
-                "{}{:.1}k",
-                if value < 0.0 { "-" } else { "" },
-                value.abs() / 1000.0
-            ),
-            (_, value) if value.abs() >= 10.0 => format!("{value:.0}"),
-            _ => format!("{value:.1}"),
-        };
+fn draw_axes(parent: &mut ChildSpawnerCommands, range: &ChartRange, area: Vec2) {
+    let extent = area.y - 2.0 * PLOT_MARGIN;
+    for row in 0..=4 {
+        let fraction = row as f32 / 4.0;
+        let value = range.maximum - (range.maximum - range.minimum) * f64::from(fraction);
         parent.spawn((
             Node {
                 position_type: PositionType::Absolute,
                 left: px(0),
-                top: px(row as f32 / 4.0 * area.y),
+                top: px(TOP_PADDING + PLOT_MARGIN + fraction * extent - 7.0),
                 ..default()
             },
-            ui::text(caption, 10.0, ui::MUTED),
+            ui::text(axis_value(value), 10.0, Tone::Muted),
         ));
-    });
-    let labels = [
-        CalendarDate::on_day(range.first_day).to_string(),
-        CalendarDate::on_day(range.last_day).to_string(),
-    ];
+    }
+    let labels = match range.first_day == range.last_day {
+        true => vec![range.last_day],
+        false => vec![range.first_day, range.last_day],
+    };
     parent
         .spawn(Node {
             position_type: PositionType::Absolute,
-            left: px(48),
+            left: px(AXIS_WIDTH + PLOT_MARGIN),
             bottom: px(0),
-            width: px(area.x),
-            justify_content: JustifyContent::SpaceBetween,
+            width: px(area.x - 2.0 * PLOT_MARGIN),
+            justify_content: match labels.len() {
+                1 => JustifyContent::End,
+                _ => JustifyContent::SpaceBetween,
+            },
             ..default()
         })
         .with_children(|axis| {
-            labels.into_iter().for_each(|label| {
-                axis.spawn(ui::text(label, 10.0, ui::MUTED));
-            });
+            for day in labels {
+                axis.spawn(ui::text(
+                    CalendarDate::on_day(day).to_string(),
+                    10.0,
+                    Tone::Muted,
+                ));
+            }
         });
 }
 
@@ -581,67 +736,144 @@ fn exact_value(value: f64, format: ValueFormat) -> String {
     }
 }
 
-fn draw_readout(
+#[derive(Clone, Copy, PartialEq, Eq)]
+struct ReadoutVersion {
+    revision: u64,
+    chart: Chart,
+    selection: SeriesSelection,
+    day: u64,
+}
+
+fn draw_cursor(
     dashboard: Option<Res<Dashboard>>,
-    plots: Query<(&bevy::ui::RelativeCursorPosition, &ComputedNode), With<Plot>>,
-    mut labels: Query<&mut Text, With<ui::ChartReadout>>,
+    plots: Query<(&Plot, &RelativeCursorPosition, &ComputedNode)>,
+    images: Query<(&ComputedNode, &ChildOf), With<ImageNode>>,
+    mut crosshairs: Query<(&ChildOf, &mut Node, &mut Visibility), With<Crosshair>>,
+    mut dates: Query<&mut Text, (With<CursorDate>, Without<ui::ChartReadout>)>,
+    mut readouts: Query<&mut Text, With<ui::ChartReadout>>,
+    mut previous: Local<Option<ReadoutVersion>>,
 ) {
-    if let Some(dashboard) = dashboard.filter(|dashboard| dashboard.company_page.is_none()) {
+    if let Some(dashboard) = dashboard {
         let display = dashboard.data.lock().expect("dashboard lock");
-        let chart = dashboard.chart;
-        let first_day = display
+        let last = display.snapshot.day;
+        let first = display
             .history
             .front()
-            .map_or(display.snapshot.day, |point| point.day)
-            .max(dashboard.period.first_day(display.snapshot.day));
-        let last_day = display.snapshot.day;
-        let hovered = plots.single().ok().and_then(|(cursor, node)| {
-            cursor
-                .normalized
-                .filter(|_| cursor.cursor_over())
-                .map(|position| {
-                    let width = node.size().x * node.inverse_scale_factor();
-                    (((position.x + 0.5) * width - 48.0) / (width - 52.0).max(1.0)).clamp(0.0, 1.0)
-                })
+            .map_or(last, |point| point.day)
+            .max(dashboard.period.first_day(last));
+        let span = last - first;
+        let hovered = plots.iter().find_map(|(plot, cursor, node)| {
+            active_chart(*plot, &dashboard).and_then(|_| hover_fraction(cursor, node))
         });
-        let day = hovered.map_or(last_day, |fraction| {
-            first_day + (f64::from(fraction) * (last_day - first_day) as f64).round() as u64
+        let day = hovered.map_or(last, |fraction| {
+            first + (f64::from(fraction) * span as f64).round() as u64
         });
-        let index = display
-            .history
-            .partition_point(|point| point.day < day)
-            .min(display.history.len().saturating_sub(1));
-        let snapshot = display.history.get(index).unwrap_or(&display.snapshot);
-        let previous = index
-            .checked_sub(1)
-            .and_then(|index| display.history.get(index));
-        let reference = display.comparison.as_ref().and_then(|run| {
-            chart
-                .samples(&run.history, snapshot.day, snapshot.day)
-                .next()
-                .map(|sample| sample.values)
+        let date = hovered.map_or_else(String::new, |_| {
+            format!("Cursor  ·  {}  ·  Day {day}", CalendarDate::on_day(day))
         });
-        let detail = {
+        for mut label in &mut dates {
+            if label.0 != date {
+                label.0.clone_from(&date);
+            }
+        }
+        for (parent, mut node, mut visibility) in &mut crosshairs {
+            let image = images.get(parent.parent()).ok().and_then(|(node, plot)| {
+                plots
+                    .get(plot.parent())
+                    .ok()
+                    .and_then(|(plot, _, _)| active_chart(*plot, &dashboard))
+                    .map(|_| node)
+            });
+            match (hovered, image) {
+                (Some(_), Some(image)) => {
+                    let width = image.size().x * image.inverse_scale_factor();
+                    let fraction = match span {
+                        0 => 1.0,
+                        _ => (day - first) as f32 / span as f32,
+                    };
+                    let left = px(PLOT_MARGIN + fraction * (width - 2.0 * PLOT_MARGIN).max(0.0));
+                    if node.left != left {
+                        node.left = left;
+                    }
+                    visibility.set_if_neq(Visibility::Inherited);
+                }
+                _ => {
+                    visibility.set_if_neq(Visibility::Hidden);
+                }
+            }
+        }
+        let version = (dashboard.page == DashboardPage::Chart).then_some(ReadoutVersion {
+            revision: display.observation_revision,
+            chart: dashboard.chart,
+            selection: dashboard.series,
+            day,
+        });
+        if let Some(version) = version.filter(|version| Some(*version) != *previous) {
+            let detail = readout_text(&display, version);
+            for mut label in &mut readouts {
+                label.0.clone_from(&detail);
+            }
+        }
+        *previous = version;
+    }
+}
+
+fn hover_fraction(cursor: &RelativeCursorPosition, node: &ComputedNode) -> Option<f32> {
+    cursor
+        .normalized
+        .filter(|_| cursor.cursor_over())
+        .and_then(|position| {
+            let size = node.size() * node.inverse_scale_factor();
+            let x = (position.x + 0.5) * size.x - AXIS_WIDTH;
+            let y = (position.y + 0.5) * size.y - TOP_PADDING;
+            let width = size.x - AXIS_WIDTH;
+            let height = size.y - DATE_HEIGHT - TOP_PADDING;
+            Rect::from_corners(Vec2::ZERO, Vec2::new(width, height))
+                .contains(Vec2::new(x, y))
+                .then(|| ((x - PLOT_MARGIN) / (width - 2.0 * PLOT_MARGIN).max(1.0)).clamp(0.0, 1.0))
+        })
+}
+
+fn readout_text(display: &Display, version: ReadoutVersion) -> String {
+    match display.history.is_empty() {
+        true => "Waiting for observations…".into(),
+        false => {
+            let chart = version.chart;
+            let index = display
+                .history
+                .partition_point(|point| point.day < version.day)
+                .min(display.history.len() - 1);
+            let snapshot = &display.history[index];
+            let previous = index
+                .checked_sub(1)
+                .and_then(|index| display.history.get(index));
+            let reference = display.comparison.as_ref().and_then(|run| {
+                chart
+                    .samples(&run.history, snapshot.day, snapshot.day)
+                    .next()
+                    .map(|sample| sample.values)
+            });
             let values = chart.values(snapshot, previous);
             let rows = chart
                 .series()
                 .into_iter()
                 .zip(values)
                 .enumerate()
-                .filter(|(series, _)| dashboard.series.includes(*series))
+                .filter(|(series, _)| version.selection.includes(*series))
                 .map(|(series, (name, value))| {
                     let comparison = reference
                         .as_ref()
                         .and_then(|values| values.get(series))
                         .filter(|prior| prior.is_finite() && value.is_finite())
                         .map_or_else(String::new, |prior| {
-                            let change = match chart.value_format() {
-                                ValueFormat::Money => format!("{:+.0}", value - prior),
-                                ValueFormat::Quantity => format!("{:+.3}", value - prior),
+                            let change = exact_value(value - prior, chart.value_format());
+                            let sign = match value > *prior {
+                                true => "+",
+                                false => "",
                             };
                             format!(
-                                " | reference {} | change {change}",
-                                exact_value(*prior, chart.value_format()),
+                                " · reference {} · Δ {sign}{change}",
+                                exact_value(*prior, chart.value_format())
                             )
                         });
                     let people = match chart {
@@ -658,17 +890,11 @@ fn draw_readout(
                 .collect::<Vec<_>>()
                 .join("\n");
             format!(
-                "{} | DAY {} | {}\n{}",
+                "{} · Day {} · {}\n\n{rows}",
                 snapshot.weather.date,
                 snapshot.day,
-                chart.unit(),
-                rows
+                chart.unit()
             )
-        };
-        labels.iter_mut().for_each(|mut text| {
-            if text.0 != detail {
-                text.0 = detail.clone();
-            }
-        });
+        }
     }
 }

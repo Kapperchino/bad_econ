@@ -1,4 +1,8 @@
-use super::{Chart, Display, model::ChartRange, presentation::chart_color, ui};
+use super::{
+    Chart, Display,
+    model::ChartRange,
+    theme::{Theme, Tone},
+};
 use bevy::{
     asset::RenderAssetUsages,
     camera::{RenderTarget, ScalingMode, visibility::RenderLayers},
@@ -34,7 +38,7 @@ pub(super) fn setup(
             Camera2d,
             Camera {
                 order: -1,
-                clear_color: ClearColorConfig::Custom(ui::INK),
+                clear_color: ClearColorConfig::Custom(Theme::Light.color(Tone::Panel)),
                 ..default()
             },
             RenderTarget::Image(image.clone().into()),
@@ -63,20 +67,18 @@ pub(super) struct GraphRenderer<'w, 's> {
     graph: Res<'w, Graph>,
     images: ResMut<'w, Assets<Image>>,
     meshes: ResMut<'w, Assets<Mesh>>,
-    cameras: Query<'w, 's, &'static mut Projection>,
+    cameras: Query<'w, 's, (&'static mut Projection, &'static mut Camera)>,
 }
 
 impl GraphRenderer<'_, '_> {
     pub fn update(
         &mut self,
         display: &Display,
-        chart: Chart,
-        range: &ChartRange,
-        size: Vec2,
+        panels: &[GraphPanel],
+        pixels: UVec2,
         scale: f32,
+        theme: Theme,
     ) {
-        let size = size.max(Vec2::ONE);
-        let pixels = (size / scale).ceil().as_uvec2().max(UVec2::ONE);
         let mut image = self.images.get_mut(&self.graph.image).expect("graph image");
         if image.size() != pixels {
             image.resize(bevy::render::render_resource::Extent3d {
@@ -85,7 +87,9 @@ impl GraphRenderer<'_, '_> {
                 depth_or_array_layers: 1,
             });
         }
-        if let Ok(mut projection) = self.cameras.get_mut(self.graph.camera) {
+        let size = pixels.as_vec2();
+        if let Ok((mut projection, mut camera)) = self.cameras.get_mut(self.graph.camera) {
+            camera.clear_color = ClearColorConfig::Custom(theme.color(Tone::Panel));
             *projection = Projection::Orthographic(OrthographicProjection {
                 scaling_mode: ScalingMode::Fixed {
                     width: size.x,
@@ -94,29 +98,24 @@ impl GraphRenderer<'_, '_> {
                 ..OrthographicProjection::default_2d()
             });
         }
-        let mut geometry = Geometry::default();
-        (0..=4).for_each(|row| {
-            let y = row as f32 / 4.0 * (size.y - 2.0) + 1.0;
-            geometry.line(
-                Vec2::new(0.0, y),
-                Vec2::new(size.x, y),
-                ui::RULE.with_alpha(0.5),
-            );
-        });
-        if range.minimum < 0.0 {
-            let y = 3.0 + (1.0 - range.fraction(0.0) as f32) * (size.y - 6.0).max(0.0);
-            geometry.line(Vec2::new(0.0, y), Vec2::new(size.x, y), ui::MUTED);
+        let mut geometry = Geometry { theme, ..default() };
+        for panel in panels {
+            geometry.panel(display, panel, scale);
         }
-        if let Some(reference) = &display.comparison {
-            geometry.history(&reference.history, chart, range, size, LineStyle::Reference);
-        }
-        geometry.history(&display.history, chart, range, size, LineStyle::Current);
         *self.meshes.get_mut(&self.graph.mesh).expect("graph mesh") = geometry.mesh(size);
     }
 
     pub fn image(&self) -> Handle<Image> {
         self.graph.image.clone()
     }
+}
+
+pub(super) const PLOT_MARGIN: f32 = 4.0;
+
+pub(super) struct GraphPanel {
+    pub chart: Chart,
+    pub range: ChartRange,
+    pub pixels: URect,
 }
 
 #[derive(Clone, Copy)]
@@ -135,6 +134,7 @@ impl LineStyle {
 
 #[derive(Default)]
 struct Geometry {
+    theme: Theme,
     positions: Vec<[f32; 3]>,
     colors: Vec<[f32; 4]>,
 }
@@ -146,27 +146,71 @@ impl Geometry {
         self.colors.extend([color; 6]);
     }
 
-    fn line(&mut self, from: Vec2, to: Vec2, color: Color) {
-        let normal = (to - from).normalize_or_zero().perp();
+    fn line(&mut self, from: Vec2, to: Vec2, width: f32, color: Color) {
+        let normal = (to - from).normalize_or_zero().perp() * (width * 0.5);
         self.quad(
             [from - normal, to - normal, to + normal, from + normal],
             color,
         );
     }
 
+    fn panel(&mut self, display: &Display, panel: &GraphPanel, scale: f32) {
+        let inset = Vec2::splat(PLOT_MARGIN * scale);
+        let origin = panel.pixels.min.as_vec2() + inset;
+        let extent = (panel.pixels.size().as_vec2() - 2.0 * inset).max(Vec2::ZERO);
+        let bounds = Rect::from_corners(origin, origin + extent);
+        let range = &panel.range;
+        for tick in 0..=4 {
+            let offset = extent * (tick as f32 / 4.0);
+            self.line(
+                origin + Vec2::new(0.0, offset.y),
+                origin + Vec2::new(extent.x, offset.y),
+                scale,
+                self.theme.color(Tone::Rule).with_alpha(0.7),
+            );
+            self.line(
+                origin + Vec2::new(offset.x, 0.0),
+                origin + Vec2::new(offset.x, extent.y),
+                scale,
+                self.theme.color(Tone::Rule).with_alpha(0.45),
+            );
+        }
+        if range.minimum < 0.0 {
+            let y = bounds.max.y - range.fraction(0.0) as f32 * extent.y;
+            self.line(
+                Vec2::new(bounds.min.x, y),
+                Vec2::new(bounds.max.x, y),
+                scale,
+                self.theme.color(Tone::Muted).with_alpha(0.55),
+            );
+        }
+        if let Some(reference) = &display.comparison {
+            self.history(
+                &reference.history,
+                panel,
+                bounds,
+                scale,
+                LineStyle::Reference,
+            );
+        }
+        self.history(&display.history, panel, bounds, scale, LineStyle::Current);
+    }
+
     fn history(
         &mut self,
         history: &std::collections::VecDeque<crate::domain::ObservationSnapshot>,
-        chart: Chart,
-        range: &ChartRange,
-        size: Vec2,
+        panel: &GraphPanel,
+        bounds: Rect,
+        scale: f32,
         style: LineStyle,
     ) {
-        let span = range.last_day.saturating_sub(range.first_day).max(1) as f32;
+        let range = &panel.range;
+        let chart = panel.chart;
+        let extent = bounds.size();
         let point = |day: u64, value: f64| {
             Vec2::new(
-                3.0 + day.saturating_sub(range.first_day) as f32 / span * (size.x - 6.0).max(0.0),
-                3.0 + (1.0 - range.fraction(value) as f32) * (size.y - 6.0).max(0.0),
+                bounds.min.x + range.day_fraction(day) * extent.x,
+                bounds.max.y - range.fraction(value) as f32 * extent.y,
             )
         };
         let mut previous = Vec::<Vec2>::new();
@@ -180,7 +224,12 @@ impl Geometry {
             );
             for (series, (&from, &to)) in previous.iter().zip(&current).enumerate() {
                 if range.selection.includes(series) && from.is_finite() && to.is_finite() {
-                    self.line(from, to, style.color(chart_color(chart, series)));
+                    self.line(
+                        from,
+                        to,
+                        1.8 * scale,
+                        style.color(self.theme.color(Tone::Series(chart, series))),
+                    );
                 }
             }
             std::mem::swap(&mut previous, &mut current);
@@ -188,14 +237,15 @@ impl Geometry {
         }
         for (series, point) in previous.into_iter().enumerate() {
             if range.selection.includes(series) && point.is_finite() {
+                let radius = 2.5 * scale;
                 self.quad(
                     [
-                        point + Vec2::new(-3.0, -3.0),
-                        point + Vec2::new(3.0, -3.0),
-                        point + Vec2::new(3.0, 3.0),
-                        point + Vec2::new(-3.0, 3.0),
+                        point + Vec2::new(-radius, -radius),
+                        point + Vec2::new(radius, -radius),
+                        point + Vec2::new(radius, radius),
+                        point + Vec2::new(-radius, radius),
                     ],
-                    style.color(chart_color(chart, series)),
+                    style.color(self.theme.color(Tone::Series(chart, series))),
                 );
             }
         }

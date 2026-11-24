@@ -1,5 +1,8 @@
 use super::Dashboard;
-use super::ui::UiAction;
+use super::{
+    theme::{Theme, Tone},
+    ui::UiAction,
+};
 use bevy::{audio::Volume, prelude::*};
 use std::time::Duration;
 
@@ -230,6 +233,7 @@ fn receive(
 
 fn animate(
     feedback: Res<Feedback>,
+    theme: Res<Theme>,
     mut cadence: ResMut<super::pacing::Cadence>,
     actions: Query<(&UiAction, &bevy::picking::hover::Hovered)>,
     mut labels: Query<&mut Text, With<Label>>,
@@ -260,7 +264,9 @@ fn animate(
             false => label.0.clone_from(&text),
         });
     let flash = feedback.flash();
-    let color = Color::srgb(0.055, 0.08, 0.09).mix(&cue.color(), 0.08 + flash * 0.20);
+    let color = theme
+        .color(Tone::Panel)
+        .mix(&cue.color(), 0.04 + flash * 0.20);
     banners
         .iter_mut()
         .for_each(|mut banner| match banner.0 == color {

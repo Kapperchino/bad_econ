@@ -23,7 +23,9 @@ cargo run --release -- run --scenario scenarios/institutions.json --days 12
 
 Workers and farmers start in cohorts of up to 10. Each cohort shares a budget, inventory, location and employer. Firms can hire part of a cohort. In output, `population.living` counts people and `households` counts accounts. For a billion-person run, use `--people 1000000000 --worker-cohort-size 10000 --farmer-cohort-size 10000` on a GPU with sufficient memory.
 
-The viewer starts paused. **Space** runs or pauses, **N** advances one day, and **1/2/3** change speed. Click a firm on the map to inspect its accounts, hover over a chart for daily values, or use **Compare seed** to overlay another run. Open **Companies** to rank businesses by worker capacity or daily cash profit. Each row includes all of the company’s sites. Select **Inspect site** to see a facility’s accounts and its owner’s stubbornness.
+The viewer starts paused on the **Overview** dashboard and follows your system appearance. Use the **Dark mode** switch in the footer to override it for the current session. Choose a category in the sidebar and change **Time range** to update every chart. Hover over a plot to see the same day marked across the dashboard. Open a chart to see exact observations and click a legend entry to isolate that series. **Esc** returns to the dashboard, and **G** cycles through charts.
+
+**Space** runs or pauses the simulation, **N** advances one day, and **1/2/3** change speed. Use **Compare seed** to overlay a second run. Click a firm on the regional map to inspect its accounts, or open **Companies** to rank businesses by worker capacity or daily cash profit. Each row aggregates all open sites. Select **Inspect site** to see a facility’s accounts and its owner’s stubbornness.
 
 ## Model
 
