@@ -62,6 +62,7 @@ pub(super) enum Tone {
     Accent,
     Primary,
     Rule,
+    Brass,
     Text,
     Muted,
     Positive,
@@ -88,39 +89,40 @@ impl Theme {
             Color::srgb_u8(red, green, blue)
         };
         match tone {
-            Canvas => rgb([243, 244, 249], [17, 18, 26]),
-            Panel => rgb([255, 255, 255], [28, 29, 40]),
-            Raised => rgb([232, 227, 249], [55, 44, 79]),
-            Accent => rgb([90, 57, 169], [200, 174, 255]),
-            Primary => rgb([90, 57, 169], [112, 75, 187]),
-            Rule => rgb([216, 216, 227], [62, 63, 83]),
-            Text => rgb([29, 27, 46], [241, 239, 250]),
-            Muted => rgb([90, 89, 112], [177, 178, 199]),
-            Positive => rgb([19, 114, 93], [108, 214, 178]),
-            Negative => rgb([173, 51, 68], [255, 137, 155]),
-            Nav => rgb([33, 27, 52], [23, 19, 35]),
-            NavHover => rgb([57, 46, 86], [46, 36, 68]),
-            NavSelected => rgb([81, 63, 121], [65, 48, 98]),
-            NavAccent => Color::srgb_u8(179, 158, 247),
-            NavMuted => Color::srgb_u8(188, 179, 208),
-            OnPrimary => Color::WHITE,
+            Canvas => rgb([214, 201, 173], [25, 26, 31]),
+            Panel => rgb([248, 239, 216], [39, 44, 49]),
+            Raised => rgb([222, 202, 162], [80, 66, 52]),
+            Accent => rgb([119, 44, 44], [244, 186, 123]),
+            Primary => rgb([112, 41, 45], [115, 46, 48]),
+            Rule => rgb([174, 150, 109], [99, 87, 70]),
+            Brass => rgb([144, 103, 52], [171, 137, 83]),
+            Text => rgb([46, 41, 31], [243, 232, 204]),
+            Muted => rgb([96, 85, 65], [194, 185, 159]),
+            Positive => rgb([39, 99, 76], [137, 198, 162]),
+            Negative => rgb([153, 44, 51], [242, 143, 131]),
+            Nav => rgb([34, 48, 60], [27, 37, 48]),
+            NavHover => rgb([63, 78, 87], [50, 64, 77]),
+            NavSelected => rgb([128, 47, 51], [110, 43, 49]),
+            NavAccent => Color::srgb_u8(224, 191, 128),
+            NavMuted => Color::srgb_u8(185, 185, 155),
+            OnPrimary => Color::srgb_u8(255, 245, 218),
             Crosshair => self.color(Accent).with_alpha(0.55),
             Series(chart, series) => self.series(chart, series),
             Region(heat) => {
-                rgb([228, 229, 241], [48, 49, 67]).mix(&rgb([189, 66, 82], [208, 79, 104]), heat)
+                rgb([216, 209, 176], [61, 72, 59]).mix(&rgb([155, 57, 36], [224, 134, 93]), heat)
             }
         }
     }
 
     fn series(self, chart: Chart, series: usize) -> Color {
-        let (blue, amber, pink, other_lightness) = match self {
-            Self::Light => ([35, 113, 181], [186, 99, 36], [177, 59, 122], 0.41),
-            Self::Dark => ([103, 176, 255], [240, 174, 100], [246, 148, 211], 0.67),
+        let (blue, ochre, plum, other_lightness) = match self {
+            Self::Light => ([47, 92, 126], [143, 100, 19], [113, 69, 104], 0.32),
+            Self::Dark => ([136, 185, 214], [220, 192, 104], [202, 160, 190], 0.70),
         };
         let rgb = |[red, green, blue]: [u8; 3]| Color::srgb_u8(red, green, blue);
         match (chart, series) {
             (Chart::Deaths, 0) | (Chart::Demography, 1) => self.color(Tone::Muted),
-            (Chart::Deaths, 1) | (Chart::Demography, 2) => rgb(amber),
+            (Chart::Deaths, 1) | (Chart::Demography, 2) => rgb(ochre),
             (Chart::Deaths, 2)
             | (Chart::Demography, 3)
             | (Chart::Employment | Chart::Credit, 1) => self.color(Tone::Negative),
@@ -129,9 +131,9 @@ impl Theme {
             }
             (Chart::Employment, 0) | (_, 2) => self.color(Tone::Positive),
             (_, 0) => self.color(Tone::Accent),
-            (_, 3) => rgb(amber),
-            (_, 4) => rgb(pink),
-            _ => Color::hsl((series as f32 * 137.5) % 360.0, 0.64, other_lightness),
+            (_, 3) => rgb(ochre),
+            (_, 4) => rgb(plum),
+            _ => Color::hsl((series as f32 * 137.5) % 360.0, 0.42, other_lightness),
         }
     }
 }

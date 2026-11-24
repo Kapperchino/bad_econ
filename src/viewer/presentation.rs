@@ -1,11 +1,11 @@
 use super::{
-    Chart, Dashboard, DashboardPage, Display,
+    Chart, Dashboard, DashboardPage, Display, atlas,
     graph::{self, GraphPanel, GraphRenderer, PLOT_MARGIN},
     model::{ChartRange, Menu, Period, SeriesSelection, ValueFormat},
     theme::{Theme, Tone},
     ui::{
         self, ActorSelection, ChartTab, Crosshair, CursorDate, FirmMarker, Label, Legend,
-        MapMarkers, Plot, Region, UiAction,
+        MapMarkers, Plot, UiAction,
     },
 };
 use crate::{
@@ -64,17 +64,14 @@ struct PlotLayout {
 #[derive(Clone, Copy, PartialEq)]
 struct LabelVersion {
     revision: u64,
-    theme: Theme,
     chart: Chart,
 }
 
 fn needs_refresh(
     dashboard: Option<Res<Dashboard>>,
-    theme: Option<Res<Theme>>,
     mut previous: Local<Option<LabelVersion>>,
 ) -> bool {
     let current = dashboard.map(|dashboard| LabelVersion {
-        theme: theme.as_deref().copied().unwrap_or_default(),
         revision: dashboard.data.lock().expect("dashboard lock").revision,
         chart: dashboard.chart,
     });
@@ -85,9 +82,7 @@ fn needs_refresh(
 
 fn draw(
     dashboard: Option<Res<Dashboard>>,
-    theme: Option<Res<Theme>>,
     mut labels: Query<(&Label, &mut Text)>,
-    mut regions: Query<(&Region, &mut BackgroundColor)>,
     mut tabs: Query<(&ChartTab, &mut Node)>,
 ) {
     if let Some(dashboard) = dashboard {
@@ -173,17 +168,6 @@ fn draw(
                 node.display = visibility;
             };
         });
-        let peak = s.regions.iter().copied().max().unwrap_or(1).max(1) as f32;
-        regions.iter_mut().for_each(|(region, mut color)| {
-            let heat = s.regions.get(region.0).copied().unwrap_or(0) as f32 / peak;
-            color.set_if_neq(BackgroundColor(
-                theme
-                    .as_deref()
-                    .copied()
-                    .unwrap_or_default()
-                    .color(Tone::Region(heat)),
-            ));
-        });
     }
 }
 
@@ -206,17 +190,9 @@ fn chart_changed(dashboard: Option<Res<Dashboard>>, mut previous: Local<Option<C
     changed
 }
 
-fn map_changed(
-    dashboard: Option<Res<Dashboard>>,
-    theme: Option<Res<Theme>>,
-    mut previous: Local<Option<(u64, Theme)>>,
-) -> bool {
-    let current = dashboard.map(|dashboard| {
-        (
-            dashboard.data.lock().expect("dashboard lock").map_revision,
-            theme.as_deref().copied().unwrap_or_default(),
-        )
-    });
+fn map_changed(dashboard: Option<Res<Dashboard>>, mut previous: Local<Option<u64>>) -> bool {
+    let current =
+        dashboard.map(|dashboard| dashboard.data.lock().expect("dashboard lock").map_revision);
     let changed = current != *previous;
     *previous = current;
     changed
@@ -376,13 +352,11 @@ fn paint_plots(
 
 fn draw_markers(
     dashboard: Option<Res<Dashboard>>,
-    theme: Option<Res<Theme>>,
     containers: Query<Entity, With<MapMarkers>>,
-    mut markers: Query<(Entity, &FirmMarker, &mut Node, &mut BackgroundColor)>,
+    mut markers: Query<(Entity, &FirmMarker, &mut Node, &mut ImageNode)>,
     mut commands: Commands,
 ) {
     if let (Some(dashboard), Ok(container)) = (dashboard, containers.single()) {
-        let theme = theme.as_deref().copied().unwrap_or_default();
         let display = dashboard.data.lock().expect("dashboard lock");
         let mut firms = display
             .firms
@@ -393,7 +367,7 @@ fn draw_markers(
             |value: u32| percent(value as f32 / display.map_size.max(1) as f32 * 100.0);
         markers
             .iter_mut()
-            .for_each(|(entity, marker, mut node, mut color)| {
+            .for_each(|(entity, marker, mut node, mut image)| {
                 match firms.remove(&marker.identity) {
                     Some(firm) => {
                         let left = coordinate(firm.position.x);
@@ -402,10 +376,10 @@ fn draw_markers(
                             node.left = left;
                             node.top = top;
                         }
-                        color.set_if_neq(BackgroundColor(theme.color(Tone::Series(
-                            Chart::Prices,
-                            firm.kind.saturating_sub(1) as usize,
-                        ))));
+                        let symbol = atlas::Symbol::for_site(firm.kind).image();
+                        if image.rect != symbol.rect {
+                            image.rect = symbol.rect;
+                        }
                     }
                     None => {
                         commands.entity(entity).despawn();
@@ -425,18 +399,16 @@ fn draw_markers(
                     position_type: PositionType::Absolute,
                     left: coordinate(firm.position.x),
                     top: coordinate(firm.position.y),
-                    width: px(9),
-                    height: px(9),
+                    width: px(17),
+                    height: px(17),
                     border: UiRect::all(px(1)),
                     border_radius: BorderRadius::MAX,
                     ..default()
                 },
                 UiTransform::from_translation(Val2::percent(-50, -50)),
-                BackgroundColor(theme.color(Tone::Series(
-                    Chart::Prices,
-                    firm.kind.saturating_sub(1) as usize,
-                ))),
-                BorderColor::all(theme.color(Tone::Panel)),
+                atlas::Symbol::for_site(firm.kind).image(),
+                BackgroundColor::default(),
+                BorderColor::default(),
             ));
         });
     }
@@ -703,10 +675,10 @@ fn inspection_text(display: &Display) -> String {
                         format!("\nLandlord business | homes {} | rental income {}", business.homes, business.income)
                     });
                     format!(
-                        "Actor {} | day {} | kind {}\n{} | {} | {}°C\nCash {} | transit {}\nRent paid {} | owed {}\nFood {:?} | other stock {}\n{}{}{}{}{}{}",
+                        "Actor {} | day {} | {}\n{} | {} | {}°C\nCash {} | transit {}\nRent paid {} | owed {}\nFood {:?} | other stock {}\n{}{}{}{}{}{}",
                         i.actor.identity,
                         i.day,
-                        i.actor.kind,
+                        Good::from_index(i.actor.kind).map_or_else(|_| "Household".into(), |good| good.to_string()),
                         i.weather.date,
                         i.weather.season,
                         i.weather.temperature_celsius,

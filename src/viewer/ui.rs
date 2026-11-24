@@ -1,8 +1,10 @@
 use super::{
-    Dashboard, DashboardPage, Speed,
+    Dashboard, DashboardPage, Speed, atlas,
+    cabinet::{self, Register},
     companies::{self, Direction, Ranking},
     feedback,
     model::{Chart, Menu, Period, SeriesSelection},
+    railway,
     theme::{Appearance, AppearanceSettings, Theme, Tone},
 };
 use bevy::{
@@ -17,17 +19,24 @@ use bevy::{
 };
 
 const BODY_FONT: Handle<Font> = uuid_handle!("a458633a-3eb8-4f44-8b21-1c00e4136524");
+const DISPLAY_FONT: Handle<Font> = uuid_handle!("26be5744-0ce8-427a-a4f0-e6459a4bc523");
 pub(super) struct UiPlugin;
 impl Plugin for UiPlugin {
     fn build(&self, app: &mut App) {
         app.add_message::<UiAction>()
+            .init_resource::<atlas::Layer>()
+            .add_systems(Update, atlas::select.before(super::controls))
             .add_observer(activate)
+            .add_systems(PostUpdate, style_buttons)
             .add_systems(Startup, setup)
             .add_systems(
                 Update,
                 (
-                    style_buttons,
+                    atlas::fit,
+                    railway::indicate,
                     style_theme_switch,
+                    cabinet::illustrate,
+                    atlas::draw,
                     style_markers,
                     style_workspace,
                     scroll,
@@ -51,6 +60,7 @@ pub(super) enum ActorSelection {
 #[derive(Component, Message, Clone, Copy, Debug, PartialEq, Eq)]
 pub(super) enum UiAction {
     Menu(Menu),
+    Atlas(atlas::Layer),
     Companies,
     Rank(Ranking),
     CompanyPage(Direction),
@@ -74,6 +84,10 @@ pub(super) enum UiAction {
 impl UiAction {
     pub fn hint(self) -> String {
         match self {
+            Self::Atlas(atlas::Layer::Sites) => {
+                "Open-site concentration, from sparse to dense".into()
+            }
+            Self::Atlas(atlas::Layer::Shortage) => "Unmet bread demand by survey square".into(),
             Self::Companies => "Compare company sizes and daily cash profits".into(),
             Self::Rank(order) => order.label().into(),
             Self::CompanyPage(direction) => direction.label().into(),
@@ -171,8 +185,6 @@ pub(super) struct FirmMarker {
     pub identity: u64,
 }
 #[derive(Component)]
-pub(super) struct Region(pub usize);
-#[derive(Component)]
 pub(super) struct ChartTab(pub Chart);
 
 fn activate(event: On<Activate>, buttons: Query<&UiAction>, mut actions: MessageWriter<UiAction>) {
@@ -182,10 +194,18 @@ fn activate(event: On<Activate>, buttons: Query<&UiAction>, mut actions: Message
 }
 
 pub(super) fn text(value: impl Into<String>, size: f32, tone: Tone) -> impl Bundle {
+    lettering(value, size, tone, BODY_FONT)
+}
+
+pub(super) fn heading(value: impl Into<String>, size: f32, tone: Tone) -> impl Bundle {
+    lettering(value, size, tone, DISPLAY_FONT)
+}
+
+fn lettering(value: impl Into<String>, size: f32, tone: Tone, font: Handle<Font>) -> impl Bundle {
     (
         Text::new(value),
         TextFont {
-            font: BODY_FONT.into(),
+            font: font.into(),
             font_size: FontSize::Px(size),
             ..default()
         },
@@ -212,14 +232,13 @@ pub(super) fn row(gap: f32) -> Node {
 }
 
 pub(super) fn button(parent: &mut ChildSpawnerCommands, action: UiAction, caption: &str) -> Entity {
-    button_with(parent, action, caption, Tone::Text, |_| {})
+    button_with(parent, action, text(caption, 12.0, Tone::Text), |_| {})
 }
 
 fn button_with(
     parent: &mut ChildSpawnerCommands,
     action: UiAction,
-    caption: &str,
-    tone: Tone,
+    caption: impl Bundle,
     content: impl FnOnce(&mut ChildSpawnerCommands),
 ) -> Entity {
     let mut button = parent.spawn((
@@ -230,23 +249,24 @@ fn button_with(
             min_height: px(29),
             column_gap: px(6),
             padding: UiRect::axes(px(9), px(5)),
-            border: UiRect::all(px(1)),
-            border_radius: BorderRadius::all(px(5)),
+            border_radius: BorderRadius::all(px(2)),
+            border: UiRect {
+                bottom: px(2),
+                ..UiRect::all(px(1))
+            },
             align_items: AlignItems::Center,
             justify_content: JustifyContent::Center,
             flex_shrink: 0.0,
             ..default()
         },
+        cabinet::bevel(),
         BackgroundColor(Theme::Light.color(Tone::Panel)),
         BorderColor::all(Theme::Light.color(Tone::Rule)),
     ));
     let entity = button.id();
     button.with_children(|parent| {
         content(parent);
-        let mut label = parent.spawn(text(caption, 12.0, tone));
-        if let UiAction::ToggleRun = action {
-            label.insert(Label::ToggleRun);
-        }
+        parent.spawn(caption);
     });
     entity
 }
@@ -260,8 +280,7 @@ pub(super) fn series_button(
     button_with(
         parent,
         UiAction::FocusSeries(index),
-        name,
-        Tone::Text,
+        text(name, 12.0, Tone::Text),
         |parent| swatch(parent, tone),
     );
 }
@@ -280,16 +299,28 @@ pub(super) fn swatch(parent: &mut ChildSpawnerCommands, tone: Tone) {
     ));
 }
 
-fn nav_button(parent: &mut ChildSpawnerCommands, action: UiAction, caption: &str) {
-    let entity = button_with(parent, action, caption, Tone::OnPrimary, |_| {});
+fn nav_button(parent: &mut ChildSpawnerCommands, register: Register) {
+    let entity = button_with(
+        parent,
+        register.action(),
+        heading(register.label(), 15.0, Tone::OnPrimary),
+        |tab| register.seal(tab),
+    );
     parent.commands().entity(entity).insert((
         NavButton,
         Node {
-            min_height: px(35),
-            padding: UiRect::horizontal(px(12)),
+            height: percent(100),
+            flex_grow: 1.0,
+            flex_basis: px(0),
+            min_width: px(0),
+            column_gap: px(7),
             align_items: AlignItems::Center,
-            border: UiRect::left(px(3)),
-            border_radius: BorderRadius::all(px(5)),
+            justify_content: JustifyContent::Center,
+            border: UiRect {
+                left: px(1),
+                bottom: px(3),
+                ..default()
+            },
             ..default()
         },
     ));
@@ -299,65 +330,65 @@ fn label(parent: &mut ChildSpawnerCommands, kind: Label, size: f32, tone: Tone) 
     parent.spawn((kind, text("", size, tone)));
 }
 
-fn card(gap: f32) -> Node {
+pub(super) fn card(gap: f32) -> Node {
     Node {
         flex_shrink: 0.0,
         padding: UiRect::all(px(13)),
         border: UiRect::all(px(1)),
-        border_radius: BorderRadius::all(px(8)),
         ..column(gap)
     }
 }
 
-fn setup(mut commands: Commands, mut fonts: ResMut<Assets<Font>>) {
+fn setup(
+    mut commands: Commands,
+    mut fonts: ResMut<Assets<Font>>,
+    mut images: ResMut<Assets<Image>>,
+) {
+    fonts
+        .insert(
+            DISPLAY_FONT.id(),
+            Font::from_bytes(include_bytes!("../../assets/fonts/LibreBaskerville.ttf").to_vec()),
+        )
+        .expect("display font handle");
     fonts
         .insert(
             BODY_FONT.id(),
             Font::from_bytes(include_bytes!("../../assets/fonts/Lato-Regular.ttf").to_vec()),
         )
         .expect("body font handle");
+    cabinet::load(&mut images);
     commands
         .spawn((
             Node {
                 width: percent(100),
                 height: percent(100),
+                display: bevy::ui::Display::Grid,
+                grid_template_columns: vec![GridTrack::flex(1.0)],
+                grid_template_rows: vec![
+                    GridTrack::px(74.0),
+                    GridTrack::px(46.0),
+                    GridTrack::flex(1.0),
+                    GridTrack::px(36.0),
+                ],
                 ..default()
             },
             Tone::Canvas.surface(),
         ))
         .with_children(|root| {
             navigation(root);
+            run_toolbar(root);
             root.spawn(Node {
-                display: bevy::ui::Display::Grid,
-                grid_template_columns: vec![GridTrack::flex(1.0)],
-                grid_template_rows: vec![
-                    GridTrack::px(58.0),
-                    GridTrack::flex(1.0),
-                    GridTrack::px(40.0),
-                ],
-                height: percent(100),
-                flex_grow: 1.0,
-                flex_basis: px(0),
                 min_width: px(0),
                 min_height: px(0),
+                overflow: Overflow::clip(),
                 ..default()
             })
-            .with_children(|main| {
-                run_toolbar(main);
-                main.spawn(Node {
-                    flex_grow: 1.0,
-                    flex_basis: px(0),
-                    min_height: px(0),
-                    overflow: Overflow::clip(),
-                    ..default()
-                })
-                .with_children(|workspace| {
-                    report(workspace);
-                    companies::panel(workspace);
-                    context(workspace);
-                });
-                footer(main);
+            .with_children(|workspace| {
+                context(workspace);
+                report(workspace);
+                companies::panel(workspace);
             });
+            footer(root);
         });
 }
 
@@ -365,60 +396,39 @@ fn navigation(parent: &mut ChildSpawnerCommands) {
     parent
         .spawn((
             Node {
-                width: px(162),
-                flex_shrink: 0.0,
-                padding: UiRect::axes(px(11), px(20)),
-                ..column(5.0)
+                border: UiRect::vertical(px(2)),
+                align_items: AlignItems::Stretch,
+                ..default()
             },
             Tone::Nav.surface(),
+            Tone::Brass.outline(),
         ))
         .with_children(|nav| {
-            nav.spawn(Node {
-                margin: UiRect::bottom(px(24)),
-                ..row(8.0)
-            })
+            nav.spawn((
+                Node {
+                    width: percent(23),
+                    max_width: px(355),
+                    flex_shrink: 0.0,
+                    padding: UiRect::horizontal(px(18)),
+                    justify_content: JustifyContent::Center,
+                    overflow: Overflow::clip(),
+                    ..column(2.0)
+                },
+                Tone::Nav.surface(),
+                cabinet::bevel(),
+            ))
             .with_children(|brand| {
-                brand
-                    .spawn((
-                        Node {
-                            width: px(28),
-                            height: px(28),
-                            align_items: AlignItems::Center,
-                            justify_content: JustifyContent::Center,
-                            border_radius: BorderRadius::all(px(7)),
-                            ..default()
-                        },
-                        Tone::Primary.surface(),
-                    ))
-                    .with_children(|mark| {
-                        mark.spawn(text("S", 17.0, Tone::OnPrimary));
-                    });
-                brand.spawn(text("Spatial Economy", 14.0, Tone::OnPrimary));
+                cabinet::imprint(brand);
+                brand.spawn(heading("Spatial Economy", 24.0, Tone::OnPrimary));
+                label(brand, Label::Date, 12.0, Tone::NavAccent);
             });
-            nav.spawn((
-                Node {
-                    margin: UiRect::axes(px(9), px(5)),
-                    ..default()
-                },
-                text("DASHBOARDS", 11.0, Tone::NavMuted),
-            ));
-            for menu in Menu::ALL {
-                nav_button(nav, UiAction::Menu(menu), menu.label());
+            for register in Menu::ALL
+                .into_iter()
+                .map(Register::Section)
+                .chain([Register::Companies])
+            {
+                nav_button(nav, register);
             }
-            nav_button(nav, UiAction::Companies, "Companies");
-            nav.spawn(Node {
-                flex_grow: 1.0,
-                ..default()
-            });
-            nav.spawn((
-                Node {
-                    margin: UiRect::axes(px(9), px(5)),
-                    ..default()
-                },
-                text("SIMULATION", 11.0, Tone::NavMuted),
-            ));
-            nav_button(nav, UiAction::Compare, "Compare seed");
-            nav_button(nav, UiAction::Reset, "Reset run");
         });
 }
 
@@ -426,48 +436,45 @@ fn run_toolbar(parent: &mut ChildSpawnerCommands) {
     parent
         .spawn((
             Node {
-                height: px(58),
+                height: px(46),
                 flex_shrink: 0.0,
-                padding: UiRect::axes(px(18), px(10)),
+                padding: UiRect::axes(px(16), px(3)),
                 border: UiRect::bottom(px(1)),
                 justify_content: JustifyContent::SpaceBetween,
                 ..row(16.0)
             },
-            Tone::Panel.surface(),
-            Tone::Rule.outline(),
+            Tone::Nav.surface(),
+            Tone::Brass.outline(),
         ))
         .with_children(|top| {
-            top.spawn(row(12.0)).with_children(|context| {
+            top.spawn(row(10.0)).with_children(|context| {
+                railway::locomotive(context);
                 context
                     .spawn((
                         Node {
                             padding: UiRect::axes(px(8), px(4)),
-                            border_radius: BorderRadius::all(px(5)),
+                            border: UiRect::all(px(1)),
                             ..row(0.0)
                         },
                         Tone::Raised.surface(),
+                        Tone::Brass.outline(),
                     ))
                     .with_children(|status| label(status, Label::Status, 12.0, Tone::Accent));
-                label(context, Label::Date, 13.0, Tone::Text);
-                label(context, Label::Seed, 12.0, Tone::Muted);
+                label(context, Label::Seed, 12.0, Tone::NavMuted);
+                button(context, UiAction::Compare, "Compare seed");
+                button(context, UiAction::Reset, "Reset run");
             });
             top.spawn(row(5.0)).with_children(|controls| {
-                controls.spawn((
-                    Node {
-                        margin: UiRect::right(px(4)),
-                        ..default()
-                    },
-                    text("Playback", 12.0, Tone::Muted),
-                ));
                 let run = button_with(
                     controls,
                     UiAction::ToggleRun,
-                    "Resume",
-                    Tone::OnPrimary,
+                    (Label::ToggleRun, text("Resume", 12.0, Tone::OnPrimary)),
                     |_| {},
                 );
                 controls.commands().entity(run).insert(PrimaryButton);
                 button(controls, UiAction::Step, "+1 day");
+                railway::governor(controls);
+                controls.spawn(text("Speed", 12.0, Tone::NavMuted));
                 button(controls, UiAction::Speed(Speed::Slow), "0.5 d/s");
                 button(controls, UiAction::Speed(Speed::Normal), "2 d/s");
                 button(controls, UiAction::Speed(Speed::Fast), "Max");
@@ -480,7 +487,7 @@ fn footer(parent: &mut ChildSpawnerCommands) {
         .spawn((
             feedback::Banner,
             Node {
-                height: px(40),
+                height: px(36),
                 flex_shrink: 0.0,
                 padding: UiRect::axes(px(16), px(5)),
                 border: UiRect::top(px(1)),
@@ -536,7 +543,7 @@ fn dark_mode_switch(parent: &mut ChildSpawnerCommands) {
                         height: px(19),
                         padding: UiRect::all(px(2)),
                         border: UiRect::all(px(1)),
-                        border_radius: BorderRadius::MAX,
+                        border_radius: BorderRadius::all(px(2)),
                         ..row(0.0)
                     },
                     BackgroundColor::default(),
@@ -546,12 +553,13 @@ fn dark_mode_switch(parent: &mut ChildSpawnerCommands) {
                 .with_children(|track| {
                     track.spawn((
                         Node {
-                            width: px(13),
+                            width: px(11),
                             height: px(13),
-                            border_radius: BorderRadius::MAX,
+                            border: UiRect::horizontal(px(2)),
                             ..default()
                         },
-                        Tone::OnPrimary.surface(),
+                        Tone::NavAccent.surface(),
+                        Tone::Brass.outline(),
                         Pickable::IGNORE,
                     ));
                 });
@@ -603,9 +611,9 @@ pub(super) fn report_panel() -> Node {
         flex_basis: px(0),
         min_width: px(0),
         min_height: px(0),
-        padding: UiRect::all(px(18)),
+        padding: UiRect::all(px(12)),
         overflow: Overflow::scroll_y(),
-        ..column(14.0)
+        ..column(10.0)
     }
 }
 
@@ -619,19 +627,23 @@ fn report(parent: &mut ChildSpawnerCommands) {
             RelativeCursorPosition::default(),
         ))
         .with_children(|report| {
+            cabinet::masthead(report, |title| {
+                title.spawn((Label::Title, heading("", 36.0, Tone::OnPrimary)));
+                label(title, Label::Subtitle, 14.0, Tone::OnPrimary);
+            });
             report
                 .spawn(Node {
                     justify_content: JustifyContent::SpaceBetween,
-                    align_items: AlignItems::End,
                     flex_wrap: FlexWrap::Wrap,
-                    row_gap: px(8),
+                    row_gap: px(5),
                     flex_shrink: 0.0,
-                    ..row(12.0)
+                    ..row(8.0)
                 })
                 .with_children(|header| {
-                    header.spawn(column(4.0)).with_children(|heading| {
-                        label(heading, Label::Title, 30.0, Tone::Text);
-                        label(heading, Label::Subtitle, 13.0, Tone::Muted);
+                    header.spawn(column(2.0)).with_children(|status| {
+                        label(status, Label::Comparison, 12.0, Tone::Muted);
+                        status.spawn((CursorDate, text("", 12.0, Tone::Accent)));
+                        label(status, Label::Error, 13.0, Tone::Negative);
                     });
                     header.spawn(row(4.0)).with_children(|periods| {
                         periods.spawn((
@@ -647,18 +659,6 @@ fn report(parent: &mut ChildSpawnerCommands) {
                     });
                 });
             report
-                .spawn(Node {
-                    justify_content: JustifyContent::SpaceBetween,
-                    flex_wrap: FlexWrap::Wrap,
-                    flex_shrink: 0.0,
-                    ..row(6.0)
-                })
-                .with_children(|status| {
-                    label(status, Label::Comparison, 12.0, Tone::Muted);
-                    status.spawn((CursorDate, text("", 12.0, Tone::Accent)));
-                });
-            label(report, Label::Error, 13.0, Tone::Negative);
-            report
                 .spawn((WorkspaceSection::Grid, column(14.0)))
                 .with_children(|metrics| {
                     metric_values(metrics);
@@ -666,8 +666,8 @@ fn report(parent: &mut ChildSpawnerCommands) {
                         .spawn(Node {
                             display: bevy::ui::Display::Grid,
                             grid_template_columns: vec![GridTrack::flex(1.0), GridTrack::flex(1.0)],
-                            row_gap: px(12),
-                            column_gap: px(12),
+                            row_gap: px(0),
+                            column_gap: px(0),
                             ..default()
                         })
                         .with_children(|cards| {
@@ -678,7 +678,7 @@ fn report(parent: &mut ChildSpawnerCommands) {
                     metrics
                         .spawn((card(5.0), Tone::Panel.surface(), Tone::Rule.outline()))
                         .with_children(|details| {
-                            details.spawn(text("Snapshot details", 15.0, Tone::Text));
+                            details.spawn(heading("Snapshot details", 15.0, Tone::Text));
                             label(details, Label::Summary, 13.0, Tone::Muted);
                         });
                 });
@@ -688,19 +688,30 @@ fn report(parent: &mut ChildSpawnerCommands) {
 
 fn metric_values(parent: &mut ChildSpawnerCommands) {
     parent
-        .spawn(Node {
-            display: bevy::ui::Display::Grid,
-            grid_template_columns: vec![GridTrack::flex(1.0); 4],
-            column_gap: px(12),
-            ..default()
-        })
+        .spawn((
+            Node {
+                display: bevy::ui::Display::Grid,
+                grid_template_columns: vec![GridTrack::flex(1.0); 4],
+                column_gap: px(1),
+                border: UiRect::vertical(px(2)),
+                ..default()
+            },
+            Tone::Rule.surface(),
+            Tone::Brass.outline(),
+        ))
         .with_children(|cards| {
             for index in 0..4 {
                 cards
-                    .spawn((card(5.0), Tone::Panel.surface(), Tone::Rule.outline()))
+                    .spawn((
+                        Node {
+                            border: UiRect::ZERO,
+                            ..card(4.0)
+                        },
+                        Tone::Panel.surface(),
+                    ))
                     .with_children(|metric| {
                         label(metric, Label::MetricName(index), 12.0, Tone::Muted);
-                        label(metric, Label::MetricValue(index), 25.0, Tone::Text);
+                        metric.spawn((Label::MetricValue(index), heading("", 25.0, Tone::Text)));
                         label(metric, Label::MetricChange(index), 11.0, Tone::Muted);
                     });
             }
@@ -724,9 +735,9 @@ fn metric_card(parent: &mut ChildSpawnerCommands, chart: Chart) {
                 justify_content: JustifyContent::SpaceBetween,
                 ..row(8.0)
             })
-            .with_children(|heading| {
-                heading.spawn(text(chart.label(), 16.0, Tone::Text));
-                heading.spawn(text("Open ›", 11.0, Tone::Accent));
+            .with_children(|title| {
+                title.spawn(heading(chart.label(), 16.0, Tone::Text));
+                title.spawn(text("Open ›", 11.0, Tone::Accent));
             });
             card.spawn(text(chart.unit(), 11.0, Tone::Muted));
             plot(
@@ -788,10 +799,10 @@ fn chart_detail(parent: &mut ChildSpawnerCommands) {
             detail
                 .spawn((card(10.0), Tone::Panel.surface(), Tone::Rule.outline()))
                 .with_children(|card| {
-                    label(card, Label::ChartTitle, 21.0, Tone::Text);
+                    card.spawn((Label::ChartTitle, heading("", 21.0, Tone::Text)));
                     label(card, Label::ChartDescription, 12.0, Tone::Muted);
                     card.spawn(Node {
-                        height: px(294),
+                        height: px(242),
                         align_items: AlignItems::Stretch,
                         ..row(12.0)
                     })
@@ -820,7 +831,7 @@ fn chart_detail(parent: &mut ChildSpawnerCommands) {
                                 RelativeCursorPosition::default(),
                             ))
                             .with_children(|readout| {
-                                readout.spawn(text("Observation", 14.0, Tone::Text));
+                                readout.spawn(heading("Observation", 14.0, Tone::Text));
                                 readout.spawn((ChartReadout, text("", 12.0, Tone::Muted)));
                             });
                     });
@@ -851,12 +862,18 @@ fn context(parent: &mut ChildSpawnerCommands) {
     parent
         .spawn((
             Node {
-                width: px(298),
+                width: percent(32),
+                max_width: px(505),
+                min_width: px(360),
                 min_height: px(0),
                 flex_shrink: 0.0,
-                padding: UiRect::all(px(14)),
-                border: UiRect::left(px(1)),
-                ..column(12.0)
+                padding: UiRect::all(px(10)),
+                border: UiRect::right(px(3)),
+                display: bevy::ui::Display::Grid,
+                grid_template_columns: vec![GridTrack::flex(1.0)],
+                grid_template_rows: vec![GridTrack::flex(1.0), GridTrack::percent(29.0)],
+                row_gap: px(10),
+                ..default()
             },
             Tone::Rule.outline(),
             Tone::Canvas.surface(),
@@ -867,75 +884,52 @@ fn context(parent: &mut ChildSpawnerCommands) {
         });
 }
 
+fn ruled_heading(parent: &mut ChildSpawnerCommands, caption: &str) {
+    parent.spawn(row(8.0)).with_children(|title| {
+        title.spawn(heading(caption, 16.0, Tone::Text));
+        title.spawn((
+            Node {
+                height: px(4),
+                flex_grow: 1.0,
+                border: UiRect::vertical(px(1)),
+                ..default()
+            },
+            Tone::Brass.outline(),
+            Pickable::IGNORE,
+        ));
+    });
+}
+
 fn map(parent: &mut ChildSpawnerCommands) {
     parent
-        .spawn((card(8.0), Tone::Panel.surface(), Tone::Rule.outline()))
-        .with_children(|map| {
-            map.spawn(text("Regional map", 16.0, Tone::Text));
-            map.spawn((
-                Node {
-                    width: percent(100),
-                    aspect_ratio: Some(1.0),
-                    flex_shrink: 0.0,
-                    border: UiRect::all(px(1)),
-                    padding: UiRect::all(px(5)),
-                    ..default()
-                },
-                Tone::Canvas.surface(),
-                Tone::Rule.outline(),
-            ))
-            .with_children(|frame| {
-                frame
+        .spawn((
+            Node {
+                min_height: px(0),
+                ..card(7.0)
+            },
+            Tone::Panel.surface(),
+            Tone::Brass.outline(),
+        ))
+        .with_children(|sheet| {
+            sheet.spawn(row(8.0)).with_children(|title| {
+                atlas::Symbol::Compass.stamp(title, 50.0);
+                title
                     .spawn(Node {
-                        width: percent(100),
-                        height: percent(100),
-                        ..default()
+                        flex_grow: 1.0,
+                        ..column(4.0)
                     })
-                    .with_children(|grid| {
-                        for index in 0..256 {
-                            grid.spawn((
-                                Region(index),
-                                Node {
-                                    position_type: PositionType::Absolute,
-                                    left: percent((index % 16) as f32 * 6.25),
-                                    top: percent((index / 16) as f32 * 6.25),
-                                    width: percent(6.25),
-                                    height: percent(6.25),
-                                    border: UiRect::all(px(0.5)),
-                                    ..default()
-                                },
-                                BackgroundColor(Theme::Light.color(Tone::Region(0.0))),
-                                Tone::Panel.outline(),
-                                Pickable::IGNORE,
-                            ));
-                        }
-                        grid.spawn((
-                            MapMarkers,
-                            Node {
-                                width: percent(100),
-                                height: percent(100),
-                                position_type: PositionType::Absolute,
-                                ..default()
-                            },
-                            Pickable::IGNORE,
-                        ));
+                    .with_children(|heading| {
+                        ruled_heading(heading, "Regional survey");
+                        heading.spawn(row(4.0)).with_children(|layers| {
+                            for layer in [atlas::Layer::Sites, atlas::Layer::Shortage] {
+                                button(layers, UiAction::Atlas(layer), layer.label());
+                            }
+                        });
                     });
             });
-            map.spawn(row(5.0)).with_children(|legend| {
-                legend.spawn(text("Bread shortage", 11.0, Tone::Muted));
-                for index in 0..8 {
-                    legend.spawn((
-                        Node {
-                            height: px(7),
-                            flex_grow: 1.0,
-                            ..default()
-                        },
-                        Tone::Region(index as f32 / 7.0).surface(),
-                    ));
-                }
-                legend.spawn(text("High", 11.0, Tone::Muted));
-            });
-            label(map, Label::MapSummary, 11.0, Tone::Muted);
+            atlas::sheet(sheet);
+            atlas::key(sheet);
+            label(sheet, Label::MapSummary, 12.0, Tone::Muted);
         });
 }
 
@@ -952,7 +946,7 @@ fn inspector(parent: &mut ChildSpawnerCommands) {
             Tone::Rule.outline(),
         ))
         .with_children(|panel| {
-            panel.spawn(text("Actor inspector", 16.0, Tone::Text));
+            ruled_heading(panel, "Inspection docket");
             panel.spawn(row(4.0)).with_children(|controls| {
                 for (selection, caption) in [
                     (ActorSelection::Household, "Account"),
@@ -1021,12 +1015,14 @@ struct ButtonAppearance {
 fn style_buttons(
     dashboard: Option<Res<Dashboard>>,
     theme: Res<Theme>,
+    layer: Res<atlas::Layer>,
     mut buttons: Query<ButtonAppearance, Without<FirmMarker>>,
 ) {
     if let Some(dashboard) = dashboard {
         let display = dashboard.data.lock().expect("dashboard lock");
         buttons.iter_mut().for_each(|mut button| {
             let selected = match button.action {
+                UiAction::Atlas(selection) => *selection == *layer,
                 UiAction::Menu(menu) => {
                     dashboard.page.company_page().is_none() && *menu == dashboard.chart.menu()
                 }
@@ -1051,10 +1047,10 @@ fn style_buttons(
                 button.hovered.get(),
             ) {
                 (true, _, _, _, true, _) => (Tone::NavSelected, Tone::NavAccent),
-                (true, _, _, _, _, true) => (Tone::NavHover, Tone::NavHover),
-                (true, _, _, _, _, _) => (Tone::Nav, Tone::Nav),
+                (true, _, _, _, _, true) => (Tone::NavHover, Tone::Brass),
+                (true, _, _, _, _, _) => (Tone::Nav, Tone::Brass),
                 (_, true, _, _, _, true) => (Tone::NavSelected, Tone::NavSelected),
-                (_, true, ..) => (Tone::Primary, Tone::Primary),
+                (_, true, ..) => (Tone::Primary, Tone::Brass),
                 (_, _, true, _, _, true) => (Tone::Panel, Tone::Accent),
                 (_, _, _, true, _, _) => (Tone::Raised, Tone::Accent),
                 (_, _, _, _, true, _) => (Tone::Raised, Tone::Accent),
@@ -1124,21 +1120,25 @@ fn reset_report_scroll(
 fn style_markers(
     dashboard: Option<Res<Dashboard>>,
     theme: Res<Theme>,
-    mut markers: Query<(&FirmMarker, &Hovered, &mut BorderColor, &mut Node)>,
+    mut markers: Query<(
+        &FirmMarker,
+        &Hovered,
+        &mut BorderColor,
+        &mut BackgroundColor,
+    )>,
 ) {
     if let Some(dashboard) = dashboard {
         markers
             .iter_mut()
-            .for_each(|(marker, hovered, mut border, mut node)| {
-                let (color, width) = match (marker.identity == dashboard.selected, hovered.get()) {
-                    (true, _) | (_, true) => (Tone::Text, 2.0),
-                    _ => (Tone::Panel, 1.0),
+            .for_each(|(marker, hovered, mut border, mut background)| {
+                let (rim, paper) = match (marker.identity == dashboard.selected, hovered.get()) {
+                    (true, _) | (_, true) => {
+                        (theme.color(Tone::Primary), theme.color(Tone::NavAccent))
+                    }
+                    _ => (Color::NONE, Color::NONE),
                 };
-                border.set_if_neq(BorderColor::all(theme.color(color)));
-                let thickness = UiRect::all(px(width));
-                if node.border != thickness {
-                    node.border = thickness;
-                }
+                border.set_if_neq(BorderColor::all(rim));
+                background.set_if_neq(BackgroundColor(paper));
             });
     }
 }

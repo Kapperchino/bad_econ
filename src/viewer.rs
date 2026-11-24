@@ -1,9 +1,12 @@
+mod atlas;
+mod cabinet;
 mod companies;
 mod feedback;
 mod graph;
 mod model;
 mod pacing;
 mod presentation;
+mod railway;
 mod theme;
 mod ui;
 mod verification;
@@ -383,7 +386,10 @@ fn controls(
                         .map(Control::Inspect)
                     })
                 }
-                UiAction::ToggleDarkMode | UiAction::Sound | UiAction::Motion => None,
+                UiAction::Atlas(_)
+                | UiAction::ToggleDarkMode
+                | UiAction::Sound
+                | UiAction::Motion => None,
             };
             if let Some(control) = control {
                 let _ = dashboard.sender.send(control);

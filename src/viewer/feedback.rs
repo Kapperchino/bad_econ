@@ -50,11 +50,11 @@ impl Cue {
         }
     }
 
-    fn color(self) -> Color {
+    fn tone(self) -> Tone {
         match self {
-            Self::Error => Color::srgb(0.95, 0.35, 0.30),
-            Self::Paused | Self::Preferences => Color::srgb(0.95, 0.73, 0.25),
-            _ => Color::srgb(0.45, 0.90, 0.65),
+            Self::Error => Tone::Negative,
+            Self::Paused | Self::Preferences => Tone::Brass,
+            _ => Tone::Positive,
         }
     }
 }
@@ -266,7 +266,7 @@ fn animate(
     let flash = feedback.flash();
     let color = theme
         .color(Tone::Panel)
-        .mix(&cue.color(), 0.04 + flash * 0.20);
+        .mix(&theme.color(cue.tone()), 0.04 + flash * 0.20);
     banners
         .iter_mut()
         .for_each(|mut banner| match banner.0 == color {

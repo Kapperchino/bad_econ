@@ -1,6 +1,6 @@
 use super::{
     ActorSelection, Chart, Cue, Dashboard, DashboardPage, DisplayState, Launch, Period,
-    SeriesSelection, Speed, UiAction, companies, feedback, model, presentation,
+    SeriesSelection, Speed, UiAction, atlas, companies, feedback, model, presentation,
     theme::{Appearance, AppearanceSettings, Surface, Theme, Tone},
     ui,
 };
@@ -74,6 +74,7 @@ enum VerificationState {
     AwaitComparison,
     AwaitFirmInspection,
     AwaitMapInspection(u64),
+    AwaitAtlas(atlas::Layer),
     AwaitSpeed(RetainedPresentation),
     AwaitPrevious {
         identity: u64,
@@ -126,6 +127,7 @@ struct VerificationPresentation<'w, 's> {
     windows: Query<'w, 's, (Entity, &'static mut Window), With<PrimaryWindow>>,
     theme: Res<'w, Theme>,
     appearance: Res<'w, AppearanceSettings>,
+    atlas: Res<'w, atlas::Layer>,
 }
 impl VerificationPresentation<'_, '_> {
     fn retained(&self) -> RetainedPresentation {
@@ -306,8 +308,26 @@ fn verify(
                             .as_ref()
                             .is_some_and(|record| record.actor.identity == identity) =>
                     {
-                        verification.click = VerificationClick::Move(UiAction::Speed(Speed::Slow));
-                        VerificationState::AwaitSpeed(presentation.retained())
+                        verification.click =
+                            VerificationClick::Move(UiAction::Atlas(atlas::Layer::Shortage));
+                        VerificationState::AwaitAtlas(atlas::Layer::Shortage)
+                    }
+                    VerificationState::AwaitAtlas(layer)
+                        if *presentation.atlas == layer
+                            && matches!(verification.click, VerificationClick::Idle) =>
+                    {
+                        match layer {
+                            atlas::Layer::Shortage => {
+                                verification.click =
+                                    VerificationClick::Move(UiAction::Atlas(atlas::Layer::Sites));
+                                VerificationState::AwaitAtlas(atlas::Layer::Sites)
+                            }
+                            atlas::Layer::Sites => {
+                                verification.click =
+                                    VerificationClick::Move(UiAction::Speed(Speed::Slow));
+                                VerificationState::AwaitSpeed(presentation.retained())
+                            }
+                        }
                     }
                     VerificationState::AwaitSpeed(retained)
                         if display.speed == Speed::Slow
@@ -755,7 +775,7 @@ fn capture_light_frame(
     appearance.verify(Theme::Light);
     verification.capture(&captured.image, "light");
     eprintln!(
-        "viewer interaction and layout verification passed: separate rendering and simulation queues, UI pointer clicks, reset/step/comparison feedback, audited days, household and firm inspection, refreshed inspection, company rankings, five dashboard grids, all 29 metric detail views, synchronized hover, four shared history periods, series focus, retained GPU chart on speed and inspection changes, previous/next navigation, footer controls, compact window, system appearance and manual overrides"
+        "viewer interaction and layout verification passed: separate rendering and simulation queues, UI pointer clicks, reset/step/comparison feedback, audited days, household and firm inspection, refreshed inspection, company rankings, both atlas layers, five dashboard grids, all 29 metric detail views, synchronized hover, four shared history periods, series focus, retained GPU chart on speed and inspection changes, previous/next navigation, footer controls, compact window, system appearance and manual overrides"
     );
     match &verification.capture_error {
         None => {

@@ -1,5 +1,5 @@
 use super::{
-    Dashboard,
+    Dashboard, cabinet,
     theme::Tone,
     ui::{self, ActorSelection, UiAction},
 };
@@ -99,8 +99,10 @@ pub(super) fn panel(parent: &mut ChildSpawnerCommands) {
         Node { display: bevy::ui::Display::None, ..ui::report_panel() },
         ScrollPosition::default(), bevy::ui::RelativeCursorPosition::default(),
     )).with_children(|panel| {
-        panel.spawn(ui::text("Companies", 30.0, Tone::Text));
-        panel.spawn(ui::text("Capacity counts worker places across open sites. Daily cash profit is measured before owner payouts and acquisitions.", 14.0, Tone::Muted));
+        cabinet::masthead(panel, |title| {
+            title.spawn(ui::heading("Companies", 36.0, Tone::OnPrimary));
+            title.spawn(ui::text("Capacity counts worker places across open sites. Daily cash profit is measured before owner payouts and acquisitions.", 13.0, Tone::OnPrimary));
+        });
         panel.spawn(Node { flex_wrap: FlexWrap::Wrap, row_gap: px(4), ..ui::row(4.0) }).with_children(|controls| {
             for order in [Ranking::Size, Ranking::Profit, Ranking::Loss] {
                 ui::button(controls, UiAction::Rank(order), order.label());
@@ -108,13 +110,7 @@ pub(super) fn panel(parent: &mut ChildSpawnerCommands) {
         });
         panel.spawn((
             CompanyRows,
-            Node {
-                padding: UiRect::all(px(13)),
-                border: UiRect::all(px(1)),
-                border_radius: BorderRadius::all(px(8)),
-                flex_shrink: 0.0,
-                ..ui::column(12.0)
-            },
+            ui::card(12.0),
             Tone::Panel.surface(),
             Tone::Rule.outline(),
         ));
@@ -294,10 +290,10 @@ fn draw_rows(
                 });
             parent.spawn(ui::column(0.0)).with_children(|table| {
                 table
-                    .spawn((table_row(), Tone::Canvas.surface(), Tone::Rule.outline()))
+                    .spawn((table_row(), Tone::Raised.surface(), Tone::Brass.outline()))
                     .with_children(|heading| {
                         for caption in ["Company", "Sites", "Capacity", "Daily cash profit", ""] {
-                            heading.spawn(ui::text(caption, 12.0, Tone::Muted));
+                            heading.spawn(ui::heading(caption, 12.0, Tone::Text));
                         }
                     });
                 for business in &businesses[start..end] {

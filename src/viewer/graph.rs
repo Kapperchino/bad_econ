@@ -175,6 +175,20 @@ impl Geometry {
                 self.theme.color(Tone::Rule).with_alpha(0.45),
             );
         }
+        for tick in 0..=16 {
+            let fraction = tick as f32 / 16.0;
+            let foot = Vec2::new(bounds.min.x + extent.x * fraction, bounds.max.y);
+            let length = match tick % 4 {
+                0 => 4.0,
+                _ => 2.0,
+            } * scale;
+            self.line(
+                foot - Vec2::Y * length,
+                foot,
+                scale,
+                self.theme.color(Tone::Brass),
+            );
+        }
         if range.minimum < 0.0 {
             let y = bounds.max.y - range.fraction(0.0) as f32 * extent.y;
             self.line(
