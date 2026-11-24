@@ -136,8 +136,6 @@ fn requests(
             );
         }
         let target = economy.ledger.value(Field::InvestmentGood, actor);
-        let tools = economy.ledger.value(Field::Tools, actor);
-        let wood = economy.ledger.value(Field::Wood, actor);
         let cash = economy.ledger.value(Field::Cash, actor);
         let arrears = economy.ledger.value(Field::RentArrears, actor);
         let household = economy.actors.kind(actor).bits() == 0;
@@ -145,10 +143,6 @@ fn requests(
         let living = economy.ledger.value(Field::LivingMembers, actor);
         let people = founder_shares(&*economy, actor);
         let capital = divide(cash, people);
-        let funded = !lt(capital, ticks(10_000, 0))
-            && (comptime!(config.property_mode == Feature::Enabled)
-                || (!lt(tools, times32(people, 2)) && !lt(wood, times32(people, 5))))
-            && equal(arrears, zero());
         let pending_investment =
             comptime!(config.cohorts == Feature::Enabled) && target.extract(0usize) >> 24 == 7;
         let eligible = !pending_investment
@@ -171,7 +165,7 @@ fn requests(
             {
                 proposal = 0;
             }
-            action = select(funded, proposal, 0);
+            action = proposal;
         }
         economy
             .ledger
@@ -215,11 +209,12 @@ fn requests(
             action = 0x05000000u32;
         }
         let pending = economy.ledger.number(Field::PendingCapacity, actor);
-        let construction = economy.ledger.number(Field::ConstructionRemaining, actor);
+        let building = crate::simulation::economy::property::PropertySite::new(actor)
+            .has_construction_project(&economy.ledger);
         if kind > 0
             && status == comptime!(EnterpriseState::Operating as u32)
             && pending > 0
-            && construction == 0
+            && !building
         {
             action = 0x06000000u32 + pending;
         }

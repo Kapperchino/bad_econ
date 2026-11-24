@@ -474,22 +474,36 @@ impl<'a> ReplacementMarket<'a> {
                             good,
                         );
                         let price = economy.ledger.number_at(terms.price, seller);
+                        let construction = good == comptime!(Good::Construction as u32);
                         let supplier =
                             household_production::counterparty(economy, buyer, seller, good);
+                        let offered = if construction {
+                            status == comptime!(EnterpriseState::Operating as u32)
+                        } else {
+                            household_production::offers(economy, seller, good)
+                        };
                         let available = status < comptime!(EnterpriseState::Liquidating as u32)
                             && supplier
-                            && household_production::offers(economy, seller, good)
+                            && offered
                             && trip <= config.search_radius
                             && price > 0;
                         if available {
-                            let days = railway::DeliveryRequest {
-                                buyer,
-                                seller,
-                                trip,
-                                buyer_access,
-                            }
-                            .days(config);
-                            let delivered = cartage::delivered_price(config, price, trip, days);
+                            let days = if construction {
+                                0u32
+                            } else {
+                                railway::DeliveryRequest {
+                                    buyer,
+                                    seller,
+                                    trip,
+                                    buyer_access,
+                                }
+                                .days(config)
+                            };
+                            let delivered = select(
+                                construction,
+                                price,
+                                cartage::delivered_price(config, price, trip, days),
+                            );
                             let score =
                                 plus(ticks(delivered, 0), times32(days, config.delivery_penalty))
                                     .record(control);

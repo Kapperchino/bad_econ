@@ -104,6 +104,7 @@ impl EconomyParameters {
         match comptime!(self.market) {
             MarketFlag::Input(InputMarket::Grain) => u32::new(Good::Grain as i64),
             MarketFlag::Input(InputMarket::Flour) => u32::new(Good::Flour as i64),
+            MarketFlag::Input(InputMarket::Construction) => u32::new(Good::Construction as i64),
             MarketFlag::Input(InputMarket::Other) | MarketFlag::Consumer(_) => self.good,
             MarketFlag::Household => u32::new(Good::Bread as i64),
             _ => u32::new(0),

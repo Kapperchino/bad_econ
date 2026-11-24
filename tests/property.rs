@@ -140,10 +140,34 @@ fn development() -> Result<ScenarioConfig> {
 }
 
 #[test]
+fn unused_contractor_capacity_expires_without_using_wood_or_tools_on_gpu() -> Result<()> {
+    let mut config = development()?;
+    config.property.as_mut().unwrap().orders.clear();
+    let scenario = Scenario::new(config)?;
+    let contractor = scenario.index_of(101).unwrap();
+    let mut initial = scenario.initial()?;
+    initial.set(Field::SafetyProvision, contractor, 750);
+    let mut simulation =
+        Simulation::from_checkpoint(Checkpoint::new(&scenario, &initial)?, support::device(64)?)?;
+    simulation.advance()?;
+    let state = simulation.download()?;
+    let good = Good::Construction as usize - 1;
+    assert!(simulation.snapshot.produced[good] > 0);
+    assert_eq!(
+        simulation.snapshot.consumption[good],
+        simulation.snapshot.produced[good]
+    );
+    assert_eq!(simulation.snapshot.inventories[good], 0);
+    assert_eq!(simulation.snapshot.transit[good], 0);
+    assert_eq!(state.get(Field::Used, contractor), 0);
+    Ok(())
+}
+
+#[test]
 fn contractors_build_housing_farms_and_factories_and_displace_only_local_farmers() -> Result<()> {
     let scenario = Scenario::new(development()?)?;
     let mut initial = scenario.initial()?;
-    initial.day = 257;
+    initial.day = 254;
     let mut simulation =
         Simulation::from_checkpoint(Checkpoint::new(&scenario, &initial)?, support::device(64)?)?;
     simulation.advance()?;
@@ -166,16 +190,32 @@ fn contractors_build_housing_farms_and_factories_and_displace_only_local_farmers
         );
     }
     assert!(simulation.snapshot.produced[Good::Construction as usize - 1] > 0);
+    assert_eq!(
+        simulation.snapshot.inventories[Good::Construction as usize - 1],
+        0
+    );
+    assert_eq!(
+        simulation.snapshot.transit[Good::Construction as usize - 1],
+        0
+    );
     assert!(simulation.snapshot.used[Good::Wood as usize - 1] > 0);
     assert!(simulation.snapshot.used[Good::Tools as usize - 1] > 0);
     assert_eq!(first.get(Field::Produced, 9), 0);
     assert_eq!(first.get(Field::Produced, 10), 0);
     assert_eq!(first.get(Field::OccupiedPlots, 9), 0);
     let mut replay = Simulation::from_checkpoint(simulation.checkpoint()?, support::device(64)?)?;
-    for _ in 0..12 {
+    for _ in 1..56 {
         simulation.advance()?;
         replay.advance()?;
         assert_eq!(simulation.download()?, replay.download()?);
+        assert_eq!(
+            simulation.snapshot.inventories[Good::Construction as usize - 1],
+            0
+        );
+        assert_eq!(
+            simulation.snapshot.transit[Good::Construction as usize - 1],
+            0
+        );
     }
     let completed = simulation.download()?;
     for site in [0, 9, 10] {
@@ -190,14 +230,12 @@ fn contractors_build_housing_farms_and_factories_and_displace_only_local_farmers
         completed.get(Field::EnterpriseStatus, 9),
         EnterpriseState::Operating as u64
     );
-    assert_eq!(completed.get(Field::Produced, 9), 0);
-    assert!(completed.get(Field::CropWork, 9) > 0);
-    assert!(completed.get(Field::Produced, 10) > 0);
+    assert!(completed.get(Field::Produced, 9) > 0);
     simulation.advance()?;
     replay.advance()?;
     let harvested = simulation.download()?;
     assert_eq!(harvested, replay.download()?);
-    assert!(harvested.get(Field::Produced, 9) > 0);
+    assert!(harvested.get(Field::Produced, 10) > 0);
     let land = PropertySnapshot::from_state(&scenario, &harvested)?.unwrap();
     assert_eq!(land.displaced_plots, 6);
     assert_eq!(land.regions[0].housing, 7);

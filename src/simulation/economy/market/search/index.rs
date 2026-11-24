@@ -78,7 +78,7 @@ impl Supply {
             good,
         );
         let available = positive(
-            economy.ledger.value_at(good, actor),
+            economy.ledger.value_at(terms.stock, actor),
             household_production::reserve(economy, actor, good),
         );
         Supply {

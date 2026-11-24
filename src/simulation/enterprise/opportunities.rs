@@ -121,8 +121,6 @@ impl EntryPlan {
         match state.actors.at(owner).kind == 0
             && state.get(Field::Cash, owner) >= 10_000
             && state.get(Field::RentArrears, owner) == 0
-            && (config.property.is_some()
-                || (state.get(Field::Tools, owner) >= 2 && state.get(Field::Wood, owner) >= 5))
             && config.property.as_ref().is_none_or(|property| {
                 property.region(plan.position).is_ok_and(|region| {
                     property.regions[region].landowner == state.actors.at(owner).identity
@@ -133,10 +131,8 @@ impl EntryPlan {
         {
             true => Ok(plan),
             false => Err(anyhow!(
-                "enterprise entry lacks invested funds, materials, or a valid quote: owner {owner}, cash {}, tools {}, wood {}, arrears {}, quote {}",
+                "enterprise entry lacks invested funds or a valid quote: owner {owner}, cash {}, arrears {}, quote {}",
                 state.get(Field::Cash, owner),
-                state.get(Field::Tools, owner),
-                state.get(Field::Wood, owner),
                 state.get(Field::RentArrears, owner),
                 plan.price,
             )),
@@ -264,6 +260,13 @@ pub(in crate::simulation) fn discover(
     let members = crate::simulation::enterprise::founder_shares(&*economy, owner);
     let investment = divide(divide(cash, members), 2);
     let wage = config.starting_wage;
+    let construction = ticks(
+        comptime!(
+            crate::domain::property::CONSTRUCTION_WORK_PER_PLOT
+                * Good::Construction.initial_price()
+        ),
+        0,
+    );
     let mut selected = 0;
     let mut best = zero();
     let mut first_cost = 0;
@@ -312,7 +315,7 @@ pub(in crate::simulation) fn discover(
                     let margin = minus(revenue, minimum(revenue, cost));
                     let needed = plus(
                         times(cost, config.coverage + config.ring).value,
-                        times32(720, wage),
+                        construction,
                     )
                     .value;
                     if lt(best, margin) && !lt(investment, needed) {
@@ -340,7 +343,11 @@ pub(in crate::simulation) fn discover(
                 .value;
                 let margin = minus(revenue, minimum(revenue, cost));
                 let required = plus(
-                    plus(times32(24 * price, 3 + config.ring), times32(780, wage)).value,
+                    plus(
+                        times32(24 * price, 3 + config.ring),
+                        plus(times32(60, wage), construction).value,
+                    )
+                    .value,
                     times32(config.firm_rent, 3 + config.ring),
                 )
                 .value;

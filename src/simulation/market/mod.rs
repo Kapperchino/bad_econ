@@ -254,7 +254,12 @@ impl Simulation {
                 if self.config.food_income == FoodIncome::PurchasingPower
                     && !matches!(
                         good,
-                        Good::Grain | Good::Flour | Good::Bread | Good::Coal | Good::Wood
+                        Good::Grain
+                            | Good::Flour
+                            | Good::Bread
+                            | Good::Coal
+                            | Good::Wood
+                            | Good::Construction
                     ) =>
             {
                 match market {
@@ -268,6 +273,7 @@ impl Simulation {
 
     fn market_has_freight(&self, market: Market) -> bool {
         !self.scenario.config().railway.companies.is_empty()
+            && market != Market::Input(Good::Construction)
             && matches!(
                 market,
                 Market::Input(_) | Market::Consumer(_) | Market::Household

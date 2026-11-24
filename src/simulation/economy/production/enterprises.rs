@@ -1,77 +1,10 @@
 use crate::domain::enterprise::FoodAccess;
-use crate::domain::enterprise::{BusinessScale, EnterpriseModel, EnterpriseState};
+use crate::domain::{
+    enterprise::{BusinessScale, EnterpriseModel, EnterpriseState},
+    property::CONSTRUCTION_WORK_PER_PLOT,
+};
 use crate::simulation::economy::configuration::Feature;
 use crate::simulation::economy::*;
-
-#[cube]
-pub(in crate::simulation::economy) fn construct_home(
-    ledger: &mut Ledger<'_>,
-    control: &[Atomic<u32>],
-    owner: u32,
-) {
-    let config = ledger.config;
-    let owned = ledger.number(Field::InvestmentFirm, owner);
-    if owned > 0 {
-        let firm = owned - 1;
-        let status = ledger.number(Field::EnterpriseStatus, firm);
-        let constructing = status == comptime!(EnterpriseState::Forming as u32)
-            || (status == comptime!(EnterpriseState::Operating as u32)
-                && ledger.number(Field::PendingCapacity, firm) > 0);
-        let cash = ledger.value(Field::Cash, firm);
-        let reserve = ledger.value(Field::OperatingReserve, firm);
-        let rent = rent::obligation(&*ledger, control, firm);
-        let protected = select(
-            status == comptime!(EnterpriseState::Operating as u32),
-            maximum(reserve, rent),
-            rent,
-        );
-        let funds = positive(cash, protected);
-        let rate = ledger.number(Field::Wage, firm);
-        let available = min(
-            ledger.number(Field::Time, owner),
-            ledger.number(Field::ConstructionRemaining, firm),
-        );
-        let minutes = minimum(ticks(available, 0), divide(funds, max(rate, 1))).extract(LOW_WORD);
-        let wage = times32(minutes, rate);
-        if constructing && minutes > 0 {
-            let remaining = ledger.number(Field::ConstructionRemaining, firm) - minutes;
-            let time = ledger.number(Field::Time, owner) - minutes;
-            ledger.set(Field::Cash, firm, minus(cash, wage));
-            let mut net = wage;
-            let gross = ledger.value(Field::GrossIncome, owner);
-            let accrued = plus(gross, wage).record(control);
-            ledger.set(Field::GrossIncome, owner, accrued);
-            if comptime!(config.payroll == Feature::Enabled) {
-                let before = PayrollAccrual::new(gross, 1, config, control);
-                let after = PayrollAccrual::new(accrued, 1, config, control);
-                net = minus(after.net, before.net);
-                ledger.set(Field::PayrollReserve, owner, after.reserve);
-                ledger.increase(
-                    control,
-                    Field::TaxTreasury,
-                    owner,
-                    minus(after.tax, before.tax),
-                );
-                ledger.increase(
-                    control,
-                    Field::ChargeTreasury,
-                    owner,
-                    minus(after.charge, before.charge),
-                );
-            }
-            ledger.increase(control, Field::Cash, owner, net);
-            ledger.set_number(Field::Time, owner, time);
-            ledger.set_number(Field::HomeMinutes, owner, minutes);
-            ledger.set_number(Field::ConstructionRemaining, firm, remaining);
-            let next = select(
-                remaining == 0,
-                comptime!(EnterpriseState::Operating as u32),
-                status,
-            );
-            ledger.set_number(Field::EnterpriseStatus, firm, next);
-        }
-    }
-}
 
 #[cube]
 pub(crate) fn mobility(
@@ -168,29 +101,19 @@ pub(in crate::simulation::economy) fn expand(
             && economy.ledger.number(Field::Plan, firm) >= capacity;
         let target = times32(capacity, economy.ledger.number(Field::OutputTicks, firm));
         let demand = economy.ledger.value(Field::Demand, firm);
-        let tools = economy.ledger.value(Field::Tools, firm);
-        let wood = economy.ledger.value(Field::Wood, firm);
         let funded = !lt(
             economy.ledger.value(Field::Cash, firm),
             plus(
                 economy.ledger.value(Field::OperatingReserve, firm),
-                times32(
-                    comptime!(match config.property_mode {
-                        Feature::Disabled => 720u32,
-                        Feature::Enabled =>
-                            crate::domain::property::CONSTRUCTION_WORK_PER_PLOT
-                                * Good::Construction.initial_price(),
-                    }),
-                    select(
-                        comptime!(config.property_mode == Feature::Enabled),
-                        1,
-                        economy.ledger.number(Field::Wage, firm),
-                    ),
+                ticks(
+                    comptime!(CONSTRUCTION_WORK_PER_PLOT * Good::Construction.initial_price()),
+                    0,
                 ),
             )
             .record(control),
         );
         let interested = expands(&*economy, firm);
+        let site = property::PropertySite::new(firm);
         if operating
             && interested
             && economy.actors.kind(firm).bits() != comptime!(Good::Housing as u32)
@@ -199,54 +122,11 @@ pub(in crate::simulation::economy) fn expand(
             && lt(target, demand)
             && funded
             && capacity + added_workers <= 10_000
-            && (comptime!(config.property_mode == Feature::Enabled)
-                || (!lt(tools, ticks(2, 0)) && !lt(wood, ticks(5, 0))))
-            && property::PropertySite::new(firm).authorized(&economy.ledger, owner)
-            && economy.ledger.number(Field::ConstructionRemaining, firm) == 0
+            && site.authorized(&economy.ledger, owner)
+            && !site.has_construction_project(&economy.ledger)
             && economy.ledger.number(Field::PendingCapacity, firm) == 0
         {
-            if comptime!(config.property_mode == Feature::Disabled) {
-                economy
-                    .ledger
-                    .set(Field::Tools, firm, minus(tools, ticks(2, 0)));
-                economy
-                    .ledger
-                    .set(Field::Wood, firm, minus(wood, ticks(5, 0)));
-                economy.ledger.increase_at(
-                    control,
-                    USED_FIELDS as u32 + comptime!(Good::Tools as u32) - 1,
-                    firm,
-                    ticks(2, 0),
-                );
-                economy.ledger.increase_at(
-                    control,
-                    USED_FIELDS as u32 + comptime!(Good::Wood as u32) - 1,
-                    firm,
-                    ticks(5, 0),
-                );
-                economy
-                    .ledger
-                    .increase(control, Field::Used, firm, ticks(7, 0));
-                economy
-                    .ledger
-                    .increase(control, Field::InstalledCapital, firm, ticks(7, 0));
-            }
-            if comptime!(config.property_mode == Feature::Enabled) {
-                economy.ledger.set_number(Field::RequestedPlots, firm, 1);
-                economy.ledger.set_number(
-                    Field::ProjectStatus,
-                    firm,
-                    comptime!(crate::domain::property::ProjectStatus::Requested as u32),
-                );
-            }
-            economy.ledger.set_number(
-                Field::ConstructionRemaining,
-                firm,
-                comptime!(match config.property_mode {
-                    Feature::Disabled => 720u32,
-                    Feature::Enabled => crate::domain::property::CONSTRUCTION_WORK_PER_PLOT,
-                }),
-            );
+            site.request_construction(economy);
             economy.ledger.set_number(
                 Field::PendingCapacity,
                 firm,
@@ -570,10 +450,12 @@ impl<'a> FirmPolicy<'a> {
             let output = max(economy.ledger.number(Field::OutputTicks, firm), 1);
             let input_cost = self.replacement_cost(&economy.ledger, output);
             let demand = economy.ledger.value(Field::Demand, firm);
-            let packets = maximum(
+            let forecast_packets = maximum(
                 divide(plus(demand, ticks(output - 1, 0)).record(control), output),
                 ticks(1, 0),
             );
+            let capacity = ticks(economy.actors.capacity(firm), 0);
+            let packets = minimum(forecast_packets, capacity);
             let coverage = select(
                 distributor,
                 economy.ledger.number(Field::StockCoverage, firm),
@@ -597,11 +479,7 @@ impl<'a> FirmPolicy<'a> {
             .record(control);
             let construction = times32(
                 economy.ledger.number(Field::ConstructionRemaining, firm),
-                select(
-                    comptime!(config.property_mode == Feature::Enabled),
-                    comptime!(Good::Construction.initial_price()),
-                    economy.ledger.number(Field::Wage, firm),
-                ),
+                comptime!(Good::Construction.initial_price()),
             );
             let reserve = plus(
                 plus(reserve, construction).record(control),

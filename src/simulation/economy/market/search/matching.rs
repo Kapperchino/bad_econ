@@ -339,8 +339,12 @@ impl SearchInput {
                         trip: selection.proposal.trip,
                         buyer_access,
                     };
-                    if comptime!(matches!(parameters.market, MarketFlag::Input(_)))
-                        && config.railway.has_routes()
+                    if comptime!(matches!(
+                        parameters.market,
+                        MarketFlag::Input(
+                            InputMarket::Grain | InputMarket::Flour | InputMarket::Other
+                        )
+                    )) && config.railway.has_routes()
                         && control[INPUT_RAIL_WORD].load() == 0
                         && delivery.may_book(config)
                     {

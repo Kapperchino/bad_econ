@@ -239,7 +239,8 @@ pub(in crate::simulation::economy) fn propose(
                                 );
                                 let quote = economy.ledger.number_at(terms.price, firm);
                                 let quote = match comptime!(market) {
-                                    MarketFlag::Labor => quote,
+                                    MarketFlag::Labor
+                                    | MarketFlag::Input(InputMarket::Construction) => quote,
                                     _ => cartage::delivered_price(config, quote, dist, route.days),
                                 };
                                 let mut inspect = true;
@@ -254,8 +255,15 @@ pub(in crate::simulation::economy) fn propose(
                                 if inspect {
                                     let mut eligible = accessible;
 
+                                    let days = select(
+                                        comptime!(
+                                            market == MarketFlag::Input(InputMarket::Construction)
+                                        ),
+                                        0,
+                                        route.days,
+                                    );
                                     let mut score =
-                                        ticks(quote + route.days * config.delivery_penalty, 0u32);
+                                        ticks(quote + days * config.delivery_penalty, 0u32);
                                     let amount = if comptime!(market == MarketFlag::Labor) {
                                         let offer =
                                             search::OfferRequest::labor(&*economy, id, firm)
@@ -298,7 +306,12 @@ pub(in crate::simulation::economy) fn propose(
                                             minimum(
                                                 wanted,
                                                 positive(
-                                                    economy.ledger.value_at(good, firm),
+                                                    economy.ledger.value_at(
+                                                        household_production::trade_stock_field(
+                                                            good,
+                                                        ),
+                                                        firm,
+                                                    ),
                                                     household_production::reserve(
                                                         &*economy, firm, good,
                                                     ),

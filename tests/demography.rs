@@ -78,7 +78,12 @@ fn household_formation_and_inheritance_preserve_assets_and_pending_deliveries() 
     state.set(Field::Transit, 0, state.get(Field::Transit, 0) + 1);
     let prior_cash = state.initial_cash;
     state.set(Field::EnterpriseStatus, 3, EnterpriseState::Forming as u64);
-    state.set(Field::ConstructionRemaining, 3, 960);
+    state.set(
+        Field::ProjectStatus,
+        3,
+        property::ProjectStatus::Building as u64,
+    );
+    state.set(Field::ConstructionRemaining, 3, 20);
     let checkpoint = Checkpoint::new(&scenario, &state)?;
     simulation.command(SimulationCommand::Restore(Box::new(checkpoint)))?;
     simulation.advance()?;
@@ -98,11 +103,11 @@ fn household_formation_and_inheritance_preserve_assets_and_pending_deliveries() 
     let delivered = simulation.download()?;
     assert_eq!(delivered.values[inherited_delivery], 0);
     assert_eq!(delivered.get(Field::InvestmentFirm, child), 4);
-    assert!(
-        delivered.get(Field::ConstructionRemaining, 3)
-            < inherited.get(Field::ConstructionRemaining, 3)
+    assert_eq!(delivered.get(Field::ConstructionRemaining, 3), 20);
+    assert_eq!(
+        simulation.snapshot.produced[Good::Construction as usize - 1],
+        0
     );
-    assert!(delivered.get(Field::GrossIncome, child) > 0);
     Ok(())
 }
 

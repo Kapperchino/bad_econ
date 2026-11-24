@@ -684,6 +684,40 @@ fn grain_distributor_buys_household_surplus_and_resells_it_to_a_mill_on_gpu() ->
 }
 
 #[test]
+fn a_mill_rebuilds_its_grain_buffer_and_reserves_for_installed_capacity_on_gpu() -> Result<()> {
+    let mut config = grain_dealer_scenario(0, 100_000)?.config().clone();
+    config.economy = Economy::Industrial;
+    config.behavior.price_response = 0;
+    config.population.as_mut().unwrap().firms[1].inventories[Good::Grain as usize - 1] = 100;
+    let coverage = u64::from(config.coverage);
+    let scenario = Scenario::new(config)?;
+    let mill = scenario.index_of(13).unwrap();
+    let dealer = scenario.index_of(14).unwrap();
+    let mut initial = scenario.initial()?;
+    initial.set(Field::Job, 1, dealer as u64 + 1);
+    initial.set(Field::JobDaysRemaining, 1, 5);
+    initial.set(Field::Demand, dealer, 24);
+    initial.set(Field::Demand, mill, 100);
+    let capacity = u64::from(initial.actors.at(mill).capacity);
+    let daily_grain = capacity * initial.get(Field::InputTicks, mill);
+    let reserve_days = coverage + scenario.ring() as u64;
+    let mut simulation =
+        Simulation::from_checkpoint(Checkpoint::new(&scenario, &initial)?, support::device(64)?)?;
+    simulation.advance()?;
+    let settled = simulation.download()?;
+    let grain_transit = TRANSIT_FIELDS * settled.actors.len() + mill;
+    assert_eq!(settled.values[grain_transit], 2 * daily_grain);
+    assert!(settled.get(Field::Demand, mill) > capacity * settled.get(Field::OutputTicks, mill));
+    let labor = settled.get(Field::LaborMinutes, mill) * settled.get(Field::Wage, mill);
+    let inputs = settled.get(Field::InputTicks, mill) * settled.get(Field::FirstInputCost, mill);
+    assert_eq!(
+        settled.get(Field::OperatingReserve, mill),
+        (labor + inputs) * reserve_days * capacity
+    );
+    Ok(())
+}
+
+#[test]
 fn a_cashless_farmer_sells_wheat_to_buy_flour_and_bake_on_gpu() -> Result<()> {
     let mut config = grain_dealer_scenario(100, 0)?.config().clone();
     config.land_access = Some(LandAccess {

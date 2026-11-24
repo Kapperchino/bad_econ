@@ -241,6 +241,24 @@ pub(in crate::simulation::economy) fn construct(
                     event.transfer(comptime!(Field::Cash as u32), actor, quantity, zero);
                     event.transfer(comptime!(Field::Cash as u32), other, zero, quantity);
                 }
+                MarketFlag::Input(InputMarket::Construction) => {
+                    let price = economy.ledger.number(Field::Price, other);
+                    let cost = times(quantity, price).record(control);
+                    event.transfer(comptime!(Field::Cash as u32), actor, cost, zero);
+                    event.transfer(comptime!(Field::Cash as u32), other, zero, cost);
+                    event.transfer(comptime!(Field::Pipeline as u32), other, quantity, zero);
+                    event.transfer(comptime!(Field::Construction as u32), actor, zero, quantity);
+                    event.transfer(comptime!(Field::Sales as u32), other, zero, quantity);
+                    event.transfer(comptime!(Field::Purchased as u32), actor, zero, quantity);
+                    if economy.actors.kind(actor).output() == comptime!(Good::Housing as u32) {
+                        event.transfer(
+                            comptime!(Field::FirstInputCost as u32),
+                            actor,
+                            economy.ledger.value(Field::FirstInputCost, actor),
+                            ticks(price, 0),
+                        );
+                    }
+                }
                 _ => {
                     let good = parameters.traded_good();
                     let terms = household_production::TradeFields::new(

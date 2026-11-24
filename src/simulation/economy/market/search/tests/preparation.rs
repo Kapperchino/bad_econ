@@ -191,7 +191,6 @@ enum PreparationEligibility {
     InactiveSeller,
     GrainCashless,
     GrainStocked,
-    Investment,
     Building,
     Distributor,
 }
@@ -204,7 +203,6 @@ fn sparse_input_preparation_preserves_stable_eligibility_and_all_round_requests_
         PreparationEligibility::InactiveSeller,
         PreparationEligibility::GrainCashless,
         PreparationEligibility::GrainStocked,
-        PreparationEligibility::Investment,
         PreparationEligibility::Building,
         PreparationEligibility::Distributor,
     ] {
@@ -217,7 +215,6 @@ fn sparse_input_preparation_preserves_stable_eligibility_and_all_round_requests_
             PreparationEligibility::GrainCashless | PreparationEligibility::GrainStocked => {
                 Good::Grain
             }
-            PreparationEligibility::Investment => Good::Tools,
             PreparationEligibility::Building => Good::Construction,
             PreparationEligibility::Distributor => Good::Linen,
         };
@@ -233,8 +230,8 @@ fn sparse_input_preparation_preserves_stable_eligibility_and_all_round_requests_
                 PreparationEligibility::GrainCashless | PreparationEligibility::GrainStocked => {
                     probe.state.set(Field::LandPlots, 0, 1)
                 }
-                PreparationEligibility::Investment => probe.state.set(Field::InvestmentGood, 0, 1),
                 PreparationEligibility::Building => {
+                    probe.parameters.market = MarketFlag::from(Market::Input(Good::Construction));
                     probe.state.set(
                         Field::ProjectStatus,
                         0,

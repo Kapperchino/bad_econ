@@ -57,7 +57,13 @@ impl Scenario {
         if !self.config.railway.companies.is_empty() {
             inputs.extend([Good::Coal, Good::Steel, Good::Locomotives]);
         }
-        if self.config.property.is_some() || self.config.rent.is_some() {
+        if self.config.property.is_some()
+            || self.config.rent.is_some()
+            || matches!(
+                self.config.household_production,
+                enterprise::HouseholdProduction::Available { .. }
+            )
+        {
             inputs.insert(Good::Construction);
         }
         inputs

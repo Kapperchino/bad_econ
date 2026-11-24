@@ -124,7 +124,7 @@ pub(in crate::simulation::economy) fn work_target(
         POLICY_SCALE,
     );
     let rent = times32(
-        config.household_rent,
+        rent::household_quote(&economy.ledger, household),
         consumption::consumers(&economy.ledger, household),
     );
     let bread_budget = select(
@@ -242,6 +242,10 @@ pub(in crate::simulation::economy) fn work_target(
         let fuel = minimum(
             times32(ceildiv(heat, 2), needs.coal),
             times32(heat, needs.wood),
+        );
+        let rent = times32(
+            rent::household_quote(&economy.ledger, target - 1),
+            consumption::consumers(&economy.ledger, household),
         );
         let daily = plus(plus(food, fuel).value, rent).value;
         let travel = select(

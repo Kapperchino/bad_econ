@@ -5,6 +5,7 @@ use super::{
 use crate::simulation::economy::{
     configuration::Feature,
     households::food::{BreadDemand, HomeKitchen},
+    property::rent,
 };
 use crate::{
     domain::{
@@ -85,7 +86,7 @@ pub(super) fn family_support(ledger: &Ledger<'_>, household: u32, food: u32) -> 
         let cost = plus(
             food_cost,
             times32(
-                select(plots > 0, 0, config.household_rent),
+                select(plots > 0, 0, rent::household_quote(ledger, household)),
                 select(
                     comptime!(config.cohorts == Feature::Enabled),
                     ledger.number(Field::LivingMembers, household),

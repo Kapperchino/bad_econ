@@ -1,7 +1,7 @@
 use crate::domain::{
     enterprise::EnterpriseState,
     landlords::{EXPANSION_OCCUPANCY_PERCENT, MAINTENANCE_DAYS},
-    property::{CONSTRUCTION_WORK_PER_PLOT, ProjectStatus},
+    property::CONSTRUCTION_WORK_PER_PLOT,
 };
 use crate::simulation::DeviceEconomy;
 use crate::simulation::economy::*;
@@ -115,11 +115,62 @@ pub(in crate::simulation) fn launch(
 }
 
 #[cube]
-pub(in crate::simulation::economy) fn maintenance(ledger: &Ledger<'_>, firm: u32) -> Ticks {
-    times32(
-        ledger.number(Field::OccupiedPlots, firm),
-        ledger.number(Field::InputTicks, firm),
+fn maintenance(ledger: &Ledger<'_>, firm: u32) -> Ticks {
+    let built = ledger.number(Field::OccupiedPlots, firm);
+    let rented = ceildiv(
+        ledger.number(Field::Sales, firm),
+        max(ledger.number(Field::OutputTicks, firm), 1),
+    );
+    let plots = select(ledger.config.household_rent > 0, min(built, rented), built);
+    times32(plots, ledger.number(Field::InputTicks, firm))
+}
+
+#[cube]
+fn construction_price(ledger: &Ledger<'_>, firm: u32) -> u32 {
+    max(ledger.number(Field::FirstInputCost, firm), 1)
+}
+
+#[cube]
+fn upkeep_cost(ledger: &Ledger<'_>, control: &[Atomic<u32>], firm: u32) -> Ticks {
+    times(maintenance(ledger, firm), construction_price(ledger, firm)).record(control)
+}
+
+#[cube]
+pub(in crate::simulation::economy) fn maintenance_due(ledger: &Ledger<'_>, firm: u32) -> Ticks {
+    select(
+        maintenance_expired(ledger, firm),
+        positive(
+            maintenance(ledger, firm),
+            ledger.value(Field::MaintenanceWork, firm),
+        ),
+        zero(),
     )
+}
+
+#[cube]
+fn maintenance_expired(ledger: &Ledger<'_>, firm: u32) -> bool {
+    ledger.number(Field::MaintenanceDays, firm) == 0
+        && ledger.number(Field::EnterpriseStatus, firm)
+            == comptime!(EnterpriseState::Operating as u32)
+}
+
+#[cube]
+pub(super) fn maintain(ledger: &mut Ledger<'_>, control: &[Atomic<u32>], firm: u32) {
+    let due = maintenance_due(&*ledger, firm);
+    let work = minimum(due, ledger.value(Field::Construction, firm));
+    if !equal(work, zero()) {
+        property::PropertySite::new(firm).consume(
+            ledger,
+            control,
+            comptime!(Good::Construction as u32),
+            work,
+        );
+        ledger.increase(control, Field::MaintenanceWork, firm, work);
+    }
+    if maintenance_expired(&*ledger, firm) && equal(work, due) {
+        ledger.set_number(Field::MaintenanceDays, firm, MAINTENANCE_DAYS);
+        ledger.set(Field::MaintenanceWork, firm, zero());
+    }
 }
 
 #[cube]
@@ -170,24 +221,15 @@ impl<'a> RentalGroup<'a> {
             comptime!(Good::Housing as u32),
             expired,
         );
-        let mut days = ledger.number(Field::MaintenanceDays, firm);
-        let upkeep = maintenance(&*ledger, firm);
+        let days = ledger.number(Field::MaintenanceDays, firm);
         let operating = ledger.number(Field::EnterpriseStatus, firm)
             == comptime!(EnterpriseState::Operating as u32);
-        if operating && days == 0 && !lt(ledger.value(Field::Construction, firm), upkeep) {
-            property::PropertySite::new(firm).consume(
-                ledger,
-                control,
-                comptime!(Good::Construction as u32),
-                upkeep,
-            );
-            days = MAINTENANCE_DAYS;
-        }
         let capacity = times32(
             ledger.number(Field::OccupiedPlots, firm),
             ledger.number(Field::OutputTicks, firm),
         );
-        let supply = select(operating && days > 0, capacity, zero());
+        let open = operating && (days > 0 || ledger.config.household_rent > 0);
+        let supply = select(open, capacity, zero());
         ledger.set_number(
             Field::MaintenanceDays,
             firm,
@@ -231,13 +273,37 @@ impl<'a> RentalGroup<'a> {
         }
         sync_cube();
         if UNIT_POS == 0 {
+            let occupied = minimum(supply, ticks(households, 0));
+            economy.ledger.set(Field::Sales, firm, occupied);
+            self.post_rent(&mut economy.ledger, occupied.extract(LOW_WORD));
             property::PropertySite::new(firm).consume(
                 &mut economy.ledger,
                 control,
                 comptime!(Good::Housing as u32),
-                minimum(supply, ticks(households, 0)),
+                occupied,
             );
         }
+    }
+
+    fn post_rent(&self, ledger: &mut Ledger<'_>, units: u32) {
+        let control = self.control;
+        let firm = self.firm;
+        let config = ledger.config;
+        let mut quote = config.household_rent;
+        if units > 0 && quote > 0 {
+            let cycle = upkeep_cost(&*ledger, control, firm);
+            let daily = CheckedTicks::ceiling_ratio(cycle, 1, MAINTENANCE_DAYS).record(control);
+            let unfunded = positive(cycle, ledger.value(Field::Cash, firm));
+            let to_collect = minimum(daily, unfunded);
+            let per_unit = CheckedTicks::ceiling_ratio(to_collect, 1, units).record(control);
+            let bounded = minimum(per_unit, ticks(config.maximum_price, 0));
+            quote = max(quote, bounded.extract(LOW_WORD));
+        }
+        ledger.set_number(
+            Field::Price,
+            firm,
+            min(max(quote, config.minimum_price), config.maximum_price),
+        );
     }
 
     fn receipts(&self, economy: &mut EconomyView<'_>) -> RentalReceipts {
@@ -307,11 +373,7 @@ impl<'a> RentalGroup<'a> {
             firm,
             collected.households - min(collected.households, collected.served),
         );
-        let upkeep = times(
-            maintenance(&economy.ledger, firm),
-            max(economy.ledger.number(Field::FirstInputCost, firm), 1),
-        )
-        .record(control);
+        let upkeep = upkeep_cost(&economy.ledger, control, firm);
         self.develop(economy, collected.households, upkeep);
         let project = economy.ledger.value(Field::ConstructionRemaining, firm);
         let interested = enterprises::expands(&*economy, firm);
@@ -322,11 +384,7 @@ impl<'a> RentalGroup<'a> {
         );
         let reserve = plus(
             upkeep,
-            times(
-                planned,
-                max(economy.ledger.number(Field::FirstInputCost, firm), 1),
-            )
-            .record(control),
+            times(planned, construction_price(&economy.ledger, firm)).record(control),
         )
         .record(control);
         economy.ledger.set(Field::OperatingReserve, firm, reserve);
@@ -347,13 +405,11 @@ impl<'a> RentalGroup<'a> {
     fn develop(&self, economy: &mut EconomyView<'_>, demand: u32, upkeep: Ticks) {
         let firm = self.firm;
         let config = economy.ledger.config;
-        let status = economy.ledger.number(Field::ProjectStatus, firm);
-        let ready = status == comptime!(ProjectStatus::None as u32)
-            || status == comptime!(ProjectStatus::Completed as u32)
-            || status == comptime!(ProjectStatus::Cancelled as u32);
+        let site = property::PropertySite::new(firm);
+        let ready = !site.has_construction_project(&economy.ledger);
         let cost = times32(
             CONSTRUCTION_WORK_PER_PLOT,
-            max(economy.ledger.number(Field::FirstInputCost, firm), 1),
+            construction_price(&economy.ledger, firm),
         );
         let available = positive(economy.ledger.value(Field::Cash, firm), upkeep);
         let owner = economy.actors.owner(firm);
@@ -363,32 +419,14 @@ impl<'a> RentalGroup<'a> {
         if ready
             && operating
             && interested
+            && equal(maintenance_due(&economy.ledger, firm), zero())
             && self.expansion_demand(&economy.ledger, demand)
             && !lt(available, cost)
-            && property::PropertySite::new(firm).authorized(&economy.ledger, owner)
+            && site.authorized(&economy.ledger, owner)
         {
-            economy.ledger.set_number(
-                Field::ConstructionRemaining,
-                firm,
-                CONSTRUCTION_WORK_PER_PLOT,
-            );
-            match comptime!(config.property_mode) {
-                Feature::Enabled => {
-                    economy.ledger.set_number(Field::RequestedPlots, firm, 1);
-                    economy.ledger.set_number(
-                        Field::ProjectStatus,
-                        firm,
-                        comptime!(ProjectStatus::Requested as u32),
-                    );
-                }
-                Feature::Disabled => {
-                    economy.ledger.set_number(Field::ReservedPlots, firm, 1);
-                    economy.ledger.set_number(
-                        Field::ProjectStatus,
-                        firm,
-                        comptime!(ProjectStatus::Building as u32),
-                    );
-                }
+            site.request_construction(economy);
+            if comptime!(config.property_mode == Feature::Disabled) {
+                economy.ledger.set_number(Field::ReservedPlots, firm, 1);
             }
         }
     }

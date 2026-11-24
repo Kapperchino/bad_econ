@@ -63,18 +63,10 @@ impl SearchInput {
                         || good == comptime!(Good::Flour as u32))
                         && food::HomeKitchen::available(&economy.ledger, id)
                         && economy.ledger.number(Field::LivingMembers, id) > 0;
-                    let investment = (parameters.traded_good() == Good::Tools as u32
-                        || parameters.traded_good() == Good::Wood as u32)
-                        && comptime!(
-                            config.home_mode == Feature::Enabled
-                                && config.property_mode == Feature::Disabled
-                        )
-                        && economy.ledger.number(Field::InvestmentGood, id) > 0
-                        && economy.ledger.number(Field::LivingMembers, id) > 0;
                     let construction = parameters.traded_good() == Good::Construction as u32
                         && economy.ledger.number(Field::ProjectStatus, id)
                             == comptime!(crate::domain::property::ProjectStatus::Building as u32);
-                    u32::cast_from(farm_inputs || investment || construction)
+                    u32::cast_from(farm_inputs || construction)
                 }
                 _ => u32::new(1),
             };

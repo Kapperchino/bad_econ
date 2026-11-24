@@ -227,6 +227,7 @@ impl Scenario {
                 state.set(Field::FarmHectares, actor, hectares);
             }
         }
+        state.retire_construction_stock(self.ring(), self.config.wage)?;
         Ok(state)
     }
 }

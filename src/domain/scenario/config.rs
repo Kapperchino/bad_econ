@@ -6,7 +6,7 @@ use crate::domain::{
 use anyhow::{Result, anyhow};
 use serde::{Deserialize, Serialize};
 
-pub const SCENARIO_VERSION: u32 = 5;
+pub const SCENARIO_VERSION: u32 = 6;
 
 #[derive(Clone, Copy, Debug, Serialize, Deserialize, PartialEq, Eq, clap::ValueEnum)]
 pub enum Experiment {

@@ -8,6 +8,16 @@ pub(in crate::simulation::economy) enum Tenants {
 }
 
 #[cube]
+pub(in crate::simulation) fn household_quote(ledger: &Ledger<'_>, actor: u32) -> u32 {
+    let mut quote = ledger.config.household_rent;
+    let landlord = ledger.number(Field::Landlord, actor);
+    if quote > 0 && landlord > 0 {
+        quote = max(quote, ledger.number(Field::Price, landlord - 1));
+    }
+    quote
+}
+
+#[cube]
 pub(in crate::simulation::economy) fn obligation(
     ledger: &Ledger<'_>,
     control: &[Atomic<u32>],
@@ -48,49 +58,67 @@ pub(in crate::simulation::economy) fn collect(
         if selected {
             let assigned =
                 config.rental_businesses == 0 || economy.ledger.number(Field::Landlord, actor) > 0;
+            let mut units = 0u32;
+            let mut quote = 0u32;
+            if comptime!(tenants == Tenants::Households) {
+                units = select(
+                    config.rental_businesses > 0,
+                    economy.ledger.number(Field::HousingAvailable, actor),
+                    consumption::consumers(&economy.ledger, actor),
+                );
+                quote = household_quote(&economy.ledger, actor);
+            }
             let mut daily = match economy.actors.kind(actor).bits() {
                 ActorKind::HOUSEHOLD_BITS => select(
                     economy.ledger.number(Field::LivingMembers, actor) > 0
                         && economy.ledger.number(Field::LandPlots, actor) == 0,
-                    config.household_rent
-                        * select(
-                            config.rental_businesses > 0
-                                && comptime!(config.cohorts == Feature::Enabled),
-                            economy.ledger.number(Field::HousingAvailable, actor),
-                            consumption::consumers(&economy.ledger, actor),
-                        ),
-                    0,
+                    times32(quote, units),
+                    zero(),
                 ),
                 _ => select(
                     economy.ledger.number(Field::EnterpriseStatus, actor)
                         < comptime!(EnterpriseState::Liquidating as u32),
                     select(
                         economy.actors.kind(actor).bits() == comptime!(Good::Housing as u32),
-                        0,
-                        config.firm_rent,
+                        zero(),
+                        ticks(config.firm_rent, 0),
                     ),
-                    0,
+                    zero(),
                 ),
             };
-            daily = select(assigned, daily, 0);
+            daily = select(assigned, daily, zero());
             let arrears = economy.ledger.value(Field::RentArrears, actor);
-            let obligation = plus(arrears, ticks(daily, 0)).record(control);
+            let obligation = plus(arrears, daily).record(control);
             let cash = economy.ledger.value(Field::Cash, actor);
             let mut available = cash;
             if comptime!(tenants == Tenants::Households) {
-                let reserve = times32(
-                    food::HouseholdRation::new(&economy.ledger, actor).reserve(config),
-                    config.coverage + config.ring - 1,
-                );
+                let ledger = &economy.ledger;
+                let ration = food::HouseholdRation::new(ledger, actor);
+                let reserve = times32(ration.reserve(config), config.coverage + config.ring - 1);
+                let uncommitted = positive(cash, ledger.value(Field::CartagePayable, actor));
+                let mut funded = uncommitted;
+                if comptime!(config.food_income == crate::domain::food::FoodIncome::PurchasingPower)
+                    && quote > config.household_rent
+                {
+                    let next_order = times(
+                        times32(ration.minimum(), config.coverage),
+                        ledger.number(Field::FoodPrice, actor),
+                    )
+                    .record(control);
+                    let base_rent = times32(config.household_rent, units);
+                    funded = minimum(
+                        uncommitted,
+                        maximum(base_rent, positive(uncommitted, next_order)),
+                    );
+                }
                 let food = plus(
-                    economy.ledger.value(Field::Bread, actor),
-                    economy.ledger.value_at(
+                    ledger.value(Field::Bread, actor),
+                    ledger.value_at(
                         TRANSIT_FIELDS as u32 + comptime!(Good::Bread as u32) - 1,
                         actor,
                     ),
-                )
-                .record(control);
-                available = select(lt(food, reserve), zero(), cash);
+                );
+                available = select(lt(food.record(control), reserve), zero(), funded);
             }
             available = select(assigned, available, zero());
             let mut housing = 0u32;
@@ -106,24 +134,25 @@ pub(in crate::simulation::economy) fn collect(
                         && supplied
                         && (previous == comptime!(HousingState::Housed as u32)
                             || !lt(available, obligation)));
-                daily = select(sheltered, daily, 0);
+                daily = select(sheltered, daily, zero());
                 housing = select(
                     sheltered,
                     comptime!(HousingState::Housed as u32),
                     comptime!(HousingState::Homeless as u32),
                 );
             }
-            let due = plus(arrears, ticks(daily, 0)).record(control);
+            let due = plus(arrears, daily).record(control);
             let paid = minimum(available, due);
             let remaining = minus(due, paid);
             match tenants {
                 Tenants::Households => {
+                    let charged = !equal(daily, zero());
                     let partial = comptime!(config.cohorts == Feature::Enabled)
-                        && daily > 0
+                        && charged
                         && config.rental_businesses > 0
                         && economy.ledger.number(Field::HousingAvailable, actor)
                             < consumption::consumers(&economy.ledger, actor);
-                    let evicted = partial || (daily > 0 && !equal(remaining, zero()));
+                    let evicted = partial || (charged && !equal(remaining, zero()));
                     economy.ledger.set_number(
                         Field::HousingStatus,
                         actor,
@@ -196,6 +225,64 @@ mod tests {
         arrears: u64,
         paid: u64,
         remaining: u64,
+    }
+
+    #[test]
+    fn upkeep_rent_preserves_bread_and_freight_budgets_on_gpu() -> Result<()> {
+        let mut config = Scenario::baseline(6, 42, Experiment::Concentrated)?
+            .config()
+            .clone();
+        config.food = Some(crate::domain::food::FoodPolicy::industrial());
+        config.rent = Some(RentPolicy {
+            household_daily: 2,
+            firm_daily: 0,
+        });
+        let coverage = u64::from(config.coverage);
+        let scenario = Scenario::new(config)?;
+        let mut initial = scenario.initial()?;
+        let tenant = 0;
+        let landlord = initial.get(Field::Landlord, tenant) as usize - 1;
+        initial.set(Field::Price, landlord, 10);
+        initial.set(Field::LandPlots, tenant, 0);
+        initial.set(Field::LivingMembers, tenant, 1);
+        initial.set(Field::HousingAvailable, tenant, 1);
+        initial.set(Field::NutritionNeed, tenant, 2);
+        initial.set(Field::FoodPrice, tenant, 5);
+        initial.set(
+            Field::Bread,
+            tenant,
+            2 * (coverage + scenario.ring() as u64),
+        );
+        let bread_cash = 2 * 5 * coverage;
+        let freight = 10;
+        initial.set(Field::Cash, tenant, bread_cash + freight + 8);
+        initial.set(Field::CartagePayable, tenant, freight);
+        let workgroup = 64;
+        let device = device(workgroup)?;
+        let config = Configuration::new(&device, &scenario, &initial);
+        let state = device.tensor(bytemuck::cast_slice(&encode(&initial.values)));
+        let metadata = initial
+            .actors
+            .iter()
+            .map(|actor| ActorLayout::new(&actor, &scenario))
+            .collect::<ActorMetadataRows>();
+        let actors = device.tensor(&metadata.words());
+        let control = device.tensor(&[0; CONTROL_WORDS]);
+        collect_rent::launch(
+            &device.client,
+            device.count(initial.actors.len()),
+            CubeDim::new_1d(workgroup),
+            state.buffer_arg(),
+            actors.into_buffer_arg(),
+            config.launch(),
+            control.buffer_arg(),
+        );
+        initial.values = decode(&device.read(&state)?);
+        assert_eq!(initial.get(Field::Cash, tenant), bread_cash + freight);
+        assert_eq!(initial.get(Field::RentPending, tenant), 8);
+        assert_eq!(initial.get(Field::RentArrears, tenant), 2);
+        FaultFlags::read(&device.read(&control)?)?.into_result()?;
+        Ok(())
     }
 
     #[test]

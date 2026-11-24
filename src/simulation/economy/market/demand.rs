@@ -54,6 +54,19 @@ impl PurchaseRequest {
             purchasing_power: cash,
         };
         match comptime!(parameters.market) {
+            MarketFlag::Input(InputMarket::Construction) => {
+                let ledger = &economy.ledger;
+                let project = property::PropertySite::new(id).construction_due(ledger);
+                let maintenance = select(
+                    kind.output() == comptime!(Good::Housing as u32),
+                    landlords::maintenance_due(ledger, id),
+                    zero(),
+                );
+                order.wanted = plus(project, maintenance).record(control);
+                order.search = !equal(order.wanted, zero());
+                order.purchasing_power =
+                    enterprises::FirmPolicy::new(id, control).purchasing_power(&*economy);
+            }
             MarketFlag::Input(_) => {
                 order.prepare_input(economy, control, id, &kind, good, parameters.day);
             }
@@ -111,17 +124,23 @@ impl PurchaseRequest {
                 let dealer = pricing::distributor(&economy.ledger, id);
                 let mill = comptime!(config.economy == crate::domain::Economy::Industrial)
                     && kind.output() == comptime!(Good::Flour as u32)
+                    && !dealer
                     && economy.ledger.number(Field::FirstInput, id) == good;
                 let units = select(
                     dealer,
                     economy.ledger.number(Field::OutputTicks, id),
                     economy.ledger.number(Field::InputTicks, id),
                 );
+                let replenishment_days = select(mill, 2u32, 1u32);
                 let capacity = times32(economy.actors.capacity(id), units);
+                let replenishment = times(capacity, replenishment_days).record(control);
                 let rounds = config.grain_rounds;
                 let lot = divide(
-                    plus(capacity, ticks(rounds - 1 - parameters.matching_round, 0))
-                        .record(control),
+                    plus(
+                        replenishment,
+                        ticks(rounds - 1 - parameters.matching_round, 0),
+                    )
+                    .record(control),
                     rounds,
                 );
                 order.wanted = select(dealer || mill, minimum(order.wanted, lot), order.wanted);
@@ -238,21 +257,6 @@ impl PurchaseRequest {
                 )
             };
         }
-        let investment = economy.ledger.number(Field::InvestmentGood, id) > 0;
-        if k.is(comptime!(ActorKind::Household))
-            && investment
-            && comptime!(config.property_mode == Feature::Disabled)
-            && economy.ledger.number(Field::LivingMembers, id) > 0
-            && comptime!(config.home_mode == Feature::Enabled)
-            && (good == comptime!(Good::Tools as u32) || good == comptime!(Good::Wood as u32))
-        {
-            search = true;
-            let members = crate::simulation::enterprise::founder_shares(&*economy, id);
-            wanted = times32(
-                members,
-                select(good == comptime!(Good::Tools as u32), 2u32, 5u32),
-            );
-        }
         if !k.is(comptime!(ActorKind::Household))
             && comptime!(
                 config.home_mode == Feature::Enabled && config.property_mode == Feature::Disabled
@@ -272,21 +276,6 @@ impl PurchaseRequest {
         {
             wanted = select(search, maximum(wanted, ticks(2, 0)), ticks(2, 0));
             search = true;
-        }
-        if good == comptime!(Good::Construction as u32) {
-            let building = economy.ledger.number(Field::ProjectStatus, id)
-                == comptime!(crate::domain::property::ProjectStatus::Building as u32);
-            let work = economy.ledger.value(Field::ConstructionRemaining, id);
-            wanted = select(
-                building,
-                select(search, maximum(wanted, work), work),
-                wanted,
-            );
-            search = search || building;
-            if k.bits() == comptime!(Good::Housing as u32) {
-                wanted = plus(wanted, landlords::maintenance(&economy.ledger, id)).record(control);
-                search = true;
-            }
         }
         let rail = railway::demand(economy, id, good);
         self.search = search || !equal(rail, zero());

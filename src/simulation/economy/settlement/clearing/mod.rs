@@ -33,11 +33,11 @@ pub(in crate::simulation::economy) fn actor_settlement(
         };
         if eligible {
             let status = match comptime!(parameters.market) {
-                MarketFlag::Input(_) | MarketFlag::Consumer(_) | MarketFlag::Household => {
-                    buyer_settlement(
-                        economy, proposals, control, parameters, actor, other, posting,
-                    )
-                }
+                MarketFlag::Input(InputMarket::Grain | InputMarket::Flour | InputMarket::Other)
+                | MarketFlag::Consumer(_)
+                | MarketFlag::Household => buyer_settlement(
+                    economy, proposals, control, parameters, actor, other, posting,
+                ),
                 _ => event_settlement(economy, proposals, control, parameters, id, posting),
             };
             status.store(scratch, 4 * parameters.count + id);
@@ -337,7 +337,6 @@ impl PeerBalances {
             _ => {
                 let good = parameters.traded_good();
                 balances.cash = economy.ledger.value(Field::Cash, peer);
-                balances.stock = economy.ledger.value_at(good, peer);
                 balances.reserve = household_production::reserve(&*economy, peer, good);
                 let terms = household_production::TradeFields::new(
                     &economy.actors,
@@ -345,6 +344,7 @@ impl PeerBalances {
                     peer,
                     good,
                 );
+                balances.stock = economy.ledger.value_at(terms.stock, peer);
                 balances.sales = economy.ledger.value_at(terms.sales, peer);
                 balances.quote = economy.ledger.number_at(terms.price, peer);
             }
@@ -505,7 +505,11 @@ impl PeerBalances {
             _ => {
                 let good = parameters.traded_good();
                 economy.ledger.set(Field::Cash, peer, self.cash);
-                economy.ledger.set_at(good, peer, self.stock);
+                economy.ledger.set_at(
+                    household_production::trade_stock_field(good),
+                    peer,
+                    self.stock,
+                );
                 economy.ledger.set_at(
                     household_production::TradeFields::new(
                         &economy.actors,

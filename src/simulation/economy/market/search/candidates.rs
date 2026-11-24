@@ -472,6 +472,7 @@ impl OfferRequest {
                 eligible = true;
                 let days = match comptime!(market) {
                     MarketFlag::Labor => max(ceildiv(dist, config.shipment_speed), 1),
+                    MarketFlag::Input(InputMarket::Construction) => u32::new(0),
                     _ => railway::DeliveryRequest {
                         buyer: id,
                         seller: firm,
@@ -481,7 +482,7 @@ impl OfferRequest {
                     .days(config),
                 };
                 let quote = match comptime!(market) {
-                    MarketFlag::Labor => quote,
+                    MarketFlag::Labor | MarketFlag::Input(InputMarket::Construction) => quote,
                     _ => cartage::delivered_price(config, quote, dist, days),
                 };
                 score = ticks(quote + days * config.delivery_penalty, 0u32);

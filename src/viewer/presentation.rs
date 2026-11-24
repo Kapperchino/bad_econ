@@ -513,10 +513,9 @@ fn inspection_text(display: &Display) -> String {
                             i.heating_served, i.heating_need, i.heating_need.saturating_sub(i.heating_served)
                         ),
                         _ => format!(
-                            "{} {:?} | {}\nBuilding {} {}\nCondition {} | safety {}\nRent overdue {} days\nCompany {} ({} sites) | owner {}\nOwner stubbornness {}/1000\nWage {} | price {}\nCapacity {} (+{}) | planned {} | open {}\nMethod {:?} | {} output / {} min",
+                            "{} {:?} | {}\nCondition {} | safety {}\nRent overdue {} days\nCompany {} ({} sites) | owner {}\nOwner stubbornness {}/1000\nWage {} | price {}\nCapacity {} (+{}) | planned {} | open {}\nMethod {:?} | {} output / {} min",
                             i.enterprise_state.map(|state| format!("{state:?}")).unwrap_or_default(),
-                            i.enterprise_model, i.business_scale.map(|scale| format!("{scale:?}")).unwrap_or_default(), i.construction_minutes_remaining,
-                            match i.property_region { 0 => "min", _ => "work" },
+                            i.enterprise_model, i.business_scale.map(|scale| format!("{scale:?}")).unwrap_or_default(),
                             i.equipment_condition, i.safety_provision,
                             i.rent_overdue_days,
                             i.company_identity, i.company_sites.len(), i.owner_identity,
@@ -533,7 +532,11 @@ fn inspection_text(display: &Display) -> String {
                         0 if i.subsistence_plots + i.displaced_plots > 0 => format!("\nSubsistence plots {} | displaced {}", i.subsistence_plots, i.displaced_plots),
                         0 if i.actor.kind == Good::Grain as u32 && i.occupied_plots > 0 => format!("\nConsolidated farmland {} plots | scale bonus {}%", i.occupied_plots, i.scale_bonus_per_mille / 10),
                         0 => String::new(),
-                        _ => format!("\nRegion {} | plots {} (+{} reserved)\nWorkers/plot {} | scale bonus {}%\nSubsistence {} | displaced {}\nConstruction {:?} | {} work remaining", i.property_region, i.occupied_plots, i.reserved_plots, i.workers_per_plot, i.scale_bonus_per_mille / 10, i.subsistence_plots, i.displaced_plots, i.project_status, i.construction_minutes_remaining),
+                        _ => format!("\nRegion {} | plots {} (+{} reserved)\nWorkers/plot {} | scale bonus {}%\nSubsistence {} | displaced {}", i.property_region, i.occupied_plots, i.reserved_plots, i.workers_per_plot, i.scale_bonus_per_mille / 10, i.subsistence_plots, i.displaced_plots),
+                    };
+                    let construction = match i.project_status {
+                        crate::domain::property::ProjectStatus::None => String::new(),
+                        status => format!("\nConstruction {status:?} | {} days and {} work remaining", i.construction_days_remaining, i.construction_minutes_remaining),
                     };
                     let accounts = i.business_account.map_or_else(String::new, |account| {
                         format!("\nDaily receipts {} | cash outlays {}\nCash profit {:+} (before owner payouts)", account.revenue, account.outlays(), account.profit())
@@ -542,10 +545,10 @@ fn inspection_text(display: &Display) -> String {
                         format!("\nRailway {:?} | {} segments built | {} operating\nRail units available {} / {} daily capacity\nDaily freight and access receipts {}", business.status(), business.built_segments, business.operating_segments, business.available_units, business.daily_capacity, business.daily_receipts)
                     });
                     let rental = i.rental_business.as_ref().map_or_else(String::new, |business| {
-                        format!("\nLandlord business | homes {} | rental income {}\nHousing project {:?} | {} work remaining", business.homes, business.income, i.project_status, i.construction_minutes_remaining)
+                        format!("\nLandlord business | homes {} | rental income {}", business.homes, business.income)
                     });
                     format!(
-                        "Actor {} | day {} | kind {}\n{} | {} | {}°C\nCash {} | transit {}\nRent paid {} | owed {}\nFood {:?} | other stock {}\n{}{}{}{}{}",
+                        "Actor {} | day {} | kind {}\n{} | {} | {}°C\nCash {} | transit {}\nRent paid {} | owed {}\nFood {:?} | other stock {}\n{}{}{}{}{}{}",
                         i.actor.identity,
                         i.day,
                         i.actor.kind,
@@ -560,6 +563,7 @@ fn inspection_text(display: &Display) -> String {
                         i.inventory[3..].iter().map(|&stock| u128::from(stock)).sum::<u128>(),
                         detail,
                         property,
+                        construction,
                         rental,
                         accounts,
                         railway

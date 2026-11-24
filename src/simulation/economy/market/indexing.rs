@@ -72,24 +72,30 @@ pub(super) fn discoverable(
                 && k.output() == good
                 && status
                     < comptime!(crate::domain::enterprise::EnterpriseState::Liquidating as u32);
-            producer
-                || household_production::offers(economy, firm, good)
-                || (distributor
-                    && ((firm + parameters.day + good) % economy.ledger.config.retail_rotation
-                        == 0
-                        || !equal(
-                            economy.ledger.value_at(
-                                pricing::retail_field(
-                                    economy.ledger.config,
-                                    good,
-                                    comptime!(crate::domain::RetailAccount::Demand),
+            if comptime!(market == MarketFlag::Input(InputMarket::Construction)) {
+                producer && !distributor
+            } else {
+                producer
+                    || household_production::offers(economy, firm, good)
+                    || (distributor
+                        && ((firm + parameters.day + good) % economy.ledger.config.retail_rotation
+                            == 0
+                            || !equal(
+                                economy.ledger.value_at(
+                                    pricing::retail_field(
+                                        economy.ledger.config,
+                                        good,
+                                        comptime!(crate::domain::RetailAccount::Demand),
+                                    ),
+                                    firm,
                                 ),
-                                firm,
-                            ),
-                            zero(),
-                        ))
-                    && status
-                        < comptime!(crate::domain::enterprise::EnterpriseState::Liquidating as u32))
+                                zero(),
+                            ))
+                        && status
+                            < comptime!(
+                                crate::domain::enterprise::EnterpriseState::Liquidating as u32
+                            ))
+            }
         }
         MarketFlag::Payroll | MarketFlag::Distribution => false,
     }

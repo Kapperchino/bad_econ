@@ -13,7 +13,7 @@ fn household_surplus_finances_construction_and_subsequent_paid_work() -> Result<
     let mut config = Scenario::baseline(252, 73, Experiment::Concentrated)?
         .config()
         .clone();
-    config.firms = 5;
+    config.firms = 6;
     config.entrepreneurship.interested_per_mille = 1000;
     config.household_production = HouseholdProduction::industrial();
     config.land_access = Some(enterprise::LandAccess {
@@ -50,12 +50,19 @@ fn household_surplus_finances_construction_and_subsequent_paid_work() -> Result<
             Good::Bread,
             Good::Flour,
             Good::Bread,
+            Good::Construction,
         ]
         .into_iter()
         .enumerate()
         .map(|(index, good)| {
             let mut inventories = [0; Good::COUNT];
-            inventories[good as usize - 1] = 2000;
+            match good {
+                Good::Construction => {
+                    inventories[Good::Wood as usize - 1] = 100;
+                    inventories[Good::Tools as usize - 1] = 100;
+                }
+                _ => inventories[good as usize - 1] = 2000,
+            }
             FirmSeed {
                 identity: 1000 + index as u64,
                 position: Position { x: 500, y: 500 },
@@ -63,17 +70,25 @@ fn household_surplus_finances_construction_and_subsequent_paid_work() -> Result<
                 good,
                 cash: match good {
                     Good::Tools | Good::Wood => 60,
+                    Good::Construction => 10_000,
                     _ => 0,
                 },
                 inventories,
                 capacity: 1,
                 technique: Technique {
                     labor_minutes: 60,
-                    input_ticks: 10 * u32::from(good.inputs()[0].is_some()),
+                    input_ticks: match good {
+                        Good::Construction => 1,
+                        _ => 10 * u32::from(good.inputs()[0].is_some()),
+                    },
                     output_ticks: 10,
                 },
                 wage: 1,
-                price: if good == Good::Bread { 60 } else { 10 },
+                price: match good {
+                    Good::Bread => 60,
+                    Good::Construction => 100,
+                    _ => 10,
+                },
             }
         })
         .collect(),
@@ -96,7 +111,7 @@ fn household_surplus_finances_construction_and_subsequent_paid_work() -> Result<
         Simulation::from_checkpoint(Checkpoint::new(&scenario, &initial)?, support::device(64)?)?;
     let mut sales = 0;
     let mut saved = 0;
-    for _ in 0..100 {
+    for _ in 0..150 {
         simulation.advance()?;
         let state = simulation.download()?;
         sales += state.get(Field::Sales, 0);

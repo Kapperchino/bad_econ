@@ -19,6 +19,15 @@ pub enum PropertyUse {
 }
 
 impl PropertyUse {
+    pub const fn construction_days(self) -> u32 {
+        match self {
+            Self::Housing => 3 * 7,
+            Self::Farm => 2 * 7,
+            Self::Factory => 8 * 7,
+            Self::Store => 0,
+        }
+    }
+
     pub fn for_site(state: &State, site: usize) -> Result<Self> {
         match (
             state.actors.at(site).kind,
@@ -275,6 +284,13 @@ impl PropertyConfig {
             }
             state.set(Field::RequestedPlots, site, order.plots.into());
             state.set(Field::ConstructionRemaining, site, order.work.into());
+            state.set(
+                Field::ConstructionDaysRemaining,
+                site,
+                PropertyUse::for_site(state, site)?
+                    .construction_days()
+                    .into(),
+            );
             state.set(Field::ProjectStatus, site, ProjectStatus::Requested as u64);
         }
         for site in 0..state.actors.len() {
@@ -365,9 +381,8 @@ impl PropertySnapshot {
         let mut displaced_plots = 0;
         for index in 0..state.actors.len() {
             let actor = state.actors.at(index);
-            match state.get(Field::PropertyUse, index)
-                == PropertyUse::for_site(state, index)? as u64
-            {
+            let usage = PropertyUse::for_site(state, index)?;
+            match state.get(Field::PropertyUse, index) == usage as u64 {
                 true => (),
                 false => Err(anyhow!("property use does not match its site"))?,
             }
@@ -376,14 +391,18 @@ impl PropertySnapshot {
             let reserved = state.get(Field::ReservedPlots, index);
             let requested = state.get(Field::RequestedPlots, index);
             let remaining = state.get(Field::ConstructionRemaining, index);
-            let status = state.get(Field::ProjectStatus, index);
+            let days = state.get(Field::ConstructionDaysRemaining, index);
+            let status = ProjectStatus::from_index(state.get(Field::ProjectStatus, index))?;
             let project = match status {
-                0 | 3 | 4 => requested == 0 && reserved == 0 && remaining == 0,
-                1 => requested > 0 && reserved == 0 && remaining > 0,
-                2 => requested == 0 && reserved > 0 && remaining > 0,
-                _ => false,
+                ProjectStatus::None | ProjectStatus::Completed | ProjectStatus::Cancelled => {
+                    requested == 0 && reserved == 0 && remaining == 0 && days == 0
+                }
+                ProjectStatus::Requested => requested > 0 && reserved == 0 && remaining > 0,
+                ProjectStatus::Building => {
+                    requested == 0 && reserved > 0 && (remaining > 0 || days > 0)
+                }
             };
-            match project {
+            match project && days <= u64::from(usage.construction_days()) {
                 true => (),
                 false => Err(anyhow!("invalid property project state"))?,
             }

@@ -78,6 +78,8 @@ pub struct Inspection {
     pub business_scale: Option<enterprise::BusinessScale>,
     pub enterprise_state: Option<enterprise::EnterpriseState>,
     pub construction_minutes_remaining: u64,
+    #[serde(default)]
+    pub construction_days_remaining: u64,
     pub property_region: u64,
     pub occupied_plots: u64,
     pub reserved_plots: u64,
@@ -205,6 +207,7 @@ impl Inspection {
                 }
             },
             construction_minutes_remaining: value(Field::ConstructionRemaining),
+            construction_days_remaining: value(Field::ConstructionDaysRemaining),
             property_region: value(Field::PropertyRegion),
             occupied_plots: value(Field::OccupiedPlots),
             reserved_plots: value(Field::ReservedPlots),

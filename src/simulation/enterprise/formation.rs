@@ -1,6 +1,6 @@
 use super::{SEPARATE_OWNER, opportunities};
 use crate::domain::{
-    Actor, Field, Good, Scenario, State, USED_FIELDS,
+    Actor, Field, Good, Scenario, State,
     enterprise::{EnterpriseModel, EnterpriseState, Ownership, OwnershipShare},
     property::{CONSTRUCTION_WORK_PER_PLOT, ProjectStatus, PropertyUse},
 };
@@ -81,7 +81,6 @@ pub(in crate::simulation) fn enter(
             }
         },
     )?;
-    let after = rows.end;
     for (firm, entry) in rows.zip(&entries) {
         let owner = entry.owner;
         let cash = state.get(Field::Cash, owner);
@@ -89,38 +88,32 @@ pub(in crate::simulation) fn enter(
         state.set(Field::Cash, owner, cash - invested);
         state.set(Field::Cash, firm, invested);
         state.set(Field::EnterpriseModel, firm, entry.model as u64);
-        let construction = match &scenario.config().property {
+        let usage = PropertyUse::for_site(state, firm)?;
+        let project = match &scenario.config().property {
             Some(property) => {
                 state.set(
                     Field::PropertyRegion,
                     firm,
                     property.region(entry.position)? as u64 + 1,
                 );
-                state.set(
-                    Field::PropertyUse,
-                    firm,
-                    PropertyUse::for_site(state, firm)? as u64,
-                );
+                state.set(Field::PropertyUse, firm, usage as u64);
                 state.set(Field::RequestedPlots, firm, 1);
                 state.set(Field::WorkersPerPlot, firm, 1);
-                state.set(Field::ProjectStatus, firm, ProjectStatus::Requested as u64);
-                u64::from(CONSTRUCTION_WORK_PER_PLOT)
+                ProjectStatus::Requested
             }
-            None => {
-                for (material, quantity) in [(Good::Tools, 2), (Good::Wood, 5)] {
-                    state.set(
-                        Field::inventory(material),
-                        owner,
-                        state.get(Field::inventory(material), owner) - quantity,
-                    );
-                    state.values[(USED_FIELDS + material as usize - 1) * after + firm] = quantity;
-                }
-                state.set(Field::Used, firm, 7);
-                state.set(Field::InstalledCapital, firm, 7);
-                720
-            }
+            None => ProjectStatus::Building,
         };
-        state.set(Field::ConstructionRemaining, firm, construction);
+        state.set(Field::ProjectStatus, firm, project as u64);
+        state.set(
+            Field::ConstructionRemaining,
+            firm,
+            CONSTRUCTION_WORK_PER_PLOT.into(),
+        );
+        state.set(
+            Field::ConstructionDaysRemaining,
+            firm,
+            usage.construction_days().into(),
+        );
         state.set(
             Field::EnterpriseStatus,
             firm,

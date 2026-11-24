@@ -1,7 +1,7 @@
 use super::{
     CONSUMPTION_FIELDS, FIRM_RENT_GRACE_DAYS, Field, Good, HiringTerm, HousingState,
-    ProductionMethod, Scenario, State, Technique, USED_FIELDS, company, demography, employment,
-    enterprise, industry, landlords, property, research,
+    ProductionMethod, Scenario, State, TRANSIT_FIELDS, Technique, USED_FIELDS, company, demography,
+    employment, enterprise, industry, landlords, property, research,
 };
 use anyhow::{Result, anyhow};
 
@@ -106,6 +106,10 @@ impl<'a> AuditedState<'a> {
                         .max(u64::from(state.actors.at(i).capacity))
                         .max(1)
                 && state.get(Field::MaintenanceDays, i) <= u64::from(landlords::MAINTENANCE_DAYS)
+                && state.get(Field::Construction, i) == 0
+                && state.values
+                    [(TRANSIT_FIELDS + Good::Construction as usize - 1) * state.actors.len() + i]
+                    == 0
                 && state.get(Field::RentOverdueDays, i) <= u64::from(FIRM_RENT_GRACE_DAYS)
                 && state.get(Field::EquipmentCondition, i) <= 1000
                 && state.get(Field::SafetyProvision, i) <= 900

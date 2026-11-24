@@ -32,7 +32,8 @@ fn rentals() -> Result<ScenarioConfig> {
     config.demography.mortality.background_annual_ppm = [0; 5];
     config.demography.mortality.occupational_annual_ppm = [0; Good::COUNT];
     let mut materials = [0; Good::COUNT];
-    materials[Good::Construction as usize - 1] = 100;
+    materials[Good::Wood as usize - 1] = 100;
+    materials[Good::Tools as usize - 1] = 100;
     config.population = Some(Population {
         households: (1..=8)
             .map(|identity| HouseholdSeed {
@@ -55,7 +56,7 @@ fn rentals() -> Result<ScenarioConfig> {
                 cash: 1000,
                 inventories: materials,
                 capacity: 1,
-                technique: Technique::new(60, 1, 1)?,
+                technique: Technique::new(60, 1, 20)?,
                 wage: 1,
                 price: Good::Construction.initial_price(),
             },
@@ -76,7 +77,7 @@ fn rentals() -> Result<ScenarioConfig> {
                 position: Position { x: 250, y: 250 },
                 owner: 1,
                 good: Good::Housing,
-                cash: 20_000,
+                cash: 30_000,
                 inventories: [0; Good::COUNT],
                 capacity: 0,
                 technique: Technique::housing(8)?,
@@ -99,6 +100,109 @@ fn region(plots: u32) -> PropertyConfig {
         buildings: vec![],
         orders: vec![],
     }
+}
+
+#[test]
+fn household_rent_funds_contractor_upkeep_from_empty_cash_on_gpu() -> Result<()> {
+    let mut config = rentals()?;
+    config.expansion = enterprise::ExpansionPolicy {
+        small_business_per_mille: 0,
+        industrial_per_mille: 0,
+    };
+    config.distribution_rate = 1000;
+    config.demography.mortality.cold_daily_ppm_at_seven_days = 0;
+    config.rent = Some(RentPolicy {
+        household_daily: 1,
+        firm_daily: 0,
+    });
+    let population = config.population.as_mut().unwrap();
+    population.firms[0].price = 1200;
+    population.firms[0].cash = 10_000;
+    population.firms[2].cash = 0;
+    for household in &mut population.households {
+        household.inventories[Good::Bread as usize - 1] = 500;
+    }
+    let scenario = Scenario::new(config)?;
+    let landlord = scenario.index_of(103).unwrap();
+    let contractor = scenario.index_of(101).unwrap();
+    let good = Good::Construction as usize - 1;
+    for starting_days in [0, u64::from(landlords::MAINTENANCE_DAYS)] {
+        let mut initial = scenario.initial()?;
+        initial.set(Field::OccupiedPlots, landlord, 3);
+        initial.set(Field::MaintenanceDays, landlord, starting_days);
+        let mut simulation = Simulation::from_checkpoint(
+            Checkpoint::new(&scenario, &initial)?,
+            support::device(64)?,
+        )?;
+        for _ in 0..2 {
+            simulation.advance()?;
+        }
+        let quoted = simulation.download()?;
+        assert_eq!(quoted.get(Field::Price, landlord), 5);
+        assert_eq!(quoted.get(Field::Sales, landlord), 8);
+        assert_eq!(quoted.get(Field::OperatingReserve, landlord), 1200);
+        assert_eq!(
+            quoted.get(Field::RentalIncome, landlord),
+            quoted.get(Field::Cash, landlord)
+        );
+        for _ in 0..33 {
+            simulation.advance()?;
+        }
+        let maintained = simulation.download()?;
+        assert!(
+            maintained.get(Field::MaintenanceDays, landlord) > 0,
+            "starting days {starting_days}, rent {}, landlord cash {}, contractor cash {}",
+            maintained.get(Field::RentalIncome, landlord),
+            maintained.get(Field::Cash, landlord),
+            maintained.get(Field::Cash, contractor)
+        );
+        assert_eq!(maintained.get(Field::MaintenanceWork, landlord), 0);
+        assert_eq!(maintained.get(Field::Sales, landlord), 8);
+        assert!(maintained.get(Field::RentalIncome, landlord) >= 1200);
+        assert_eq!(simulation.snapshot.used[good], 1);
+        assert_eq!(simulation.snapshot.inventories[good], 0);
+        assert_eq!(simulation.snapshot.transit[good], 0);
+        assert_eq!(simulation.snapshot.cash, initial.initial_cash);
+    }
+    Ok(())
+}
+
+#[test]
+fn paid_maintenance_work_can_span_days_without_storing_construction_on_gpu() -> Result<()> {
+    let mut config = rentals()?;
+    config.expansion = enterprise::ExpansionPolicy {
+        small_business_per_mille: 0,
+        industrial_per_mille: 0,
+    };
+    let firms = &mut config.population.as_mut().unwrap().firms;
+    firms[0].technique = Technique::new(60, 1, 1)?;
+    firms[2].technique = Technique::housing(2)?;
+    let scenario = Scenario::new(config)?;
+    let landlord = scenario.index_of(103).unwrap();
+    let mut initial = scenario.initial()?;
+    initial.set(Field::OccupiedPlots, landlord, 3);
+    initial.set(Field::MaintenanceDays, landlord, 0);
+    let mut simulation =
+        Simulation::from_checkpoint(Checkpoint::new(&scenario, &initial)?, support::device(64)?)?;
+    for completed in 1..=3 {
+        simulation.advance()?;
+        let state = simulation.download()?;
+        let good = Good::Construction as usize - 1;
+        assert_eq!(simulation.snapshot.used[good], completed);
+        assert_eq!(simulation.snapshot.inventories[good], 0);
+        assert_eq!(simulation.snapshot.transit[good], 0);
+        match completed {
+            3 => {
+                assert_eq!(state.get(Field::MaintenanceWork, landlord), 0);
+                assert_eq!(state.get(Field::MaintenanceDays, landlord), 30);
+            }
+            _ => {
+                assert_eq!(state.get(Field::MaintenanceWork, landlord), completed);
+                assert_eq!(state.get(Field::MaintenanceDays, landlord), 0);
+            }
+        }
+    }
+    Ok(())
 }
 
 #[test]
@@ -192,7 +296,7 @@ fn rental_income_funds_paid_housing_and_replays_on_gpu() -> Result<()> {
         );
         assert_eq!(
             ordered.get(Field::Cash, 10),
-            initial.get(Field::Cash, 10) + 100 - 120
+            initial.get(Field::Cash, 10) + 100
         );
         assert_eq!(ordered.get(Field::ConstructionRemaining, 10), 20);
         assert_eq!(ordered.get(Field::OutputTicks, 10), 8);
@@ -210,11 +314,14 @@ fn rental_income_funds_paid_housing_and_replays_on_gpu() -> Result<()> {
         let encoded = serde_json::to_string(&simulation.checkpoint()?)?;
         let mut resumed =
             Simulation::from_checkpoint(serde_json::from_str(&encoded)?, support::device(64)?)?;
-        for _ in 0..3 {
+        for _ in 0..21 {
             simulation.advance()?;
             resumed.advance()?;
             assert_eq!(simulation.download()?, resumed.download()?);
             assert_eq!(simulation.snapshot.cash, initial.initial_cash);
+            let good = Good::Construction as usize - 1;
+            assert_eq!(simulation.snapshot.inventories[good], 0);
+            assert_eq!(simulation.snapshot.transit[good], 0);
         }
         let completed = simulation.download()?;
         assert_eq!(

@@ -2,6 +2,8 @@ pub(in crate::simulation) mod opening;
 
 use crate::simulation::economy::*;
 
+const CONSTRUCTION_KIND: u32 = Good::Construction as u32;
+
 #[derive(CubeType)]
 pub(super) struct ActorDay<'a> {
     actor: u32,
@@ -99,6 +101,9 @@ impl<'a> ActorDay<'a> {
                 },
                 control,
             );
+            if kind.output() == comptime!(Good::Construction as u32) {
+                desired = demand;
+            }
             if farming::FarmSite::new(id, kind.output()).is_farm(&economy.ledger) {
                 desired = farming::FarmProduction::new(
                     &mut economy.ledger,
@@ -217,14 +222,26 @@ impl<'a> ActorDay<'a> {
             economy.ledger.set(Field::RetailOpen, id, services);
             economy.ledger.set_number(Field::Pipeline, id, 0);
         }
+        if kind.output() == comptime!(Good::Construction as u32) {
+            let completed = economy.ledger.value(Field::Pipeline, id);
+            let available = property::PropertySite::new(id).scale_output(
+                &mut economy.ledger,
+                control,
+                completed,
+            );
+            economy.ledger.set(Field::Pipeline, id, available);
+            economy
+                .ledger
+                .increase(control, Field::Produced, id, available);
+            economy
+                .ledger
+                .increase(control, Field::UnscaledProduced, id, completed);
+        }
         if kind.is(comptime!(ActorKind::Household))
             && comptime!(config.home_mode == Feature::Enabled)
             && economy.ledger.number(Field::LivingMembers, id) > 0
         {
             enterprises::expand(economy, control, id);
-            if comptime!(config.property_mode == Feature::Disabled) {
-                enterprises::construct_home(&mut economy.ledger, control, id);
-            }
             let has_kitchen = food::HomeKitchen::available(&economy.ledger, id);
             let mut farm =
                 household_production::HouseholdFarm::new(&mut economy.ledger, control, id, day);
@@ -352,6 +369,9 @@ impl<'a> ActorDay<'a> {
                 }
                 economy.ledger.set_number(Field::Fatigue, id, fatigue);
             }
+            self::CONSTRUCTION_KIND => {
+                self.close_construction(&mut economy.ledger);
+            }
             _ => {
                 let completed = economy.ledger.value(Field::Pipeline, id);
                 let mut farm = farming::FarmProduction::new(
@@ -373,6 +393,38 @@ impl<'a> ActorDay<'a> {
                 economy.ledger.set_number(Field::Pipeline, id, 0u32);
             }
         }
+    }
+
+    fn close_construction(&self, ledger: &mut Ledger<'_>) {
+        let id = self.actor;
+        let control = self.control;
+        let unused = ledger.value(Field::Pipeline, id);
+        if !equal(unused, zero()) {
+            let shifts = ledger.number(Field::Plan, id) - ledger.number(Field::Slots, id);
+            let reserved = shifts * ledger.number(Field::InputTicks, id);
+            let available = plus(unused, ledger.value(Field::Sales, id)).record(control);
+            let refund = ratio(unused, reserved, available.extract(LOW_WORD)).record(control);
+            for input in 0u32..2u32 {
+                let good = ledger.number_at(comptime!(Field::FirstInput as u32) + input, id);
+                if good > 0 {
+                    ledger.increase_at(control, good, id, refund);
+                    let used = USED_FIELDS as u32 + good - 1;
+                    ledger.set_at(used, id, minus(ledger.value_at(used, id), refund));
+                    ledger.set(
+                        Field::Used,
+                        id,
+                        minus(ledger.value(Field::Used, id), refund),
+                    );
+                }
+            }
+            ledger.increase_at(
+                control,
+                CONSUMPTION_FIELDS as u32 + comptime!(Good::Construction as u32) - 1,
+                id,
+                unused,
+            );
+        }
+        ledger.set(Field::Pipeline, id, zero());
     }
 
     fn update_accounts(&self, economy: &mut EconomyView<'_>) {

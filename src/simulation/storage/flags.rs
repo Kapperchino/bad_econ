@@ -37,6 +37,7 @@ impl ControlLayout {
 pub enum InputMarket {
     Grain,
     Flour,
+    Construction,
     Other,
 }
 
@@ -62,6 +63,7 @@ impl From<Market> for MarketFlag {
             Market::Labor => Self::Labor,
             Market::Input(Good::Grain) => Self::Input(InputMarket::Grain),
             Market::Input(Good::Flour) => Self::Input(InputMarket::Flour),
+            Market::Input(Good::Construction) => Self::Input(InputMarket::Construction),
             Market::Input(_) => Self::Input(InputMarket::Other),
             Market::Consumer(Good::Coal | Good::Wood) => Self::Consumer(ConsumerMarket::Fuel),
             Market::Consumer(Good::LuxuryClothes | Good::LuxuryFurniture) => {

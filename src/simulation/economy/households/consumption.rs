@@ -292,7 +292,10 @@ impl<'a, 'b> HouseholdPurchase<'a, 'b> {
                     food::HouseholdRation::new(ledger, household).reserve(config),
                     ledger.number(Field::FoodPrice, household),
                 ),
-                times32(config.household_rent, consumers(ledger, household)),
+                times32(
+                    rent::household_quote(ledger, household),
+                    consumers(ledger, household),
+                ),
             )
             .record(control);
             let reserve = times(

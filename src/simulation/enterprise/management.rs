@@ -95,34 +95,18 @@ fn assign(ledger: &mut Ledger<'_>, firms: &[u32], groups: u32, day: u32) {
         let start = firms[(group * 3 + 1) as usize];
         let end = firms[(group * 3 + 2) as usize];
         let mut active = 0;
-        let mut construction = 0;
         for offset in 0..end - start {
             let firm = firms[(start + (offset + day) % (end - start)) as usize];
             let status = ledger.number(Field::EnterpriseStatus, firm);
             if status != comptime!(EnterpriseState::Closed as u32) && active == 0 {
                 active = firm + 1;
             }
-            let cash = ledger.value(Field::Cash, firm);
-            let reserve = ledger.value(Field::OperatingReserve, firm);
-            let available = select(
-                status == comptime!(EnterpriseState::Operating as u32),
-                positive(cash, reserve),
-                cash,
-            );
-            let wage = ledger.value(Field::Wage, firm);
-            let remaining = ledger.value(Field::ConstructionRemaining, firm);
-            let building = status == comptime!(EnterpriseState::Forming as u32)
-                || status == comptime!(EnterpriseState::Operating as u32);
-            if building && !equal(remaining, zero()) && !lt(available, wage) && construction == 0 {
-                construction = firm + 1;
-            }
         }
         let living = ledger.value(Field::LivingMembers, owner);
-        let selected = select(construction > 0, construction, active);
         ledger.set(
             Field::InvestmentFirm,
             owner,
-            ticks(select(equal(living, zero()), 0, selected), 0),
+            ticks(select(equal(living, zero()), 0, active), 0),
         );
     }
 }

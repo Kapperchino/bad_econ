@@ -286,6 +286,7 @@ impl StartingProduction {
         let slot = output as usize - 1;
         let daily = self.daily(output, retailer);
         let economy = config.economy;
+        let construction_stock = config.version < 6;
         let units = match retailer {
             Some(store) => daily * u64::from(config.buffer_days.min(store.reserve_days)),
             None => self.stocks[slot],
@@ -305,6 +306,7 @@ impl StartingProduction {
                 Economy::Industrial => reserves.inputs(output, daily),
             },
         }))
+        .filter(move |stock| construction_stock || stock.good != Good::Construction)
     }
 }
 

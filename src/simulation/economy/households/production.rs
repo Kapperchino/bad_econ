@@ -33,6 +33,7 @@ pub(in crate::simulation::economy) fn reserve(
 
 #[derive(CubeType)]
 pub(in crate::simulation::economy) struct TradeFields {
+    pub stock: u32,
     pub price: u32,
     pub sales: u32,
 }
@@ -43,6 +44,7 @@ impl TradeFields {
         let grain = good == comptime!(Good::Grain as u32)
             && actors.kind(seller).is(comptime!(ActorKind::Household));
         TradeFields {
+            stock: trade_stock_field(good),
             price: select(
                 grain,
                 comptime!(Field::GrainQuote as u32),
@@ -68,6 +70,15 @@ impl TradeFields {
 }
 
 #[cube]
+pub(in crate::simulation::economy) fn trade_stock_field(good: u32) -> u32 {
+    select(
+        good == comptime!(Good::Construction as u32),
+        comptime!(Field::Pipeline as u32),
+        good,
+    )
+}
+
+#[cube]
 pub(in crate::simulation::economy) fn supplier(
     economy: &EconomyView<'_>,
     actor: u32,
@@ -80,9 +91,12 @@ pub(in crate::simulation::economy) fn supplier(
             && good == comptime!(Good::Grain as u32)
             && economy.ledger.number(Field::LivingMembers, actor) > 0
             && economy.ledger.number(Field::GrainQuote, actor) > 0);
-    pricing::distributor(&economy.ledger, actor)
-        || k.output() == good
-        || (k.is(comptime!(ActorKind::Household)) && household_good)
+    let dealer = pricing::distributor(&economy.ledger, actor);
+    if good == comptime!(Good::Construction as u32) {
+        k.output() == good && !dealer
+    } else {
+        dealer || k.output() == good || (k.is(comptime!(ActorKind::Household)) && household_good)
+    }
 }
 
 #[cube]
@@ -94,7 +108,7 @@ pub(in crate::simulation::economy) fn offers(
     supplier(economy, actor, good)
         && lt(
             reserve(economy, actor, good),
-            economy.ledger.value_at(good, actor),
+            economy.ledger.value_at(trade_stock_field(good), actor),
         )
 }
 
@@ -108,7 +122,9 @@ pub(in crate::simulation::economy) fn counterparty(
     let buyer_is_dealer = pricing::distributor(&economy.ledger, buyer);
     let seller_is_dealer = pricing::distributor(&economy.ledger, seller);
     let output = economy.actors.kind(seller).output();
-    if buyer_is_dealer {
+    if good == comptime!(Good::Construction as u32) {
+        output == good && !seller_is_dealer
+    } else if buyer_is_dealer {
         !seller_is_dealer
     } else if good == comptime!(Good::Grain as u32) {
         seller_is_dealer

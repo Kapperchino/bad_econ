@@ -1,9 +1,9 @@
 pub(in crate::simulation) mod landlords;
-pub(in crate::simulation::economy) mod rent;
+pub(in crate::simulation) mod rent;
 
 use crate::domain::{
-    enterprise::EnterpriseState,
-    property::{ProjectStatus, PropertyUse},
+    enterprise::{EnterpriseModel, EnterpriseState},
+    property::{CONSTRUCTION_WORK_PER_PLOT, ProjectStatus, PropertyUse},
 };
 use crate::simulation::DeviceEconomy;
 use crate::simulation::economy::*;
@@ -154,10 +154,7 @@ pub(in crate::simulation) fn launch(
 ) {
     let stages: &[PropertyStage] = match (config.property_mode, phase) {
         (Feature::Enabled, Phase::Opening) => &[PropertyStage::Initialize, PropertyStage::Allocate],
-        (Feature::Enabled, Phase::PhysicalClose) => &[PropertyStage::Construct],
-        (Feature::Disabled, Phase::PhysicalClose) if config.rental_businesses > 0 => {
-            &[PropertyStage::Construct]
-        }
+        (_, Phase::PhysicalClose) => &[PropertyStage::Construct],
         _ => &[],
     };
     let consolidation = match (
@@ -214,7 +211,7 @@ fn consolidate(economy: &mut EconomyView<'_>, spatial: &[u32], control: &[Atomic
         let operating = economy.ledger.number(Field::EnterpriseStatus, farm)
             == comptime!(EnterpriseState::Operating as u32);
         let producer = economy.ledger.number(Field::EnterpriseModel, farm) == 0;
-        let completed = economy.ledger.number(Field::ConstructionRemaining, farm) == 0;
+        let completed = !PropertySite::new(farm).has_construction_project(&economy.ledger);
         let required = economy.ledger.number(Field::PendingCapacity, farm);
         let labor_efficient = if comptime!(
             config.commercial_wheat == crate::domain::food::WheatHusbandry::NorfolkFourCourse
@@ -591,46 +588,24 @@ impl PropertySite {
             economy
                 .ledger
                 .set_number(Field::PropertyRegion, actor, selected);
-            let kind = economy.actors.kind(actor).bits();
-            let mut usage = u32::new(comptime!(PropertyUse::Factory as i64));
-            let natural = comptime!(
-                Good::ALL
-                    .into_iter()
-                    .filter(|good| good.kind() == crate::domain::GoodKind::Natural)
-                    .fold(0u32, |mask, good| mask | (1 << good as u32))
-            );
-            usage = select(
-                natural & (1u32 << kind) != 0,
-                comptime!(PropertyUse::Farm as u32),
-                usage,
-            );
-            usage = select(
-                kind == 0 || kind == comptime!(Good::Housing as u32),
-                comptime!(PropertyUse::Housing as u32),
-                usage,
-            );
-            usage = select(
-                kind > 0 && economy.ledger.number(Field::EnterpriseModel, actor) == 1,
-                comptime!(PropertyUse::Store as u32),
-                usage,
-            );
+            let usage = self.usage(&*economy);
             economy.ledger.set_number(Field::PropertyUse, actor, usage);
-            let project = economy.ledger.number(Field::ProjectStatus, actor);
+            let kind = economy.actors.kind(actor).bits();
             let status = economy.ledger.number(Field::EnterpriseStatus, actor);
             let abandoned = select(
                 kind == 0,
                 economy.ledger.number(Field::EstateSettled, actor) > 0,
                 status >= comptime!(EnterpriseState::Liquidating as u32),
             );
-            if abandoned
-                && (project == comptime!(ProjectStatus::Requested as u32)
-                    || project == comptime!(ProjectStatus::Building as u32))
-            {
+            if abandoned && self.has_construction_project(&economy.ledger) {
                 economy.ledger.set_number(Field::RequestedPlots, actor, 0);
                 economy.ledger.set_number(Field::ReservedPlots, actor, 0);
                 economy
                     .ledger
                     .set_number(Field::ConstructionRemaining, actor, 0);
+                economy
+                    .ledger
+                    .set_number(Field::ConstructionDaysRemaining, actor, 0);
                 economy.ledger.set_number(
                     Field::ProjectStatus,
                     actor,
@@ -638,6 +613,74 @@ impl PropertySite {
                 );
             }
         }
+    }
+
+    fn usage(&self, economy: &EconomyView<'_>) -> u32 {
+        let actor = self.actor;
+        let kind = economy.actors.kind(actor).bits();
+        let natural = comptime!(
+            Good::ALL
+                .into_iter()
+                .filter(|good| good.kind() == crate::domain::GoodKind::Natural)
+                .fold(0u32, |mask, good| mask | (1 << good as u32))
+        );
+        let usage = select(
+            natural & (1u32 << kind) != 0,
+            comptime!(PropertyUse::Farm as u32),
+            comptime!(PropertyUse::Factory as u32),
+        );
+        let distributor = economy.ledger.number(Field::EnterpriseModel, actor)
+            == comptime!(EnterpriseModel::Distributor as u32);
+        let usage = select(distributor, comptime!(PropertyUse::Store as u32), usage);
+        select(
+            kind == 0 || kind == comptime!(Good::Housing as u32),
+            comptime!(PropertyUse::Housing as u32),
+            usage,
+        )
+    }
+
+    pub fn has_construction_project(&self, ledger: &Ledger<'_>) -> bool {
+        let status = ledger.number(Field::ProjectStatus, self.actor);
+        status == comptime!(ProjectStatus::Requested as u32)
+            || status == comptime!(ProjectStatus::Building as u32)
+    }
+
+    pub(in crate::simulation::economy) fn request_construction(
+        &self,
+        economy: &mut EconomyView<'_>,
+    ) {
+        let actor = self.actor;
+        let usage = self.usage(&*economy);
+        let days = select(
+            usage == comptime!(PropertyUse::Factory as u32),
+            comptime!(PropertyUse::Factory.construction_days()),
+            comptime!(PropertyUse::Store.construction_days()),
+        );
+        let days = select(
+            usage == comptime!(PropertyUse::Farm as u32),
+            comptime!(PropertyUse::Farm.construction_days()),
+            days,
+        );
+        let days = select(
+            usage == comptime!(PropertyUse::Housing as u32),
+            comptime!(PropertyUse::Housing.construction_days()),
+            days,
+        );
+        let ledger = &mut economy.ledger;
+        ledger.set_number(Field::ConstructionDaysRemaining, actor, days);
+        ledger.set_number(
+            Field::ConstructionRemaining,
+            actor,
+            comptime!(CONSTRUCTION_WORK_PER_PLOT),
+        );
+        let status = match comptime!(ledger.config.property_mode) {
+            Feature::Enabled => {
+                ledger.set_number(Field::RequestedPlots, actor, 1);
+                comptime!(ProjectStatus::Requested as u32)
+            }
+            Feature::Disabled => comptime!(ProjectStatus::Building as u32),
+        };
+        ledger.set_number(Field::ProjectStatus, actor, status);
     }
 
     pub fn authorized(&self, ledger: &Ledger<'_>, owner: u32) -> bool {
@@ -691,69 +734,102 @@ impl PropertySite {
         minus(free, retained)
     }
 
+    pub(in crate::simulation::economy) fn construction_due(&self, ledger: &Ledger<'_>) -> Ticks {
+        let actor = self.actor;
+        select(
+            self.building(ledger),
+            ledger.value(Field::ConstructionRemaining, actor),
+            zero(),
+        )
+    }
+
+    fn building(&self, ledger: &Ledger<'_>) -> bool {
+        let actor = self.actor;
+        ledger.number(Field::ProjectStatus, actor) == comptime!(ProjectStatus::Building as u32)
+            && ledger.number(Field::EnterpriseStatus, actor)
+                < comptime!(EnterpriseState::Liquidating as u32)
+    }
+
     fn construct(&self, economy: &mut EconomyView<'_>, control: &[Atomic<u32>]) {
         let actor = self.actor;
         let config = economy.ledger.config;
         if actor < config.actors {
-            let status = economy.ledger.number(Field::ProjectStatus, actor);
-            let remaining = economy.ledger.value(Field::ConstructionRemaining, actor);
+            if economy.actors.kind(actor).output() == comptime!(Good::Housing as u32) {
+                landlords::maintain(&mut economy.ledger, control, actor);
+            }
             let stock = economy.ledger.value(Field::Construction, actor);
-            let work = minimum(stock, remaining);
-            if status == comptime!(ProjectStatus::Building as u32) {
-                economy
-                    .ledger
-                    .set(Field::Construction, actor, minus(stock, work));
-                economy
-                    .ledger
-                    .set(Field::ConstructionRemaining, actor, minus(remaining, work));
+            let work = if self.building(&economy.ledger) {
+                self.advance_construction(economy, control, stock)
+            } else {
+                zero()
+            };
+            let unused = minus(stock, work);
+            if !equal(unused, zero()) {
+                economy.ledger.set(Field::Construction, actor, zero());
                 economy.ledger.increase_at(
                     control,
-                    USED_FIELDS as u32 + comptime!(Good::Construction as u32) - 1,
+                    CONSUMPTION_FIELDS as u32 + comptime!(Good::Construction as u32) - 1,
                     actor,
-                    work,
+                    unused,
                 );
-                economy.ledger.increase(control, Field::Used, actor, work);
-                economy
-                    .ledger
-                    .increase(control, Field::InstalledCapital, actor, work);
-                if equal(work, remaining) {
-                    let plots = economy.ledger.value(Field::OccupiedPlots, actor);
-                    let built = economy.ledger.value(Field::ReservedPlots, actor);
-                    let firm = !economy
-                        .actors
-                        .kind(actor)
-                        .is(comptime!(ActorKind::Household));
-                    let workers = economy.ledger.number(Field::WorkersPerPlot, actor);
-                    let developed = plus(plots, built).record(control);
-                    let target = times(developed, workers).record(control);
-                    let capacity = economy.actors.capacity(actor);
-                    let expansion = select(firm, positive(target, ticks(capacity, 0)), zero());
-                    economy
-                        .ledger
-                        .increase(control, Field::PendingCapacity, actor, expansion);
-                    economy.ledger.set(
-                        Field::OccupiedPlots,
-                        actor,
-                        plus(plots, built).record(control),
-                    );
-                    economy.ledger.set_number(Field::ReservedPlots, actor, 0);
-                    economy.ledger.set_number(
-                        Field::ProjectStatus,
-                        actor,
-                        comptime!(ProjectStatus::Completed as u32),
-                    );
-                    let enterprise = economy.ledger.number(Field::EnterpriseStatus, actor);
-                    economy.ledger.set_number(
-                        Field::EnterpriseStatus,
-                        actor,
-                        select(
-                            firm && enterprise == comptime!(EnterpriseState::Forming as u32),
-                            comptime!(EnterpriseState::Operating as u32),
-                            enterprise,
-                        ),
-                    );
-                }
             }
         }
+    }
+
+    fn advance_construction(
+        &self,
+        economy: &mut EconomyView<'_>,
+        control: &[Atomic<u32>],
+        stock: Ticks,
+    ) -> Ticks {
+        let actor = self.actor;
+        let ledger = &mut economy.ledger;
+        let remaining = ledger.value(Field::ConstructionRemaining, actor);
+        let work = minimum(stock, remaining);
+        if !equal(work, zero()) {
+            self.consume(ledger, control, comptime!(Good::Construction as u32), work);
+            ledger.set(Field::ConstructionRemaining, actor, minus(remaining, work));
+            ledger.increase(control, Field::InstalledCapital, actor, work);
+        }
+        let days = max(ledger.number(Field::ConstructionDaysRemaining, actor), 1) - 1;
+        ledger.set_number(Field::ConstructionDaysRemaining, actor, days);
+        if days == 0 && equal(work, remaining) {
+            self.finish_construction(economy, control);
+        }
+        work
+    }
+
+    fn finish_construction(&self, economy: &mut EconomyView<'_>, control: &[Atomic<u32>]) {
+        let actor = self.actor;
+        let ledger = &mut economy.ledger;
+        let plots = ledger.value(Field::OccupiedPlots, actor);
+        let built = ledger.value(Field::ReservedPlots, actor);
+        let firm = !economy
+            .actors
+            .kind(actor)
+            .is(comptime!(ActorKind::Household));
+        let workers = ledger.number(Field::WorkersPerPlot, actor);
+        let developed = plus(plots, built).record(control);
+        let target = times(developed, workers).record(control);
+        let capacity = economy.actors.capacity(actor);
+        let expansion = select(firm, positive(target, ticks(capacity, 0)), zero());
+        ledger.increase(control, Field::PendingCapacity, actor, expansion);
+        ledger.set(Field::OccupiedPlots, actor, developed);
+        ledger.set_number(Field::ReservedPlots, actor, 0);
+        ledger.set_number(
+            Field::ProjectStatus,
+            actor,
+            comptime!(ProjectStatus::Completed as u32),
+        );
+        let enterprise = ledger.number(Field::EnterpriseStatus, actor);
+        ledger.set_number(
+            Field::EnterpriseStatus,
+            actor,
+            select(
+                firm && enterprise == comptime!(EnterpriseState::Forming as u32),
+                comptime!(EnterpriseState::Operating as u32),
+                enterprise,
+            ),
+        );
     }
 }

@@ -1,10 +1,14 @@
 use super::{ActorRows, Good, company, demography, enterprise, industry, research};
-use crate::{arithmetic::hex, ledger::Coordinate};
+use crate::{
+    arithmetic::{add, hex, mul},
+    ledger::Coordinate,
+};
+use anyhow::Context;
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 
-pub const STATE_HASH_VERSION: &str = "bad-econ/state/CubekV2/v32";
-pub const USED_FIELDS: usize = Field::CartageCapacity as usize + 1;
+pub const STATE_HASH_VERSION: &str = "bad-econ/state/CubekV2/v34";
+pub const USED_FIELDS: usize = Field::ConstructionDaysRemaining as usize + 1;
 pub const TRANSIT_FIELDS: usize = USED_FIELDS + Good::COUNT;
 pub const CONSUMPTION_FIELDS: usize = TRANSIT_FIELDS + Good::COUNT;
 pub const PRODUCTION_FIELDS: usize = CONSUMPTION_FIELDS + Good::COUNT;
@@ -198,6 +202,8 @@ pub enum Field {
     CartageIncome,
     CartagePayable,
     CartageCapacity,
+    MaintenanceWork,
+    ConstructionDaysRemaining,
 }
 impl Field {
     pub fn inventory(good: Good) -> Self {
@@ -245,6 +251,59 @@ pub struct State {
     pub companies: Vec<company::Company>,
 }
 impl State {
+    pub(super) fn retire_construction_stock(
+        &mut self,
+        ring: usize,
+        wage: u32,
+    ) -> anyhow::Result<()> {
+        let good = Good::Construction as usize - 1;
+        let count = self.actors.len();
+        let rate = u64::from(wage * super::railway::CART_BILLABLE_MINUTES_PER_UNIT_DAY);
+        for actor in 0..count {
+            let stock = self.get(Field::Construction, actor);
+            let transit_index = (TRANSIT_FIELDS + good) * count + actor;
+            let transit = self.values[transit_index];
+            if stock > 0 || transit > 0 {
+                let mut road = 0;
+                let mut payable = 0;
+                for slot in 0..ring {
+                    let delivery = self.shipment_coordinate(Good::Construction, slot, ring, actor);
+                    self.values[delivery.0 as usize] = 0;
+                    let cartage = self.cartage_coordinate(Good::Construction, slot, ring, actor);
+                    let waiting = std::mem::take(&mut self.values[cartage.0 as usize]);
+                    road = add(road, waiting)?;
+                    payable = add(payable, mul(waiting, slot as u64 * rate)?)?;
+                }
+                self.set(Field::Construction, actor, 0);
+                self.values[transit_index] = 0;
+                self.set(
+                    Field::Transit,
+                    actor,
+                    self.get(Field::Transit, actor)
+                        .checked_sub(transit)
+                        .context("legacy construction transit exceeds all transit")?,
+                );
+                self.set(
+                    Field::RoadFreight,
+                    actor,
+                    self.get(Field::RoadFreight, actor)
+                        .checked_sub(road)
+                        .context("legacy construction cartage exceeds all road freight")?,
+                );
+                self.set(
+                    Field::CartagePayable,
+                    actor,
+                    self.get(Field::CartagePayable, actor)
+                        .checked_sub(payable)
+                        .context("legacy construction cartage fees exceed total fees")?,
+                );
+                let expired = &mut self.values[(CONSUMPTION_FIELDS + good) * count + actor];
+                *expired = add(*expired, add(stock, transit)?)?;
+            }
+        }
+        Ok(())
+    }
+
     pub fn retain_basic_recipe(&mut self, actor: usize) {
         for (basic, current) in [
             (Field::BasicLaborMinutes, Field::LaborMinutes),

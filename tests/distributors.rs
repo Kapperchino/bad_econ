@@ -82,6 +82,42 @@ fn economy() -> Result<Scenario> {
 }
 
 #[test]
+fn producers_and_distributors_reserve_for_at_most_installed_capacity_on_gpu() -> Result<()> {
+    let mut config = economy()?.config().clone();
+    config.household_production = HouseholdProduction::industrial();
+    config.behavior.wage_increment = 0;
+    let scenario = Scenario::new(config)?;
+    let bakery = scenario.index_of(4).unwrap();
+    let dealer = scenario.index_of(5).unwrap();
+    let mut initial = scenario.initial()?;
+    initial.set(Field::Demand, bakery, 240);
+    initial.set(Field::Demand, dealer, 240);
+    let mut simulation =
+        Simulation::from_checkpoint(Checkpoint::new(&scenario, &initial)?, support::device(64)?)?;
+    simulation.advance()?;
+    let state = simulation.download()?;
+    let bakery_labor = state.get(Field::LaborMinutes, bakery) * state.get(Field::Wage, bakery);
+    let bakery_flour =
+        state.get(Field::InputTicks, bakery) * state.get(Field::FirstInputCost, bakery);
+    let bakery_days = u64::from(scenario.config().coverage) + scenario.ring() as u64;
+    let bakery_capacity = u64::from(state.actors.at(bakery).capacity);
+    assert_eq!(
+        state.get(Field::OperatingReserve, bakery),
+        bakery_capacity * bakery_days * (bakery_labor + bakery_flour)
+    );
+    let dealer_labor = state.get(Field::LaborMinutes, dealer) * state.get(Field::Wage, dealer);
+    let dealer_stock =
+        state.get(Field::OutputTicks, dealer) * state.get(Field::ReplacementCost, dealer);
+    let dealer_days = state.get(Field::StockCoverage, dealer) + scenario.ring() as u64;
+    let dealer_capacity = u64::from(state.actors.at(dealer).capacity);
+    assert_eq!(
+        state.get(Field::OperatingReserve, dealer),
+        dealer_capacity * dealer_days * (dealer_labor + dealer_stock)
+    );
+    Ok(())
+}
+
+#[test]
 fn buying_tools_preserves_the_delivered_cost_of_resale_stock_on_gpu() -> Result<()> {
     let mut config = economy()?.config().clone();
     config.household_production = HouseholdProduction::industrial();

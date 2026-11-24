@@ -1,13 +1,17 @@
 use super::{
     BASE_FIELDS, Field, Good, ObservationSnapshot, Scenario, ScenarioConfig, State, Technique,
-    USED_FIELDS, demography, railway,
+    USED_FIELDS, demography,
+    property::{ProjectStatus, PropertyUse},
+    railway,
 };
 use crate::arithmetic::{PROFILE, hex, table_hash};
 use anyhow::{Result, anyhow};
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 
-const CHECKPOINT_VERSION: u32 = 29;
+const CHECKPOINT_VERSION: u32 = 31;
+const LEGACY_USED_FIELDS: usize = Field::MaintenanceWork as usize;
+const LEGACY_FIELD_GAP: usize = USED_FIELDS - LEGACY_USED_FIELDS;
 
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(try_from = "CheckpointDocument", deny_unknown_fields)]
@@ -76,7 +80,7 @@ impl TryFrom<CheckpointDocument> for Checkpoint {
             .get("version")
             .and_then(serde_json::Value::as_u64)
         {
-            Some(23..=28) => (),
+            Some(23..=30) => (),
             Some(version) if version == u64::from(CHECKPOINT_VERSION) => (),
             _ => Err(anyhow!(
                 "unsupported checkpoint format: expected 23 through {CHECKPOINT_VERSION}"
@@ -93,26 +97,26 @@ impl TryFrom<CheckpointDocument> for Checkpoint {
             checksum: String,
         }
         let mut current: Current = serde_json::from_value(document.0)?;
-        if current.version < CHECKPOINT_VERSION {
+        if current.version < 29 {
             let scenario = Scenario::new(current.scenario.clone())?;
             let count = current.state.actors.len();
             let retail = super::RetailAccount::FIELDS * count;
-            let expected = scenario.state_len_for(count) - retail;
+            let expected = scenario.state_len_for(count) - retail - LEGACY_FIELD_GAP * count;
             let grain = Field::GrainReserve as usize;
             let freight = Field::RoadFreight as usize;
             let missing = match current.version {
-                23 => Field::JobDaysRemaining as usize..USED_FIELDS,
-                24 => Field::EligibleWorkers as usize..USED_FIELDS,
-                25 => Field::Infants as usize..USED_FIELDS,
-                26 => grain..USED_FIELDS,
+                23 => Field::JobDaysRemaining as usize..LEGACY_USED_FIELDS,
+                24 => Field::EligibleWorkers as usize..LEGACY_USED_FIELDS,
+                25 => Field::Infants as usize..LEGACY_USED_FIELDS,
+                26 => grain..LEGACY_USED_FIELDS,
                 27 if current.state.values.len() == expected - (freight - grain) * count => {
                     grain..freight
                 }
-                27 => freight..USED_FIELDS,
+                27 => freight..LEGACY_USED_FIELDS,
                 28 => 0..0,
                 _ => unreachable!(),
             };
-            let add_freight = missing.end == USED_FIELDS;
+            let add_freight = missing.end == LEGACY_USED_FIELDS;
             let shipping = Good::COUNT * scenario.ring() * count;
             let added = missing.len() * count + usize::from(add_freight) * shipping;
             match (current.version >= 25 || current.scenario.people.is_none())
@@ -129,7 +133,7 @@ impl TryFrom<CheckpointDocument> for Checkpoint {
                 std::iter::repeat_n(0, missing.len() * count),
             );
             if add_freight {
-                let offset = BASE_FIELDS * count + shipping;
+                let offset = (BASE_FIELDS - LEGACY_FIELD_GAP) * count + shipping;
                 current
                     .state
                     .values
@@ -149,19 +153,62 @@ impl TryFrom<CheckpointDocument> for Checkpoint {
                     }
                 }
             }
-            if current.version == 25 && current.scenario.people.is_some() {
-                demography::CohortPopulation::from_individuals(
-                    &current.scenario,
-                    &mut current.state,
-                )?;
-            }
-            let offset = scenario.fields() * count - retail;
+            let offset = (scenario.fields() - LEGACY_FIELD_GAP) * count - retail;
             current
                 .state
                 .values
                 .splice(offset..offset, std::iter::repeat_n(0, retail));
-            current.version = CHECKPOINT_VERSION;
             current.checksum = Self::checksum(&current.scenario, &current.state)?;
+        }
+        if current.version < CHECKPOINT_VERSION {
+            let scenario = Scenario::new(current.scenario.clone())?;
+            let state = &mut current.state;
+            let count = state.actors.len();
+            let first_missing = match current.version {
+                30 => Field::ConstructionDaysRemaining as usize,
+                _ => LEGACY_USED_FIELDS,
+            };
+            let missing = (USED_FIELDS - first_missing) * count;
+            match count >= scenario.actors()
+                && state.values.len() == scenario.state_len_for(count) - missing
+                && current.checksum == Self::checksum(&current.scenario, state)?
+            {
+                true => (),
+                false => Err(anyhow!("invalid legacy checkpoint shape or checksum"))?,
+            }
+            let offset = first_missing * count;
+            state
+                .values
+                .splice(offset..offset, std::iter::repeat_n(0, missing));
+            if current.version == 25 && current.scenario.people.is_some() {
+                demography::CohortPopulation::from_individuals(&current.scenario, state)?;
+            }
+            if current.version < 30 {
+                state.retire_construction_stock(scenario.ring(), current.scenario.wage)?;
+            }
+            if current.version < 30 && current.scenario.property.is_none() {
+                for row in 0..count {
+                    let work = state.get(Field::ConstructionRemaining, row);
+                    if work > 0 && state.get(Field::ProjectStatus, row) == 0 {
+                        state.set(Field::ProjectStatus, row, ProjectStatus::Building as u64);
+                        let minutes_per_unit =
+                            720 / u64::from(super::property::CONSTRUCTION_WORK_PER_PLOT);
+                        state.set(
+                            Field::ConstructionRemaining,
+                            row,
+                            work.div_ceil(minutes_per_unit),
+                        );
+                    }
+                }
+            }
+            for row in 0..count {
+                if state.get(Field::ProjectStatus, row) == ProjectStatus::Requested as u64 {
+                    let days = PropertyUse::for_site(state, row)?.construction_days();
+                    state.set(Field::ConstructionDaysRemaining, row, days.into());
+                }
+            }
+            current.version = CHECKPOINT_VERSION;
+            current.checksum = Self::checksum(&current.scenario, state)?;
         }
         Ok(Self {
             version: current.version,

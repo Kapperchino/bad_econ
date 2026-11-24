@@ -466,16 +466,21 @@ fn a_founder_buys_materials_and_leaves_an_explicit_cohort_on_gpu() -> Result<()>
     Ok(())
 }
 
+const LEGACY_USED_FIELDS: usize = Field::MaintenanceWork as usize;
+
 fn legacy_fields(state: &mut State, scenario: &Scenario, missing: std::ops::Range<usize>) {
     let rows = state.actors.len();
     let end = scenario.fields() * rows;
     state.values.drain(end - RetailAccount::FIELDS * rows..end);
-    if missing.end == USED_FIELDS {
+    if missing.end == LEGACY_USED_FIELDS {
         let shipments = Good::COUNT * scenario.ring();
         state
             .values
             .drain((BASE_FIELDS + shipments) * rows..(BASE_FIELDS + 2 * shipments) * rows);
     }
+    state
+        .values
+        .drain(LEGACY_USED_FIELDS * rows..USED_FIELDS * rows);
     state.values.drain(missing.start * rows..missing.end * rows);
 }
 
@@ -492,11 +497,11 @@ fn legacy_checkpoints_migrate_and_resume_on_gpu() -> Result<()> {
     let checkpoint = serde_json::to_value(simulation.checkpoint()?)?;
     for (version, missing) in [
         (28, 0..0),
-        (23, Field::JobDaysRemaining as usize..USED_FIELDS),
-        (24, Field::EligibleWorkers as usize..USED_FIELDS),
-        (25, Field::Infants as usize..USED_FIELDS),
-        (26, Field::GrainReserve as usize..USED_FIELDS),
-        (27, Field::RoadFreight as usize..USED_FIELDS),
+        (23, Field::JobDaysRemaining as usize..LEGACY_USED_FIELDS),
+        (24, Field::EligibleWorkers as usize..LEGACY_USED_FIELDS),
+        (25, Field::Infants as usize..LEGACY_USED_FIELDS),
+        (26, Field::GrainReserve as usize..LEGACY_USED_FIELDS),
+        (27, Field::RoadFreight as usize..LEGACY_USED_FIELDS),
         (
             27,
             Field::GrainReserve as usize..Field::RoadFreight as usize,
@@ -552,7 +557,11 @@ fn individual_checkpoint_members_resume_as_cohort_counts_on_gpu() -> Result<()> 
     let scenario = Scenario::new(config)?;
     let initial = scenario.initial()?;
     let mut legacy = initial.clone();
-    legacy_fields(&mut legacy, &scenario, Field::Infants as usize..USED_FIELDS);
+    legacy_fields(
+        &mut legacy,
+        &scenario,
+        Field::Infants as usize..LEGACY_USED_FIELDS,
+    );
     legacy.next_identity = 1030;
     legacy.people = scenario
         .config()
