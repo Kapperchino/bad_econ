@@ -1,8 +1,9 @@
 use super::{
     Chart, Display,
-    model::ChartRange,
+    model::{ChartRange, ChartSample},
     theme::{Theme, Tone},
 };
+use crate::domain::ObservationSnapshot;
 use bevy::{
     asset::RenderAssetUsages,
     camera::{RenderTarget, ScalingMode, visibility::RenderLayers},
@@ -12,6 +13,7 @@ use bevy::{
     render::render_resource::TextureFormat,
     sprite_render::AlphaMode2d,
 };
+use std::collections::VecDeque;
 
 #[derive(Resource)]
 pub(super) struct Graph {
@@ -78,6 +80,7 @@ impl GraphRenderer<'_, '_> {
         pixels: UVec2,
         scale: f32,
         theme: Theme,
+        hovered: Option<ChartLine>,
     ) {
         let mut image = self.images.get_mut(&self.graph.image).expect("graph image");
         if image.size() != pixels {
@@ -100,7 +103,7 @@ impl GraphRenderer<'_, '_> {
         }
         let mut geometry = Geometry { theme, ..default() };
         for panel in panels {
-            geometry.panel(display, panel, scale);
+            geometry.panel(display, panel, scale, hovered);
         }
         *self.meshes.get_mut(&self.graph.mesh).expect("graph mesh") = geometry.mesh(size);
     }
@@ -111,6 +114,10 @@ impl GraphRenderer<'_, '_> {
 }
 
 pub(super) const PLOT_MARGIN: f32 = 4.0;
+const LINE_HIT_RADIUS: f32 = 6.0;
+
+#[derive(Component)]
+pub(super) struct HoverDot;
 
 pub(super) struct GraphPanel {
     pub chart: Chart,
@@ -118,17 +125,174 @@ pub(super) struct GraphPanel {
     pub pixels: URect,
 }
 
-#[derive(Clone, Copy)]
-enum LineStyle {
+#[derive(Clone, Copy, PartialEq, Eq)]
+pub(super) struct ChartLine {
+    pub chart: Chart,
+    pub series: usize,
+    pub run: LineRun,
+}
+
+#[derive(Clone, Copy, PartialEq, Eq)]
+pub(super) enum LineRun {
     Current,
     Reference,
 }
-impl LineStyle {
-    fn color(self, color: Color) -> Color {
-        match self {
-            Self::Current => color,
-            Self::Reference => color.with_alpha(0.30),
+
+impl ChartLine {
+    fn color(self, theme: Theme, hovered: Option<Self>) -> Color {
+        let alpha = match (self.run, hovered.filter(|line| line.chart == self.chart)) {
+            (_, Some(line)) if line == self => 1.0,
+            (LineRun::Current, Some(_)) => 0.10,
+            (LineRun::Reference, Some(_)) => 0.05,
+            (LineRun::Current, None) => 1.0,
+            (LineRun::Reference, None) => 0.30,
+        };
+        theme
+            .color(Tone::Series(self.chart, self.series))
+            .with_alpha(alpha)
+    }
+}
+
+pub(super) struct LineHit {
+    pub observation: LineObservation,
+    pub point: Vec2,
+    distance: f32,
+}
+
+#[derive(Clone, Copy, PartialEq)]
+pub(super) struct LineObservation {
+    pub line: ChartLine,
+    pub day: u64,
+    pub value: f64,
+}
+
+#[derive(Clone, Copy)]
+struct LinePoint {
+    day: u64,
+    value: f64,
+    position: Vec2,
+}
+
+impl LineHit {
+    fn near(line: ChartLine, cursor: Vec2, from: LinePoint, to: LinePoint) -> Option<Self> {
+        let segment = to.position - from.position;
+        let fraction = ((cursor - from.position).dot(segment)
+            / segment.length_squared().max(f32::EPSILON))
+        .clamp(0.0, 1.0);
+        let point = from.position + fraction * segment;
+        let distance = point.distance_squared(cursor);
+        let observation = match fraction < 0.5 {
+            true => from,
+            false => to,
+        };
+        (distance <= LINE_HIT_RADIUS.powi(2)).then_some(Self {
+            observation: LineObservation {
+                line,
+                day: observation.day,
+                value: observation.value,
+            },
+            point,
+            distance,
+        })
+    }
+}
+
+fn plot_bounds(size: Vec2, margin: f32) -> Rect {
+    let inset = Vec2::splat(margin);
+    Rect::from_corners(inset, inset + (size - 2.0 * inset).max(Vec2::ZERO))
+}
+
+impl GraphPanel {
+    fn point(&self, bounds: Rect, day: u64, value: f64) -> Vec2 {
+        let extent = bounds.size();
+        Vec2::new(
+            bounds.min.x + self.range.day_fraction(day) * extent.x,
+            bounds.max.y - self.range.fraction(value) as f32 * extent.y,
+        )
+    }
+
+    fn line(&self, run: LineRun, series: usize) -> ChartLine {
+        ChartLine {
+            chart: self.chart,
+            series,
+            run,
         }
+    }
+
+    pub fn hit(&self, display: &Display, cursor: Vec2, inverse_scale: f32) -> Option<LineHit> {
+        let bounds = plot_bounds(self.pixels.size().as_vec2() * inverse_scale, PLOT_MARGIN);
+        std::iter::once((&display.history, LineRun::Current))
+            .chain(
+                display
+                    .comparison
+                    .as_ref()
+                    .map(|run| (&run.history, LineRun::Reference)),
+            )
+            .filter_map(|(history, run)| self.hit_history(history, bounds, cursor, run))
+            .min_by(|first, second| first.distance.total_cmp(&second.distance))
+    }
+
+    fn hit_history(
+        &self,
+        history: &VecDeque<ObservationSnapshot>,
+        bounds: Rect,
+        cursor: Vec2,
+        run: LineRun,
+    ) -> Option<LineHit> {
+        let range = &self.range;
+        let span = (range.last_day - range.first_day) as f64;
+        let offset = |x: f32| {
+            let fraction = ((x - bounds.min.x) / bounds.width().max(f32::EPSILON)).clamp(0.0, 1.0);
+            f64::from(fraction) * span
+        };
+        let start = range.first_day + offset(cursor.x - LINE_HIT_RADIUS).floor() as u64;
+        let end = range.first_day + offset(cursor.x + LINE_HIT_RADIUS).ceil() as u64;
+        let last_index = history
+            .partition_point(|sample| sample.day <= range.last_day)
+            .checked_sub(1)?;
+        let first_index = history
+            .partition_point(|sample| sample.day < start)
+            .saturating_sub(1);
+        let end_index = history
+            .partition_point(|sample| sample.day <= end)
+            .min(last_index);
+        let first_day = history.get(first_index)?.day.max(range.first_day);
+        let last_day = history.get(end_index)?.day;
+        let endpoint = history[last_index].day;
+        let mut previous: Option<ChartSample> = None;
+        let mut best = None;
+        let point = |day, value| LinePoint {
+            day,
+            value,
+            position: self.point(bounds, day, value),
+        };
+        for sample in self.chart.samples(history, first_day, last_day) {
+            let closest = sample
+                .values
+                .iter()
+                .enumerate()
+                .filter(|(series, _)| range.selection.includes(*series))
+                .flat_map(|(series, value)| {
+                    let to = point(sample.day, *value);
+                    let from = previous.as_ref().and_then(|prior| {
+                        prior
+                            .values
+                            .get(series)
+                            .map(|value| point(prior.day, *value))
+                    });
+                    from.into_iter()
+                        .chain((sample.day == endpoint).then_some(to))
+                        .filter_map(move |from| {
+                            LineHit::near(self.line(run, series), cursor, from, to)
+                        })
+                });
+            best = best
+                .into_iter()
+                .chain(closest)
+                .min_by(|first: &LineHit, second| first.distance.total_cmp(&second.distance));
+            previous = Some(sample);
+        }
+        best
     }
 }
 
@@ -154,11 +318,20 @@ impl Geometry {
         );
     }
 
-    fn panel(&mut self, display: &Display, panel: &GraphPanel, scale: f32) {
-        let inset = Vec2::splat(PLOT_MARGIN * scale);
-        let origin = panel.pixels.min.as_vec2() + inset;
-        let extent = (panel.pixels.size().as_vec2() - 2.0 * inset).max(Vec2::ZERO);
-        let bounds = Rect::from_corners(origin, origin + extent);
+    fn panel(
+        &mut self,
+        display: &Display,
+        panel: &GraphPanel,
+        scale: f32,
+        hovered: Option<ChartLine>,
+    ) {
+        let bounds = plot_bounds(panel.pixels.size().as_vec2(), PLOT_MARGIN * scale);
+        let bounds = Rect::from_corners(
+            bounds.min + panel.pixels.min.as_vec2(),
+            bounds.max + panel.pixels.min.as_vec2(),
+        );
+        let origin = bounds.min;
+        let extent = bounds.size();
         let range = &panel.range;
         for tick in 0..=4 {
             let offset = extent * (tick as f32 / 4.0);
@@ -204,46 +377,47 @@ impl Geometry {
                 panel,
                 bounds,
                 scale,
-                LineStyle::Reference,
+                LineRun::Reference,
+                hovered,
             );
         }
-        self.history(&display.history, panel, bounds, scale, LineStyle::Current);
+        self.history(
+            &display.history,
+            panel,
+            bounds,
+            scale,
+            LineRun::Current,
+            hovered,
+        );
     }
 
     fn history(
         &mut self,
-        history: &std::collections::VecDeque<crate::domain::ObservationSnapshot>,
+        history: &VecDeque<ObservationSnapshot>,
         panel: &GraphPanel,
         bounds: Rect,
         scale: f32,
-        style: LineStyle,
+        run: LineRun,
+        hovered: Option<ChartLine>,
     ) {
         let range = &panel.range;
-        let chart = panel.chart;
-        let extent = bounds.size();
-        let point = |day: u64, value: f64| {
-            Vec2::new(
-                bounds.min.x + range.day_fraction(day) * extent.x,
-                bounds.max.y - range.fraction(value) as f32 * extent.y,
-            )
-        };
+        let theme = self.theme;
+        let color = |series| panel.line(run, series).color(theme, hovered);
         let mut previous = Vec::<Vec2>::new();
         let mut current = Vec::new();
-        for sample in chart.samples(history, range.first_day, range.last_day) {
+        for sample in panel
+            .chart
+            .samples(history, range.first_day, range.last_day)
+        {
             current.extend(
                 sample
                     .values
                     .into_iter()
-                    .map(|value| point(sample.day, value)),
+                    .map(|value| panel.point(bounds, sample.day, value)),
             );
             for (series, (&from, &to)) in previous.iter().zip(&current).enumerate() {
                 if range.selection.includes(series) && from.is_finite() && to.is_finite() {
-                    self.line(
-                        from,
-                        to,
-                        1.8 * scale,
-                        style.color(self.theme.color(Tone::Series(chart, series))),
-                    );
+                    self.line(from, to, 1.8 * scale, color(series));
                 }
             }
             std::mem::swap(&mut previous, &mut current);
@@ -259,7 +433,7 @@ impl Geometry {
                         point + Vec2::new(radius, radius),
                         point + Vec2::new(-radius, radius),
                     ],
-                    style.color(self.theme.color(Tone::Series(chart, series))),
+                    color(series),
                 );
             }
         }

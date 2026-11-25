@@ -1,10 +1,12 @@
 use super::{
     Chart, Dashboard, DashboardPage, Display, atlas,
-    graph::{self, GraphPanel, GraphRenderer, PLOT_MARGIN},
+    graph::{
+        self, GraphPanel, GraphRenderer, HoverDot, LineHit, LineObservation, LineRun, PLOT_MARGIN,
+    },
     model::{ChartRange, Menu, Period, SeriesSelection, ValueFormat},
     theme::{Theme, Tone},
     ui::{
-        self, ActorSelection, ChartTab, Crosshair, CursorDate, FirmMarker, Label, Legend,
+        self, ActorSelection, ChartTab, ChartTooltip, Crosshair, FirmMarker, Label, Legend,
         MapMarkers, Plot, UiAction,
     },
 };
@@ -13,27 +15,31 @@ use crate::{
     runtime::RuntimeState,
 };
 use bevy::{
+    ecs::system::SystemParam,
     picking::{Pickable, hover::Hovered},
     prelude::*,
     ui::RelativeCursorPosition,
     ui_widgets::Button,
+    window::PrimaryWindow,
 };
 use std::collections::BTreeMap;
 
 pub(super) struct PresentationPlugin;
 impl Plugin for PresentationPlugin {
     fn build(&self, app: &mut App) {
-        app.add_systems(Startup, graph::setup).add_systems(
-            Update,
-            (
-                draw.run_if(needs_refresh),
-                (draw_plot, draw_cursor).chain(),
-                draw_legend.run_if(chart_changed),
-                draw_markers.run_if(map_changed),
-            )
-                .after(super::controls)
-                .in_set(PresentationSystems),
-        );
+        app.init_resource::<PlotState>()
+            .add_systems(Startup, graph::setup)
+            .add_systems(
+                Update,
+                (
+                    draw.run_if(needs_refresh),
+                    (draw_plot, draw_hover_dots, draw_cursor).chain(),
+                    draw_legend.run_if(chart_changed),
+                    draw_markers.run_if(map_changed),
+                )
+                    .after(super::controls)
+                    .in_set(PresentationSystems),
+            );
     }
 }
 
@@ -43,6 +49,33 @@ pub(super) struct PresentationSystems;
 const AXIS_WIDTH: f32 = 48.0;
 const DATE_HEIGHT: f32 = 20.0;
 const TOP_PADDING: f32 = 5.0;
+const CROSSHAIR_WIDTH: f32 = 1.0;
+const HOVER_DOT_RADIUS: f32 = 4.5;
+
+#[derive(Resource, Default)]
+struct PlotState {
+    version: Option<PlotVersion>,
+    atlas: PlotAtlas,
+    hover: Option<PlotHover>,
+}
+
+#[derive(Default)]
+struct PlotAtlas {
+    panels: Vec<GraphPanel>,
+    pixels: UVec2,
+}
+
+struct PlotHover {
+    plot: Entity,
+    fraction: f32,
+    hit: Option<LineHit>,
+}
+
+impl PlotHover {
+    fn observation(&self) -> Option<LineObservation> {
+        self.hit.as_ref().map(|hit| hit.observation)
+    }
+}
 
 #[derive(PartialEq)]
 struct PlotVersion {
@@ -59,6 +92,24 @@ struct PlotLayout {
     chart: Chart,
     scale: f32,
     size: UVec2,
+}
+
+impl PlotLayout {
+    fn area(&self) -> Vec2 {
+        self.size.as_vec2() * self.scale
+    }
+
+    fn plot_width(&self) -> f32 {
+        (self.area().x - 2.0 * PLOT_MARGIN).max(0.0)
+    }
+
+    fn fraction_at(&self, x: f32) -> f32 {
+        ((x - PLOT_MARGIN) / self.plot_width().max(f32::EPSILON)).clamp(0.0, 1.0)
+    }
+
+    fn x_at(&self, fraction: f32) -> f32 {
+        PLOT_MARGIN + fraction * self.plot_width()
+    }
 }
 
 #[derive(Clone, Copy, PartialEq)]
@@ -219,15 +270,15 @@ fn draw_legend(
 fn draw_plot(
     dashboard: Option<Res<Dashboard>>,
     theme: Option<Res<Theme>>,
-    plots: Query<(Entity, &Plot, &ComputedNode)>,
+    plots: Query<(Entity, &Plot, &ComputedNode, &RelativeCursorPosition)>,
     mut renderer: GraphRenderer,
-    mut previous: Local<Option<PlotVersion>>,
+    mut state: ResMut<PlotState>,
     mut commands: Commands,
 ) {
     if let Some(dashboard) = dashboard {
-        let mut plots = plots
+        let mut layouts = plots
             .iter()
-            .filter_map(|(entity, plot, node)| {
+            .filter_map(|(entity, plot, node, _)| {
                 active_chart(*plot, &dashboard)
                     .filter(|_| node.size().min_element() > 0.0)
                     .map(|chart| {
@@ -243,33 +294,108 @@ fn draw_plot(
                     })
             })
             .collect::<Vec<_>>();
-        plots.sort_unstable_by_key(|plot| plot.entity);
+        layouts.sort_unstable_by_key(|plot| plot.entity);
         let display = dashboard.data.lock().expect("dashboard lock");
         let version = PlotVersion {
             theme: theme.as_deref().copied().unwrap_or_default(),
             revision: display.observation_revision,
             period: dashboard.period,
             selection: dashboard.series,
-            plots,
+            plots: layouts,
         };
-        if !version.plots.is_empty() && previous.as_ref() != Some(&version) {
-            paint_plots(&display, &version, &mut renderer, &mut commands);
+        let changed = state.version.as_ref() != Some(&version);
+        if changed {
+            state.atlas = plot_atlas(&display, &version);
+            paint_plots(
+                &display,
+                &version,
+                &state.atlas.panels,
+                renderer.image(),
+                &mut commands,
+            );
         }
-        *previous = Some(version);
+        let hover = version
+            .plots
+            .iter()
+            .zip(&state.atlas.panels)
+            .find_map(|(layout, panel)| {
+                let (_, _, node, cursor) = plots.get(layout.entity).ok()?;
+                let position = cursor_in_plot(cursor, node)?;
+                let hit = panel.hit(&display, position, layout.scale);
+                let x = hit.as_ref().map_or(position.x, |hit| hit.point.x);
+                Some(PlotHover {
+                    plot: layout.entity,
+                    fraction: layout.fraction_at(x),
+                    hit,
+                })
+            });
+        let hovered = hover
+            .as_ref()
+            .and_then(PlotHover::observation)
+            .map(|observation| observation.line);
+        let previous = state
+            .hover
+            .as_ref()
+            .and_then(PlotHover::observation)
+            .map(|observation| observation.line);
+        if let Some(layout) = version
+            .plots
+            .first()
+            .filter(|_| changed || hovered != previous)
+        {
+            renderer.update(
+                &display,
+                &state.atlas.panels,
+                state.atlas.pixels,
+                1.0 / layout.scale,
+                version.theme,
+                hovered,
+            );
+        }
+        state.hover = hover;
+        state.version = Some(version);
     }
 }
 
-fn paint_plots(
-    display: &Display,
-    version: &PlotVersion,
-    renderer: &mut GraphRenderer,
-    commands: &mut Commands,
+fn draw_hover_dots(
+    state: Res<PlotState>,
+    mut dots: Query<(&ChildOf, &mut Node, &mut Visibility, &mut BackgroundColor), With<HoverDot>>,
 ) {
+    if let Some(version) = &state.version {
+        for (parent, mut node, mut visibility, mut background) in &mut dots {
+            match state
+                .hover
+                .as_ref()
+                .filter(|hover| hover.plot == parent.parent())
+                .and_then(|hover| hover.hit.as_ref())
+            {
+                Some(hit) => {
+                    let point = hit.point + Vec2::new(AXIS_WIDTH, TOP_PADDING) - HOVER_DOT_RADIUS;
+                    let (left, top) = (px(point.x), px(point.y));
+                    if (node.left, node.top) != (left, top) {
+                        node.left = left;
+                        node.top = top;
+                    }
+                    let line = hit.observation.line;
+                    background.set_if_neq(BackgroundColor(
+                        version.theme.color(Tone::Series(line.chart, line.series)),
+                    ));
+                    visibility.set_if_neq(Visibility::Inherited);
+                }
+                None => {
+                    visibility.set_if_neq(Visibility::Hidden);
+                }
+            }
+        }
+    }
+}
+
+fn plot_atlas(display: &Display, version: &PlotVersion) -> PlotAtlas {
     let tile = version
         .plots
         .iter()
         .fold(UVec2::ONE, |tile, plot| tile.max(plot.size));
-    let columns = version.plots.len().min(2);
+    let columns = version.plots.len().clamp(1, 2);
     let rows = version.plots.len().div_ceil(columns);
     let panels = version
         .plots
@@ -291,22 +417,28 @@ fn paint_plots(
             }
         })
         .collect::<Vec<_>>();
-    renderer.update(
-        display,
-        &panels,
-        tile * UVec2::new(columns as u32, rows as u32),
-        1.0 / version.plots[0].scale,
-        version.theme,
-    );
-    for (layout, panel) in version.plots.iter().zip(&panels) {
-        let area = layout.size.as_vec2() * layout.scale;
+    PlotAtlas {
+        panels,
+        pixels: tile * UVec2::new(columns as u32, rows as u32),
+    }
+}
+
+fn paint_plots(
+    display: &Display,
+    version: &PlotVersion,
+    panels: &[GraphPanel],
+    texture: Handle<Image>,
+    commands: &mut Commands,
+) {
+    for (layout, panel) in version.plots.iter().zip(panels) {
+        let area = layout.area();
         let rect = Rect::from_corners(panel.pixels.min.as_vec2(), panel.pixels.max.as_vec2());
         commands
             .entity(layout.entity)
             .despawn_children()
             .with_children(|plot| {
                 draw_axes(plot, &panel.range, area);
-                let mut image = ImageNode::new(renderer.image());
+                let mut image = ImageNode::new(texture.clone());
                 image.rect = Some(rect);
                 plot.spawn((
                     Node {
@@ -328,13 +460,28 @@ fn paint_plots(
                             position_type: PositionType::Absolute,
                             top: px(PLOT_MARGIN),
                             bottom: px(PLOT_MARGIN),
-                            width: px(1),
+                            width: px(CROSSHAIR_WIDTH),
                             ..default()
                         },
                         Tone::Crosshair.surface(),
                         Pickable::IGNORE,
                     ));
                 });
+                plot.spawn((
+                    HoverDot,
+                    Visibility::Hidden,
+                    Node {
+                        position_type: PositionType::Absolute,
+                        width: px(2.0 * HOVER_DOT_RADIUS),
+                        height: px(2.0 * HOVER_DOT_RADIUS),
+                        border: UiRect::all(px(1)),
+                        border_radius: BorderRadius::MAX,
+                        ..default()
+                    },
+                    BackgroundColor::default(),
+                    Tone::Panel.outline(),
+                    Pickable::IGNORE,
+                ));
                 if display.history.is_empty() {
                     plot.spawn((
                         Node {
@@ -716,14 +863,74 @@ struct ReadoutVersion {
     day: u64,
 }
 
+#[derive(SystemParam)]
+struct CursorTooltip<'w, 's> {
+    node: Single<
+        'w,
+        's,
+        (
+            Entity,
+            &'static ComputedNode,
+            &'static mut Node,
+            &'static mut UiTransform,
+            &'static mut Visibility,
+        ),
+        (With<ChartTooltip>, Without<Crosshair>),
+    >,
+    window: Single<'w, 's, &'static Window, With<PrimaryWindow>>,
+    previous: Local<'s, Option<LineObservation>>,
+    commands: Commands<'w, 's>,
+}
+
+impl CursorTooltip<'_, '_> {
+    fn update(&mut self, observation: Option<LineObservation>) {
+        let (entity, computed, node, transform, visibility) = &mut *self.node;
+        match (observation, self.window.cursor_position()) {
+            (Some(observation), Some(cursor)) => {
+                if Some(observation) != *self.previous {
+                    self.commands
+                        .entity(*entity)
+                        .despawn_children()
+                        .with_children(|tooltip| tooltip_content(tooltip, observation));
+                    *self.previous = Some(observation);
+                }
+                let size = computed.size() * computed.inverse_scale_factor();
+                let inset = 8.0;
+                let gap = 10.0;
+                let minimum_x = inset + size.x * 0.5;
+                let maximum_x = (self.window.width() - minimum_x).max(minimum_x);
+                let left = px(cursor.x.clamp(minimum_x, maximum_x));
+                let above = cursor.y - gap;
+                let (top, anchor) = match above - size.y >= inset {
+                    true => (above, -100.0),
+                    false => (
+                        (cursor.y + gap).min(self.window.height() - size.y - inset),
+                        0.0,
+                    ),
+                };
+                let top = px(top.max(inset));
+                if (node.left, node.top) != (left, top) {
+                    node.left = left;
+                    node.top = top;
+                }
+                transform.set_if_neq(UiTransform::from_xy(percent(-50), percent(anchor)));
+                visibility.set_if_neq(Visibility::Inherited);
+            }
+            _ => {
+                visibility.set_if_neq(Visibility::Hidden);
+            }
+        }
+    }
+}
+
 fn draw_cursor(
     dashboard: Option<Res<Dashboard>>,
-    plots: Query<(&Plot, &RelativeCursorPosition, &ComputedNode)>,
-    images: Query<(&ComputedNode, &ChildOf), With<ImageNode>>,
+    state: Res<PlotState>,
+    images: Query<&ChildOf, With<ImageNode>>,
     mut crosshairs: Query<(&ChildOf, &mut Node, &mut Visibility), With<Crosshair>>,
-    mut dates: Query<&mut Text, (With<CursorDate>, Without<ui::ChartReadout>)>,
     mut readouts: Query<&mut Text, With<ui::ChartReadout>>,
     mut previous: Local<Option<ReadoutVersion>>,
+    mut tooltip: CursorTooltip,
 ) {
     if let Some(dashboard) = dashboard {
         let display = dashboard.data.lock().expect("dashboard lock");
@@ -734,36 +941,26 @@ fn draw_cursor(
             .map_or(last, |point| point.day)
             .max(dashboard.period.first_day(last));
         let span = last - first;
-        let hovered = plots.iter().find_map(|(plot, cursor, node)| {
-            active_chart(*plot, &dashboard).and_then(|_| hover_fraction(cursor, node))
-        });
-        let day = hovered.map_or(last, |fraction| {
-            first + (f64::from(fraction) * span as f64).round() as u64
-        });
-        let date = hovered.map_or_else(String::new, |_| {
-            format!("Cursor  ·  {}  ·  Day {day}", CalendarDate::on_day(day))
-        });
-        for mut label in &mut dates {
-            if label.0 != date {
-                label.0.clone_from(&date);
-            }
-        }
+        let hovered = state.hover.as_ref();
+        let observation = hovered.and_then(PlotHover::observation);
+        let day = match observation {
+            Some(observation) => observation.day.clamp(first, last),
+            None => hovered.map_or(last, |hover| {
+                first + (f64::from(hover.fraction) * span as f64).round() as u64
+            }),
+        };
         for (parent, mut node, mut visibility) in &mut crosshairs {
-            let image = images.get(parent.parent()).ok().and_then(|(node, plot)| {
-                plots
-                    .get(plot.parent())
-                    .ok()
-                    .and_then(|(plot, _, _)| active_chart(*plot, &dashboard))
-                    .map(|_| node)
+            let layout = images.get(parent.parent()).ok().and_then(|plot| {
+                state
+                    .version
+                    .as_ref()?
+                    .plots
+                    .iter()
+                    .find(|layout| layout.entity == plot.parent())
             });
-            match (hovered, image) {
-                (Some(_), Some(image)) => {
-                    let width = image.size().x * image.inverse_scale_factor();
-                    let fraction = match span {
-                        0 => 1.0,
-                        _ => (day - first) as f32 / span as f32,
-                    };
-                    let left = px(PLOT_MARGIN + fraction * (width - 2.0 * PLOT_MARGIN).max(0.0));
+            match (hovered, layout) {
+                (Some(hover), Some(layout)) => {
+                    let left = px(layout.x_at(hover.fraction) - CROSSHAIR_WIDTH * 0.5);
                     if node.left != left {
                         node.left = left;
                     }
@@ -787,23 +984,50 @@ fn draw_cursor(
             }
         }
         *previous = version;
+        tooltip.update(observation);
     }
 }
 
-fn hover_fraction(cursor: &RelativeCursorPosition, node: &ComputedNode) -> Option<f32> {
+fn cursor_in_plot(cursor: &RelativeCursorPosition, node: &ComputedNode) -> Option<Vec2> {
     cursor
         .normalized
         .filter(|_| cursor.cursor_over())
         .and_then(|position| {
             let size = node.size() * node.inverse_scale_factor();
-            let x = (position.x + 0.5) * size.x - AXIS_WIDTH;
-            let y = (position.y + 0.5) * size.y - TOP_PADDING;
-            let width = size.x - AXIS_WIDTH;
-            let height = size.y - DATE_HEIGHT - TOP_PADDING;
-            Rect::from_corners(Vec2::ZERO, Vec2::new(width, height))
-                .contains(Vec2::new(x, y))
-                .then(|| ((x - PLOT_MARGIN) / (width - 2.0 * PLOT_MARGIN).max(1.0)).clamp(0.0, 1.0))
+            let position = (position + 0.5) * size - Vec2::new(AXIS_WIDTH, TOP_PADDING);
+            let area = size - Vec2::new(AXIS_WIDTH, TOP_PADDING + DATE_HEIGHT);
+            Rect::from_corners(Vec2::ZERO, area)
+                .contains(position)
+                .then_some(position)
         })
+}
+
+fn tooltip_content(tooltip: &mut ChildSpawnerCommands, observation: LineObservation) {
+    let line = observation.line;
+    let chart = line.chart;
+    let name = chart
+        .series()
+        .into_iter()
+        .nth(line.series)
+        .unwrap_or_else(|| chart.label().into());
+    let run = match line.run {
+        LineRun::Current => "",
+        LineRun::Reference => " · Reference",
+    };
+    tooltip.spawn(ui::text(
+        format!("Day {} · {}{run}", observation.day, chart.unit()),
+        11.0,
+        Tone::Muted,
+    ));
+    tooltip.spawn(ui::row(6.0)).with_children(|row| {
+        ui::swatch(row, Tone::Series(chart, line.series));
+        row.spawn(ui::text(name, 12.0, Tone::Text));
+        row.spawn(ui::text(
+            exact_value(observation.value, ValueFormat::Quantity),
+            12.0,
+            Tone::Text,
+        ));
+    });
 }
 
 fn readout_text(display: &Display, version: ReadoutVersion) -> String {

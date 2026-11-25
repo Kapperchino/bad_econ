@@ -1,6 +1,8 @@
 use super::{
     ActorSelection, Chart, Cue, Dashboard, DashboardPage, DisplayState, Launch, Period,
-    SeriesSelection, Speed, UiAction, atlas, companies, feedback, model, presentation,
+    SeriesSelection, Speed, UiAction, atlas, companies, feedback,
+    graph::{HoverDot, PLOT_MARGIN},
+    model, presentation,
     theme::{Appearance, AppearanceSettings, Surface, Theme, Tone},
     ui,
 };
@@ -9,6 +11,7 @@ use anyhow::{Context, Result};
 use bevy::{
     camera::RenderTarget,
     ecs::system::SystemParam,
+    mesh::VertexAttributeValues,
     picking::pointer::{Location, PointerAction, PointerButton, PointerId, PointerInput},
     prelude::*,
     render::view::screenshot::{Screenshot, ScreenshotCaptured},
@@ -90,6 +93,13 @@ enum VerificationState {
     LeaveCompanies,
     AwaitOverview,
     AwaitOverviewHover,
+    AwaitOverviewLine(Vec2),
+    AwaitOverviewPlayback {
+        start_day: u64,
+        crosshair_left: f32,
+    },
+    AwaitOverviewPause,
+    AwaitOverviewLeave,
     AwaitMenu(Chart),
     AwaitCategoryChart(Chart),
     AwaitChart(Chart),
@@ -120,16 +130,129 @@ struct RetainedPresentation {
 struct VerificationPresentation<'w, 's> {
     plots: Query<'w, 's, (&'static ui::Plot, &'static ComputedNode, &'static Children)>,
     images: Query<'w, 's, &'static ImageNode>,
-    crosshairs: Query<'w, 's, &'static Visibility, With<ui::Crosshair>>,
-    cursor: Query<'w, 's, &'static Text, With<ui::CursorDate>>,
+    image_layouts:
+        Query<'w, 's, (&'static ComputedNode, &'static UiGlobalTransform), With<ImageNode>>,
+    dots: Query<'w, 's, (&'static Visibility, &'static UiGlobalTransform), With<HoverDot>>,
+    crosshairs: Query<
+        'w,
+        's,
+        (
+            &'static Visibility,
+            &'static Node,
+            &'static UiGlobalTransform,
+        ),
+        With<ui::Crosshair>,
+    >,
+    tooltip: Query<
+        'w,
+        's,
+        (
+            Entity,
+            &'static Visibility,
+            &'static ComputedNode,
+            &'static UiGlobalTransform,
+        ),
+        With<ui::ChartTooltip>,
+    >,
+    children: Query<'w, 's, &'static Children>,
+    text: Query<'w, 's, &'static Text>,
     legends: Query<'w, 's, &'static Children, With<ui::Legend>>,
     meshes: Query<'w, 's, &'static Mesh2d>,
+    mesh_assets: Res<'w, Assets<Mesh>>,
     windows: Query<'w, 's, (Entity, &'static mut Window), With<PrimaryWindow>>,
     theme: Res<'w, Theme>,
     appearance: Res<'w, AppearanceSettings>,
     atlas: Res<'w, atlas::Layer>,
 }
 impl VerificationPresentation<'_, '_> {
+    fn employment_image(&self) -> Entity {
+        let (_, _, children) = self
+            .plots
+            .iter()
+            .find(|(plot, _, _)| **plot == ui::Plot::Preview(Chart::Employment))
+            .expect("employment plot");
+        children
+            .iter()
+            .find(|child| self.images.contains(*child))
+            .expect("employment chart image")
+    }
+
+    fn employment_crosshair(&self) -> (&Visibility, &Node, &UiGlobalTransform) {
+        self.children
+            .relationship_sources::<Children>(self.employment_image())
+            .find_map(|child| self.crosshairs.get(child).ok())
+            .expect("employment crosshair")
+    }
+
+    fn employment_crosshair_left(&self) -> f32 {
+        let (visibility, node, _) = self.employment_crosshair();
+        assert_eq!(*visibility, Visibility::Inherited);
+        match node.left {
+            Val::Px(left) => left,
+            other => panic!("invalid crosshair position {other:?}"),
+        }
+    }
+
+    fn hover_employment_line(&mut self, display: &super::Display, period: Period) -> Vec2 {
+        let chart = Chart::Employment;
+        let (node, transform) = self
+            .image_layouts
+            .get(self.employment_image())
+            .expect("employment chart image");
+        let range = model::ChartRange::new(
+            chart,
+            &display.snapshot,
+            &display.history,
+            display.comparison.as_ref(),
+            period,
+            SeriesSelection::All,
+        );
+        let mut points = chart.samples(&display.history, 1, 2).map(|sample| {
+            Vec2::new(
+                range.day_fraction(sample.day),
+                1.0 - range.fraction(sample.values[3]) as f32,
+            )
+        });
+        let from = points.next().expect("employment sample on day 1");
+        let to = points.next().expect("employment sample on day 2");
+        let inset = PLOT_MARGIN / node.inverse_scale_factor();
+        let extent = node.size() - 2.0 * inset;
+        let point = transform.translation - extent * 0.5 + extent * from.lerp(to, 0.6);
+        self.windows
+            .single_mut()
+            .expect("primary window")
+            .1
+            .set_physical_cursor_position(Some(point.as_dvec2()));
+        point
+    }
+
+    fn chart_lines_dimmed(&self) -> bool {
+        let series = self
+            .theme
+            .color(Tone::Series(Chart::Employment, 0))
+            .to_linear()
+            .to_f32_array();
+        let mesh = self.meshes.single().expect("chart mesh");
+        self.mesh_assets
+            .get(&mesh.0)
+            .and_then(|mesh| mesh.attribute(Mesh::ATTRIBUTE_COLOR))
+            .is_some_and(|colors| match colors {
+                VertexAttributeValues::Float32x4(colors) => colors
+                    .iter()
+                    .any(|color| color[3] == 0.10 && color[..3] == series[..3]),
+                _ => false,
+            })
+    }
+
+    fn tooltip_above_cursor(&self) -> Option<Entity> {
+        let (entity, visibility, node, transform) = self.tooltip.single().ok()?;
+        let (_, window) = self.windows.single().ok()?;
+        let cursor = window.physical_cursor_position()?;
+        let bottom = transform.translation.y + node.size().y * 0.5;
+        let gap = (cursor.y - bottom) / window.scale_factor();
+        (*visibility == Visibility::Inherited && (8.0..=12.0).contains(&gap)).then_some(entity)
+    }
+
     fn retained(&self) -> RetainedPresentation {
         assert_eq!(self.meshes.iter().count(), 1, "charts share one GPU mesh");
         let (_, _, children) = self
@@ -416,18 +539,116 @@ fn verify(
                     }
                     VerificationState::AwaitOverviewHover
                         if presentation
-                            .cursor
-                            .single()
-                            .is_ok_and(|text| text.0.contains("Cursor")) =>
+                            .crosshairs
+                            .iter()
+                            .any(|(visibility, _, _)| *visibility == Visibility::Inherited) =>
                     {
                         assert_eq!(
                             presentation
                                 .crosshairs
                                 .iter()
-                                .filter(|visibility| **visibility == Visibility::Inherited)
+                                .filter(|(visibility, _, _)| **visibility == Visibility::Inherited)
                                 .count(),
                             4,
                             "synchronized crosshair on each overview chart"
+                        );
+                        let point = presentation.hover_employment_line(&display, dashboard.period);
+                        VerificationState::AwaitOverviewLine(point)
+                    }
+                    VerificationState::AwaitOverviewLine(point)
+                        if let Some(tooltip) = presentation.tooltip_above_cursor()
+                            && let Some((_, dot)) =
+                                presentation.dots.iter().find(|(visibility, transform)| {
+                                    **visibility == Visibility::Inherited
+                                        && transform.translation.distance(point) <= 2.0
+                                }) =>
+                    {
+                        let (_, _, crosshair) = presentation.employment_crosshair();
+                        assert!(
+                            (crosshair.translation.x - dot.translation.x).abs() <= 1.0,
+                            "crosshair and dot align"
+                        );
+                        let text = presentation
+                            .children
+                            .iter_descendants::<Children>(tooltip)
+                            .filter_map(|entity| presentation.text.get(entity).ok())
+                            .map(|text| text.0.as_str())
+                            .collect::<Vec<_>>();
+                        let history = match text.first().copied() {
+                            Some("Day 2 · count") => &display.history,
+                            Some("Day 2 · count · Reference") => {
+                                &display.comparison.as_ref().expect("comparison run").history
+                            }
+                            header => panic!("unexpected tooltip header {header:?}"),
+                        };
+                        let value = Chart::Employment
+                            .samples(history, 2, 2)
+                            .next()
+                            .expect("hovered employment sample")
+                            .values[3];
+                        assert_eq!(
+                            text[1..],
+                            ["Farmers without paid work", &format!("{value:.0}")]
+                        );
+                        assert!(
+                            presentation
+                                .text
+                                .iter()
+                                .all(|text| !text.0.starts_with("Cursor  ·"))
+                        );
+                        assert!(presentation.chart_lines_dimmed(), "other chart lines fade");
+                        verification.click = VerificationClick::Move(UiAction::ToggleRun);
+                        VerificationState::AwaitOverviewPlayback {
+                            start_day: display.snapshot.day,
+                            crosshair_left: presentation.employment_crosshair_left(),
+                        }
+                    }
+                    VerificationState::AwaitOverviewPlayback {
+                        start_day,
+                        crosshair_left,
+                    } => {
+                        let current = presentation.employment_crosshair_left();
+                        assert!(
+                            (current - crosshair_left).abs() <= 12.0,
+                            "crosshair stays near the cursor during playback"
+                        );
+                        match display.snapshot.day.saturating_sub(start_day) >= 2 {
+                            true => {
+                                verification.click = VerificationClick::Move(UiAction::ToggleRun);
+                                VerificationState::AwaitOverviewPause
+                            }
+                            false => verification.state,
+                        }
+                    }
+                    VerificationState::AwaitOverviewPause
+                        if matches!(display.status, DisplayState::Active(RuntimeState::Paused))
+                            && matches!(verification.click, VerificationClick::Idle) =>
+                    {
+                        presentation
+                            .windows
+                            .single_mut()
+                            .expect("primary window")
+                            .1
+                            .set_physical_cursor_position(None);
+                        VerificationState::AwaitOverviewLeave
+                    }
+                    VerificationState::AwaitOverviewLeave
+                        if presentation
+                            .tooltip
+                            .single()
+                            .is_ok_and(|(_, visibility, _, _)| {
+                                *visibility == Visibility::Hidden
+                            }) =>
+                    {
+                        assert!(
+                            !presentation.chart_lines_dimmed(),
+                            "chart opacity is restored"
+                        );
+                        assert!(
+                            presentation
+                                .dots
+                                .iter()
+                                .all(|(visibility, _)| *visibility == Visibility::Hidden)
                         );
                         verification.click =
                             VerificationClick::Move(UiAction::Chart(Chart::Employment));
@@ -775,7 +996,7 @@ fn capture_light_frame(
     appearance.verify(Theme::Light);
     verification.capture(&captured.image, "light");
     eprintln!(
-        "viewer interaction and layout verification passed: separate rendering and simulation queues, UI pointer clicks, reset/step/comparison feedback, audited days, household and firm inspection, refreshed inspection, company rankings, both atlas layers, five dashboard grids, all 29 metric detail views, synchronized hover, four shared history periods, series focus, retained GPU chart on speed and inspection changes, previous/next navigation, footer controls, compact window, system appearance and manual overrides"
+        "viewer interaction and layout verification passed: separate rendering and simulation queues, UI pointer clicks, reset/step/comparison feedback, audited days, household and firm inspection, refreshed inspection, company rankings, both atlas layers, five dashboard grids, all 29 metric detail views, synchronized hover and value tooltip, four shared history periods, series focus, retained GPU chart on speed and inspection changes, previous/next navigation, footer controls, compact window, system appearance and manual overrides"
     );
     match &verification.capture_error {
         None => {

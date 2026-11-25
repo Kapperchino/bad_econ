@@ -155,7 +155,7 @@ pub(super) enum Plot {
 pub(super) struct Crosshair;
 
 #[derive(Component)]
-pub(super) struct CursorDate;
+pub(super) struct ChartTooltip;
 
 #[derive(Component)]
 enum WorkspaceSection {
@@ -390,6 +390,21 @@ fn setup(
             });
             footer(root);
         });
+    commands.spawn((
+        ChartTooltip,
+        GlobalZIndex(1),
+        Visibility::Hidden,
+        Pickable::IGNORE,
+        Node {
+            position_type: PositionType::Absolute,
+            padding: UiRect::axes(px(10), px(8)),
+            border: UiRect::all(px(1)),
+            border_radius: BorderRadius::all(px(4)),
+            ..column(5.0)
+        },
+        Tone::Panel.surface(),
+        Tone::Brass.outline(),
+    ));
 }
 
 fn navigation(parent: &mut ChildSpawnerCommands) {
@@ -642,7 +657,6 @@ fn report(parent: &mut ChildSpawnerCommands) {
                 .with_children(|header| {
                     header.spawn(column(2.0)).with_children(|status| {
                         label(status, Label::Comparison, 12.0, Tone::Muted);
-                        status.spawn((CursorDate, text("", 12.0, Tone::Accent)));
                         label(status, Label::Error, 13.0, Tone::Negative);
                     });
                     header.spawn(row(4.0)).with_children(|periods| {
