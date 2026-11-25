@@ -13,6 +13,11 @@ pub(super) struct StagedRows {
     pub(super) elements: usize,
 }
 
+pub(super) struct EntryValues {
+    pub values: Vec<u64>,
+    pub readback_bytes: u64,
+}
+
 impl StagedRows {
     pub(super) fn new(
         device: &Device,
@@ -52,6 +57,59 @@ impl StagedRows {
         self.elements as u64 * size_of::<u64>() as u64
     }
 
+    pub(super) fn read_entry(&self, device: &Device, state: &CubeTensor) -> Result<EntryValues> {
+        match (&device.cube, self.elements) {
+            (cubecl::Device::Metal(_), 16_384..=4_194_304) => self.read_packed(device, state),
+            _ => Ok(EntryValues {
+                values: self.read(device, state)?,
+                readback_bytes: self.readback_bytes(),
+            }),
+        }
+    }
+
+    fn read_packed(&self, device: &Device, state: &CubeTensor) -> Result<EntryValues> {
+        let pairs = self.elements.div_ceil(2);
+        let wide_capacity = self.elements.div_ceil(32);
+        let packed = device.empty(pairs + wide_capacity * 3);
+        let written = device.empty(1);
+        device.clear(&written);
+        device.clear(&packed);
+        gather_entry_pairs::launch(
+            &device.client,
+            device.count(pairs),
+            CubeDim::new_1d(device.workgroup),
+            state.buffer_arg(),
+            self.indices.buffer_arg(),
+            packed.buffer_arg(),
+            written.buffer_arg(),
+            self.stride as u32,
+            self.elements as u32,
+        );
+        let [count, words] =
+            device.read_prefixes([(&written, 1), (&packed, packed.meta.num_elements())])?;
+        let bytes = ((1 + words.len()) * size_of::<u32>()) as u64;
+        match count[0] as usize {
+            count if count <= wide_capacity => {
+                let mut values = words[..pairs]
+                    .iter()
+                    .flat_map(|&word| [u64::from(word & 0xffff), u64::from(word >> 16)])
+                    .take(self.elements)
+                    .collect::<Vec<_>>();
+                for entry in words[pairs..pairs + count * 3].chunks_exact(3) {
+                    values[entry[0] as usize] = u64::from(entry[1]) | (u64::from(entry[2]) << 32);
+                }
+                Ok(EntryValues {
+                    values,
+                    readback_bytes: bytes,
+                })
+            }
+            _ => Ok(EntryValues {
+                values: self.read(device, state)?,
+                readback_bytes: bytes + self.readback_bytes(),
+            }),
+        }
+    }
+
     pub(super) fn read(&self, device: &Device, state: &CubeTensor) -> Result<Vec<u64>> {
         let values = device.empty(self.elements * TICK_WORDS);
         transfer(
@@ -63,6 +121,43 @@ impl StagedRows {
             Transfer::Gather,
         );
         Ok(decode(&device.read(&values)?))
+    }
+}
+
+#[cube(launch)]
+fn gather_entry_pairs(
+    state: &[Ticks],
+    indices: &[u32],
+    packed: &mut [u32],
+    written: &[Atomic<u32>],
+    stride: u32,
+    elements: u32,
+) {
+    let pair = ABSOLUTE_POS as u32;
+    let pairs = ceildiv(elements, 2);
+    if pair < pairs {
+        let rows = indices.len() as u32;
+        let mut narrow = 0u32;
+        #[unroll]
+        for part in 0..2u32 {
+            let id = 2 * pair + part;
+            if id < elements {
+                let value = state[(id / rows * stride + indices[(id % rows) as usize]) as usize];
+                let low = value.extract(0usize);
+                let high = value.extract(1usize);
+                narrow |= (low & 0xffff) << (part * 16);
+                if low > 0xffff || high != 0 {
+                    let slot = written[0usize].fetch_add(1);
+                    let offset = pairs + slot * 3;
+                    if slot < ceildiv(elements, 32) {
+                        packed[offset as usize] = id;
+                        packed[(offset + 1) as usize] = low;
+                        packed[(offset + 2) as usize] = high;
+                    }
+                }
+            }
+        }
+        packed[pair as usize] = narrow;
     }
 }
 
@@ -155,4 +250,39 @@ pub(super) fn transfer(
             stage,
         },
     );
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn packed_entry_read_preserves_sparse_and_dense_wide_values_on_gpu() -> Result<()> {
+        let device = crate::simulation::tests::device(64)?;
+        let selected = [5u32, 2, 0];
+        let rows = StagedRows {
+            indices: device.tensor(&selected),
+            stride: 7,
+            elements: 33,
+        };
+        let mut mixed = (0..77).map(|i| 65_535 - i).collect::<Vec<_>>();
+        mixed[5] = u64::MAX;
+        mixed[70] = 65_536;
+        for values in [mixed, vec![1u64 << 48; 77]] {
+            let state = device.tensor(bytemuck::cast_slice(&crate::simulation::encode(&values)));
+            let expected = values
+                .chunks_exact(7)
+                .flat_map(|row| selected.map(|id| row[id as usize]))
+                .collect::<Vec<_>>();
+            let packed = rows.read_packed(&device, &state)?;
+            assert_eq!(packed.values, expected);
+            let first_read = (1 + 17 + 2 * 3) * size_of::<u32>() as u64;
+            let dense = expected.iter().filter(|&&v| v > u16::MAX as u64).count() > 2;
+            assert_eq!(
+                packed.readback_bytes,
+                first_read + u64::from(dense) * rows.readback_bytes()
+            );
+        }
+        Ok(())
+    }
 }

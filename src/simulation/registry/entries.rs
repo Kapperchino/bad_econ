@@ -127,14 +127,14 @@ impl EntryBatch {
             .collect::<Vec<_>>();
         let fields = crate::domain::BASE_FIELDS;
         let staged = StagedRows::new(device, state, scenario.fields(), &selected, Staging::Entry)?;
-        let readback_bytes = staged.readback_bytes();
+        let gathered = staged.read_entry(device, state)?;
         let mut compact = State {
             day: metadata.day,
             actors: selected
                 .iter()
                 .map(|&index| metadata.actors.at(index))
                 .collect(),
-            values: staged.read(device, state)?,
+            values: gathered.values,
             ownership: Vec::new(),
             companies: Vec::new(),
             next_identity,
@@ -245,7 +245,7 @@ impl EntryBatch {
             .collect::<Vec<_>>();
         Ok(Self {
             metadata: grown,
-            readback_bytes,
+            readback_bytes: gathered.readback_bytes,
             formations,
             indices: device.tensor(&indices),
             values: device.tensor(bytemuck::cast_slice(&encode(&values))),

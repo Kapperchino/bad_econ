@@ -87,7 +87,7 @@ impl MarketRound<'_> {
                     stage,
                     execution,
                     match execution {
-                        Execution::Buffered(_) => ResourceSelection::MarketSuppliers,
+                        Execution::Buffered(_) => self.resources,
                         Execution::Immediate(_) => ResourceSelection::AllFirms,
                     },
                 )

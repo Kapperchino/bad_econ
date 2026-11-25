@@ -184,6 +184,16 @@ impl CartageAccounts {
 
 #[cube]
 impl EconomyConfig {
+    pub fn query_members(&self) -> u32 {
+        let cells = self.spatial_side * self.spatial_side;
+        3 * (cells + 1 + self.actors)
+            + crate::simulation::storage::words::ceildiv(
+                self.actors,
+                crate::simulation::storage::layout::DISCOVERY_BLOCK,
+            )
+            + 1
+    }
+
     pub fn coordinate(&self, field: u32, actor: u32) -> u32 {
         field * self.state_stride + actor
     }
@@ -268,6 +278,7 @@ impl Configuration {
             &self.cartage_accounts,
         ]
         .into_iter()
+        .chain(self.farm_market.graph_buffers())
         .chain(self.railway.graph_buffers())
     }
 
@@ -463,7 +474,11 @@ impl Configuration {
             cohorts: Feature::from(config.people.as_ref()),
             home: HomeProduction::new(config.household_production, config.prices[0]),
             property_mode: Feature::from(config.property.as_ref()),
-            farm_market: super::market::farm_offers::FarmMarket::new(device, &state.actors),
+            farm_market: super::market::farm_offers::FarmMarket::new(
+                device,
+                &state.actors,
+                config.map_size,
+            ),
             grain_farms: device.tensor(
                 &state
                     .actors

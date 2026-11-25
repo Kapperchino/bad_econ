@@ -39,7 +39,13 @@ pub struct Device {
     pub workgroup: u32,
     pub memory_budget: MemoryBudget,
 }
+thread_local! {
+    static READS: std::cell::Cell<u64> = const { std::cell::Cell::new(0) };
+}
 impl Device {
+    pub fn thread_readback_calls() -> u64 {
+        READS.get()
+    }
     #[cfg(target_os = "macos")]
     pub fn headless(workgroup: u32) -> Result<Self> {
         use cubecl::metal::{MetalDevice, device::all_devices};
@@ -285,39 +291,118 @@ impl Device {
     pub fn read(&self, tensor: &CubeTensor) -> Result<Vec<u32>> {
         self.read_range(tensor, 0, Self::logical_words(tensor))
     }
+    pub(in crate::simulation) fn read_prefixes<const N: usize>(
+        &self,
+        buffers: [(&CubeTensor, usize); N],
+    ) -> Result<[Vec<u32>; N]> {
+        self.read_ranges(buffers.map(|(tensor, words)| (tensor, 0, words)))
+    }
+
+    pub(in crate::simulation) fn read_ranges<const N: usize>(
+        &self,
+        buffers: [(&CubeTensor, usize, usize); N],
+    ) -> Result<[Vec<u32>; N]> {
+        let handles = buffers
+            .into_iter()
+            .map(|(tensor, start, words)| {
+                let handle = tensor.handle.clone();
+                let bytes = handle.size_in_used();
+                let available = Self::logical_words(tensor).min(bytes as usize / WORD_BYTES);
+                let end = start
+                    .checked_add(words)
+                    .context("readback range overflow")?;
+                match end <= available {
+                    true => Ok(handle
+                        .offset_start((start * WORD_BYTES) as u64)
+                        .offset_end(bytes - (end * WORD_BYTES) as u64)),
+                    false => Err(anyhow!(
+                        "readback range {start}..{end} exceeds {available} words"
+                    )),
+                }
+            })
+            .collect::<Result<Vec<_>>>()?;
+        READS.set(READS.get() + 1);
+        let data = self.client.read(handles)?;
+        let results: [_; N] = data
+            .try_into()
+            .map_err(|_| anyhow!("incomplete GPU readback"))?;
+        Ok(results.map(|bytes| {
+            bytes
+                .chunks_exact(WORD_BYTES)
+                .map(|word| u32::from_le_bytes(word.try_into().expect("four bytes")))
+                .collect()
+        }))
+    }
     pub fn read_range(&self, tensor: &CubeTensor, start: usize, length: usize) -> Result<Vec<u32>> {
+        let mut words = Vec::new();
+        self.read_elements(tensor, start, length, &mut words, u32::from_le_bytes)?;
+        Ok(words)
+    }
+
+    pub(in crate::simulation) fn read_ticks_into(
+        &self,
+        tensor: &CubeTensor,
+        ticks: &mut Vec<u64>,
+    ) -> Result<()> {
+        self.read_elements(
+            tensor,
+            0,
+            Self::logical_words(tensor) / 2,
+            ticks,
+            u64::from_le_bytes,
+        )
+    }
+
+    fn read_elements<T, const BYTES: usize>(
+        &self,
+        tensor: &CubeTensor,
+        start: usize,
+        length: usize,
+        output: &mut Vec<T>,
+        decode: fn([u8; BYTES]) -> T,
+    ) -> Result<()> {
+        let handle = &tensor.handle;
+        let size = handle.size_in_used();
         let available =
-            Self::logical_words(tensor).min(tensor.handle.size_in_used() as usize / WORD_BYTES);
+            Self::logical_words(tensor).min(size as usize / WORD_BYTES) / (BYTES / WORD_BYTES);
         let end = start
             .checked_add(length)
             .context("readback range overflow")?;
-        if end > available {
-            Err(anyhow!(
-                "readback range {start}..{end} exceeds {available} words"
-            ))?;
-        }
-        let chunk = match length {
-            0..=DIRECT_READBACK_WORDS => length.max(1),
-            _ => (1usize << length.ilog2()).min(MAX_READBACK_WORDS),
+        match end <= available {
+            true => Ok(()),
+            false => Err(anyhow!(
+                "readback range {start}..{end} exceeds {available} elements"
+            )),
+        }?;
+        let maximum = MAX_READBACK_WORDS / (BYTES / WORD_BYTES);
+        let direct = DIRECT_READBACK_WORDS / (BYTES / WORD_BYTES);
+        let chunk = match (&self.cube, length) {
+            (cubecl::Device::Metal(_), _) => length.clamp(1, maximum),
+            (_, length) if length <= direct => length.max(1),
+            _ => (1usize << length.ilog2()).min(maximum),
         };
-        let mut words = Vec::with_capacity(length);
+        output.reserve(length);
         for offset in (0..length).step_by(chunk) {
-            let base = offset.min(length - chunk);
-            let handle = tensor.handle.clone();
-            let size = handle.size_in_used();
+            let (base, span) = match self.cube {
+                cubecl::Device::Metal(_) => (offset, chunk.min(length - offset)),
+                _ => (offset.min(length - chunk), chunk),
+            };
             let handle = handle
-                .offset_start(((start + base) * WORD_BYTES) as u64)
-                .offset_end(size - ((start + base + chunk) * WORD_BYTES) as u64);
+                .clone()
+                .offset_start(((start + base) * BYTES) as u64)
+                .offset_end(size - ((start + base + span) * BYTES) as u64);
+            READS.set(READS.get() + 1);
             let bytes = self.client.read_one(handle)?;
-            words.extend(
+            output.extend(
                 bytes
-                    .chunks_exact(WORD_BYTES)
+                    .chunks_exact(BYTES)
                     .skip(offset - base)
-                    .map(|bytes| u32::from_le_bytes(bytes.try_into().expect("four bytes"))),
+                    .map(|bytes| decode(bytes.try_into().expect("one readback element"))),
             );
         }
-        Ok(words)
+        Ok(())
     }
+
     pub fn write(&self, tensor: &CubeTensor, words: &[u32]) {
         assert!(
             words.len() <= Self::logical_words(tensor)

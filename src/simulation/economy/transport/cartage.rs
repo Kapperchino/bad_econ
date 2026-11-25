@@ -248,7 +248,8 @@ impl GpuPass<CartageInput> for HaulGoods {
             CartageStage::Household => input.roster[(partners - 1) as usize],
             CartageStage::Pay => input.drivers.len() as u32,
         };
-        if index < count {
+        if index < count && input.control[crate::simulation::storage::flags::FAULT_WORD].load() == 0
+        {
             let driver = match comptime!(input.stage) {
                 CartageStage::Fleet | CartageStage::Pay => input.drivers[index as usize],
                 CartageStage::Household => input.roster[(partners + index) as usize],

@@ -552,6 +552,18 @@ fn farmer_offers_surplus_to_the_nearest_funded_distributor_on_gpu() -> Result<()
         firm: nearer,
         ..original
     });
+    population.firms[2].position.y = 512;
+    for identity in 18..36 {
+        let mut dealer = population.firms[1].clone();
+        dealer.identity = identity;
+        dealer.position = Position { x: 650, y: 500 };
+        population.firms.push(dealer);
+        config.distributors.push(enterprise::Distributor {
+            firm: identity,
+            ..original
+        });
+    }
+    config.firms = population.firms.len() as u32;
     let device = support::device(64)?;
     for (near_x, near_cash, far_cash, buyer) in [
         (510, 100_000, 100_000, Some(nearer)),

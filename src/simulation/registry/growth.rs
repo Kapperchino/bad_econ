@@ -255,6 +255,7 @@ impl Simulation {
             provisioning: self.provisioning,
         };
         checkpoint("Buffers");
+        next.device.clear_except_fault(&next.control);
         apply_records(
             DeviceEconomy {
                 actors: &previous_actors,
@@ -263,6 +264,7 @@ impl Simulation {
             settlement.as_ref(),
             &next.enterprise_requests,
             &next.work.scratch,
+            &next.control,
             next.day as u32,
         );
         checkpoint("Apply");
@@ -285,7 +287,7 @@ impl Simulation {
             next.config.state_stride,
             &self.demography,
         );
-        next.snapshot = next.observe_rings(rings)?;
+        next.snapshot = next.observe_with_control(rings)?;
         checkpoint("Observe");
         allocation.check_reserved(&next)?;
         *self = next;

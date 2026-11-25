@@ -10,7 +10,7 @@ use crate::{
                 orders,
                 sorting::{self, INPUT_TILE, MarketSort, SortKeys},
             },
-            parameters::MarketClock,
+            parameters::{EconomyParameters, MarketClock},
             settlement::batch::{
                 self,
                 labor::{LaborExecution, LaborInputLaunch, LaborSettlement},
@@ -81,7 +81,10 @@ impl MarketRound<'_> {
                     &simulation.work.scratch,
                     &simulation.control,
                     &simulation.searches.dispatches,
-                    &self.parameters,
+                    &EconomyParameters {
+                        sort_count: observed.unwrap_or(self.count) as u32,
+                        ..self.parameters
+                    },
                     sort_keys,
                 )
             }

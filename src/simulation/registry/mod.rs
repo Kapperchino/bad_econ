@@ -251,46 +251,7 @@ fn transition(
             economy
                 .ledger
                 .set(Field::Cash, actor, minus(available, moving_cost));
-            if kind == 2 {
-                let destination = (action & 0x00ffffff) - 1;
-                let x = economy.actors.x(actor);
-                let y = economy.actors.y(actor);
-                let arrived = requests[destination as usize] >> 24 == 3 && destination < actor;
-                let dx = select(
-                    arrived,
-                    economy.ledger.number(Field::MoveX, destination),
-                    economy.actors.x(destination),
-                );
-                let dy = select(
-                    arrived,
-                    economy.ledger.number(Field::MoveY, destination),
-                    economy.actors.y(destination),
-                );
-                let distance = max(x, dx) - min(x, dx) + max(y, dy) - min(y, dy);
-                let speed = config.shipment_speed;
-                let duration = max((distance + speed - 1) / speed, 1);
-                economy.ledger.set_number(Field::PreviousX, actor, x);
-                economy.ledger.set_number(Field::PreviousY, actor, y);
-                economy.ledger.set_number(Field::MoveX, actor, dx);
-                economy.ledger.set_number(Field::MoveY, actor, dy);
-                economy
-                    .ledger
-                    .set_number(Field::MoveDue, actor, day + duration);
-            }
-            if kind == 3 || kind == 10 {
-                economy.ledger.set(Field::MoveDue, actor, zero());
-                economy.ledger.set(Field::MoveTarget, actor, zero());
-            }
-            if (kind == 3 || kind == 10)
-                && comptime!(
-                    config.property_mode
-                        == crate::simulation::economy::configuration::Feature::Enabled
-                        || config.economy == crate::domain::Economy::Industrial
-                )
-            {
-                economy.ledger.set(Field::LandPlots, actor, zero());
-                economy.ledger.set(Field::CropWork, actor, zero());
-            }
+            move_actor(economy, requests, actor, day);
             if kind == 6 {
                 economy.ledger.set(Field::PendingCapacity, actor, zero());
             }
@@ -305,6 +266,54 @@ fn transition(
                 );
             }
         }
+    }
+}
+
+#[cube]
+fn move_actor(economy: &mut EconomyView<'_>, requests: &[u32], actor: u32, day: u32) {
+    let action = requests[actor as usize];
+    let kind = action >> 24;
+    let config = economy.ledger.config;
+    if kind == 2 {
+        let destination = (action & 0x00ffffff) - 1;
+        let x = economy.actors.x(actor);
+        let y = economy.actors.y(actor);
+        let arrived = requests[destination as usize] >> 24 == 3 && destination < actor;
+        let dx = select(
+            arrived,
+            economy.ledger.number(Field::MoveX, destination),
+            economy.actors.x(destination),
+        );
+        let dy = select(
+            arrived,
+            economy.ledger.number(Field::MoveY, destination),
+            economy.actors.y(destination),
+        );
+        let distance = max(x, dx) - min(x, dx) + max(y, dy) - min(y, dy);
+        let speed = config.shipment_speed;
+        let duration = max((distance + speed - 1) / speed, 1);
+        economy.ledger.set_number(Field::PreviousX, actor, x);
+        economy.ledger.set_number(Field::PreviousY, actor, y);
+        economy.ledger.set_number(Field::MoveX, actor, dx);
+        economy.ledger.set_number(Field::MoveY, actor, dy);
+        economy.ledger.set(
+            Field::MoveDue,
+            actor,
+            plus(ticks(day, 0), ticks(duration, 0)).value,
+        );
+    }
+    if kind == 3 || kind == 10 {
+        economy.ledger.set(Field::MoveDue, actor, zero());
+        economy.ledger.set(Field::MoveTarget, actor, zero());
+    }
+    if (kind == 3 || kind == 10)
+        && comptime!(
+            config.property_mode == crate::simulation::economy::configuration::Feature::Enabled
+                || config.economy == crate::domain::Economy::Industrial
+        )
+    {
+        economy.ledger.set(Field::LandPlots, actor, zero());
+        economy.ledger.set(Field::CropWork, actor, zero());
     }
 }
 

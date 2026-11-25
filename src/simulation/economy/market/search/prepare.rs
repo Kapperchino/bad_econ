@@ -103,8 +103,14 @@ impl SearchInput {
                             searching = labor.vacancies;
                         }
                         MarketFlag::Input(_) | MarketFlag::Consumer(_) | MarketFlag::Household => {
-                            let order =
-                                PurchaseRequest::new(economy, spatial, control, parameters, id);
+                            let order = PurchaseRequest::new(
+                                economy,
+                                spatial,
+                                control,
+                                parameters,
+                                id,
+                                comptime!(self.program.quote_source),
+                            );
                             searching = order.search;
                             wanted = order.wanted;
                             purchasing_power = order.purchasing_power;
@@ -124,8 +130,13 @@ impl SearchInput {
                                 MarketFlag::Input(InputMarket::Grain | InputMarket::Flour)
                             )
                     ) {
-                        eligible =
-                            select(k.is(comptime!(ActorKind::Household)), searching, eligible);
+                        let traded = parameters.traded_good();
+                        let firm = economy.ledger.number(Field::FirstInput, id) == traded
+                            || economy.ledger.number(Field::SecondInput, id) == traded
+                            || k.output() == traded
+                            || k.output() == comptime!(Good::Railway as u32)
+                            || pricing::distributor(&economy.ledger, id);
+                        eligible = select(k.is(comptime!(ActorKind::Household)), searching, firm);
                     }
                     if comptime!(
                         round == PreparationRound::Capture

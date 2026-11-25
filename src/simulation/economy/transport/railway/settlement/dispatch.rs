@@ -4,6 +4,7 @@ use super::*;
 struct DispatchInput {
     control: Box<[Atomic<u32>]>,
     dispatches: Box<[u32]>,
+    progress: Box<[Atomic<u32>]>,
     workgroup: u32,
     config: EconomyConfig,
     parameters: FreightParameters,
@@ -16,6 +17,7 @@ struct DispatchInput {
 pub enum ResourceSelection {
     AllFirms,
     MarketSuppliers,
+    RoutedInputs,
 }
 
 struct FreightDispatch;
@@ -41,15 +43,26 @@ impl GpuPass<DispatchInput> for PrepareDispatch {
             comptime!(input.resource_selection),
         );
         let resources = layout.sellers + layout.carriers + input.config.railway.region_count;
+        let routed = comptime!(input.resource_selection != ResourceSelection::RoutedInputs)
+            || input.control[crate::simulation::economy::market::search::INPUT_RAIL_WORD].load()
+                > 0;
+        if !routed {
+            input.progress[comptime!(Wave::Initial as usize)].store(0);
+            input.progress[comptime!(Wave::Retry as usize)].store(0);
+        }
         orders::store_dispatch(
             &mut input.dispatches,
             RESOURCE_DISPATCH,
-            ceildiv(max(resources, 1), input.workgroup),
+            select(routed, ceildiv(max(resources, 1), input.workgroup), 0),
         );
         orders::store_dispatch(
             &mut input.dispatches,
             INITIALIZE_DISPATCH,
-            ceildiv(max(max(resources, active), 1), input.workgroup),
+            select(
+                routed,
+                ceildiv(max(max(resources, active), 1), input.workgroup),
+                0,
+            ),
         );
     }
 }
@@ -152,6 +165,7 @@ pub fn launch_buffered(
             DispatchInputLaunch {
                 control: control.buffer_arg(),
                 dispatches: buffers.dispatches.buffer_arg(),
+                progress: buffers.progress.buffer_arg(),
                 workgroup: device.workgroup,
                 config: config.launch(),
                 parameters: parameters.into(),
@@ -294,7 +308,7 @@ impl FreightParticipants {
         let firms = spatial[(base + cells) as usize];
         let home = good == comptime!(Good::Bread as u32) || good == comptime!(Good::Grain as u32);
         let suppliers = spatial[cells as usize];
-        let indexed = comptime!(selection == ResourceSelection::MarketSuppliers)
+        let indexed = comptime!(selection != ResourceSelection::AllFirms)
             && !home
             && good != comptime!(Good::Railway as u32)
             && suppliers + config.railway.company_count < firms;

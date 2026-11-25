@@ -40,13 +40,22 @@ impl Simulation {
             trace,
             count: self.metadata.actors.len(),
         };
+        let mixed = phase == Phase::ProvisionPurchase
+            && !self.scenario.config().railway.companies.is_empty();
+        if mixed {
+            self.market_result(evidence)?;
+        }
         let active = round.prepare_orders(self)?;
         match (active, self.market_execution) {
             (0, _) => Ok(()),
             (_, MarketExecution::Original) => round.clear_grouped(self, active, evidence),
             (_, MarketExecution::Reference) => round.clear_batched(self, evidence),
             (_, MarketExecution::Grouped) => unreachable!(),
+        }?;
+        if mixed {
+            self.clear_control();
         }
+        Ok(())
     }
 }
 

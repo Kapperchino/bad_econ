@@ -234,20 +234,19 @@ impl SearchProbe {
         };
         parameters.settlement_rotation = day;
         let mut spatial = simulation.device.read(&simulation.spatial)?;
-        spatial.fill(0);
+        let prices = 3 * (2 + state.actors.len());
+        let query = prices + state.actors.len().div_ceil(DISCOVERY_BLOCK as usize) + 1;
+        spatial[..query].fill(0);
         spatial[1] = suppliers;
         spatial[2..suppliers as usize + 2].copy_from_slice(&(1..=suppliers).collect::<Vec<u32>>());
-        let prices = 3 * (2 + state.actors.len());
         spatial[prices] = (1..=suppliers as usize)
             .map(|firm| state.get(Field::Price, firm) as u32)
             .min()
             .expect("suppliers");
-        let query = prices + state.actors.len().div_ceil(DISCOVERY_BLOCK as usize) + 1;
-        let mut queries = (0..state.actors.len() as u32).collect::<Vec<_>>();
         if let Market::Consumer(_) = market {
-            queries.reverse();
+            spatial[query..query + state.actors.len()]
+                .copy_from_slice(&(0..state.actors.len() as u32).rev().collect::<Vec<_>>());
         }
-        spatial[query..query + state.actors.len()].copy_from_slice(&queries);
         simulation.device.write(&simulation.spatial, &spatial);
         Ok(Self {
             simulation,

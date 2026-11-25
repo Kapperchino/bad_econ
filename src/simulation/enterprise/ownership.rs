@@ -2,12 +2,11 @@ use crate::domain::{Field, Good, State, enterprise::EstateStatus};
 use crate::simulation::DeviceEconomy;
 use crate::simulation::economy::configuration::EconomyConfig;
 #[cfg(test)]
-use crate::simulation::storage::layout::ActorLayout;
+use crate::simulation::storage::{flags::FaultFlags, layout::ActorLayout};
 use crate::simulation::{
     Device,
     pass::GpuPass,
     storage::{
-        flags::FaultFlags,
         state::{ActorTable, ReadLedger, ReadLedgerExpand, TickLedger},
         words::*,
     },
@@ -64,7 +63,6 @@ pub(in crate::simulation) struct OwnershipRuntime {
     offsets: CubeTensor,
     entries: CubeTensor,
     payments: CubeTensor,
-    control: CubeTensor,
 }
 impl OwnershipRuntime {
     pub fn new(device: &Device, state: &State) -> Result<Self> {
@@ -128,7 +126,6 @@ impl OwnershipRuntime {
             ),
             offsets: device.tensor(&offsets),
             entries: device.tensor(&entries),
-            control: device.tensor(&[0; 4]),
         })
     }
     pub fn distribute(
@@ -139,8 +136,8 @@ impl OwnershipRuntime {
             actors,
             config,
         }: DeviceEconomy<'_>,
-    ) -> Result<()> {
-        device.write(&self.control, &[0; 4]);
+        control: &CubeTensor,
+    ) {
         OwnershipPayments::launch_elements(
             device,
             self.shares.meta.num_elements() / 2,
@@ -151,7 +148,7 @@ impl OwnershipRuntime {
                 shares: self.shares.buffer_arg(),
                 beneficiaries: self.beneficiaries.buffer_arg(),
                 payments: self.payments.buffer_arg(),
-                control: self.control.buffer_arg(),
+                control: control.buffer_arg(),
             },
         );
         OwnershipDistribution::launch_elements(
@@ -164,10 +161,9 @@ impl OwnershipRuntime {
                 offsets: self.offsets.buffer_arg(),
                 entries: self.entries.buffer_arg(),
                 payments: self.payments.buffer_arg(),
-                control: self.control.buffer_arg(),
+                control: control.buffer_arg(),
             },
         );
-        FaultFlags::read(&device.read(&self.control)?)?.into_result()
     }
 }
 
@@ -505,16 +501,19 @@ mod tests {
                     original.buffer_arg(),
                     control.buffer_arg(),
                 );
-                let result = runtime.distribute(DeviceEconomy {
-                    device: &device,
-                    state: &actual,
-                    actors: &actors,
-                    config: &config,
-                });
+                let actual_control = device.tensor(&[0; 4]);
+                runtime.distribute(
+                    DeviceEconomy {
+                        device: &device,
+                        state: &actual,
+                        actors: &actors,
+                        config: &config,
+                    },
+                    &actual_control,
+                );
                 let expected_faults = FaultFlags::read(&device.read(&control)?)?;
-                assert_eq!(result.is_ok(), expected_faults.is_empty());
                 assert_eq!(
-                    FaultFlags::read(&device.read(&runtime.control)?)?,
+                    FaultFlags::read(&device.read(&actual_control)?)?,
                     expected_faults
                 );
                 assert_eq!(

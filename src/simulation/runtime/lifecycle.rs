@@ -20,10 +20,25 @@ use crate::{
     runtime::{PhaseTiming, RuntimeState, SimulationCommand},
 };
 use anyhow::{Context, Result, anyhow};
-use bytemuck::Zeroable;
 use std::time::Instant;
 
 const MILLISECONDS_PER_SECOND: f64 = 1000.0;
+
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum PhaseChecks {
+    Immediate,
+    Batched,
+}
+
+impl PhaseChecks {
+    fn carries_faults(self, phase: Phase) -> bool {
+        self == Self::Batched
+            && matches!(
+                phase,
+                Phase::Observation | Phase::Proposal | Phase::Commitment | Phase::AccountsDecisions
+            )
+    }
+}
 
 #[derive(Debug)]
 pub(in crate::simulation) struct ClaimCapacityDemand {
@@ -44,10 +59,7 @@ impl std::error::Error for ClaimCapacityDemand {}
 
 impl Simulation {
     pub(in crate::simulation) fn clear_control(&self) {
-        self.device.write(
-            &self.control,
-            bytemuck::cast_slice(&[ObservationControlLayout::zeroed()]),
-        );
+        self.device.clear(&self.control);
     }
 
     pub(in crate::simulation) fn fault_check(&mut self) -> Result<()> {
@@ -78,6 +90,15 @@ impl Simulation {
     }
 
     pub fn phase(&mut self, phase: Phase, trace: Trace) -> Result<PhaseEvidence> {
+        self.advance_phase(phase, trace, PhaseChecks::Immediate)
+    }
+
+    fn advance_phase(
+        &mut self,
+        phase: Phase,
+        trace: Trace,
+        checks: PhaseChecks,
+    ) -> Result<PhaseEvidence> {
         match (&self.status, self.next_phase == phase) {
             (RuntimeState::Fault { .. }, _) => {
                 Err(anyhow!("reset or restore the faulted simulation"))
@@ -93,7 +114,7 @@ impl Simulation {
         let result = self
             .device
             .reclaim_memory(0)
-            .and_then(|_| self.execute_phase(phase, trace))
+            .and_then(|_| self.execute_phase(phase, trace, checks))
             .and_then(|evidence| {
                 let memory = self.device.reclaim_memory(0)?;
                 match memory.bytes_reserved <= self.device.memory_budget.bytes() {
@@ -131,7 +152,12 @@ impl Simulation {
             }
         }
     }
-    fn execute_phase(&mut self, phase: Phase, trace: Trace) -> Result<PhaseEvidence> {
+    fn execute_phase(
+        &mut self,
+        phase: Phase,
+        trace: Trace,
+        checks: PhaseChecks,
+    ) -> Result<PhaseEvidence> {
         self.config.heating_per_person =
             crate::domain::calendar::Weather::on_day(self.day).heating_units_per_person;
         self.demography.before(self.gpu(), phase, self.day)?;
@@ -140,9 +166,19 @@ impl Simulation {
                 .assign(&self.device, &self.state, &self.config, self.day as u32);
         }
         let mut evidence = PhaseEvidence::default();
-        self.clear_control();
+        if checks.carries_faults(phase) {
+            self.device.clear_except_fault(&self.control);
+        } else {
+            self.clear_control();
+        }
         if let Some(research) = &self.research {
-            research.before_phase(&self.device, &self.state, phase, self.day)?;
+            research.enqueue_before_phase(
+                &self.device,
+                &self.state,
+                &self.control,
+                phase,
+                self.day,
+            )?;
         }
         self.finance_phase(phase, trace, &mut evidence)?;
         match phase {
@@ -158,16 +194,19 @@ impl Simulation {
             }
             Phase::WorkPayment => {
                 self.market(Market::Payroll, phase, trace, &mut evidence)?;
-                self.market_result(&mut evidence)?;
-                self.clear_control();
-                self.local(phase)
+                self.local(phase)?;
+                self.market_result(&mut evidence)
             }
             Phase::ProvisionPurchase => self.provision(trace, &mut evidence),
             Phase::AccountsDecisions => {
                 self.local(phase)?;
                 match &self.ownership {
-                    Some(ownership) => ownership.distribute(self.gpu()),
+                    Some(ownership) => {
+                        ownership.distribute(self.gpu(), &self.control);
+                        self.fault_check()
+                    }
                     None => {
+                        self.fault_check()?;
                         self.market(Market::Distribution, phase, trace, &mut evidence)?;
                         self.market_result(&mut evidence)
                     }
@@ -177,9 +216,22 @@ impl Simulation {
             _ => self.local(phase),
         }?;
         self.demography.after(self.gpu(), phase, self.day)?;
-        match (&self.research, phase) {
-            (_, Phase::Audit) | (None, _) => (),
-            (Some(research), _) => research.phase(&self.device, &self.state, phase, self.day)?,
+        if matches!(
+            phase,
+            Phase::Opening | Phase::Observation | Phase::Proposal | Phase::PhysicalClose
+        ) {
+            if let Some(research) = &self.research {
+                research.enqueue_phase(
+                    &self.device,
+                    &self.state,
+                    &self.control,
+                    phase,
+                    self.day,
+                )?;
+            }
+            if checks == PhaseChecks::Immediate {
+                self.fault_check()?;
+            }
         }
         self.account_research_readbacks();
         Ok(evidence)
@@ -224,11 +276,17 @@ impl Simulation {
     fn audit_day(&mut self) -> Result<()> {
         let started = Instant::now();
         self.railways(economy::transport::railway::RailStage::Close);
-        self.fault_check()?;
         if let Some(research) = &self.research {
-            research.phase(&self.device, &self.state, Phase::Audit, self.day)?;
+            research.enqueue_phase(
+                &self.device,
+                &self.state,
+                &self.control,
+                Phase::Audit,
+                self.day,
+            )?;
         }
-        self.snapshot = self.observe()?;
+        self.snapshot =
+            self.observe_with_control(economy::accounting::audit::RingValidation::All)?;
         if self.day + 1 == profiling_day() && std::env::var_os("BAD_ECON_PROFILE_STAGES").is_some()
         {
             eprintln!(
@@ -284,7 +342,7 @@ impl Simulation {
         }
         economy::property::launch(self.gpu(), &self.spatial, &self.control, phase);
         economy::property::landlords::launch(self.gpu(), &self.control, phase);
-        self.fault_check()
+        Ok(())
     }
     pub(in crate::simulation) fn refresh_freight_quotes(&self) {
         use economy::transport::railway::RailStage;
@@ -356,9 +414,17 @@ impl Simulation {
 
     fn run_day(&mut self) -> Result<()> {
         self.timings.clear();
+        let checks = match (&self.finance, self.freight_execution, self.market_execution) {
+            (
+                None,
+                FreightExecution::Buffered,
+                crate::simulation::market::MarketExecution::Grouped,
+            ) => PhaseChecks::Batched,
+            _ => PhaseChecks::Immediate,
+        };
         Phase::ALL.into_iter().try_for_each(|phase| -> Result<()> {
             let start = Instant::now();
-            let evidence = self.phase(phase, Trace::Discard)?;
+            let evidence = self.advance_phase(phase, Trace::Discard, checks)?;
             self.timings.push(PhaseTiming {
                 phase,
                 milliseconds: start.elapsed().as_secs_f64() * MILLISECONDS_PER_SECOND,

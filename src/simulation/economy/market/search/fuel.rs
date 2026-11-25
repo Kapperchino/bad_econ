@@ -38,9 +38,7 @@ impl SearchInput {
         let count = select(spatial_order, config.actors, jobs);
         if job < count && control[LATCH_WORD].load() == 0 {
             let id = if spatial_order {
-                let cells = config.spatial_side * config.spatial_side;
-                let base =
-                    3 * (cells + 1 + config.actors) + ceildiv(config.actors, DISCOVERY_BLOCK) + 1;
+                let base = config.query_members();
                 spatial[(base + job) as usize]
             } else {
                 searches[job as usize]

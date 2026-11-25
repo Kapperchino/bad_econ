@@ -234,25 +234,16 @@ pub fn reserve_market_claims(
     config: &mut Configuration,
     control: &CubeTensor,
 ) -> anyhow::Result<()> {
-    let values = device.client.read(vec![
-        word_range(&config.railway.freight.progress, CLAIM_COUNT, 2),
-        word_range(control, crate::simulation::storage::flags::FAULT_WORD, 1),
+    let [claims, faults] = device.read_ranges([
+        (&config.railway.freight.progress, CLAIM_COUNT, 2),
+        (control, crate::simulation::storage::flags::FAULT_WORD, 1),
     ])?;
-    let count = u64::from_le_bytes(values[0][..8].try_into()?);
-    let faults = u32::from_le_bytes(values[1][..4].try_into()?);
+    let count = u64::from(claims[0]) | (u64::from(claims[1]) << 32);
+    let faults = faults[0];
     if count > 0 && faults == 0 {
         reserve_claims_for_replay(device, config, count)?;
     }
     Ok(())
-}
-
-fn word_range(tensor: &CubeTensor, start: usize, words: usize) -> cubecl::server::Handle {
-    let handle = tensor.handle.clone();
-    let size = handle.size_in_used();
-    let offset = start * size_of::<u32>();
-    handle
-        .offset_start(offset as u64)
-        .offset_end(size - (offset + words * size_of::<u32>()) as u64)
 }
 
 pub struct WaveBookings {
@@ -269,14 +260,14 @@ impl WaveBookings {
         config: &Configuration,
         control: &CubeTensor,
     ) -> anyhow::Result<Self> {
-        let values = device.client.read(vec![
-            word_range(&config.railway.freight.progress, Wave::Initial as usize, 2),
-            word_range(control, crate::simulation::storage::flags::FAULT_WORD, 1),
+        let [bookings, faults] = device.read_ranges([
+            (&config.railway.freight.progress, Wave::Initial as usize, 2),
+            (control, crate::simulation::storage::flags::FAULT_WORD, 1),
         ])?;
         Ok(Self {
-            initial: u32::from_le_bytes(values[0][..4].try_into()?),
-            retry: u32::from_le_bytes(values[0][4..8].try_into()?),
-            faults: FaultFlags::new(u32::from_le_bytes(values[1][..4].try_into()?))?,
+            initial: bookings[0],
+            retry: bookings[1],
+            faults: FaultFlags::new(faults[0])?,
         })
     }
 }
@@ -286,17 +277,16 @@ pub fn prepare_market_claims(
     config: &mut Configuration,
     control: &CubeTensor,
 ) -> anyhow::Result<ClaimPreparation> {
-    let values = device.client.read(vec![
-        word_range(&config.railway.freight.progress, CLAIM_COUNT, 2),
-        word_range(control, crate::simulation::storage::flags::FAULT_WORD, 1),
-        word_range(control, orders::SEARCHES_WORD, 1),
+    let [claims, faults, searches] = device.read_ranges([
+        (&config.railway.freight.progress, CLAIM_COUNT, 2),
+        (control, crate::simulation::storage::flags::FAULT_WORD, 1),
+        (control, orders::SEARCHES_WORD, 1),
     ])?;
-    let count = u64::from_le_bytes(values[0][..8].try_into()?);
-    let faults = u32::from_le_bytes(values[1][..4].try_into()?);
-    FaultFlags::new(faults)?.into_result()?;
+    let count = u64::from(claims[0]) | (u64::from(claims[1]) << 32);
+    FaultFlags::new(faults[0])?.into_result()?;
     Ok(ClaimPreparation {
         claims: claim_work(device, config, count)?,
-        searches: u32::from_le_bytes(values[2][..4].try_into()?),
+        searches: searches[0],
     })
 }
 

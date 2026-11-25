@@ -354,6 +354,151 @@ pub(in crate::simulation::economy) fn stocked<L: ReadLedger>(
         || !equal(ledger.value_at(good, actor), zero())
 }
 
+#[derive(Clone, Copy, Debug, Hash, PartialEq, Eq)]
+pub(in crate::simulation) enum QuoteSource {
+    FromLedger,
+    Indexed,
+    Masked,
+}
+
+#[cube]
+pub(in crate::simulation::economy) fn offer_price(
+    economy: &EconomyView<'_>,
+    seller: u32,
+    good: u32,
+) -> u32 {
+    let status = economy.ledger.number(Field::EnterpriseStatus, seller);
+    let offered = if good == comptime!(Good::Construction as u32) {
+        status == comptime!(EnterpriseState::Operating as u32)
+    } else {
+        household_production::offers(economy, seller, good)
+    };
+    let available = (economy.actors.kind(seller).output() == good
+        || distributor(&economy.ledger, seller))
+        && status < comptime!(crate::domain::enterprise::EnterpriseState::Liquidating as u32)
+        && offered;
+    if available {
+        let terms = household_production::TradeFields::new(
+            &economy.actors,
+            economy.ledger.config,
+            seller,
+            good,
+        );
+        economy.ledger.number_at(terms.price, seller)
+    } else {
+        0u32
+    }
+}
+
+pub(in crate::simulation) const QUOTE_MASK_WORDS: u32 = HOUSEHOLD_SEARCH_SAMPLES.div_ceil(32);
+
+#[derive(CubeType)]
+pub(in crate::simulation::economy) struct FirmQuotes {
+    offers: u32,
+    masks: u32,
+}
+
+#[cube]
+impl FirmQuotes {
+    pub(in crate::simulation::economy) fn new(cells: u32, firms: u32) -> Self {
+        let offers = cells + 1 + firms;
+        FirmQuotes {
+            offers,
+            masks: offers + 2 * firms,
+        }
+    }
+
+    pub(in crate::simulation::economy) fn offer(&self, member: u32) -> u32 {
+        self.offers + 2 * member
+    }
+
+    fn mask(&self, rotation: u32, word: u32) -> u32 {
+        self.masks + rotation * QUOTE_MASK_WORDS + word
+    }
+}
+
+#[cube]
+pub(in crate::simulation::economy) fn index_offer_prices(
+    economy: &EconomyView<'_>,
+    spatial: &mut [u32],
+    parameters: &EconomyParameters,
+) {
+    let config = economy.ledger.config;
+    let cells = config.spatial_side * config.spatial_side;
+    let segment = 2 * (cells + 1 + config.actors);
+    let firms = spatial[(segment + cells) as usize];
+    let first = CUBE_POS as u32 * DISCOVERY_BLOCK;
+    let mut member = first + UNIT_POS;
+    while member < min(first + DISCOVERY_BLOCK, firms) {
+        let seller = spatial[(segment + cells + 1 + member) as usize];
+        let quote = FirmQuotes::new(cells, firms).offer(member);
+        match comptime!(parameters.market) {
+            MarketFlag::Consumer(ConsumerMarket::Fuel) => {
+                spatial[quote as usize] =
+                    offer_price(economy, seller, comptime!(Good::Coal as u32));
+                spatial[(quote + 1) as usize] =
+                    offer_price(economy, seller, comptime!(Good::Wood as u32));
+            }
+            _ => spatial[quote as usize] = offer_price(economy, seller, parameters.traded_good()),
+        }
+        member += CUBE_DIM;
+    }
+}
+
+#[cube]
+pub(in crate::simulation::economy) fn index_quote_masks(
+    spatial: &mut [u32],
+    firms: u32,
+    #[comptime] market: MarketFlag,
+) {
+    let rotation = ABSOLUTE_POS as u32;
+    let quotes = FirmQuotes::new(1, firms);
+    if rotation < firms {
+        let samples = min(firms, HOUSEHOLD_SEARCH_SAMPLES);
+        for word in 0..QUOTE_MASK_WORDS {
+            let mut mask = 0u32;
+            for sample in word * 32..min(word * 32 + 32, samples) {
+                let offset = sample * (firms / samples) + sample * (firms % samples) / samples;
+                let shifted = rotation + offset;
+                let member = select(shifted < firms, shifted, shifted - firms);
+                let quote = quotes.offer(member);
+                let mut available = spatial[quote as usize];
+                if comptime!(matches!(market, MarketFlag::Consumer(ConsumerMarket::Fuel))) {
+                    available |= spatial[(quote + 1) as usize];
+                }
+                mask |= u32::cast_from(available > 0) << (sample % 32);
+            }
+            spatial[quotes.mask(rotation, word) as usize] = mask;
+        }
+    }
+}
+
+#[cube]
+pub(in crate::simulation::economy) fn next_sample(
+    spatial: &[u32],
+    firms: u32,
+    origin: u32,
+    start: u32,
+    #[comptime] quotes: QuoteSource,
+) -> u32 {
+    let mut next = start;
+    if comptime!(quotes == QuoteSource::Masked) && origin <= u32::MAX - (max(firms, 1) - 1) {
+        let rotation = origin % max(firms, 1);
+        let samples = min(firms, HOUSEHOLD_SEARCH_SAMPLES);
+        let mut word = start / 32;
+        let mut bits = 0u32;
+        while bits == 0 && word * 32 < samples {
+            bits = spatial[FirmQuotes::new(1, firms).mask(rotation, word) as usize];
+            if word == start / 32 {
+                bits &= u32::MAX << (start % 32);
+            }
+            word += 1;
+        }
+        next = select(bits == 0, samples, (word - 1) * 32 + bits.trailing_zeros());
+    }
+    next
+}
+
 #[derive(CubeType)]
 pub(in crate::simulation::economy) struct ReplacementMarket<'a> {
     spatial: &'a [u32],
@@ -417,7 +562,12 @@ impl<'a> ReplacementMarket<'a> {
                                 && !lt(stock, ticks(batch, 0))
                                 && economy.ledger.number_at(field, buyer) > 0;
                         if !stocked {
-                            let current = self.quote(&*economy, buyer, good);
+                            let current = self.quote(
+                                &*economy,
+                                buyer,
+                                good,
+                                comptime!(QuoteSource::FromLedger),
+                            );
                             if current > 0 {
                                 economy.ledger.set_number_at(field, buyer, current);
                             }
@@ -433,6 +583,7 @@ impl<'a> ReplacementMarket<'a> {
         economy: &EconomyView<'_>,
         buyer: u32,
         good: u32,
+        #[comptime] quotes: QuoteSource,
     ) -> u32 {
         let spatial = self.spatial;
         let control = self.control;
@@ -456,38 +607,27 @@ impl<'a> ReplacementMarket<'a> {
                 let begin = spatial[(segment + cell) as usize];
                 let length = spatial[(segment + cell + 1) as usize] - begin;
                 let samples = min(length, HOUSEHOLD_SEARCH_SAMPLES);
-                for sample in 0..samples {
+                let mut sample =
+                    next_sample(spatial, length, self.day + buyer, 0, comptime!(quotes));
+                while sample < samples {
                     let offset =
                         sample * (length / samples) + sample * (length % samples) / samples;
                     let rotated = (offset + self.day + buyer) % length;
                     let seller = spatial[(segment + cells + 1 + begin + rotated) as usize];
-                    let k = economy.actors.kind(seller);
-                    let relevant = seller != buyer
-                        && (k.output() == good || distributor(&economy.ledger, seller));
-                    if relevant {
-                        let status = economy.ledger.number(Field::EnterpriseStatus, seller);
+                    let price = match comptime!(quotes) {
+                        QuoteSource::Indexed | QuoteSource::Masked => {
+                            let firms = spatial[(segment + cells) as usize];
+                            spatial[FirmQuotes::new(cells, firms).offer(begin + rotated) as usize]
+                        }
+                        QuoteSource::FromLedger => offer_price(economy, seller, good),
+                    };
+                    if price > 0
+                        && seller != buyer
+                        && household_production::counterparty(economy, buyer, seller, good)
+                    {
                         let trip = economy.actors.distance(buyer, seller);
-                        let terms = household_production::TradeFields::new(
-                            &economy.actors,
-                            economy.ledger.config,
-                            seller,
-                            good,
-                        );
-                        let price = economy.ledger.number_at(terms.price, seller);
                         let construction = good == comptime!(Good::Construction as u32);
-                        let supplier =
-                            household_production::counterparty(economy, buyer, seller, good);
-                        let offered = if construction {
-                            status == comptime!(EnterpriseState::Operating as u32)
-                        } else {
-                            household_production::offers(economy, seller, good)
-                        };
-                        let available = status < comptime!(EnterpriseState::Liquidating as u32)
-                            && supplier
-                            && offered
-                            && trip <= config.search_radius
-                            && price > 0;
-                        if available {
+                        if trip <= config.search_radius {
                             let days = if construction {
                                 0u32
                             } else {
@@ -513,6 +653,13 @@ impl<'a> ReplacementMarket<'a> {
                             }
                         }
                     }
+                    sample = next_sample(
+                        spatial,
+                        length,
+                        self.day + buyer,
+                        sample + 1,
+                        comptime!(quotes),
+                    );
                 }
                 column += 1;
             }

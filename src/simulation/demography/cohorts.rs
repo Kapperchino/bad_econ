@@ -299,12 +299,11 @@ fn observe(state: &mut [u32], config: &EconomyConfig, output: &mut [u64], #[comp
     }
 }
 
-pub(super) fn observation(
+pub(super) fn totals(
     device: &Device,
     state: &CubeTensor,
     config: &Configuration,
-    initial_population: u64,
-) -> Result<PopulationObservation> {
+) -> Result<CubeTensor> {
     let rows = config.actors as usize;
     let hardware = &device.client.properties().hardware;
     let lanes = match (
@@ -343,8 +342,17 @@ pub(super) fn observation(
         cubek::reduce::components::instructions::ReduceOperationConfig::Sum,
         dtype,
     )?;
-    let bytes = device.client.read_one(sums.handle)?;
-    let totals: &[u64] = bytemuck::cast_slice(&bytes);
+    Ok(CubeTensor::new_contiguous(
+        device.client.clone(),
+        device.cube.clone(),
+        burn::tensor::Shape::new([2 * METRICS]),
+        sums.handle,
+        burn::tensor::DType::U32,
+    ))
+}
+
+pub(super) fn observation(words: &[u32], initial_population: u64) -> Result<PopulationObservation> {
+    let totals = crate::simulation::decode(words);
     let observation = PopulationObservation {
         living: totals[0],
         dependents: totals[1],

@@ -32,6 +32,13 @@ impl Simulation {
         rings: economy::accounting::audit::RingValidation<'_>,
     ) -> Result<ObservationSnapshot> {
         self.clear_control();
+        self.observe_with_control(rings)
+    }
+
+    pub(in crate::simulation) fn observe_with_control(
+        &mut self,
+        rings: economy::accounting::audit::RingValidation<'_>,
+    ) -> Result<ObservationSnapshot> {
         let input = economy::accounting::audit::AuditInput {
             economy: self.gpu(),
             spatial: &self.spatial,
@@ -66,14 +73,39 @@ impl Simulation {
         }?;
         #[cfg(not(test))]
         self.audit.summarize(input)?;
-        let totals = self
-            .device
-            .read_range(&self.summary, 0, SummaryLayout::WORDS)?;
-        let totals = SummaryLayout::new(&totals)?;
-        let control = self.device.read(&self.control)?;
-        let control = ObservationControlLayout::new(&control)?;
+        let population_buffer =
+            self.demography
+                .observation_totals(&self.device, &self.state, &self.config)?;
+        let population = (&population_buffer, population_buffer.meta.num_elements());
+        let totals = (&self.summary, SummaryLayout::WORDS);
+        let control = (&self.control, SummaryLayout::CONTROL_WORDS);
+        let (totals, control, population, research_summary) = match &self.research {
+            Some(research) => {
+                let buffer = research.observation_buffer(&self.device, &self.control)?;
+                let [totals, control, population, summary] = self.device.read_prefixes([
+                    totals,
+                    control,
+                    population,
+                    (buffer, buffer.meta.num_elements()),
+                ])?;
+                self.readback_bytes += (summary.len() * WORD_BYTES) as u64;
+                (
+                    totals,
+                    control,
+                    population,
+                    research::ResearchRuntime::decode_summary(&summary),
+                )
+            }
+            None => {
+                let [totals, control, population] =
+                    self.device.read_prefixes([totals, control, population])?;
+                (totals, control, population, Default::default())
+            }
+        };
         self.readback_bytes +=
-            ((SummaryLayout::WORDS + SummaryLayout::CONTROL_WORDS) * WORD_BYTES) as u64;
+            ((totals.len() + control.len() + population.len()) * WORD_BYTES) as u64;
+        let totals = SummaryLayout::new(&totals)?;
+        let control = ObservationControlLayout::new(&control)?;
         FaultFlags::new(control.scheduler.faults)?.into_result()?;
         let financial = self
             .finance
@@ -119,12 +151,7 @@ impl Simulation {
             loan_interest: financial.interest_due,
             active_loans: financial.active_loans,
             overdue_loans: financial.overdue_loans,
-            research: self
-                .research
-                .as_ref()
-                .map(|research| research.summary(&self.device))
-                .transpose()?
-                .unwrap_or_default(),
+            research: research_summary,
             employed: totals.employed.into(),
             homeless_households: totals.homeless_households.into(),
             households: (self.metadata.actors.len() - self.metadata.actors.firms()) as u64,
@@ -139,9 +166,7 @@ impl Simulation {
             firm_closures: totals.closures.into(),
             distributors: totals.distributors.into(),
             household_production: totals.household_production.map(u64::from),
-            population: self
-                .demography
-                .observation(&self.device, &self.state, &self.config)?,
+            population: self.demography.observation_from_words(&population)?,
             inventories: totals.inventories.map(u64::from),
             transit: totals.transit.map(u64::from),
             produced: totals.produced.map(u64::from),

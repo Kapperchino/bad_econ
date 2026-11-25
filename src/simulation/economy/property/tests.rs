@@ -1,6 +1,6 @@
 use super::*;
 use crate::domain::{Experiment, Position, Scenario};
-use crate::simulation::encode;
+use crate::simulation::{economy::configuration::Configuration, encode};
 use anyhow::Result;
 
 #[derive(Clone, Copy, Debug, Hash, PartialEq, Eq)]
@@ -98,7 +98,6 @@ fn bulk_consolidation_preserves_nearest_whole_grants_and_ties_on_gpu() -> Result
             .collect::<crate::simulation::storage::layout::ActorMetadataRows>()
             .words(),
     );
-    let spatial = parcel_index(&device, &actors, &spatial, &config);
     for required in [0, 1, 3, 127, 255, 257, 1024, u32::MAX] {
         let mut results = Vec::new();
         for selection in [Selection::Serial, Selection::Bulk] {

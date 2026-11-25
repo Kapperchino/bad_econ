@@ -105,6 +105,200 @@ fn fuel_sample_rotation_preserves_non_power_supplier_counts_and_wrapping_on_gpu(
     Ok(())
 }
 
+#[cube(launch)]
+fn compare_firm_quotes(
+    state: &mut [u32],
+    actors: &[u32],
+    config: EconomyConfig,
+    spatial: &mut [u32],
+    prices: &mut [u32],
+    parameters: EconomyParameters,
+) {
+    let economy = EconomyView::new(state, actors, &config);
+    pricing::index_offer_prices(&economy, spatial, &parameters);
+    let cells = config.spatial_side * config.spatial_side;
+    let segment = 2 * (cells + 1 + config.actors);
+    let member = ABSOLUTE_POS as u32;
+    if member < spatial[(segment + cells) as usize] {
+        let actor = spatial[(segment + cells + 1 + member) as usize];
+        match comptime!(parameters.market) {
+            MarketFlag::Consumer(ConsumerMarket::Fuel) => {
+                prices[(2 * member) as usize] =
+                    pricing::offer_price(&economy, actor, comptime!(Good::Coal as u32));
+                prices[(2 * member + 1) as usize] =
+                    pricing::offer_price(&economy, actor, comptime!(Good::Wood as u32));
+            }
+            _ => {
+                prices[(2 * member) as usize] =
+                    pricing::offer_price(&economy, actor, parameters.traded_good())
+            }
+        }
+    }
+}
+
+#[test]
+fn indexed_quotes_refresh_from_funded_suppliers_on_gpu() -> Result<()> {
+    let scenario = Scenario::industrial(3000, 42, Experiment::Baseline)?;
+    let device = device(64)?;
+    let mut state = scenario.initial()?;
+    let simulation = Simulation::new(scenario, device.clone())?;
+    let firms = state.actors.firm_indices().collect::<Vec<_>>();
+    assert!(state.actors.len() >= 3 * firms.len());
+    let reference = device.empty(2 * firms.len());
+    let cells = simulation.config.spatial_side.pow(2) as usize;
+    for good in [Good::Coal, Good::LuxuryClothes] {
+        let parameters = simulation.parameters(
+            Phase::ProvisionPurchase,
+            Market::Consumer(good),
+            0,
+            state.actors.len(),
+        )?;
+        for stock in [100_000, 0] {
+            for &firm in &firms {
+                for output in [good, Good::Wood] {
+                    state.set(Field::inventory(output), firm, stock);
+                }
+                state.set(Field::Price, firm, firm as u64 + 1);
+                state.set(Field::RetailOpen, firm, stock);
+                state.set(Field::Sales, firm, 0);
+            }
+            device.write(
+                &simulation.state,
+                bytemuck::cast_slice(&encode(&state.values)),
+            );
+            compare_firm_quotes::launch(
+                &device.client,
+                device.count(firms.len()),
+                CubeDim::new_1d(device.workgroup),
+                simulation.state.buffer_arg(),
+                simulation.actors.buffer_arg(),
+                simulation.config.launch(),
+                simulation.spatial.buffer_arg(),
+                reference.buffer_arg(),
+                parameters.launch(),
+            );
+            let indexed = device.read_range(
+                &simulation.spatial,
+                cells + 1 + firms.len(),
+                2 * firms.len(),
+            )?;
+            let direct = device.read(&reference)?;
+            let fields = match good {
+                Good::Coal => 2,
+                _ => 1,
+            };
+            let prices = |words: &[u32]| {
+                words
+                    .chunks_exact(2)
+                    .flat_map(|pair| pair[..fields].iter().copied())
+                    .collect::<Vec<_>>()
+            };
+            let direct = prices(&direct);
+            assert_eq!(prices(&indexed), direct);
+            assert_eq!(direct.iter().any(|&price| price > 0), stock > 0);
+        }
+    }
+    Ok(())
+}
+
+#[cube(launch)]
+fn build_test_masks(spatial: &mut [u32], firms: u32, #[comptime] market: MarketFlag) {
+    pricing::index_quote_masks(spatial, firms, comptime!(market));
+}
+
+#[cube(launch)]
+fn sampled_offers(
+    spatial: &[u32],
+    results: &mut [u32],
+    firms: u32,
+    origin: u32,
+    #[comptime] market: MarketFlag,
+    #[comptime] source: QuoteSource,
+) {
+    let start = ABSOLUTE_POS as u32;
+    if start < HOUSEHOLD_SEARCH_SAMPLES {
+        let rotation = consumption::FuelSearchRotation::new(firms, origin, 0);
+        let samples = min(firms, HOUSEHOLD_SEARCH_SAMPLES);
+        let mut next = pricing::next_sample(spatial, firms, origin, start, comptime!(source));
+        let mut found = samples;
+        while next < samples && found == samples {
+            let slot = pricing::FirmQuotes::new(1, firms).offer(rotation.member(next));
+            let mut price = spatial[slot as usize];
+            if comptime!(market == MarketFlag::Consumer(ConsumerMarket::Fuel)) {
+                price |= spatial[(slot + 1) as usize];
+            }
+            if price > 0 {
+                found = next;
+            }
+            next = pricing::next_sample(spatial, firms, origin, next + 1, comptime!(source));
+        }
+        results[start as usize] = found;
+    }
+}
+
+#[test]
+fn quote_masks_preserve_each_next_funded_sample_and_wrapping_on_gpu() -> Result<()> {
+    let device = device(64)?;
+    let width = HOUSEHOLD_SEARCH_SAMPLES as usize;
+    let masked = device.empty(width);
+    let scanned = device.empty(width);
+    for (firms, stride) in [
+        (0usize, 1),
+        (1, 1),
+        (31, 257),
+        (32, 19),
+        (33, 19),
+        (127, 19),
+        (128, 1),
+        (129, 19),
+        (193, 19),
+    ] {
+        let quotes = 2 + firms;
+        let mut words = vec![0; quotes + (2 + QUOTE_MASK_WORDS as usize) * firms];
+        for market in [ConsumerMarket::Fuel, ConsumerMarket::Luxury] {
+            let market = MarketFlag::Consumer(market);
+            for member in 0..firms {
+                words[quotes + member * 2] = u32::from((member + 1) % stride == 0);
+                words[quotes + member * 2 + 1] = u32::from((member + 2) % stride == 0);
+            }
+            let spatial = device.tensor(&words);
+            let dim = CubeDim::new_1d(device.workgroup);
+            build_test_masks::launch(
+                &device.client,
+                device.count(firms.max(1)),
+                dim,
+                spatial.buffer_arg(),
+                firms as u32,
+                market,
+            );
+            for origin in [0, firms.saturating_sub(1) as u32, u32::MAX] {
+                for (source, output) in [
+                    (QuoteSource::Masked, &masked),
+                    (QuoteSource::Indexed, &scanned),
+                ] {
+                    sampled_offers::launch(
+                        &device.client,
+                        device.count(width),
+                        dim,
+                        spatial.buffer_arg(),
+                        output.buffer_arg(),
+                        firms as u32,
+                        origin,
+                        market,
+                        source,
+                    );
+                }
+                assert_eq!(
+                    device.read(&masked)?,
+                    device.read(&scanned)?,
+                    "{firms} firms, {market:?}, stride {stride}, origin {origin}"
+                );
+            }
+        }
+    }
+    Ok(())
+}
+
 #[test]
 fn bounded_household_search_rotates_samples_and_repeats_on_gpu() -> Result<()> {
     for day in [0, 1] {

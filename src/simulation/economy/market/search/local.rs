@@ -1,31 +1,6 @@
 use super::*;
 
 #[cube]
-fn tile_offset(
-    actors: &ActorTable<'_>,
-    spatial: &[u32],
-    base: u32,
-    count: u32,
-    tile: u32,
-    width: u32,
-    side: u32,
-) -> u32 {
-    let mut first = 0u32;
-    let mut end = count;
-    while first < end {
-        let mid = first + (end - first) / 2;
-        let actor = spatial[(base + mid) as usize];
-        let cell = actors.y(actor) / width * side + actors.x(actor) / width;
-        if cell < tile {
-            first = mid + 1;
-        } else {
-            end = mid;
-        }
-    }
-    first
-}
-
-#[cube]
 pub(in crate::simulation::economy) fn staple(
     economy: &EconomyView<'_>,
     spatial: &[u32],
@@ -77,13 +52,12 @@ pub(in crate::simulation::economy) fn staple(
         )
         && (good == Good::Grain as u32 || good == Good::Flour as u32)
     {
-        let cells = config.spatial_side * config.spatial_side;
-        let base = 3 * (cells + 1 + config.actors) + ceildiv(config.actors, DISCOVERY_BLOCK) + 1;
+        let base = config.query_members();
         let width = ceildiv(config.map_size, 128);
         let side = ceildiv(config.map_size, width);
         let tile = actors.y(buyer) / width * side + actors.x(buyer) / width;
-        let first = tile_offset(actors, spatial, base, config.actors, tile, width, side);
-        let end = tile_offset(actors, spatial, base, config.actors, tile + 1, width, side);
+        let first = spatial[(base + config.actors + tile) as usize];
+        let end = spatial[(base + config.actors + tile + 1) as usize];
         let count = end - first;
         let mut index = 0u32;
         while index < min(count, GRAIN_MARKET_QUOTES) && proposal.peer == NO_ACTOR {
@@ -112,4 +86,74 @@ pub(in crate::simulation::economy) fn staple(
         }
     }
     proposal
+}
+
+#[cube]
+impl SearchInput {
+    pub(super) fn collect_local(&mut self) {
+        let config = &self.config;
+        let count = self.control[SEARCHES_WORD].load();
+        let mut group = CUBE_POS as u32;
+        while group < ceildiv(count, CUBE_DIM) {
+            let job = group * CUBE_DIM + UNIT_POS;
+            let mut buyer = 0u32;
+            let mut matched = 0u32;
+            let mut unmatched = 0u32;
+            if job < count {
+                buyer = self.searches[job as usize];
+                let start = buyer as usize * ProposalLayout::WORDS;
+                let seller = self.proposals[start + ProposalLayout::ACTOR];
+                if seller != NO_ACTOR {
+                    matched = 1;
+                    let trip = self.proposals[start + ProposalLayout::DISTANCE];
+                    if config.railway.has_routes() && self.control[INPUT_RAIL_WORD].load() == 0 {
+                        let delivery = railway::DeliveryRequest {
+                            buyer,
+                            seller,
+                            trip,
+                            buyer_access: config.railway.access[buyer as usize * 2 + 1],
+                        };
+                        if delivery.may_book(config) {
+                            self.control[INPUT_RAIL_WORD].store(1);
+                        }
+                    }
+                    record_success(&self.successes, &self.parameters, buyer);
+                } else {
+                    unmatched = u32::cast_from(
+                        comptime!(self.parameters.market != MarketFlag::Input(InputMarket::Grain))
+                            || !pricing::distributor(&Ledger::new(&mut self.state, config), buyer),
+                    );
+                }
+            }
+            let prefix =
+                parallel::scan_prefix(unmatched | (matched << 16), comptime!(self.parameters.scan));
+            let mut missing = Shared::<u32>::new();
+            let mut found = Shared::<u32>::new();
+            if UNIT_POS == 0 {
+                let total = prefix.total & 0xffff;
+                if total > 0 {
+                    *missing = self.control[UNMATCHED_WORD].fetch_add(total);
+                }
+                if comptime!(self.program.collection == OrderCollection::InputTile)
+                    && prefix.total >> 16 > 0
+                {
+                    *found = self.control[CONSTRUCTED_EVENTS_WORD].fetch_add(prefix.total >> 16);
+                }
+            }
+            sync_cube();
+            if unmatched != 0 {
+                let slot = *missing + (prefix.inclusive & 0xffff) - 1;
+                self.searches[(comptime!(UNMATCHED_FIELD) * config.actors + slot) as usize] = buyer;
+            }
+            if comptime!(self.program.collection == OrderCollection::InputTile) && matched != 0 {
+                let slot = *found + (prefix.inclusive >> 16) - 1;
+                if slot < comptime!(sorting::INPUT_TILE as u32) {
+                    self.searches
+                        [(comptime!(INPUT_BUYERS_FIELD) * config.actors + slot) as usize] = buyer;
+                }
+            }
+            sync_cube();
+            group += CUBE_COUNT as u32;
+        }
+    }
 }

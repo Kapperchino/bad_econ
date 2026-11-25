@@ -7,6 +7,7 @@ mod reference;
 mod settlement;
 mod submission;
 
+use crate::simulation::economy::market::farm_offers::BidRound;
 use crate::{
     domain::{Good, Market, Phase, PhaseEvidence, Scenario, food::FoodIncome},
     simulation::{
@@ -64,6 +65,7 @@ impl MarketReplay {
 
 pub(super) enum MatchingState {
     Searching,
+    DeviceInput { capacity: usize },
     Exhausted,
 }
 
@@ -133,6 +135,7 @@ struct MarketRound<'a> {
     trace: Trace,
     count: usize,
     index: usize,
+    resources: crate::simulation::settlement::ResourceSelection,
     timing: StageTiming,
     parameters: EconomyParameters,
     profile: &'a MarketProfile,
@@ -144,6 +147,7 @@ enum StageTiming {
     Synchronized,
 }
 
+#[derive(Clone, Copy)]
 struct InputOrders {
     count: usize,
     routing: RouteAvailability,
@@ -151,6 +155,16 @@ struct InputOrders {
 
 impl Simulation {
     pub(super) fn market_result(&mut self, evidence: &mut PhaseEvidence) -> Result<()> {
+        let counters = self.read_market_control()?;
+        self.record_market_result(counters, evidence)
+    }
+
+    fn record_market_result(
+        &mut self,
+        counters: ControlLayout,
+        evidence: &mut PhaseEvidence,
+    ) -> Result<()> {
+        self.fault_result(counters.faults)?;
         let execution = match (
             self.next_phase,
             self.scenario.config().railway.companies.is_empty(),
@@ -160,8 +174,6 @@ impl Simulation {
         };
         match execution {
             MarketExecution::Grouped => {
-                let counters = self.read_market_control()?;
-                self.fault_result(counters.faults)?;
                 evidence.frontier_depth = evidence.frontier_depth.max(counters.progress as usize);
                 evidence.events += counters.completed as usize;
             }
@@ -183,9 +195,13 @@ impl Simulation {
             self.config.home_mode,
         ) {
             let parameters = self.parameters(phase, market, 0, self.metadata.actors.len())?;
-            self.config
-                .farm_market
-                .collect(self.gpu(), &self.spatial, &self.control, &parameters);
+            self.config.farm_market.collect(
+                self.gpu(),
+                &self.spatial,
+                &self.control,
+                &parameters,
+                BidRound::Open,
+            );
         }
         match self.market_execution {
             _ if self.market_has_freight(market) => {
@@ -226,10 +242,10 @@ impl Simulation {
         let profile = MarketProfile::new(&self.device, self.day + 1);
         let mut round = MarketRound::new(self, market, phase, trace, &profile)?;
         round.initialize(self);
-        round.parameters.clock = round.clock(self);
+        round.parameters.clock = round.clock(self, self.market_replay);
         let submission = round.submit(self)?;
         round.parameters.sort_source = submission.sort_source;
-        let matching = round.complete_matching(self, submission.constructed)?;
+        let matching = round.complete_matching(self, submission.activity)?;
         round.record_feedback(self);
         if let Trace::Record = trace {
             self.fault_check()?;
@@ -245,6 +261,24 @@ impl Simulation {
         self.readback_bytes +=
             profile.resolve(market, self.matching_round, &self.config, &self.control)?;
         Ok(matching)
+    }
+
+    fn continue_input(&mut self, market: Market, capacity: usize) -> Result<MatchingState> {
+        use crate::simulation::economy::market::MarketStart;
+        let profile = MarketProfile::Disabled;
+        let mut round = MarketRound::new(
+            self,
+            market,
+            Phase::ProvisionPurchase,
+            Trace::Discard,
+            &profile,
+        )?;
+        MarketStart::ContinueInput.launch(self.market_buffers(), &round.parameters);
+        round.parameters.clock = MarketClock::Device;
+        round.resources = crate::simulation::settlement::ResourceSelection::RoutedInputs;
+        round.parameters.sort_source = round.submit_input_continuation(self, capacity)?;
+        round.record_feedback(self);
+        Ok(MatchingState::DeviceInput { capacity })
     }
 
     fn matching_rounds(&self, market: Market) -> usize {
@@ -333,6 +367,7 @@ impl<'a> MarketRound<'a> {
             trace,
             count,
             index: simulation.matching_round,
+            resources: crate::simulation::settlement::ResourceSelection::MarketSuppliers,
             timing: match simulation.market_profiling("BAD_ECON_PROFILE_STAGES") {
                 true => StageTiming::Synchronized,
                 false => StageTiming::Disabled,
@@ -384,6 +419,27 @@ impl<'a> MarketRound<'a> {
                 &simulation.searches.dispatches,
                 self.count,
             ),
+            GroupExecute | GroupPrepare | GroupFinalize | FinalizeFixedWages | GroupRemainder
+            | GroupRanges
+                if matches!(device.cube, cubecl::Device::Metal(_)) && groups > 256 =>
+            {
+                let offset = match stage {
+                    GroupExecute => orders::RANGE_DISPATCH,
+                    _ => orders::SORT_DISPATCH,
+                };
+                crate::simulation::economy::settle_blocks::launch(
+                    &device.client,
+                    cubecl::CubeCount::Static(256, 1, 1),
+                    cubecl::CubeDim::new_1d(device.workgroup),
+                    simulation
+                        .market_buffers()
+                        .launch_input(stage, &self.parameters),
+                    crate::simulation::system::AsBufferArg::buffer_arg(
+                        &simulation.searches.dispatches,
+                    ),
+                    offset as u32,
+                )
+            }
             _ => EconomySystem::launch(
                 device,
                 dispatch,
@@ -421,7 +477,7 @@ impl<'a> MarketRound<'a> {
     fn complete_matching(
         self,
         simulation: &mut Simulation,
-        constructed: Option<usize>,
+        activity: Option<submission::InputActivity>,
     ) -> Result<MatchingState> {
         let matching = match (
             simulation.market_has_freight(self.market),
@@ -439,8 +495,8 @@ impl<'a> MarketRound<'a> {
             self.index + 1 < simulation.matching_rounds(self.market),
         ) {
             (Trace::Discard, Market::Input(_), true) => {
-                let count = match constructed {
-                    Some(count) => count,
+                let count = match &activity {
+                    Some(activity) => activity.orders.count,
                     None => {
                         simulation.readback_bytes += WORD_BYTES as u64;
                         simulation.device.read_range(
@@ -450,8 +506,13 @@ impl<'a> MarketRound<'a> {
                         )?[0] as usize
                     }
                 };
-                Ok(match count {
-                    0 => MatchingState::Exhausted,
+                Ok(match (count, activity) {
+                    (0, _) => MatchingState::Exhausted,
+                    (_, Some(activity)) if self.parameters.clock == MarketClock::Device => {
+                        MatchingState::DeviceInput {
+                            capacity: activity.candidates.next_power_of_two().min(self.count),
+                        }
+                    }
                     _ => matching,
                 })
             }

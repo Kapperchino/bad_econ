@@ -527,7 +527,7 @@ pub(in crate::simulation) fn radix_local_digits(
 ) {
     let count = parameters.count;
     let active_count = active(control, parameters);
-    let block = CUBE_POS as u32;
+    let block = id / CUBE_DIM;
     let blocks = ceildiv(active_count, CUBE_DIM);
     let lane = UNIT_POS as usize;
     let source = parameters.sort_source;
@@ -666,7 +666,7 @@ pub(in crate::simulation) fn radix_scatter_digits(
         let destination = 2 * count - source;
         let key = scratch[(source + id) as usize];
         let digit = (radix_key(key, key_base) >> parameters.sort_width) & ((1u32 << bits) - 1);
-        let histogram = digit * blocks + CUBE_POS as u32;
+        let histogram = digit * blocks + id / CUBE_DIM;
         let mut target = scratch[(6 * count + id) as usize];
         if histogram > 0 {
             target += scratch[(7 * count + histogram - 1) as usize];

@@ -56,7 +56,7 @@ use policy::*;
 use proposals::MarketProposal;
 use settlement::payroll::PayrollAccrual;
 use settlement::scheduler::{Posting, apply};
-pub(super) use systems::{EconomyInputLaunch, EconomySystem};
+pub(super) use systems::{EconomyInputLaunch, EconomySystem, feedback_blocks, settle_blocks};
 
 #[enumflags2::bitflags]
 #[repr(u64)]

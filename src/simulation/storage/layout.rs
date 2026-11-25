@@ -86,6 +86,7 @@ impl SpatialIndex {
             offsets[cell] += offsets[cell - 1];
         }
         let query_base = 3 * segment + actors.len().div_ceil(DISCOVERY_BLOCK as usize) + 1;
+        words.extend(offsets.iter().map(|&offset| offset as u32));
         for actor in 0..actors.len() {
             let offset = &mut offsets[query_cell(actor)];
             words[query_base + *offset] = actor as u32;

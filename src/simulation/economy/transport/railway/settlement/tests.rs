@@ -1346,7 +1346,7 @@ fn buffered_claim_admission_preserves_zero_wide_counts_and_prior_faults_on_gpu()
 }
 
 #[test]
-fn disabled_buffered_freight_retry_preserves_all_settlement_buffers_on_gpu() -> Result<()> {
+fn inactive_freight_work_clears_dispatches_and_preserves_buffers_on_gpu() -> Result<()> {
     let scenario = Scenario::new(serde_json::from_str(include_str!(
         "../../../../../../scenarios/railway.json"
     ))?)?;
@@ -1486,6 +1486,30 @@ fn disabled_buffered_freight_retry_preserves_all_settlement_buffers_on_gpu() -> 
         dispatches[..3],
     );
     assert_eq!(device.read(&buffers.progress)?, [7, 11, 0, 0, 0]);
+    let mut control = vec![0; simulation.control.meta.num_elements()];
+    let routed = crate::simulation::economy::market::search::INPUT_RAIL_WORD;
+    for rail in [1, 0] {
+        control[routed] = rail;
+        device.write(&simulation.control, &control);
+        device.write(&buffers.progress, &[7, 3]);
+        launch_buffered(
+            simulation.gpu(),
+            &simulation.spatial,
+            &simulation.work.proposals,
+            &simulation.work.scratch,
+            &simulation.control,
+            &parameters,
+            Stage::Snapshot,
+            Execution::Buffered(Wave::Initial),
+            ResourceSelection::RoutedInputs,
+        );
+        let dispatches = device.read(&buffers.dispatches)?;
+        assert_eq!(dispatches[RESOURCE_DISPATCH] > 0, rail > 0);
+        assert_eq!(dispatches[INITIALIZE_DISPATCH] > 0, rail > 0);
+        if rail == 0 {
+            assert_eq!(device.read_range(&buffers.progress, 0, 2)?, [0, 0]);
+        }
+    }
     Ok(())
 }
 

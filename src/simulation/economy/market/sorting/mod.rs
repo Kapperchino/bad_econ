@@ -506,6 +506,12 @@ fn encode_keys(
 ) {
     let mut parameters = *parameters;
     let count = parameters.count as usize;
+    let capacity = match (parameters.discovery, parameters.sort_count) {
+        (crate::simulation::economy::parameters::Discovery::Indexed, 1..) => {
+            parameters.sort_count as usize
+        }
+        _ => count,
+    };
     let key_span = keys.span(parameters.count).max(1);
     let key_bits = key_span.ilog2() + 1;
     for shift in (0..key_bits).step_by(radix.bits() as usize) {
@@ -525,7 +531,7 @@ fn encode_keys(
             source_workgroup: radix.layout(device).source_workgroup,
         };
         let histogram_count =
-            layout.bins as usize * count.div_ceil(layout.source_workgroup as usize);
+            layout.bins as usize * capacity.div_ceil(layout.source_workgroup as usize);
         let histogram_items = parallel::ActiveScanTile::new(device, histogram_count).items();
         let histogram_span = device.workgroup * histogram_items;
         if radix != Radix::Nibble && (shift == 0 || bins != (1u32 << radix.bits())) {
@@ -533,27 +539,31 @@ fn encode_keys(
         }
         parameters.sort_width = shift;
         let launch = |stage| {
-            RadixSort::launch(
-                device,
-                orders::dispatch(
-                    dispatches,
-                    orders::SORT_DISPATCH,
-                    count.div_ceil(layout.source_workgroup as usize),
+            let input = SortInputLaunch {
+                scratch: scratch.buffer_arg(),
+                control: control.buffer_arg(),
+                parameters: parameters.launch(),
+                stage,
+                histogram,
+                digit_bits: bits,
+                histogram_span,
+                histogram_bound: histogram_count as u32,
+                histogram_bins: bins,
+                key_base: keys.base(),
+            };
+            let groups = capacity.div_ceil(layout.source_workgroup as usize);
+            let dim = CubeDim::new_1d(layout.source_workgroup);
+            match (&device.cube, groups) {
+                (cubecl::Device::Metal(_), 257..) => {
+                    sort_blocks::launch(&device.client, CubeCount::Static(256, 1, 1), dim, input)
+                }
+                _ => RadixSort::launch(
+                    device,
+                    orders::dispatch(dispatches, orders::SORT_DISPATCH, groups),
+                    dim,
+                    input,
                 ),
-                CubeDim::new_1d(layout.source_workgroup),
-                SortInputLaunch {
-                    scratch: scratch.buffer_arg(),
-                    control: control.buffer_arg(),
-                    parameters: parameters.launch(),
-                    stage,
-                    histogram,
-                    digit_bits: bits,
-                    histogram_span,
-                    histogram_bound: histogram_count as u32,
-                    histogram_bins: bins,
-                    key_base: keys.base(),
-                },
-            );
+            }
         };
         launch(SortStage::Local);
         match radix {
@@ -688,28 +698,50 @@ impl GpuPass<SortInput> for Sort {
 
     fn execute(mut input: SortInput) {
         if orders::faults_clear(&input.control) {
-            match comptime!(input.stage) {
-                SortStage::Local => orders::radix_local_digits(
-                    &mut input.scratch,
-                    &input.control,
-                    &input.parameters,
-                    ABSOLUTE_POS as u32,
-                    input.key_base,
-                    comptime!(input.digit_bits),
-                    input.histogram_bins,
-                ),
-                SortStage::Scatter => orders::radix_scatter_digits(
-                    &mut input.scratch,
-                    &input.control,
-                    &input.parameters,
-                    ABSOLUTE_POS as u32,
-                    input.key_base,
-                    comptime!(input.histogram),
-                    comptime!(input.digit_bits),
-                    comptime!(input.histogram_span),
-                    input.histogram_bound,
-                ),
+            input.sort(ABSOLUTE_POS as u32);
+        }
+    }
+}
+
+#[cube(launch)]
+fn sort_blocks(mut input: SortInput) {
+    if orders::faults_clear(&input.control) {
+        let groups = ceildiv(orders::active(&input.control, &input.parameters), CUBE_DIM);
+        let mut group = CUBE_POS as u32;
+        while group < groups {
+            input.sort(group * CUBE_DIM + UNIT_POS);
+            if comptime!(input.stage == SortStage::Local) {
+                sync_cube();
             }
+            group += CUBE_COUNT as u32;
+        }
+    }
+}
+
+#[cube]
+impl SortInput {
+    fn sort(&mut self, id: u32) {
+        match comptime!(self.stage) {
+            SortStage::Local => orders::radix_local_digits(
+                &mut self.scratch,
+                &self.control,
+                &self.parameters,
+                id,
+                self.key_base,
+                comptime!(self.digit_bits),
+                self.histogram_bins,
+            ),
+            SortStage::Scatter => orders::radix_scatter_digits(
+                &mut self.scratch,
+                &self.control,
+                &self.parameters,
+                id,
+                self.key_base,
+                comptime!(self.histogram),
+                comptime!(self.digit_bits),
+                comptime!(self.histogram_span),
+                self.histogram_bound,
+            ),
         }
     }
 }

@@ -15,6 +15,7 @@ use crate::simulation::economy::*;
 pub(in crate::simulation) enum MarketStart {
     Standard,
     PrepareCandidates,
+    ContinueInput,
     ResetCandidatesAndOrders,
     ResetOrders,
 }
@@ -31,7 +32,9 @@ impl MarketStart {
             Self::ResetCandidatesAndOrders | Self::ResetOrders => {
                 device.count(parameters.count as usize)
             }
-            Self::Standard | Self::PrepareCandidates => CubeCount::Static(1, 1, 1),
+            Self::Standard | Self::PrepareCandidates | Self::ContinueInput => {
+                CubeCount::Static(1, 1, 1)
+            }
         };
         start_market::launch(
             &device.client,
@@ -60,6 +63,11 @@ fn start_market(
     if id == 0 {
         parameters.write_clock(clock, heating);
         control[LATCH_WORD].store(control[crate::simulation::storage::flags::FAULT_WORD].load());
+        if comptime!(start == MarketStart::ContinueInput)
+            && control[CONSTRUCTED_EVENTS_WORD].load() == 0
+        {
+            control[orders::PREPARATION_ACTORS_WORD].store(0);
+        }
         control[CONSTRUCTED_EVENTS_WORD].store(0);
         control[RANGE_SLOTS_WORD].store(0);
         control[orders::SEARCHES_WORD].store(0);
@@ -70,6 +78,9 @@ fn start_market(
         }
         if comptime!(matches!(parameters.market, MarketFlag::Input(_))) {
             control[search::INPUT_RAIL_WORD].store(0);
+            if control.len() > search::UNMATCHED_WORD {
+                control[search::UNMATCHED_WORD].store(0);
+            }
         }
         if comptime!(parameters.market == MarketFlag::Input(InputMarket::Grain))
             && parameters.matching_round == 0

@@ -180,11 +180,39 @@ impl<'a> OrderSearch<'a> {
         }
     }
 
+    fn quote_source(&self, simulation: &Simulation) -> search::QuoteSource {
+        use search::QuoteSource;
+        let capacity = self.round.count / self.members.max(1);
+        match (
+            self.round.market,
+            self.round.count,
+            simulation.config.spatial_side,
+            capacity,
+        ) {
+            (
+                Market::Consumer(
+                    Good::Wood | Good::Coal | Good::LuxuryClothes | Good::LuxuryFurniture,
+                ),
+                4096..,
+                side,
+                words,
+            ) => match (side, words) {
+                (1, words) if words >= 3 + search::QUOTE_MASK_WORDS as usize => QuoteSource::Masked,
+                (_, 3..) => QuoteSource::Indexed,
+                _ => QuoteSource::FromLedger,
+            },
+            _ => QuoteSource::FromLedger,
+        }
+    }
+
     fn prepare_suppliers(&self, simulation: &mut Simulation, grain: GrainSearch) -> Result<()> {
         if let Market::Input(Good::Bread) | Market::Consumer(_) | Market::Household =
             self.round.market
         {
             self.launch(simulation, SearchStage::Index);
+            if self.quote_source(simulation) == search::QuoteSource::Masked {
+                self.launch(simulation, SearchStage::QuoteMasks);
+            }
         }
         if let GrainSearch::FirmIndex = grain {
             let stage = match self.round.index {
@@ -223,6 +251,13 @@ impl<'a> OrderSearch<'a> {
             (Market::Consumer(_) | Market::Household, _) => SearchSpatialFuel,
             (Market::Input(Good::Bread), _) => SearchIndexed,
             (Market::Input(Good::Grain), GrainSearch::FirmIndex) => SearchGrain,
+            (Market::Input(Good::Flour | Good::Grain), GrainSearch::Standard)
+                if self.round.count >= 262_144
+                    && matches!(simulation.device.cube, Device::Metal(_)) =>
+            {
+                self.launch(simulation, CollectLocal);
+                SearchUnmatched
+            }
             _ => Search,
         };
         self.launch(simulation, stage);
@@ -272,7 +307,7 @@ impl<'a> OrderSearch<'a> {
         use SearchStage::*;
         let workgroup = match (stage, &simulation.device.cube) {
             (PrepareSelected, Device::Metal(_)) => 256,
-            (Search | SearchGrain, _) => 32,
+            (Search | SearchUnmatched | SearchGrain, _) => 32,
             (SearchIndexed | EmptySort | FilterBuyers | Prepare | PrepareCandidates, _) => 256,
             _ => simulation.device.workgroup,
         };
@@ -281,6 +316,10 @@ impl<'a> OrderSearch<'a> {
             | (_, Trace::Discard) => StatusReset::Active,
             (_, Trace::Record) => StatusReset::Full,
         };
+        let mut program = stage
+            .program(&simulation.config)
+            .collecting(self.collection);
+        program.quote_source = self.quote_source(simulation);
         MarketSearch::launch(
             &simulation.device,
             self.dispatch_count(simulation, stage, workgroup),
@@ -296,9 +335,7 @@ impl<'a> OrderSearch<'a> {
                 scratch: simulation.work.scratch.buffer_arg(),
                 control: simulation.control.buffer_arg(),
                 parameters: self.round.parameters.launch(),
-                program: stage
-                    .program(&simulation.config)
-                    .collecting(self.collection),
+                program,
                 status_reset,
             },
         );
@@ -327,6 +364,7 @@ impl<'a> OrderSearch<'a> {
                 .into(),
             (FilterEmpty, _) => device.count(count.div_ceil(32)).into(),
             (FinishFiltered | StockLimits, _) => device.count(self.members).into(),
+            (QuoteMasks, _) => device.count(self.members).into(),
             (Index, _) => device
                 .count(self.members.div_ceil(DISCOVERY_BLOCK as usize) * device.workgroup as usize)
                 .into(),
@@ -344,7 +382,8 @@ impl<'a> OrderSearch<'a> {
             (PrepareSelected, _) => {
                 orders::dispatch(dispatches, orders::PREPARATION_DISPATCH, groups)
             }
-            (Search | SearchGrain | SearchIndexed, _) => {
+            (CollectLocal, _) => CubeCount::Static(groups.clamp(1, 512) as u32, 1, 1).into(),
+            (Search | SearchUnmatched | SearchGrain | SearchIndexed, _) => {
                 orders::job_dispatch(dispatches, orders::SEARCH_DISPATCH, count)
             }
             (SearchFuel | SearchHousehold | Compact, _) => {

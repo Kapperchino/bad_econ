@@ -6,6 +6,7 @@ use crate::simulation::{Device, encode, enterprise};
 use anyhow::{Context, Result, anyhow};
 use burn_wgpu::CubeTensor;
 use std::collections::{BTreeMap, BTreeSet};
+mod moves;
 mod tiles;
 
 enum SettlementValues {
@@ -20,6 +21,7 @@ pub(in crate::simulation) struct SettlementBatch {
     pub readback_bytes: u64,
     indices: CubeTensor,
     values: SettlementValues,
+    moves: moves::IndependentMoves,
 }
 
 pub(in crate::simulation) struct OwnerChange {
@@ -71,15 +73,15 @@ impl SettlementBatch {
         let mut selected = BTreeSet::new();
         let mut firms = BTreeSet::new();
         let mut estates = BTreeSet::new();
-        for record in requests.iter().filter(|record| record.request > 0) {
+        for record in requests
+            .iter()
+            .filter(|record| record.request > 0 && !matches!(record.request >> 24, 2 | 3))
+        {
             selected.insert(record.actor as usize);
             match record.request >> 24 {
-                2 | 7 | PURCHASE => {
-                    let target = record.target();
-                    selected.insert(target);
-                    if record.request >> 24 != 2 {
-                        firms.insert(target);
-                    }
+                7 | PURCHASE => {
+                    selected.insert(record.target());
+                    firms.insert(record.target());
                 }
                 4 => {
                     firms.insert(record.actor as usize);
@@ -185,6 +187,7 @@ impl SettlementBatch {
             true => (),
             false => Err(anyhow!("settlement shareholder is missing"))?,
         }
+        let moves = moves::IndependentMoves::new(device, requests, &mut selected);
         let selected = selected.into_iter().collect::<Vec<_>>();
         if day == crate::simulation::profiling_day()
             && std::env::var_os("BAD_ECON_PROFILE_REGISTRY").is_some()
@@ -259,19 +262,17 @@ impl SettlementBatch {
         };
         let mut actions = vec![0; selected.len()];
         for record in requests.iter().filter(|record| record.request > 0) {
-            let actor = selected
-                .binary_search(&(record.actor as usize))
-                .ok()
-                .context("missing settlement actor")?;
-            actions[actor] = match record.request >> 24 {
-                2 | 7 | PURCHASE => record.remap_target(
-                    selected
-                        .binary_search(&record.target())
-                        .ok()
-                        .context("missing settlement target")?,
-                ),
-                _ => record.request,
-            };
+            if let Ok(actor) = selected.binary_search(&(record.actor as usize)) {
+                actions[actor] = match record.request >> 24 {
+                    2 | 7 | PURCHASE => record.remap_target(
+                        selected
+                            .binary_search(&record.target())
+                            .ok()
+                            .context("missing settlement target")?,
+                    ),
+                    _ => record.request,
+                };
+            }
         }
         let previous_owners = compact
             .actors
@@ -317,6 +318,7 @@ impl SettlementBatch {
             owners,
             readback_bytes,
             indices: staged.indices,
+            moves,
             values: match tiles {
                 Some(tiles) => SettlementValues::Changes(tiles.changes(device, &compact.values)),
                 None => SettlementValues::Rows(
@@ -338,7 +340,17 @@ impl SettlementBatch {
         &self.indices
     }
 
-    pub fn apply(&self, device: &Device, state: &CubeTensor, actors: usize) {
+    pub fn apply(
+        &self,
+        gpu: crate::simulation::DeviceEconomy<'_>,
+        requests: &CubeTensor,
+        control: &CubeTensor,
+        day: u32,
+    ) {
+        self.moves.apply(gpu, requests, control, day);
+        let device = gpu.device;
+        let state = gpu.state;
+        let actors = gpu.config.state_stride as usize;
         match &self.values {
             SettlementValues::Rows(values) => transfer(
                 device,

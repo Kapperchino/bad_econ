@@ -40,10 +40,11 @@ pub(super) fn apply_records(
     settlement: Option<&SettlementBatch>,
     requests: &CubeTensor,
     scratch: &CubeTensor,
+    control: &CubeTensor,
     day: u32,
 ) {
     match settlement {
-        Some(batch) => batch.apply(gpu.device, gpu.state, gpu.config.state_stride as usize),
+        Some(batch) => batch.apply(gpu, requests, control, day),
         None => registry::apply(gpu, requests, scratch, day),
     }
 }

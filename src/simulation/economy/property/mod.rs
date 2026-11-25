@@ -7,7 +7,6 @@ use crate::domain::{
 };
 use crate::simulation::DeviceEconomy;
 use crate::simulation::economy::*;
-use crate::simulation::{Device, economy::configuration::Configuration};
 use burn_wgpu::CubeTensor;
 
 #[cfg(test)]
@@ -41,81 +40,6 @@ struct PropertyInput {
 
 struct PropertySystem;
 struct AllocateProperty;
-
-#[derive(CubeType, CubeLaunch)]
-struct ParcelIndexInput {
-    actors: Box<[u32]>,
-    spatial: Box<[u32]>,
-    parcels: Box<[u32]>,
-    count: u32,
-    source: u32,
-    side: u32,
-    size: u32,
-}
-
-struct ParcelIndex;
-struct IndexParcels;
-
-impl System for ParcelIndex {
-    type Input = ParcelIndexInput;
-    type Passes = gpu_passes![IndexParcels];
-}
-
-#[cube]
-impl GpuPass<ParcelIndexInput> for IndexParcels {
-    type Output = ();
-
-    fn execute(mut input: ParcelIndexInput) {
-        let actors = ActorTable::with_stride(&input.actors, input.count as usize);
-        let id = ABSOLUTE_POS as u32;
-        let cells = input.side * input.side;
-        if id < input.count {
-            input.parcels[(cells + 1 + id) as usize] = input.spatial[(input.source + id) as usize];
-        }
-        if id <= cells {
-            let mut low = 0;
-            let mut high = input.count;
-            while low < high {
-                let middle = low + (high - low) / 2;
-                let actor = input.spatial[(input.source + middle) as usize];
-                let x = actors.x(actor);
-                let y = actors.y(actor);
-                let before = y / input.size * input.side + x / input.size < id;
-                low = select(before, middle + 1, low);
-                high = select(before, high, middle);
-            }
-            input.parcels[id as usize] = low;
-        }
-    }
-}
-
-fn parcel_index(
-    device: &Device,
-    actors: &CubeTensor,
-    spatial: &CubeTensor,
-    config: &Configuration,
-) -> CubeTensor {
-    let size = config.map_size.div_ceil(128);
-    let side = config.map_size.div_ceil(size);
-    let cells = side * side;
-    let parcels = device.empty((cells + 1 + config.actors) as usize);
-    ParcelIndex::launch_elements(
-        device,
-        config.actors.max(cells + 1) as usize,
-        ParcelIndexInputLaunch {
-            actors: actors.buffer_arg(),
-            spatial: spatial.buffer_arg(),
-            parcels: parcels.buffer_arg(),
-            count: config.actors,
-            source: 3 * (config.spatial_side * config.spatial_side + 1 + config.actors)
-                + config.actors.div_ceil(DISCOVERY_BLOCK)
-                + 1,
-            side,
-            size,
-        },
-    );
-    parcels
-}
 
 impl System for PropertySystem {
     type Input = PropertyInput;
@@ -180,10 +104,6 @@ pub(in crate::simulation) fn launch(
         let workgroup = match stage {
             PropertyStage::Consolidate => 256,
             _ => device.workgroup,
-        };
-        let spatial = match stage {
-            PropertyStage::Consolidate => parcel_index(device, actors, spatial, config),
-            _ => spatial.clone(),
         };
         PropertySystem::launch(
             device,
@@ -270,6 +190,8 @@ fn local_plots(economy: &EconomyView<'_>, household: u32) -> u64 {
 
 #[derive(CubeType)]
 struct LandNeighborhood {
+    members: u32,
+    borders: u32,
     x: u32,
     y: u32,
     width: u32,
@@ -289,6 +211,8 @@ impl LandNeighborhood {
         let upper_x = min((x + radius) / size, side - 1);
         let upper_y = min((y + radius) / size, side - 1);
         LandNeighborhood {
+            members: config.query_members(),
+            borders: config.query_members() + config.actors,
             x: lower_x,
             y: lower_y,
             width: upper_x - lower_x + 1,
@@ -298,11 +222,11 @@ impl LandNeighborhood {
     }
 
     fn cell(&self, index: u32) -> u32 {
-        (self.y + index / self.width) * self.side + self.x + index % self.width
+        self.borders + (self.y + index / self.width) * self.side + self.x + index % self.width
     }
 
     fn actor(&self, spatial: &[u32], index: u32) -> u32 {
-        spatial[(self.side * self.side + 1 + index) as usize]
+        spatial[(self.members + index) as usize]
     }
 
     fn lower_bound(&self, spatial: &[u32], cell: u32, actor: u32) -> u32 {

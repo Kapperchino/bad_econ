@@ -1,5 +1,7 @@
-use super::super::{AsBufferArg, Device, Ticks, ticks, zero};
-use crate::simulation::{decode, encode};
+use super::super::{AsBufferArg, Device, Ticks, zero};
+#[cfg(test)]
+use crate::simulation::decode;
+use crate::simulation::encode;
 use anyhow::Result;
 use burn_wgpu::CubeTensor;
 use cubecl::prelude::*;
@@ -10,6 +12,7 @@ const RECORD: usize = WIDTH + 1;
 pub(super) struct GatheredTiles {
     records: Vec<u64>,
     slots: Vec<u32>,
+    readback_bytes: u64,
 }
 
 impl GatheredTiles {
@@ -45,16 +48,32 @@ impl GatheredTiles {
             elements as u32,
         );
         let count = device.read(&written)?[0] as usize;
-        let records = decode(&device.read_range(&packed, 0, count * RECORD * 2)?);
+        let words = device.read_range(&packed, 0, count * RECORD)?;
+        let mut records = Vec::new();
         let mut slots = vec![u32::MAX; tiles];
-        for (slot, record) in records.chunks_exact(RECORD).enumerate() {
-            slots[record[0] as usize] = slot as u32;
+        for plane in words.chunks_exact(RECORD) {
+            let tile = plane[0] / 2;
+            let shift = (plane[0] % 2) * 32;
+            let slot = &mut slots[tile as usize];
+            if *slot == u32::MAX {
+                *slot = (records.len() / RECORD) as u32;
+                records.push(u64::from(tile));
+                records.resize(records.len() + WIDTH, 0);
+            }
+            let start = *slot as usize * RECORD + 1;
+            for (value, &word) in records[start..start + WIDTH].iter_mut().zip(&plane[1..]) {
+                *value |= u64::from(word) << shift;
+            }
         }
-        Ok(Self { records, slots })
+        Ok(Self {
+            records,
+            slots,
+            readback_bytes: (1 + words.len()) as u64 * size_of::<u32>() as u64,
+        })
     }
 
     pub fn readback_bytes(&self) -> u64 {
-        4 + self.records.len() as u64 * 8
+        self.readback_bytes
     }
 
     pub fn unpack(&self, elements: usize) -> Vec<u64> {
@@ -120,7 +139,7 @@ impl TileChanges {
 fn gather_tiles(
     state: &[Ticks],
     indices: &[u32],
-    packed: &mut [Ticks],
+    packed: &mut [u32],
     written: &[Atomic<u32>],
     stride: u32,
     elements: u32,
@@ -131,14 +150,18 @@ fn gather_tiles(
         let rows = indices.len() as u32;
         value = state[(id / rows * stride + indices[(id % rows) as usize]) as usize];
     }
-    if plane_any((value.extract(0usize) | value.extract(1usize)) != 0) {
-        let mut slot = 0u32;
-        if UNIT_POS == 0 {
-            slot = written[0usize].fetch_add(1);
-            packed[slot as usize * RECORD] = ticks(CUBE_POS as u32, 0);
+    #[unroll]
+    for half in 0..2usize {
+        let word = value.extract(half);
+        if plane_any(word != 0) {
+            let mut slot = 0u32;
+            if UNIT_POS == 0 {
+                slot = written[0usize].fetch_add(1);
+                packed[slot as usize * RECORD] = 2 * CUBE_POS as u32 + half as u32;
+            }
+            let offset = plane_broadcast(slot, 0u32) as usize * RECORD;
+            packed[offset + 1 + UNIT_POS as usize] = word;
         }
-        let offset = plane_broadcast(slot, 0u32) as usize * RECORD;
-        packed[offset + 1 + UNIT_POS as usize] = value;
     }
 }
 
@@ -179,7 +202,7 @@ mod tests {
         for &position in &positions {
             expected[position] = 0;
         }
-        expected[positions[33]] = 1u64 << 40;
+        expected[positions[33]] = (1u64 << 40) + 11;
         expected[*positions.last().unwrap()] = 9;
         let state = device.tensor(bytemuck::cast_slice(&encode(&expected)));
         let tiles = GatheredTiles::read(&device, &state, &indices, stride, positions.len())?;
@@ -188,7 +211,7 @@ mod tests {
             selected,
             positions.iter().map(|&i| expected[i]).collect::<Vec<_>>()
         );
-        assert_eq!(tiles.readback_bytes(), 4 + 2 * RECORD as u64 * 8);
+        assert_eq!(tiles.readback_bytes(), 4 + 3 * RECORD as u64 * 4);
         selected[33] = 0;
         selected[5] = u64::MAX;
         let changes = tiles.changes(&device, &selected);

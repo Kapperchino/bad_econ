@@ -275,7 +275,7 @@ impl FinanceRuntime {
     }
 
     fn clear(&self, device: &Device) {
-        device.write(&self.control, &[0; CONTROL_WORDS]);
+        device.clear(&self.control);
     }
 
     fn faults(&self, device: &Device) -> Result<()> {

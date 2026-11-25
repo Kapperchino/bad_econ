@@ -18,9 +18,9 @@ static GLOBAL: MiMalloc = MiMalloc;
 struct Arguments {
     #[arg(long, value_delimiter = ',', default_value = "10000,100000,1000000")]
     sizes: Vec<u32>,
-    #[arg(long)]
+    #[arg(long, value_parser = CohortSizes::parse_setting)]
     worker_cohort_size: Option<NonZeroU32>,
-    #[arg(long)]
+    #[arg(long, value_parser = CohortSizes::parse_setting)]
     farmer_cohort_size: Option<NonZeroU32>,
     #[arg(long, default_value_t = 42)]
     seed: u64,
@@ -93,6 +93,7 @@ fn main() -> Result<()> {
         (0..args.warmup).try_for_each(|_| simulation.advance())?;
         simulation.device.sync()?;
         let starting_day = simulation.snapshot.day;
+        let calls_before = Device::thread_readback_calls();
         let readback_before = simulation.readback_bytes;
         let mut daily = Vec::new();
         let mut durations = Vec::new();
@@ -122,10 +123,13 @@ fn main() -> Result<()> {
         let slowest = durations[durations.len() - 1];
         let median = (durations[(durations.len() - 1) / 2] + durations[durations.len() / 2]) / 2;
         let readback_bytes = simulation.readback_bytes - readback_before;
+        let read_calls = Device::thread_readback_calls() - calls_before;
         let final_state_hash = simulation.download()?.digest();
         match final_state_hash == expected_hash {
             true => (),
-            false => Err(anyhow!("preflight and measured state hashes differ"))?,
+            false => Err(anyhow!(
+                "preflight state hash {expected_hash} differs from measured hash {final_state_hash}"
+            ))?,
         }
         reports.push(serde_json::json!({
             "people": people,
@@ -148,6 +152,7 @@ fn main() -> Result<()> {
             "target_day_milliseconds": args.max_day_ms,
             "target_median_milliseconds": args.max_median_ms,
             "readback_bytes": readback_bytes,
+            "device_read_calls": read_calls,
             "final_state_hash": final_state_hash,
             "state_hash_version": STATE_HASH_VERSION,
             "scenario_hash": simulation.scenario.fingerprint()?,

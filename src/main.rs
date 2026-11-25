@@ -18,9 +18,9 @@ struct Cli {
     people: u32,
     #[arg(long, help = "Generate a legacy household-based population", conflicts_with_all = ["worker_cohort_size", "farmer_cohort_size"])]
     households: Option<u32>,
-    #[arg(long, help = "Maximum workers per starting cohort (default 10)")]
+    #[arg(long, value_parser = CohortSizes::parse_setting, help = "Maximum workers per starting cohort (10 through 100, default 10)")]
     worker_cohort_size: Option<std::num::NonZeroU32>,
-    #[arg(long, help = "Maximum farmers per starting cohort (default 10)")]
+    #[arg(long, value_parser = CohortSizes::parse_setting, help = "Maximum farmers per starting cohort (10 through 100, default 10)")]
     farmer_cohort_size: Option<std::num::NonZeroU32>,
     #[arg(long, default_value_t = 42)]
     seed: u64,

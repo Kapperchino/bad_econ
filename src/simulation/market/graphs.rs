@@ -41,6 +41,10 @@ enum Recording {
 #[derive(Clone, Copy, PartialEq, Eq)]
 pub(super) enum GraphScope {
     PrepareOrders,
+    SingleInput,
+    InputContinuation {
+        capacity: usize,
+    },
     SettleInput {
         routing: RouteAvailability,
         capacity: usize,
@@ -419,6 +423,42 @@ mod tests {
         assert_eq!(graphs.invalidations, 2);
         assert_eq!(graphs.records, 1);
         assert!(!device.client.is_capturing());
+        Ok(())
+    }
+
+    #[test]
+    fn exhausted_grain_graphs_keep_candidates_and_final_feedback_empty_on_gpu() -> Result<()> {
+        use crate::simulation::economy::market::{orders, search::INPUT_RAIL_WORD};
+        use crate::simulation::storage::flags::{CONSTRUCTED_EVENTS_WORD, CONTROL_WORDS};
+
+        let device = crate::simulation::tests::device(64)?;
+        let scenario = Scenario::industrial(4097, 42, Experiment::Baseline)?;
+        let mut simulation = Simulation::new(scenario, device.clone())?;
+        simulation
+            .config
+            .railway
+            .replace_route_availability(RouteAvailability::Dormant);
+        simulation.freight_execution = FreightExecution::Buffered;
+        let before = simulation.download()?;
+        let capacity = before.actors.len();
+        let mut control = vec![0; simulation.control.meta.num_elements()];
+        control[orders::PREPARATION_ACTORS_WORD] = capacity as u32;
+        control[INPUT_RAIL_WORD] = 1;
+        device.write(&simulation.control, &control);
+        let feedback = vec![0; simulation.work.feedback.meta.num_elements()];
+        device.write(&simulation.work.feedback, &feedback);
+        for round in 1..simulation.config.grain_rounds {
+            simulation.matching_round = round as usize;
+            simulation.continue_input(crate::domain::Market::Input(Good::Grain), capacity)?;
+        }
+        let control = device.read(&simulation.control)?;
+        assert_eq!(control[orders::PREPARATION_ACTORS_WORD], 0);
+        assert_eq!(control[CONSTRUCTED_EVENTS_WORD], 0);
+        assert_eq!(control[INPUT_RAIL_WORD], 0);
+        let actual = device.read(&simulation.work.feedback)?;
+        assert_eq!(actual[orders::FEEDBACK_EVENTS_WORD], 0);
+        assert_eq!(&actual[CONTROL_WORDS..], &feedback[CONTROL_WORDS..]);
+        assert_eq!(simulation.download()?, before);
         Ok(())
     }
 

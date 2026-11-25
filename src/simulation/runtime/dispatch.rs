@@ -8,11 +8,7 @@ use crate::simulation::{
     },
     market::{MarketExecution, Provisioning},
     parallel,
-    storage::{
-        buffers::EconomyBuffers,
-        flags::{CONTROL_WORDS, FaultFlags},
-        layout::*,
-    },
+    storage::buffers::EconomyBuffers,
 };
 use anyhow::{Context, Result};
 use burn_wgpu::CubeTensor;
@@ -130,25 +126,27 @@ impl Simulation {
             }
             _ => &self.spatial,
         };
-        EconomyBuffers {
+        let buffers = EconomyBuffers {
             spatial,
             control: &self.work.feedback,
             ..self.market_buffers()
+        };
+        match (stage, parameters.discovery, &self.device.cube, count) {
+            (
+                EconomyStage::RecordFeedback,
+                Discovery::Indexed,
+                cubecl::Device::Metal(_),
+                4096..,
+            ) => {
+                let groups = count.div_ceil(self.device.workgroup as usize).min(256);
+                crate::simulation::economy::feedback_blocks::launch(
+                    &self.device.client,
+                    cubecl::CubeCount::Static(groups as u32, 1, 1),
+                    cubecl::CubeDim::new_1d(self.device.workgroup),
+                    buffers.launch_input(stage, parameters),
+                );
+            }
+            _ => buffers.run(stage, count, parameters),
         }
-        .run(stage, count, parameters);
-    }
-
-    pub(in crate::simulation) fn apply_feedback(&mut self) -> Result<()> {
-        let parameters = self.parameters(Phase::ProvisionPurchase, Market::Household, 0, 0)?;
-        self.feedback_operation(
-            EconomyStage::ApplyFeedback,
-            self.metadata.actors.len(),
-            &parameters,
-        );
-        let control = self
-            .device
-            .read_range(&self.work.feedback, 0, CONTROL_WORDS)?;
-        self.readback_bytes += (CONTROL_WORDS * WORD_BYTES) as u64;
-        FaultFlags::read(&control)?.into_result()
     }
 }

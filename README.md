@@ -17,11 +17,12 @@ cargo run --release -- run --scenario scenarios/institutions.json --days 12
 | Option | Purpose |
 | --- | --- |
 | `--people N`, `--seed N` | Set the starting population and generation seed. |
+| `--worker-cohort-size N`, `--farmer-cohort-size N` | Set each cohort size independently. Both default to 10 and accept every integer from 10 through 100. |
 | `--economy agrarian` | Run the simpler food economy. |
 | `--trajectory PATH` | Write daily observations as JSONL. |
 | `--checkpoint PATH`, `--restore PATH` | Save or resume a run. Add `--checkpoint-every N` for periodic saves. |
 
-Workers and farmers start in cohorts of up to 10. Each cohort shares a budget, inventory, location and employer. Firms can hire part of a cohort. In output, `population.living` counts people and `households` counts accounts. For a billion-person run, use `--people 1000000000 --worker-cohort-size 10000 --farmer-cohort-size 10000` on a GPU with sufficient memory.
+Each cohort shares a budget, inventory, location and employer. Firms can hire part of a cohort. In output, `population.living` counts people and `households` counts accounts. Existing scenario files and checkpoints retain their configured cohort sizes, including larger values used for billion-person simulations.
 
 The viewer starts paused on the **Overview** dashboard and follows your system appearance. Use the **Dark mode** switch in the footer to override it for the current session. Choose a register along the top and change **Time range** to update every chart. The regional survey shows the concentration of open sites. Select **Bread shortage** to see unmet demand in each survey square. Hover over a plot to see the same day marked across the dashboard. Open a chart to see exact observations and click a legend entry to isolate that series. **Esc** returns to the dashboard, and **G** cycles through charts.
 
@@ -43,10 +44,13 @@ Scenario files configure populations, production, research, credit, property and
 ```sh
 cargo gpu-fast
 cargo gpu-full
+cargo gpu-10m --output target/gpu-10m.json
 cargo run --release -- benchmark --sizes 100000,1000000 --days 10
 ```
 
 `gpu-fast` runs the smoke tests. `gpu-full` runs the regression suite, including viewer tests. Add `--kernel-profile PATH` to a benchmark for per-kernel timings. [Startup and throughput benchmarks](examples/)
+
+`gpu-10m` measures 60 days after four warm-up days with 10 million people, seed 40, and both cohort sizes set to 10. It checks the final state against a separate run. The report counts calls to CubeCL read APIs made through the simulation device helpers on the benchmark thread during the measured days. For other cohort sizes, pass `--worker-cohort-size` and `--farmer-cohort-size` to the benchmark example directly.
 
 To time day advancement in the viewer worker with one million people, run the release benchmark below. It measures 60 days after two warm-up days and includes publishing each daily snapshot. Rendering and playback delays are outside the timer.
 

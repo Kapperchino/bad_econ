@@ -1,4 +1,9 @@
 [alias]
+gpu-10m = [
+    "run", "--locked", "--release", "--example", "gpu_throughput", "--",
+    "--sizes", "10000000", "--worker-cohort-size", "10", "--farmer-cohort-size", "10",
+    "--seed", "40", "--workgroup", "64", "--warmup", "4", "--days", "60",
+]
 gpu-fast = [
     "test", "--locked", "--features", "viewer", "--lib", "--jobs", "2",
     "--", "--test-threads=1", "--exact",

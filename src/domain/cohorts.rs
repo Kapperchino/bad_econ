@@ -24,6 +24,14 @@ impl Default for CohortSizes {
 }
 
 impl CohortSizes {
+    pub fn parse_setting(value: &str) -> Result<NonZeroU32> {
+        let size = value.parse::<NonZeroU32>()?;
+        match size.get() {
+            10..=100 => Ok(size),
+            _ => Err(anyhow!("cohort size must be between 10 and 100")),
+        }
+    }
+
     pub(super) fn is_default(&self) -> bool {
         *self == Self::default()
     }

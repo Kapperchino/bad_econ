@@ -21,6 +21,42 @@ pub(in crate::simulation) enum RingMaskState {
     Unknown,
 }
 
+impl Device {
+    pub(in crate::simulation) fn clear_except_fault(&self, tensor: &CubeTensor) {
+        clear_phase_counters::launch(
+            &self.client,
+            self.count(tensor.meta.num_elements()),
+            CubeDim::new_1d(self.workgroup),
+            tensor.buffer_arg(),
+        );
+    }
+
+    pub(in crate::simulation) fn clear(&self, tensor: &CubeTensor) {
+        clear_words::launch(
+            &self.client,
+            self.count(tensor.meta.num_elements()),
+            CubeDim::new_1d(self.workgroup),
+            tensor.buffer_arg(),
+        );
+    }
+}
+
+#[cube(launch)]
+fn clear_phase_counters(output: &mut [u32]) {
+    if ABSOLUTE_POS < output.len()
+        && ABSOLUTE_POS != comptime!(crate::simulation::storage::flags::FAULT_WORD)
+    {
+        output[ABSOLUTE_POS] = 0;
+    }
+}
+
+#[cube(launch)]
+fn clear_words(output: &mut [u32]) {
+    if ABSOLUTE_POS < output.len() {
+        output[ABSOLUTE_POS] = 0;
+    }
+}
+
 pub(in crate::simulation) fn reset_ring_mask(
     device: &Device,
     mask: &CubeTensor,
@@ -311,16 +347,16 @@ impl AuditedBuffer {
         })
     }
 
-    pub(in crate::simulation) fn read(
+    pub(in crate::simulation) fn read_ticks(
         &self,
         device: &Device,
         live: &CubeTensor,
-    ) -> Result<Vec<u32>> {
-        let mut words = Vec::with_capacity(live.meta.num_elements());
+    ) -> Result<Vec<u64>> {
+        let mut ticks = Vec::with_capacity(live.meta.num_elements() / 2);
         for part in self.parts(live) {
-            words.extend(device.read(&part.audited)?);
+            device.read_ticks_into(&part.audited, &mut ticks)?;
         }
-        Ok(words)
+        Ok(ticks)
     }
 
     pub(in crate::simulation) fn restore(&self, device: &Device, live: &CubeTensor) {
@@ -426,6 +462,42 @@ impl SnapshotCopy {
         };
         match self {
             Self::Full => copy_contiguous(device, source, target),
+            Self::Sparse { nonzero, current }
+                if matches!(device.cube, cubecl::Device::Metal(_))
+                    && hardware.plane_size_min == 32
+                    && hardware.plane_size_max == 32
+                    && ring_start.div_ceil(SNAPSHOT_BLOCK_WORDS)
+                        < ring_end.min(source.meta.num_elements()) / SNAPSHOT_BLOCK_WORDS =>
+            {
+                let first = ring_start.next_multiple_of(SNAPSHOT_BLOCK_WORDS);
+                let past = ring_end.min(source.meta.num_elements()) / SNAPSHOT_BLOCK_WORDS
+                    * SNAPSHOT_BLOCK_WORDS;
+                let groups = (past - first) / SNAPSHOT_BLOCK_WORDS;
+                for (start, end) in [(0, first), (past, source.meta.num_elements())] {
+                    if start < end {
+                        self.save_range(
+                            device,
+                            &word_slice(source, start, end - start),
+                            &word_slice(target, start, end - start),
+                            0,
+                            0,
+                            group_offset + start / SNAPSHOT_BLOCK_WORDS,
+                        );
+                    }
+                }
+                let dim = CubeDim::new_1d(256);
+                copy_ring_blocks::launch(
+                    &device.client,
+                    cubecl::calculate_cube_count_elemwise(&device.client, groups, dim),
+                    dim,
+                    word_slice(source, first, past - first).buffer_arg(),
+                    word_slice(target, first, past - first).buffer_arg(),
+                    nonzero.buffer_arg(),
+                    current.buffer_arg(),
+                    (group_offset + first / SNAPSHOT_BLOCK_WORDS) as u32,
+                    groups as u32,
+                );
+            }
             Self::Sparse { nonzero, current } => SparseCopy::launch(
                 device,
                 cubecl::calculate_cube_count_elemwise(
@@ -513,6 +585,45 @@ impl GpuPass<SnapshotInput> for SparseWords {
                 }
             }
         }
+    }
+}
+
+#[cube(launch)]
+fn copy_ring_blocks(
+    source: &[Vector<u32, Const<4>>],
+    target: &mut [Vector<u32, Const<4>>],
+    previous: &mut [u32],
+    current: &[u32],
+    offset: u32,
+    groups: u32,
+) {
+    let group = ABSOLUTE_POS as u32;
+    let lane = UNIT_POS_PLANE;
+    let mut present = 0u32;
+    let mut changed = false;
+    if group < groups {
+        let mask = (offset + group) as usize;
+        present = current[mask];
+        changed = (present | previous[mask]) != 0;
+        previous[mask] = present;
+    }
+    let populated = plane_ballot(present != 0).extract(0usize);
+    let mut pending = plane_ballot(changed).extract(0usize);
+    let first = group - lane;
+    while pending != 0 {
+        let next = pending.trailing_zeros();
+        let copy = (populated & (1u32 << next)) != 0;
+        let base = (first + next) * comptime!(SNAPSHOT_PARTS as u32 * 32) + lane;
+        #[unroll]
+        for part in 0..SNAPSHOT_PARTS {
+            let index = (base + part as u32 * 32) as usize;
+            let mut value = Vector::<u32, Const<4>>::new(0);
+            if copy {
+                value = source[index];
+            }
+            target[index] = value;
+        }
+        pending &= pending - 1;
     }
 }
 

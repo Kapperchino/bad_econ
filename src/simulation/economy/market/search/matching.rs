@@ -20,10 +20,21 @@ impl SearchInput {
         let suppliers = comptime!(self.program.suppliers);
         let collection = comptime!(self.program.collection);
         let config = economy.ledger.config;
-        let jobs = orders::job_count(control, SEARCHES_WORD);
+        let jobs = orders::job_count(
+            control,
+            comptime!(match self.program.stage {
+                SearchStage::SearchUnmatched => UNMATCHED_WORD,
+                _ => SEARCHES_WORD,
+            }),
+        );
         let mut job = CUBE_POS as u32;
         while job < jobs {
-            let id = searches[job as usize];
+            let id = match comptime!(self.program.stage) {
+                SearchStage::SearchUnmatched => {
+                    searches[(comptime!(UNMATCHED_FIELD) * config.actors + job) as usize]
+                }
+                _ => searches[job as usize],
+            };
             let demand = BuyerDemand::load(&*searches, config.actors, id);
             let wanted = demand.wanted;
             let purchasing_power = demand.purchasing_power;

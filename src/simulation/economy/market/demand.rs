@@ -43,6 +43,7 @@ impl PurchaseRequest {
         control: &[Atomic<u32>],
         parameters: &EconomyParameters,
         id: u32,
+        #[comptime] quotes: pricing::QuoteSource,
     ) -> Self {
         let config = economy.ledger.config;
         let kind = economy.actors.kind(id);
@@ -74,7 +75,7 @@ impl PurchaseRequest {
                 let purchase = consumption::HouseholdPurchase::new(
                     &*economy, spatial, control, parameters, id,
                 );
-                purchase.prepare(&mut order, good);
+                purchase.prepare(&mut order, good, comptime!(quotes));
             }
             MarketFlag::Household => {
                 order.search = kind.is(comptime!(ActorKind::Household));

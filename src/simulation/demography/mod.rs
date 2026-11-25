@@ -458,17 +458,27 @@ impl DemographyRuntime {
         state: &CubeTensor,
         config: &super::economy::configuration::Configuration,
     ) -> Result<PopulationObservation> {
-        match self.count {
-            0 => cohorts::observation(device, state, config, self.initial_population),
-            _ => self.individual_observation(device, state, config),
-        }
+        let buffer = self.observation_totals(device, state, config)?;
+        self.observation_from_words(&device.read(&buffer)?)
     }
-    fn individual_observation(
+
+    pub(super) fn observation_totals(
         &self,
         device: &Device,
         state: &CubeTensor,
         config: &super::economy::configuration::Configuration,
-    ) -> Result<PopulationObservation> {
+    ) -> Result<CubeTensor> {
+        match self.count {
+            0 => cohorts::totals(device, state, config),
+            _ => self.individual_totals(device, state, config),
+        }
+    }
+    fn individual_totals(
+        &self,
+        device: &Device,
+        state: &CubeTensor,
+        config: &super::economy::configuration::Configuration,
+    ) -> Result<CubeTensor> {
         let shards = device.tensor(&[0; OBSERVATION_SHARDS * OBSERVATION_METRICS]);
         let output = device.empty(OBSERVATION_METRICS);
         PopulationCounting::launch_elements(
@@ -504,7 +514,17 @@ impl DemographyRuntime {
                 output: output.buffer_arg(),
             },
         );
-        let totals = device.read(&output)?;
+        Ok(output)
+    }
+
+    pub(super) fn observation_from_words(&self, totals: &[u32]) -> Result<PopulationObservation> {
+        match self.count {
+            0 => cohorts::observation(totals, self.initial_population),
+            _ => self.individual_observation(totals),
+        }
+    }
+
+    fn individual_observation(&self, totals: &[u32]) -> Result<PopulationObservation> {
         let classified = [totals[0], totals[2], totals[3], totals[4]]
             .into_iter()
             .map(u64::from)

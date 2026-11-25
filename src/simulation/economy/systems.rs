@@ -28,13 +28,42 @@ impl GpuPass<EconomyInput> for AdvanceEconomy {
 
     fn execute(mut input: EconomyInput) {
         input.parameters.refresh(&mut input.config);
-        input.dispatch();
+        input.dispatch(ABSOLUTE_POS as u32);
+    }
+}
+
+#[cube(launch)]
+pub(in crate::simulation) fn settle_blocks(
+    mut input: EconomyInput,
+    dispatches: &[u32],
+    offset: u32,
+) {
+    input.parameters.refresh(&mut input.config);
+    let groups = dispatches[offset as usize] * dispatches[offset as usize + 1];
+    let mut group = CUBE_POS as u32;
+    while group < groups {
+        input.dispatch(group * CUBE_DIM + UNIT_POS);
+        if comptime!(input.stage == EconomyStage::GroupRanges) {
+            sync_cube();
+        }
+        group += CUBE_COUNT as u32;
+    }
+}
+
+#[cube(launch)]
+pub(in crate::simulation) fn feedback_blocks(mut input: EconomyInput) {
+    input.parameters.refresh(&mut input.config);
+    let count = input.control[orders::FEEDBACK_EVENTS_WORD].load();
+    let mut id = ABSOLUTE_POS as u32;
+    while id < count {
+        input.dispatch(id);
+        id += CUBE_COUNT as u32 * CUBE_DIM;
     }
 }
 
 #[cube]
 impl EconomyInput {
-    fn dispatch(&mut self) {
+    fn dispatch(&mut self, id: u32) {
         let mut view = EconomyView::new(&mut self.state, &self.actors, &self.config);
         let economy = &mut view;
         let config = &self.config;
@@ -45,7 +74,6 @@ impl EconomyInput {
         let parameters = &self.parameters;
 
         let market = market::MarketControl::new(control);
-        let id = ABSOLUTE_POS as u32;
         let guarded = comptime!(
             self.parameters.discovery == Discovery::Indexed && self.stage.requires_open_market()
         );

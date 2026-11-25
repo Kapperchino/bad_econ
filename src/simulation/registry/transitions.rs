@@ -176,6 +176,17 @@ impl Simulation {
             }
             _ => plan.actors.as_ref().unwrap_or(&self.metadata.actors),
         };
+        let farm_market = plan
+            .changes
+            .iter()
+            .any(|record| record.request >> 24 == 3 && rows.at(record.actor as usize).kind > 0)
+            .then(|| {
+                economy::market::farm_offers::FarmMarket::new(
+                    &self.device,
+                    rows,
+                    self.config.map_size,
+                )
+            });
         let spatial = match plan.transition {
             registry::RegistryTransition::Migration => plan.migrate_spatial(self, rows),
             _ => self.spatial.clone(),
@@ -197,11 +208,13 @@ impl Simulation {
                 "registry capacity exhausted while preparing GPU transitions"
             ))?,
         }
+        self.device.clear_except_fault(&self.control);
         apply_records(
             self.gpu(),
             settlement.as_ref(),
             &self.enterprise_requests,
             &self.work.scratch,
+            &self.control,
             self.day as u32,
         );
         self.readback_bytes += settlement.as_ref().map_or(0, |batch| batch.readback_bytes);
@@ -237,7 +250,7 @@ impl Simulation {
                         self.fault_check().map(|_| self.snapshot.clone())
                     }
                     economy::accounting::audit::RegistryObservation::Updated => {
-                        self.observe_rings(rings)
+                        self.observe_with_control(rings)
                     }
                 }
                 .map(|mut snapshot| {
@@ -290,6 +303,9 @@ impl Simulation {
                         }
                     }
                     _ => (),
+                }
+                if let Some(market) = farm_market {
+                    self.config.farm_market = market;
                 }
                 runtimes.commit(self);
                 if let Some(companies) =

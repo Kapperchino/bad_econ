@@ -1,7 +1,5 @@
 use crate::domain::{Checkpoint, State};
-use crate::simulation::{
-    Simulation, decode, gpu::tensor, profiling_day, storage::layout::TICK_BYTES,
-};
+use crate::simulation::{Simulation, gpu::tensor, profiling_day, storage::layout::TICK_BYTES};
 use anyhow::Result;
 use std::time::Instant;
 
@@ -13,12 +11,14 @@ pub(in crate::simulation) enum CopyDirection {
 
 impl Simulation {
     fn read_state(&mut self, direction: CopyDirection) -> Result<Vec<u64>> {
-        let words = match direction {
-            CopyDirection::Save => self.device.read(&self.state)?,
-            CopyDirection::Restore => self.audited.read(&self.device, &self.state)?,
+        let mut values = match direction {
+            CopyDirection::Save => {
+                let mut ticks = Vec::new();
+                self.device.read_ticks_into(&self.state, &mut ticks)?;
+                ticks
+            }
+            CopyDirection::Restore => self.audited.read_ticks(&self.device, &self.state)?,
         };
-        let mut values = decode(&words);
-        drop(words);
         self.readback_bytes += (values.len() * TICK_BYTES) as u64;
         let count = self.metadata.actors.len();
         let stride = self.config.state_stride as usize;

@@ -37,19 +37,19 @@ pub(in crate::simulation) fn extend(
         query_tile,
     };
     let cells = (growth.side * growth.side) as usize;
-    let words = 3 * (cells + 1 + count) + count.div_ceil(DISCOVERY_BLOCK as usize) + 1 + count;
+    let query_cells = (growth.query_side * growth.query_side) as usize;
+    let words = 3 * (cells + 1 + count)
+        + count.div_ceil(DISCOVERY_BLOCK as usize)
+        + 1
+        + count
+        + query_cells
+        + 1;
     let added = device.tensor(&SpatialIndex::from_actors(scenario, additions).words);
     let output = device.empty(words);
-    SpatialClearing::launch_elements(
-        device,
-        words,
-        SpatialClearInputLaunch {
-            output: output.buffer_arg(),
-        },
-    );
+    device.clear(&output);
     SpatialGrowthSystem::launch_elements(
         device,
-        count.max(cells + 1),
+        count.max(cells.max(query_cells) + 1),
         SpatialGrowthInputLaunch {
             prior: prior.buffer_arg(),
             additions: added.into_buffer_arg(),
@@ -83,33 +83,6 @@ fn cell(
     }
 }
 
-#[cube]
-fn query_offset(
-    spatial: &[u32],
-    actors: &ActorTable<'_>,
-    growth: &SpatialGrowth,
-    base: u32,
-    count: u32,
-    actor_offset: u32,
-    target: u32,
-) -> u32 {
-    let mut low = 0u32;
-    let mut high = count;
-    while low < high {
-        let middle = (low + high) / 2;
-        let actor = spatial[(base + middle) as usize] + actor_offset;
-        let before = cell(actors, growth, actor, comptime!(CellKind::Query)) < target;
-        low = select(before, middle + 1, low);
-        high = select(before, high, middle);
-    }
-    low
-}
-
-#[derive(CubeType, CubeLaunch)]
-struct SpatialClearInput {
-    output: Box<[u32]>,
-}
-
 #[derive(CubeType, CubeLaunch)]
 struct SpatialGrowthInput {
     prior: Box<[u32]>,
@@ -119,28 +92,12 @@ struct SpatialGrowthInput {
     growth: SpatialGrowth,
 }
 
-struct SpatialClearing;
 struct SpatialGrowthSystem;
-struct ClearSpatialRows;
 struct MergeSpatialRows;
-
-impl System for SpatialClearing {
-    type Input = SpatialClearInput;
-    type Passes = gpu_passes![ClearSpatialRows];
-}
 
 impl System for SpatialGrowthSystem {
     type Input = SpatialGrowthInput;
     type Passes = gpu_passes![MergeSpatialRows];
-}
-
-#[cube]
-impl GpuPass<SpatialClearInput> for ClearSpatialRows {
-    type Output = ();
-
-    fn execute(mut input: SpatialClearInput) {
-        clear(&mut input.output);
-    }
 }
 
 #[cube]
@@ -158,13 +115,6 @@ impl GpuPass<SpatialGrowthInput> for MergeSpatialRows {
             &mut input.output,
             &input.growth,
         );
-    }
-}
-
-#[cube]
-fn clear(output: &mut [u32]) {
-    if ABSOLUTE_POS < output.len() {
-        output[ABSOLUTE_POS] = 0;
     }
 }
 
@@ -209,16 +159,20 @@ fn merge(
     let prior_query = 3 * prior_segment + ceildiv(before, DISCOVERY_BLOCK) + 1;
     let added_query = 3 * added_segment + ceildiv(added, DISCOVERY_BLOCK) + 1;
     let query = 3 * segment + ceildiv(count, DISCOVERY_BLOCK) + 1;
+    if id <= growth.query_side * growth.query_side {
+        output[(query + count + id) as usize] = prior[(prior_query + before + id) as usize]
+            + additions[(added_query + added + id) as usize];
+    }
     if id < before {
         let actor = prior[(prior_query + id) as usize];
         let cell = cell(actors, growth, actor, comptime!(CellKind::Query));
-        let slot = id + query_offset(additions, actors, growth, added_query, added, before, cell);
+        let slot = id + additions[(added_query + added + cell) as usize];
         output[(query + slot) as usize] = actor;
     }
     if id < added {
         let actor = additions[(added_query + id) as usize] + before;
         let cell = cell(actors, growth, actor, comptime!(CellKind::Query));
-        let slot = id + query_offset(prior, actors, growth, prior_query, before, 0, cell + 1);
+        let slot = id + prior[(prior_query + before + cell + 1) as usize];
         output[(query + slot) as usize] = actor;
     }
 }
@@ -275,16 +229,15 @@ pub(in crate::simulation) fn migrate(
     let config = scenario.config();
     let side = config.map_size.div_ceil(config.search_radius);
     let cells = side * side;
-    let words =
-        3 * (cells as usize + 1 + count) + count.div_ceil(DISCOVERY_BLOCK as usize) + 1 + count;
+    let tile = config.map_size.div_ceil(128);
+    let query_side = config.map_size.div_ceil(tile);
+    let words = 3 * (cells as usize + 1 + count)
+        + count.div_ceil(DISCOVERY_BLOCK as usize)
+        + 1
+        + count
+        + (query_side * query_side + 1) as usize;
     let output = device.empty(words);
-    SpatialClearing::launch_elements(
-        device,
-        words,
-        SpatialClearInputLaunch {
-            output: output.buffer_arg(),
-        },
-    );
+    device.clear(&output);
     let arrivals = migration
         .requests
         .iter()
@@ -367,7 +320,8 @@ pub(in crate::simulation) fn migrate(
                         + 1,
                     border: 0,
                     radius,
-                    side: config.map_size.div_ceil(radius),
+                    cells: query_side * query_side,
+                    side: query_side,
                     ..parameters
                 }
             }
@@ -376,7 +330,7 @@ pub(in crate::simulation) fn migrate(
             device,
             (parameters.members as usize)
                 .max(inserted_count)
-                .max(cells as usize + 1),
+                .max(parameters.cells as usize + 1),
             SpatialMigrationInputLaunch {
                 prior: migration.spatial.buffer_arg(),
                 actors: migration.actors.buffer_arg(),
@@ -483,7 +437,7 @@ fn migrate_rows(
     #[comptime] population: SpatialPopulation,
 ) {
     let id = ABSOLUTE_POS as u32;
-    if comptime!(population != SpatialPopulation::QueryActors) && id <= parameters.cells {
+    if id <= parameters.cells {
         let removed = changed_offset(
             changes,
             parameters.removed_start,
@@ -498,8 +452,13 @@ fn migrate_rows(
             id,
             0,
         );
-        output[(parameters.target + id) as usize] =
-            prior[(parameters.source + id) as usize] - removed + inserted;
+        let mut source = parameters.source;
+        let mut target = parameters.target;
+        if comptime!(population == SpatialPopulation::QueryActors) {
+            source += parameters.members;
+            target += parameters.members - parameters.removed_count + parameters.inserted_count;
+        }
+        output[(target + id) as usize] = prior[(source + id) as usize] - removed + inserted;
     }
     if id < parameters.members {
         let actor = prior[(parameters.source + parameters.border + id) as usize];

@@ -1395,7 +1395,24 @@ fn property_allocation_fault_restores_the_audited_gpu_state() -> Result<()> {
     initial.set(Field::DisplacedPlots, 1, u64::MAX);
     let mut simulation = Simulation::from_state(scenario, initial, device(64)?)?;
     let before = simulation.download()?;
-    assert!(simulation.phase(Phase::Opening, Trace::Discard).is_err());
+    let checkpoint = simulation.checkpoint()?;
+    let phase_error = simulation
+        .phase(Phase::Opening, Trace::Discard)
+        .unwrap_err();
+    match simulation.status {
+        RuntimeState::Fault {
+            last_audited_day: 0,
+            ..
+        } => (),
+        ref status => panic!("unexpected phase status {status:?}"),
+    }
+    assert_eq!(simulation.download()?, before);
+    simulation.command(crate::runtime::SimulationCommand::Restore(
+        checkpoint.clone().into(),
+    ))?;
+    let day_error = simulation.advance().unwrap_err();
+    assert_eq!(phase_error.to_string(), day_error.to_string());
+    assert_eq!(simulation.checkpoint()?, checkpoint);
     assert!(matches!(simulation.status, RuntimeState::Fault { .. }));
     assert_eq!(simulation.download()?, before);
     Ok(())

@@ -11,6 +11,7 @@ pub(in crate::simulation) struct PendingRecord {
 }
 
 impl PendingRecord {
+    const WORDS: usize = size_of::<Self>() / size_of::<u32>();
     const PAYLOAD: u32 = 0x00ff_ffff;
 
     pub(super) fn payload(self) -> u32 {
@@ -83,12 +84,29 @@ impl PendingRecords {
                 output: output.buffer_arg(),
             },
         );
-        let count = device.read_range(output, 0, 1)?[0] as usize;
-        let words = device.read_range(output, 1, count * 3)?;
-        let records = bytemuck::cast_slice::<u32, PendingRecord>(&words).to_vec();
+        let prefix = match (&device.cube, actors) {
+            (cubecl::Device::Metal(_), 4096..) => (actors / 64).min(16_384),
+            _ => 0,
+        };
+        let initial = device.read_range(output, 0, 1 + prefix * PendingRecord::WORDS)?;
+        let count = initial[0] as usize;
+        let mut records = bytemuck::cast_slice::<u32, PendingRecord>(
+            &initial[1..1 + count.min(prefix) * PendingRecord::WORDS],
+        )
+        .to_vec();
+        let mut read_words = initial.len();
+        if count > prefix {
+            let remainder = device.read_range(
+                output,
+                initial.len(),
+                (count - prefix) * PendingRecord::WORDS,
+            )?;
+            read_words += remainder.len();
+            records.extend_from_slice(bytemuck::cast_slice(&remainder));
+        }
         Ok(Self {
             records,
-            readback_bytes: ((1 + count * 3) * size_of::<u32>()) as u64,
+            readback_bytes: (read_words * size_of::<u32>()) as u64,
         })
     }
 }
@@ -286,15 +304,24 @@ mod tests {
         let workgroup = 64;
         let device = crate::simulation::tests::device(workgroup)?;
         for scan in [parallel::ScanMode::Shared, parallel::ScanMode::new(&device)] {
-            for count in [1, 31, 32, 33, 65, 257, 4097] {
+            for (count, period) in [
+                (1, 7),
+                (31, 7),
+                (32, 7),
+                (33, 7),
+                (65, 7),
+                (257, 7),
+                (4097, 7),
+                (4097, 257),
+            ] {
                 let requests = (0..count)
-                    .map(|actor| match actor % 7 {
+                    .map(|actor| match actor % period {
                         1 | 3 => actor as u32 + 1,
                         _ => 0,
                     })
                     .collect::<Vec<_>>();
                 let births = (0..count)
-                    .map(|actor| match actor % 7 {
+                    .map(|actor| match actor % period {
                         2 | 3 => actor as u32 % 2 + 1,
                         _ => 0,
                     })
@@ -336,7 +363,14 @@ mod tests {
                     &output,
                 )?;
                 assert_eq!(actual.records, expected, "{workgroup} {scan:?} {count}");
-                assert_eq!(actual.readback_bytes, (1 + expected.len() * 3) as u64 * 4);
+                let minimum = match (&device.cube, count) {
+                    (cubecl::Device::Metal(_), 4096..) => count / 64,
+                    _ => 0,
+                };
+                assert_eq!(
+                    actual.readback_bytes,
+                    (1 + expected.len().max(minimum) * 3) as u64 * 4
+                );
                 let expanded = upload_requests(&device, &actual.records, count + 3);
                 assert_eq!(
                     device.read(&expanded)?,

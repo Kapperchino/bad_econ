@@ -1,5 +1,7 @@
 use crate::simulation::economy::*;
 
+use pricing::QuoteSource;
+
 #[derive(CubeType, Clone, Copy)]
 pub(in crate::simulation::economy) struct FuelSearchRotation {
     length: u32,
@@ -110,7 +112,7 @@ impl<'a, 'b> HouseholdPurchase<'a, 'b> {
         }
     }
 
-    pub fn prepare(&self, order: &mut PurchaseRequest, good: u32) {
+    pub fn prepare(&self, order: &mut PurchaseRequest, good: u32, #[comptime] quotes: QuoteSource) {
         let economy = self.economy;
         let parameters = self.parameters;
         let config = economy.ledger.config;
@@ -130,7 +132,7 @@ impl<'a, 'b> HouseholdPurchase<'a, 'b> {
                 && lt(held, order.wanted)
                 && !equal(order.purchasing_power, zero());
             if order.search {
-                order.search = self.preferred_fuel(good) == good;
+                order.search = self.preferred_fuel(good, comptime!(quotes)) == good;
             }
         } else {
             let luxury = comptime!(matches!(
@@ -186,7 +188,7 @@ impl<'a, 'b> HouseholdPurchase<'a, 'b> {
             order.search = order.search && !equal(order.purchasing_power, zero());
             order.wanted = ticks(consumers(&economy.ledger, id), 0);
             if luxury && order.search {
-                order.wanted = self.durable_target(good, order.purchasing_power);
+                order.wanted = self.durable_target(good, order.purchasing_power, comptime!(quotes));
             }
         }
     }
@@ -197,7 +199,7 @@ impl<'a, 'b> HouseholdPurchase<'a, 'b> {
         demand.purchase_target(ledger, self.control, self.parameters, good)
     }
 
-    fn durable_target(&self, good: u32, budget: Ticks) -> Ticks {
+    fn durable_target(&self, good: u32, budget: Ticks, #[comptime] quotes: QuoteSource) -> Ticks {
         let household = self.household;
         let parameters = self.parameters;
         let control = self.control;
@@ -206,8 +208,12 @@ impl<'a, 'b> HouseholdPurchase<'a, 'b> {
         let config = economy.ledger.config;
         let members = consumers(&economy.ledger, household);
         if scaled_luxury(config, good) {
-            let quote = pricing::ReplacementMarket::new(spatial, control, parameters.day)
-                .quote(economy, household, good);
+            let quote = pricing::ReplacementMarket::new(spatial, control, parameters.day).quote(
+                economy,
+                household,
+                good,
+                comptime!(quotes),
+            );
             let price = select(quote > 0, quote, config.maximum_price);
             let interval = config.market_table[good as usize - 1];
             let allowance = times(
@@ -221,7 +227,7 @@ impl<'a, 'b> HouseholdPurchase<'a, 'b> {
         }
     }
 
-    fn preferred_fuel(&self, good: u32) -> u32 {
+    fn preferred_fuel(&self, good: u32, #[comptime] quotes: QuoteSource) -> u32 {
         let household = self.household;
         let parameters = self.parameters;
         let spatial = self.spatial;
@@ -234,38 +240,44 @@ impl<'a, 'b> HouseholdPurchase<'a, 'b> {
         let cash = economy.ledger.value(Field::Cash, household);
         let mut selected = good;
         let mut best = u32::new(comptime!(i64::from(u32::MAX)));
-        for sample in 0..rotation.samples() {
+        let mut sample = pricing::next_sample(
+            spatial,
+            length,
+            parameters.day + household,
+            0,
+            comptime!(quotes),
+        );
+        while sample < rotation.samples() {
             let rotated = rotation.member(sample);
             let seller = spatial[(segment + cells + 1 + rotated) as usize];
-            let primary = economy.actors.kind(seller).output();
-            let dealer = pricing::distributor(&economy.ledger, seller);
             #[unroll]
             for output in [Good::Coal as u32, Good::Wood as u32] {
-                let relevant = primary == output || dealer;
-                if relevant {
-                    let terms = household_production::TradeFields::new(
-                        &economy.actors,
-                        config,
-                        seller,
-                        output,
-                    );
-                    let price = economy.ledger.number_at(terms.price, seller);
+                let price = match comptime!(quotes) {
+                    QuoteSource::Indexed | QuoteSource::Masked => {
+                        let slot = pricing::FirmQuotes::new(cells, length).offer(rotated)
+                            + u32::cast_from(output == Good::Wood as u32);
+                        spatial[slot as usize]
+                    }
+                    QuoteSource::FromLedger => pricing::offer_price(economy, seller, output),
+                };
+                if price > 0 && !lt(cash, ticks(price, 0)) {
                     let trip = economy.actors.distance(household, seller);
-                    let available = economy.ledger.number(Field::EnterpriseStatus, seller)
-                        < comptime!(crate::domain::enterprise::EnterpriseState::Liquidating as u32)
-                        && household_production::offers(economy, seller, output)
-                        && trip <= config.search_radius
-                        && price > 0
-                        && !lt(cash, ticks(price, 0));
                     let units = select(output == comptime!(Good::Coal as u32), 2u32, 1u32);
                     let days = max(ceildiv(trip, config.shipment_speed), 1);
                     let score = price * (2 / units) * (config.ring + 1) + days;
-                    if available && score < best {
+                    if trip <= config.search_radius && score < best {
                         selected = output;
                         best = score;
                     }
                 }
             }
+            sample = pricing::next_sample(
+                spatial,
+                length,
+                parameters.day + household,
+                sample + 1,
+                comptime!(quotes),
+            );
         }
         selected
     }

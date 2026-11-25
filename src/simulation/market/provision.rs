@@ -10,7 +10,10 @@ use crate::simulation::{
         transport::railway::{self, RailStage},
     },
     settlement,
-    storage::layout::WORD_BYTES,
+    storage::{
+        flags::{CONTROL_WORDS, ControlLayout, FAULT_WORD, FaultFlags},
+        layout::WORD_BYTES,
+    },
 };
 use anyhow::Result;
 
@@ -35,6 +38,10 @@ impl ProvisionMarket {
                 ) => {
                     simulation.matching_round = round;
                     simulation.market(market, Phase::ProvisionPurchase, trace, evidence)
+                }
+                (MatchingState::DeviceInput { capacity }, _, _, _) => {
+                    simulation.matching_round = round;
+                    simulation.continue_input(market, capacity)
                 }
                 _ => Ok(MatchingState::Exhausted),
             }
@@ -66,7 +73,10 @@ impl ProvisionMarket {
                 &parameters,
                 &simulation.work.proposals,
             );
-            simulation.fault_check()?;
+            #[cfg(test)]
+            if !matches!(simulation.market_execution, super::MarketExecution::Grouped) {
+                simulation.fault_check()?;
+            }
         }
         Ok(())
     }
@@ -115,8 +125,12 @@ impl Simulation {
         }
         self.config.railway.replace_route_availability(routing);
         result?;
-        self.market_result(evidence)?;
-        self.apply_feedback()?;
+        let parameters = self.parameters(Phase::ProvisionPurchase, Market::Household, 0, 0)?;
+        self.feedback_operation(
+            EconomyStage::ApplyFeedback,
+            self.metadata.actors.len(),
+            &parameters,
+        );
         economy::transport::cartage::dispatch(
             self.gpu(),
             &self.control,
@@ -125,7 +139,13 @@ impl Simulation {
             &self.searches.requests,
             &self.work.proposals,
         );
-        self.fault_check()?;
+        let [feedback, cartage] = self.device.read_prefixes([
+            (&self.work.feedback, FAULT_WORD + 1),
+            (&self.control, CONTROL_WORDS),
+        ])?;
+        self.readback_bytes += ((feedback.len() + cartage.len()) * WORD_BYTES) as u64;
+        self.record_market_result(*ControlLayout::new(&cartage)?, evidence)?;
+        FaultFlags::read(&feedback)?.into_result()?;
         self.market_replay = MarketReplay::Reusable;
         Ok(())
     }

@@ -23,11 +23,20 @@ const DIRECT_INPUT_TILE: usize = 256;
 
 pub(super) struct MarketSubmission {
     pub(super) sort_source: u32,
-    pub(super) constructed: Option<usize>,
+    pub(super) activity: Option<InputActivity>,
+}
+
+pub(super) struct InputActivity {
+    pub(super) orders: InputOrders,
+    pub(super) candidates: usize,
 }
 
 impl MarketRound<'_> {
-    pub(super) fn clock(&self, simulation: &Simulation) -> MarketClock {
+    pub(super) fn clock(
+        &self,
+        simulation: &Simulation,
+        replay: super::MarketReplay,
+    ) -> MarketClock {
         match (
             self.trace,
             self.count,
@@ -54,7 +63,7 @@ impl MarketRound<'_> {
             ) if !self.has_unallocated_freight(simulation)
                 && std::env::var_os("BAD_ECON_PROFILE_SUPPLY").is_none() =>
             {
-                simulation.market_replay.clock(self.market.into())
+                replay.clock(self.market.into())
             }
             _ => MarketClock::Scalars,
         }
@@ -74,7 +83,13 @@ impl MarketRound<'_> {
                 FreightExecution::Buffered,
                 cubecl::Device::Metal(_),
                 4096..,
-            ) => GraphScope::PrepareOrders,
+            ) => match (
+                simulation.matching_rounds(self.market),
+                self.parameters.clock,
+            ) {
+                (1, MarketClock::Device) => GraphScope::SingleInput,
+                _ => GraphScope::PrepareOrders,
+            },
             _ => GraphScope::FullMarket,
         };
         MarketKey {
@@ -89,21 +104,80 @@ impl MarketRound<'_> {
 
     pub(super) fn submit(self, simulation: &mut Simulation) -> Result<MarketSubmission> {
         let key = self.graph_key(simulation);
-        let submission = if key.scope == GraphScope::PrepareOrders {
-            self.submit_sparse_input(simulation, key)?
-        } else {
-            let sort_source = match self.parameters.clock {
-                MarketClock::Scalars => self.prepare_and_settle(simulation)?,
-                MarketClock::Device => self.run_graph(simulation, key, |simulation| {
-                    self.prepare_and_settle(simulation)
-                })?,
-            };
-            MarketSubmission {
-                sort_source,
-                constructed: None,
+        match key.scope {
+            GraphScope::SingleInput => {
+                let round = Self {
+                    resources: crate::simulation::settlement::ResourceSelection::RoutedInputs,
+                    ..self
+                };
+                let sort_source = round.run_graph(simulation, key, |simulation| {
+                    round.prepare_and_settle(simulation)
+                })?;
+                Ok(MarketSubmission {
+                    sort_source,
+                    activity: None,
+                })
             }
+            GraphScope::PrepareOrders => self.submit_sparse_input(simulation, key),
+            _ => {
+                let sort_source = match self.parameters.clock {
+                    MarketClock::Scalars => self.prepare_and_settle(simulation)?,
+                    MarketClock::Device => self.run_graph(simulation, key, |simulation| {
+                        self.prepare_and_settle(simulation)
+                    })?,
+                };
+                Ok(MarketSubmission {
+                    sort_source,
+                    activity: None,
+                })
+            }
+        }
+    }
+
+    pub(super) fn submit_input_continuation(
+        self,
+        simulation: &mut Simulation,
+        capacity: usize,
+    ) -> Result<u32> {
+        let key = MarketKey {
+            scope: GraphScope::InputContinuation { capacity },
+            ..self.graph_key(simulation)
         };
-        Ok(submission)
+        self.run_graph(simulation, key, |simulation| {
+            if crate::simulation::economy::market::farm_offers::FarmMarket::takes_offers(
+                self.market,
+                simulation.config.home_mode,
+            ) {
+                simulation.config.farm_market.collect(
+                    simulation.gpu(),
+                    &simulation.spatial,
+                    &simulation.control,
+                    &self.parameters,
+                    super::BidRound::Continue,
+                );
+            }
+            self.prepare_bounded_input(simulation, capacity, key.routing)
+        })
+    }
+
+    fn prepare_bounded_input(
+        self,
+        simulation: &mut Simulation,
+        capacity: usize,
+        routing: RouteAvailability,
+    ) -> Result<u32> {
+        let collection = match capacity {
+            1..=INPUT_TILE => OrderCollection::InputTile,
+            _ => OrderCollection::Bitmap,
+        };
+        self.prepare_orders(simulation, collection)?;
+        self.settle_orders(
+            simulation,
+            Some(InputOrders {
+                count: capacity,
+                routing,
+            }),
+        )
     }
 
     fn run_graph(
@@ -151,7 +225,8 @@ impl MarketRound<'_> {
                 })?;
             }
         }
-        let orders = simulation.observe_input_orders()?;
+        let activity = simulation.observe_input_orders()?;
+        let orders = activity.orders;
         let count = orders.count;
         let sort_source = match (count, self.parameters.clock) {
             (0, _) => 0,
@@ -183,7 +258,7 @@ impl MarketRound<'_> {
         };
         Ok(MarketSubmission {
             sort_source,
-            constructed: Some(count),
+            activity: Some(activity),
         })
     }
 
@@ -214,16 +289,21 @@ impl MarketRound<'_> {
 }
 
 impl Simulation {
-    fn observe_input_orders(&mut self) -> Result<InputOrders> {
+    fn observe_input_orders(&mut self) -> Result<InputActivity> {
         let start = flags::CONSTRUCTED_EVENTS_WORD;
         let rail = INPUT_RAIL_WORD - start;
         let words = self.device.read_range(&self.control, start, rail + 1)?;
         self.readback_bytes += (words.len() * WORD_BYTES) as u64;
-        Ok(InputOrders {
-            count: words[0] as usize,
-            routing: match words[rail] {
-                0 => RouteAvailability::Dormant,
-                _ => RouteAvailability::Available,
+        Ok(InputActivity {
+            candidates: words
+                [crate::simulation::economy::market::orders::PREPARATION_ACTORS_WORD - start]
+                as usize,
+            orders: InputOrders {
+                count: words[0] as usize,
+                routing: match words[rail] {
+                    0 => RouteAvailability::Dormant,
+                    _ => RouteAvailability::Available,
+                },
             },
         })
     }

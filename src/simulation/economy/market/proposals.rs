@@ -79,9 +79,7 @@ pub(in crate::simulation::economy) fn propose(
         let market = comptime!(parameters.market);
         let mut id = invocation;
         if comptime!(market == MarketFlag::Household && parameters.discovery.indexed()) {
-            let cells = config.spatial_side * config.spatial_side;
-            let base =
-                3 * (cells + 1 + config.actors) + ceildiv(config.actors, DISCOVERY_BLOCK) + 1;
+            let base = config.query_members();
             id = spatial[(base + invocation) as usize];
         }
         let mut quantity = ticks(0u32, 0u32);
@@ -111,7 +109,14 @@ pub(in crate::simulation::economy) fn propose(
                 search = labor.vacancies;
             }
             MarketFlag::Input(_) | MarketFlag::Consumer(_) | MarketFlag::Household => {
-                let order = PurchaseRequest::new(economy, spatial, control, parameters, id);
+                let order = PurchaseRequest::new(
+                    economy,
+                    spatial,
+                    control,
+                    parameters,
+                    id,
+                    comptime!(pricing::QuoteSource::FromLedger),
+                );
                 search = order.search;
                 wanted = order.wanted;
                 purchasing_power = order.purchasing_power;

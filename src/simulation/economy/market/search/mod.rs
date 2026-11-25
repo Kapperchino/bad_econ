@@ -25,10 +25,13 @@ pub(in crate::simulation) mod grain;
 mod index;
 pub(super) mod local;
 mod road;
+pub(in crate::simulation) use pricing::{QUOTE_MASK_WORDS, QuoteSource};
 pub(in crate::simulation) use road::SIDE as ROAD_TILE_SIDE;
 
 pub(in crate::simulation) const INPUT_MINIMUM_QUOTE_WORD: usize = CONTROL_WORDS + 7;
 pub(in crate::simulation) const INPUT_RAIL_WORD: usize = orders::WIDE_ORDERS_WORD;
+pub(in crate::simulation::economy) const UNMATCHED_WORD: usize = CONTROL_WORDS + 9;
+const UNMATCHED_FIELD: u32 = 13;
 pub(in crate::simulation) const INPUT_BUYERS_FIELD: u32 = 12;
 pub(in crate::simulation::economy) const GRAIN_FIRMS_WORD: usize = CONTROL_WORDS + 8;
 
@@ -58,6 +61,7 @@ pub(in crate::simulation) enum StatusReset {
 #[derive(Clone, Copy, Debug, Hash, PartialEq, Eq)]
 pub(in crate::simulation) enum SearchStage {
     Index,
+    QuoteMasks,
     EmptySort,
     EmptyBounds,
     Prepare,
@@ -65,6 +69,8 @@ pub(in crate::simulation) enum SearchStage {
     PrepareSelected,
     Search,
     SearchIndexed,
+    CollectLocal,
+    SearchUnmatched,
     GrainFirms,
     RefreshGrainSupply,
     SearchGrain,
@@ -97,6 +103,7 @@ pub(in crate::simulation) enum OrderCollection {
 
 #[derive(Clone, Copy, Debug, Hash, PartialEq, Eq)]
 pub(in crate::simulation) struct SearchProgram {
+    pub(in crate::simulation) quote_source: QuoteSource,
     collection: OrderCollection,
     stage: SearchStage,
     suppliers: SupplierSearch,
@@ -113,6 +120,7 @@ impl SearchStage {
         let shipment_speed = config.shipment_speed;
         let suppliers = match self {
             Self::Search
+            | Self::SearchUnmatched
             | Self::SearchGrain
             | Self::SearchIndexed
             | Self::SearchFuel
@@ -126,6 +134,7 @@ impl SearchStage {
             _ => SupplierSearch::Inactive,
         };
         SearchProgram {
+            quote_source: QuoteSource::FromLedger,
             collection: OrderCollection::Bitmap,
             stage: self,
             suppliers,
@@ -192,6 +201,14 @@ impl GpuPass<SearchInput> for Search {
         if input.control[LATCH_WORD].load() == 0 {
             match comptime!(input.program.stage) {
                 SearchStage::Index => input.build_supplier_index(),
+                SearchStage::QuoteMasks => {
+                    let firms = input.spatial[(2 * (2 + input.config.actors) + 1) as usize];
+                    pricing::index_quote_masks(
+                        &mut input.spatial,
+                        firms,
+                        comptime!(input.parameters.market),
+                    );
+                }
                 SearchStage::EmptySort => empty::sort(
                     &input.config,
                     &input.spatial,
@@ -239,9 +256,11 @@ impl GpuPass<SearchInput> for Search {
                     &mut input.scratch,
                     &input.control,
                 ),
-                SearchStage::Search | SearchStage::SearchGrain | SearchStage::SearchIndexed => {
-                    input.match_suppliers()
-                }
+                SearchStage::CollectLocal => input.collect_local(),
+                SearchStage::Search
+                | SearchStage::SearchUnmatched
+                | SearchStage::SearchGrain
+                | SearchStage::SearchIndexed => input.match_suppliers(),
                 SearchStage::SearchFuel
                 | SearchStage::SearchHousehold
                 | SearchStage::SearchSpatialFuel => input.match_fuel(),

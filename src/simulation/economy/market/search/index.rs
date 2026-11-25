@@ -227,6 +227,9 @@ impl SearchInput {
         let reduction = comptime!(parameters.scan);
         let cells = config.spatial_side * config.spatial_side;
         let count = spatial[cells as usize];
+        if comptime!(self.program.quote_source != QuoteSource::FromLedger) {
+            pricing::index_offer_prices(economy, spatial, parameters);
+        }
         let start = CUBE_POS as u32 * (DISCOVERY_BLOCK / BLOCK);
         let end = min(start + DISCOVERY_BLOCK / BLOCK, ceildiv(count, BLOCK));
         let width = match comptime!(reduction) {
