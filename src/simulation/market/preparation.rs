@@ -231,9 +231,15 @@ impl<'a> OrderSearch<'a> {
 
     fn collect(&self, simulation: &mut Simulation, grain: GrainSearch) -> Result<()> {
         use SearchStage::*;
-        let preparation = match (self.round.market, self.round.index) {
-            (Market::Input(_) | Market::Consumer(_), 0) => PrepareCandidates,
-            (Market::Input(_) | Market::Consumer(_), _) => PrepareSelected,
+        let preparation = match (
+            self.round.market,
+            self.round.index,
+            simulation.matching_rounds(self.round.market),
+            self.round.trace,
+        ) {
+            (Market::Input(_), 0, 1, Trace::Discard) => Prepare,
+            (Market::Input(_) | Market::Consumer(_), 0, _, _) => PrepareCandidates,
+            (Market::Input(_) | Market::Consumer(_), _, _, _) => PrepareSelected,
             _ => Prepare,
         };
         self.launch(simulation, preparation);
@@ -320,6 +326,9 @@ impl<'a> OrderSearch<'a> {
             .program(&simulation.config)
             .collecting(self.collection);
         program.quote_source = self.quote_source(simulation);
+        if matches!(stage, PrepareCandidates | PrepareSelected) {
+            program.consumer_reserves = self.round.consumer_reserves(simulation);
+        }
         MarketSearch::launch(
             &simulation.device,
             self.dispatch_count(simulation, stage, workgroup),
@@ -353,6 +362,9 @@ impl<'a> OrderSearch<'a> {
         let groups = count.div_ceil(workgroup as usize);
         let dispatches = &simulation.searches.dispatches;
         match (stage, &device.cube) {
+            (SearchSpatialFuel, Device::Metal(_)) => {
+                CubeCount::Static(groups.clamp(1, 1024) as u32, 1, 1).into()
+            }
             (SearchSpatialFuel | GrainFirms | RefreshGrainSupply, _) => device.count(count).into(),
             (RoadCandidates, _) => CubeCount::Static(search::ROAD_TILE_SIDE.pow(2), 1, 1).into(),
             (EmptySort, _) => CubeCount::Static(1, 1, 1).into(),

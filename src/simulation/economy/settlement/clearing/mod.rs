@@ -137,6 +137,7 @@ pub(in crate::simulation::economy) fn buyer_settlement(
     if comptime!(posting == Posting::ApplyActor)
         && status.contains(comptime!(EventStatus::Accepted))
     {
+        config.mark_ring_occupancy(actor, good - 1);
         economy.ledger.set(Field::Cash, actor, minus(cash, cost));
         economy.ledger.set_at(slot, actor, incoming.value);
         if trip > 0 {

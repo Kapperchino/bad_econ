@@ -45,7 +45,7 @@ impl Simulation {
             empty_orders: parameters::EmptyOrderMode::Settle,
             day,
             matching_round: match self.provisioning {
-                Provisioning::Standard => self.matching_round as u32,
+                Provisioning::Standard | Provisioning::Nonfuel { .. } => self.matching_round as u32,
                 Provisioning::Minimum => 0,
                 Provisioning::Choice => MATCHING_ROUNDS as u32 - 1,
             },

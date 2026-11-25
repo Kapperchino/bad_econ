@@ -516,10 +516,20 @@ impl SnapshotCopy {
                     ring_start: ring_start as u32,
                     ring_end: ring_end as u32,
                     group_offset: group_offset as u32,
+                    range: match ring_start < ring_end {
+                        true => SnapshotRange::Ring,
+                        false => SnapshotRange::Unobserved,
+                    },
                 },
             ),
         }
     }
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+enum SnapshotRange {
+    Ring,
+    Unobserved,
 }
 
 #[derive(CubeType, CubeLaunch)]
@@ -534,6 +544,8 @@ struct SnapshotInput {
     group_offset: u32,
     #[cube(comptime)]
     parts: u32,
+    #[cube(comptime)]
+    range: SnapshotRange,
 }
 
 struct SparseCopy;
@@ -553,10 +565,16 @@ impl GpuPass<SnapshotInput> for SparseWords {
         if group < input.groups as usize {
             let mask = input.group_offset as usize + group;
             let previous = input.nonzero[mask];
-            let start = group * (comptime!(input.parts) as usize * 32 * 4);
-            let ring = start >= input.ring_start as usize
-                && start + comptime!(input.parts) as usize * 32 * 4 <= input.ring_end as usize;
-            let observed_zero = ring && input.current[mask].load() == 0;
+            let observed_zero = match comptime!(input.range) {
+                SnapshotRange::Ring => {
+                    let width = comptime!(input.parts) as usize * 32 * 4;
+                    let start = group * width;
+                    start >= input.ring_start as usize
+                        && start + width <= input.ring_end as usize
+                        && input.current[mask].load() == 0
+                }
+                SnapshotRange::Unobserved => false,
+            };
             if PLANE_DIM != 32 || !observed_zero || previous > 0 {
                 let mut local = 0u32;
                 #[unroll]
@@ -770,6 +788,7 @@ mod tests {
                 ring_start: 0,
                 ring_end: 0,
                 group_offset: 0,
+                range: SnapshotRange::Unobserved,
             },
         );
         assert_eq!(

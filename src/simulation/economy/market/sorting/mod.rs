@@ -603,7 +603,9 @@ struct SortDispatchInput {
     control: Box<[Atomic<u32>]>,
     dispatches: Box<[u32]>,
     bins: u32,
+    #[cube(comptime)]
     source_workgroup: u32,
+    #[cube(comptime)]
     histogram_span: u32,
 }
 
@@ -622,22 +624,17 @@ impl GpuPass<SortDispatchInput> for PrepareSort {
     fn execute(mut input: SortDispatchInput) {
         let active =
             input.control[crate::simulation::storage::flags::CONSTRUCTED_EVENTS_WORD].load();
-        let groups = ceildiv(active, input.source_workgroup);
+        let groups = ceildiv(active, comptime!(input.source_workgroup));
         orders::store_dispatch(
             &mut input.dispatches,
             comptime!(orders::SORT_DISPATCH),
             groups,
         );
-        let mut count = input.bins * groups;
-        for level in 0..6usize {
-            let groups = ceildiv(count, input.histogram_span);
-            orders::store_dispatch(
-                &mut input.dispatches,
-                comptime!(orders::HISTOGRAM_DISPATCH) + level * 3,
-                groups,
-            );
-            count = groups;
-        }
+        orders::store_histogram_dispatches(
+            &mut input.dispatches,
+            input.bins * groups,
+            comptime!(input.histogram_span),
+        );
     }
 }
 
@@ -698,7 +695,8 @@ impl GpuPass<SortInput> for Sort {
 
     fn execute(mut input: SortInput) {
         if orders::faults_clear(&input.control) {
-            input.sort(ABSOLUTE_POS as u32);
+            let size = orders::RadixPassSize::new(&input.control, &input.parameters);
+            input.sort(ABSOLUTE_POS as u32, &size);
         }
     }
 }
@@ -706,10 +704,10 @@ impl GpuPass<SortInput> for Sort {
 #[cube(launch)]
 fn sort_blocks(mut input: SortInput) {
     if orders::faults_clear(&input.control) {
-        let groups = ceildiv(orders::active(&input.control, &input.parameters), CUBE_DIM);
+        let size = orders::RadixPassSize::new(&input.control, &input.parameters);
         let mut group = CUBE_POS as u32;
-        while group < groups {
-            input.sort(group * CUBE_DIM + UNIT_POS);
+        while group < size.blocks {
+            input.sort(group * CUBE_DIM + UNIT_POS, &size);
             if comptime!(input.stage == SortStage::Local) {
                 sync_cube();
             }
@@ -720,11 +718,11 @@ fn sort_blocks(mut input: SortInput) {
 
 #[cube]
 impl SortInput {
-    fn sort(&mut self, id: u32) {
+    fn sort(&mut self, id: u32, size: &orders::RadixPassSize) {
         match comptime!(self.stage) {
             SortStage::Local => orders::radix_local_digits(
                 &mut self.scratch,
-                &self.control,
+                size,
                 &self.parameters,
                 id,
                 self.key_base,
@@ -733,7 +731,7 @@ impl SortInput {
             ),
             SortStage::Scatter => orders::radix_scatter_digits(
                 &mut self.scratch,
-                &self.control,
+                size,
                 &self.parameters,
                 id,
                 self.key_base,

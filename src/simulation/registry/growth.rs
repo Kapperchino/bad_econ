@@ -136,7 +136,7 @@ impl Simulation {
             &metadata,
             &rental_changes,
         );
-        config.state_stride = stride as u32;
+        config.set_state_stride(&self.device, stride as u32);
         if std::env::var_os("BAD_ECON_PROFILE_STAGES").is_some() {
             eprintln!(
                 "CONFIG {} {:.3}",

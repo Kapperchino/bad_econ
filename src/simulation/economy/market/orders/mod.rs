@@ -223,9 +223,12 @@ pub(in crate::simulation) fn prepare_dispatch_for(
 struct DispatchInput {
     control: Box<[Atomic<u32>]>,
     dispatches: Box<[u32]>,
+    #[cube(comptime)]
     workgroup: u32,
+    #[cube(comptime)]
     histogram_span: u32,
     preparation_resets: u32,
+    #[cube(comptime)]
     preparation_workgroup: u32,
 }
 
@@ -245,10 +248,10 @@ impl GpuPass<DispatchInput> for PrepareCounts {
         prepare_counts(
             &input.control,
             &mut input.dispatches,
-            input.workgroup,
-            input.histogram_span,
+            comptime!(input.workgroup),
+            comptime!(input.histogram_span),
             input.preparation_resets,
-            input.preparation_workgroup,
+            comptime!(input.preparation_workgroup),
         );
     }
 }
@@ -257,32 +260,48 @@ impl GpuPass<DispatchInput> for PrepareCounts {
 fn prepare_counts(
     control: &[Atomic<u32>],
     dispatches: &mut [u32],
-    workgroup: u32,
-    histogram_span: u32,
+    #[comptime] workgroup: u32,
+    #[comptime] histogram_span: u32,
     preparation_resets: u32,
-    preparation_workgroup: u32,
+    #[comptime] preparation_workgroup: u32,
 ) {
     control[LATCH_WORD].store(control[crate::simulation::storage::flags::FAULT_WORD].load());
-    let mut counts = Array::<u32>::new(12usize);
-    counts[0usize] = control[SEARCHES_WORD].load();
-    counts[1usize] = ceildiv(control[CONSTRUCTED_EVENTS_WORD].load(), workgroup);
-    counts[2usize] = ceildiv(control[RANGE_SLOTS_WORD].load(), workgroup);
-    counts[3usize] = ceildiv(16 * counts[1usize], histogram_span);
-    for index in 4..9usize {
-        counts[index] = ceildiv(counts[index - 1], histogram_span);
-    }
-    counts[9usize] = control[RANGE_SLOTS_WORD].load();
-    counts[10usize] = ceildiv(counts[0usize], workgroup);
+    let searches = control[SEARCHES_WORD].load();
+    let order_groups = ceildiv(control[CONSTRUCTED_EVENTS_WORD].load(), workgroup);
+    let ranges = control[RANGE_SLOTS_WORD].load();
+    store_dispatch(dispatches, SEARCH_DISPATCH, searches);
+    store_dispatch(dispatches, SORT_DISPATCH, order_groups);
+    store_dispatch(dispatches, RANGE_DISPATCH, ceildiv(ranges, workgroup));
+    store_histogram_dispatches(dispatches, 16 * order_groups, histogram_span);
+    store_dispatch(dispatches, QUEUE_DISPATCH, ranges);
+    store_dispatch(
+        dispatches,
+        SEARCH_COMPACT_DISPATCH,
+        ceildiv(searches, workgroup),
+    );
     let mut preparation_actors = 0u32;
     if control.len() > PREPARATION_ACTORS_WORD {
         preparation_actors = control[PREPARATION_ACTORS_WORD].load();
     }
-    counts[11usize] = ceildiv(
-        max(preparation_actors, preparation_resets),
-        preparation_workgroup,
+    store_dispatch(
+        dispatches,
+        PREPARATION_DISPATCH,
+        ceildiv(
+            max(preparation_actors, preparation_resets),
+            preparation_workgroup,
+        ),
     );
-    for index in 0..12usize {
-        store_dispatch(dispatches, index * 3, counts[index]);
+}
+
+#[cube]
+pub(super) fn store_histogram_dispatches(
+    dispatches: &mut [u32],
+    mut count: u32,
+    #[comptime] span: u32,
+) {
+    for level in 0..6usize {
+        count = ceildiv(count, span);
+        store_dispatch(dispatches, HISTOGRAM_DISPATCH + level * 3, count);
     }
 }
 
@@ -504,6 +523,23 @@ fn radix_key(key: u32, base: u32) -> u32 {
     select(key == u32::MAX, key, key - base)
 }
 
+#[derive(CubeType)]
+pub(in crate::simulation) struct RadixPassSize {
+    active: u32,
+    pub blocks: u32,
+}
+
+#[cube]
+impl RadixPassSize {
+    pub fn new(control: &[Atomic<u32>], parameters: &EconomyParameters) -> Self {
+        let active = active(control, parameters);
+        RadixPassSize {
+            active,
+            blocks: ceildiv(active, CUBE_DIM),
+        }
+    }
+}
+
 #[cube]
 pub(in crate::simulation) fn radix_local_keys(
     scratch: &mut [u32],
@@ -512,13 +548,14 @@ pub(in crate::simulation) fn radix_local_keys(
     id: u32,
     key_base: u32,
 ) {
-    radix_local_digits(scratch, control, parameters, id, key_base, 4u32, 16u32);
+    let size = RadixPassSize::new(control, parameters);
+    radix_local_digits(scratch, &size, parameters, id, key_base, 4u32, 16u32);
 }
 
 #[cube]
 pub(in crate::simulation) fn radix_local_digits(
     scratch: &mut [u32],
-    control: &[Atomic<u32>],
+    size: &RadixPassSize,
     parameters: &EconomyParameters,
     id: u32,
     key_base: u32,
@@ -526,9 +563,9 @@ pub(in crate::simulation) fn radix_local_digits(
     histogram_bins: u32,
 ) {
     let count = parameters.count;
-    let active_count = active(control, parameters);
+    let active_count = size.active;
     let block = id / CUBE_DIM;
-    let blocks = ceildiv(active_count, CUBE_DIM);
+    let blocks = size.blocks;
     let lane = UNIT_POS as usize;
     let source = parameters.sort_source;
     let shift = parameters.sort_width;
@@ -634,9 +671,10 @@ pub(in crate::simulation) fn radix_scatter_keys(
     #[comptime] output: parallel::HistogramScan,
     #[comptime] items: u32,
 ) {
+    let size = RadixPassSize::new(control, parameters);
     radix_scatter_digits(
         scratch,
-        control,
+        &size,
         parameters,
         id,
         key_base,
@@ -650,7 +688,7 @@ pub(in crate::simulation) fn radix_scatter_keys(
 #[cube]
 pub(in crate::simulation) fn radix_scatter_digits(
     scratch: &mut [u32],
-    control: &[Atomic<u32>],
+    size: &RadixPassSize,
     parameters: &EconomyParameters,
     id: u32,
     key_base: u32,
@@ -660,8 +698,8 @@ pub(in crate::simulation) fn radix_scatter_digits(
     histogram_bound: u32,
 ) {
     let count = parameters.count;
-    if id < active(control, parameters) {
-        let blocks = ceildiv(active(control, parameters), CUBE_DIM);
+    if id < size.active {
+        let blocks = size.blocks;
         let source = parameters.sort_source;
         let destination = 2 * count - source;
         let key = scratch[(source + id) as usize];

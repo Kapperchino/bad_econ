@@ -2,7 +2,10 @@ use super::FreightExecution;
 use crate::domain::Good;
 use crate::simulation::{
     Device, Simulation,
-    economy::{policy::RETAINED_LABOR_ROUND, transport::railway::RouteAvailability},
+    economy::{
+        market::search::ConsumerReserves, policy::RETAINED_LABOR_ROUND,
+        transport::railway::RouteAvailability,
+    },
     gpu::tensor::same_buffer,
 };
 use anyhow::Result;
@@ -58,6 +61,7 @@ pub(super) struct MarketKey {
     pub market: MarketProgram,
     pub phase: crate::domain::Phase,
     pub preparation: Preparation,
+    pub consumer_reserves: ConsumerReserves,
     pub routing: RouteAvailability,
     pub freight: FreightExecution,
 }
@@ -342,6 +346,7 @@ mod tests {
                     market: market.into(),
                     phase: Phase::ProvisionPurchase,
                     preparation: Preparation::First,
+                    consumer_reserves: ConsumerReserves::Ledger,
                     routing: RouteAvailability::Dormant,
                     freight: FreightExecution::Synchronous,
                 };
@@ -385,6 +390,7 @@ mod tests {
             market: MarketProgram::Household,
             phase: Phase::ProvisionPurchase,
             preparation: Preparation::First,
+            consumer_reserves: ConsumerReserves::Ledger,
             routing: RouteAvailability::Dormant,
             freight: FreightExecution::Synchronous,
         };

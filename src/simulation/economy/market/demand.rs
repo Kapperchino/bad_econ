@@ -1,6 +1,13 @@
 use crate::domain::enterprise::FoodAccess;
 use crate::simulation::economy::*;
 
+#[derive(Clone, Copy, Debug, Hash, PartialEq, Eq)]
+pub(in crate::simulation) enum ConsumerReserves {
+    Ledger,
+    Capture,
+    Cached,
+}
+
 #[derive(CubeType)]
 pub(super) struct FoodSearchResult {
     pub seller: u32,
@@ -45,6 +52,26 @@ impl PurchaseRequest {
         id: u32,
         #[comptime] quotes: pricing::QuoteSource,
     ) -> Self {
+        Self::with_reserves(
+            economy,
+            spatial,
+            control,
+            parameters,
+            id,
+            comptime!(quotes),
+            comptime!(ConsumerReserves::Ledger),
+        )
+    }
+
+    pub(super) fn with_reserves(
+        economy: &mut EconomyView<'_>,
+        spatial: &[u32],
+        control: &[Atomic<u32>],
+        parameters: &EconomyParameters,
+        id: u32,
+        #[comptime] quotes: pricing::QuoteSource,
+        #[comptime] reserves: ConsumerReserves,
+    ) -> Self {
         let config = economy.ledger.config;
         let kind = economy.actors.kind(id);
         let good = parameters.traded_good();
@@ -75,7 +102,7 @@ impl PurchaseRequest {
                 let purchase = consumption::HouseholdPurchase::new(
                     &*economy, spatial, control, parameters, id,
                 );
-                purchase.prepare(&mut order, good, comptime!(quotes));
+                purchase.prepare(&mut order, good, comptime!(quotes), comptime!(reserves));
             }
             MarketFlag::Household => {
                 order.search = kind.is(comptime!(ActorKind::Household));

@@ -180,11 +180,15 @@ impl CandidateTile {
             };
             offer.replace(match comptime!(parameters.market) {
                 MarketFlag::Consumer(_) => request.consumer(config, supply),
-                _ => request.with_supply(
+                _ => request.with_scored_supply(
                     economy,
                     &self.faults[fault_start..fault_start + fault_words],
                     parameters,
                     supply,
+                    ScoringTarget {
+                        quantity: buyer.input_target,
+                        basis: TargetBasis::Calculated,
+                    },
                 ),
             });
         }
@@ -230,17 +234,21 @@ pub(in crate::simulation::economy) fn supplier_stride(
 
 #[cube]
 pub(in crate::simulation::economy) fn coprime_stride(length: u32, offset: u32) -> u32 {
-    let mut stride = max(length / 2 + offset, 1);
-    let mut divisor = 0u32;
-    while divisor != 1 {
-        let mut remaining = length;
-        divisor = stride;
-        while remaining > 0 {
-            let next = divisor % remaining;
-            divisor = remaining;
-            remaining = next;
+    let even_length = u32::cast_from(length & 1 == 0);
+    let step = 1 + even_length;
+    let mut stride = max(length / 2 + offset, 1) | even_length;
+    let odd_length = length >> length.trailing_zeros();
+    let mut gcd = 0u32;
+    while gcd != 1 {
+        gcd = odd_length;
+        let mut difference = stride;
+        while difference != 0 && gcd != 1 {
+            let odd = difference >> difference.trailing_zeros();
+            let smaller = min(gcd, odd);
+            difference = max(gcd, odd) - smaller;
+            gcd = smaller;
         }
-        stride += u32::cast_from(divisor != 1);
+        stride += select(gcd != 1, step, 0);
     }
     stride
 }
@@ -373,17 +381,52 @@ pub(in crate::simulation::economy) fn supply_score(
     amount: Ticks,
     price: Ticks,
 ) -> Ticks {
-    let mut score = price;
-    if comptime!(matches!(parameters.market, MarketFlag::Input(_)))
-        && !economy
-            .actors
-            .kind(buyer)
-            .is(comptime!(ActorKind::Household))
-    {
-        let missing = positive(input_target(economy, parameters, buyer, wanted), amount);
-        score = ticks(price.extract(LOW_WORD), missing.extract(LOW_WORD));
+    ScoringTarget {
+        quantity: wanted,
+        basis: TargetBasis::Wanted,
     }
-    score
+    .score(economy, parameters, buyer, amount, price)
+}
+
+#[derive(Clone, Copy)]
+enum TargetBasis {
+    Wanted,
+    Calculated,
+}
+
+#[derive(CubeType)]
+struct ScoringTarget {
+    quantity: Ticks,
+    #[cube(comptime)]
+    basis: TargetBasis,
+}
+
+#[cube]
+impl ScoringTarget {
+    fn score(
+        &self,
+        economy: &EconomyView<'_>,
+        parameters: &EconomyParameters,
+        buyer: u32,
+        amount: Ticks,
+        price: Ticks,
+    ) -> Ticks {
+        let mut score = price;
+        if comptime!(matches!(parameters.market, MarketFlag::Input(_)))
+            && !economy
+                .actors
+                .kind(buyer)
+                .is(comptime!(ActorKind::Household))
+        {
+            let target = match comptime!(self.basis) {
+                TargetBasis::Wanted => input_target(economy, parameters, buyer, self.quantity),
+                TargetBasis::Calculated => self.quantity,
+            };
+            let missing = positive(target, amount);
+            score = ticks(price.extract(LOW_WORD), missing.extract(LOW_WORD));
+        }
+        score
+    }
 }
 
 #[derive(CubeType)]
@@ -436,6 +479,26 @@ impl OfferRequest {
         control: &[Atomic<u32>],
         parameters: &EconomyParameters,
         supply: &index::Supply,
+    ) -> Candidate {
+        self.with_scored_supply(
+            economy,
+            control,
+            parameters,
+            supply,
+            ScoringTarget {
+                quantity: self.demand.wanted,
+                basis: TargetBasis::Wanted,
+            },
+        )
+    }
+
+    fn with_scored_supply(
+        &self,
+        economy: &EconomyView<'_>,
+        control: &[Atomic<u32>],
+        parameters: &EconomyParameters,
+        supply: &index::Supply,
+        target: ScoringTarget,
     ) -> Candidate {
         let id = self.buyer;
         let firm = self.seller;
@@ -597,7 +660,7 @@ impl OfferRequest {
                         && offered
                         && quote > 0u32
                         && !equal(amount, ticks(0u32, 0u32));
-                    score = supply_score(economy, parameters, id, wanted, amount, score);
+                    score = target.score(economy, parameters, id, amount, score);
                 }
             }
         }

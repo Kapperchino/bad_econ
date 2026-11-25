@@ -8,6 +8,22 @@ impl SearchInput {
             SearchStage::PrepareSelected => PreparationRound::Selected,
             _ => PreparationRound::First,
         });
+        let reserves = comptime!(self.program.consumer_reserves);
+        if comptime!(reserves == ConsumerReserves::Capture) && invocation < self.config.actors {
+            let reserve = consumption::ConsumerFoodReserve::capture(
+                &Ledger::new(&mut self.state, &self.config),
+                &ActorTable::new(&self.actors),
+                &self.control,
+                invocation,
+                self.parameters.day,
+            );
+            consumption::ConsumerFoodReserve::store(
+                &mut self.config.market_table,
+                self.config.actors,
+                invocation,
+                reserve,
+            );
+        }
         let mut view = EconomyView::new(&mut self.state, &self.actors, &self.config);
         let economy = &mut view;
         let parameters = &self.parameters;
@@ -103,13 +119,14 @@ impl SearchInput {
                             searching = labor.vacancies;
                         }
                         MarketFlag::Input(_) | MarketFlag::Consumer(_) | MarketFlag::Household => {
-                            let order = PurchaseRequest::new(
+                            let order = PurchaseRequest::with_reserves(
                                 economy,
                                 spatial,
                                 control,
                                 parameters,
                                 id,
                                 comptime!(self.program.quote_source),
+                                comptime!(reserves),
                             );
                             searching = order.search;
                             wanted = order.wanted;
@@ -199,11 +216,14 @@ impl SearchInput {
                         round,
                         PreparationRound::First | PreparationRound::Capture
                     )) {
-                        let inactive_good = parameters.traded_good();
-                        economy
+                        let transit = economy
                             .ledger
-                            .stock_with_transit(inactive_good, id)
-                            .record(control);
+                            .value_at(TRANSIT_FIELDS as u32 + good - 1, id);
+                        if !equal(transit, zero()) {
+                            plus(economy.ledger.value_at(good, id), transit)
+                                .faults
+                                .record(control);
+                        }
                     }
                 }
             }

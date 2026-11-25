@@ -34,7 +34,7 @@ pub(in crate::simulation::economy) fn open(
         if good != output {
             let cost = pricing::retail_field(config, good, comptime!(RetailAccount::Cost));
             let paid = ledger.number_at(cost, firm);
-            let replacement = select(paid == 0, config.opening_prices[good as usize - 1], paid);
+            let replacement = select(paid == 0, config.opening_price(good - 1), paid);
             let basis = plus(ticks(replacement, 0), handling).record(control);
             let quote = CheckedTicks::ceiling_ratio(
                 basis,

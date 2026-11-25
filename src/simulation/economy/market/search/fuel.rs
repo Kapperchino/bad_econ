@@ -32,11 +32,12 @@ impl SearchInput {
         let suppliers = comptime!(self.program.suppliers);
         let collection = comptime!(self.program.collection);
         let config = economy.ledger.config;
-        let job = ABSOLUTE_POS as u32;
+        let mut job = ABSOLUTE_POS as u32;
+        let stride = CUBE_COUNT as u32 * CUBE_DIM;
         let jobs = control[SEARCHES_WORD].load();
         let spatial_order = comptime!(order == SearchOrder::Spatial) && jobs > config.actors / 8;
         let count = select(spatial_order, config.actors, jobs);
-        if job < count && control[LATCH_WORD].load() == 0 {
+        while job < count {
             let id = if spatial_order {
                 let base = config.query_members();
                 spatial[(base + job) as usize]
@@ -380,6 +381,7 @@ impl SearchInput {
                     record_wide_order(control, parameters, quantity);
                 }
             }
+            job += stride;
         }
     }
 }

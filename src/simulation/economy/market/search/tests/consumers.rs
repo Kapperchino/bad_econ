@@ -26,7 +26,7 @@ impl GpuPass<FuelRotationInput> for CompareFuelRotation {
             let length = input.cases[index * 3];
             let day = input.cases[index * 3 + 1];
             let household = input.cases[index * 3 + 2];
-            let rotation = consumption::FuelSearchRotation::new(length, day, household);
+            let rotation = pricing::QuoteSamples::new(length, day + household);
             let samples = min(length, HOUSEHOLD_SEARCH_SAMPLES);
             for sample in 0..samples {
                 let offset = sample * (length / samples) + sample * (length % samples) / samples;
@@ -217,9 +217,9 @@ fn sampled_offers(
 ) {
     let start = ABSOLUTE_POS as u32;
     if start < HOUSEHOLD_SEARCH_SAMPLES {
-        let rotation = consumption::FuelSearchRotation::new(firms, origin, 0);
+        let rotation = pricing::QuoteSamples::new(firms, origin);
         let samples = min(firms, HOUSEHOLD_SEARCH_SAMPLES);
-        let mut next = pricing::next_sample(spatial, firms, origin, start, comptime!(source));
+        let mut next = rotation.next(spatial, start, comptime!(source));
         let mut found = samples;
         while next < samples && found == samples {
             let slot = pricing::FirmQuotes::new(1, firms).offer(rotation.member(next));
@@ -230,7 +230,7 @@ fn sampled_offers(
             if price > 0 {
                 found = next;
             }
-            next = pricing::next_sample(spatial, firms, origin, next + 1, comptime!(source));
+            next = rotation.next(spatial, next + 1, comptime!(source));
         }
         results[start as usize] = found;
     }

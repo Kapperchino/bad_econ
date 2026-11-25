@@ -72,6 +72,7 @@ impl Simulation {
             _ => count,
         };
         config.state_stride = stride as u32;
+        config.initialize_ring_occupancy(&device);
         let actor_layouts = initial
             .actors
             .iter()

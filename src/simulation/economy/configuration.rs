@@ -1,12 +1,16 @@
 use super::transport::railway;
 use crate::simulation::{
-    Device, negotiation::BargainingConfig, storage::layout::WORD_BITS, system::AsBufferArg,
+    Device, gpu::tensor, negotiation::BargainingConfig, parallel::ScanMode,
+    storage::layout::WORD_BITS, system::AsBufferArg,
 };
 use crate::{
     arithmetic::PRICE_TABLE,
     domain::{Good, Scenario, State},
 };
 use cubecl::prelude::*;
+
+const RING_OCCUPANCY_MIN_ACTORS: u32 = 262_144;
+const OPENING_PRICE_WORDS: usize = Good::COUNT.next_multiple_of(4);
 
 #[derive(Clone, Copy, Debug, Default, Hash, PartialEq, Eq)]
 pub enum Feature {
@@ -90,6 +94,8 @@ pub struct EconomyConfig {
     pub state_stride: u32,
     pub fields: u32,
     pub ring: u32,
+    #[cube(comptime)]
+    pub(in crate::simulation) ring_occupancy_mode: Feature,
     pub grain_rounds: u32,
     pub first_firm: u32,
     pub retail_rotation: u32,
@@ -111,7 +117,7 @@ pub struct EconomyConfig {
     #[cube(comptime)]
     pub cohorts: Feature,
     pub home: HomeProduction,
-    pub opening_prices: Box<[u32]>,
+    opening_prices_and_rings: Box<[Atomic<u32>]>,
     pub market_table: Box<[u32]>,
     pub work_cap: u32,
     pub reserved_minutes: u32,
@@ -197,6 +203,81 @@ impl EconomyConfig {
     pub fn coordinate(&self, field: u32, actor: u32) -> u32 {
         field * self.state_stride + actor
     }
+
+    pub(in crate::simulation::economy) fn opening_price(&self, good: u32) -> u32 {
+        self.opening_prices_and_rings[good as usize].load()
+    }
+
+    pub(in crate::simulation::economy) fn ring_occupied(&self, actor: u32, good: u32) -> bool {
+        self.ring_goods(actor) & (1u32 << good) != 0
+    }
+
+    pub(in crate::simulation::economy) fn ring_goods(&self, actor: u32) -> u32 {
+        match comptime!(self.ring_occupancy_mode) {
+            Feature::Enabled => self.opening_prices_and_rings
+                [comptime!(OPENING_PRICE_WORDS) + actor as usize]
+                .load(),
+            Feature::Disabled => u32::new(comptime!((1i64 << Good::COUNT) - 1)),
+        }
+    }
+
+    pub(in crate::simulation::economy) fn mark_ring_occupancy(&self, actor: u32, good: u32) {
+        if comptime!(self.ring_occupancy_mode == Feature::Enabled) {
+            let bit = 1u32 << good;
+            let mask =
+                &self.opening_prices_and_rings[comptime!(OPENING_PRICE_WORDS) + actor as usize];
+            if mask.load() & bit == 0 {
+                mask.fetch_or(bit);
+            }
+        }
+    }
+}
+
+#[derive(Clone)]
+enum MarketOpening {
+    Prices(burn_wgpu::CubeTensor),
+    TrackedRings(burn_wgpu::CubeTensor),
+}
+
+impl MarketOpening {
+    fn new(device: &Device, scenario: &Scenario) -> Self {
+        let mut prices = [0; OPENING_PRICE_WORDS];
+        for (price, good) in prices.iter_mut().zip(Good::ALL) {
+            *price = scenario.initial_price(good);
+        }
+        Self::Prices(device.tensor(&prices))
+    }
+
+    fn buffer(&self) -> &burn_wgpu::CubeTensor {
+        match self {
+            Self::Prices(buffer) | Self::TrackedRings(buffer) => buffer,
+        }
+    }
+
+    fn mode(&self) -> Feature {
+        match self {
+            Self::Prices(_) => Feature::Disabled,
+            Self::TrackedRings(_) => Feature::Enabled,
+        }
+    }
+
+    fn track_rings(&mut self, device: &Device, stride: u32) {
+        let grown = device.empty(OPENING_PRICE_WORDS + (stride as usize).next_multiple_of(4));
+        device.clear(&grown);
+        tensor::copy_contiguous(device, self.buffer(), &grown);
+        *self = Self::TrackedRings(grown);
+    }
+
+    fn grow(&mut self, device: &Device, stride: u32) {
+        match self {
+            Self::TrackedRings(buffer)
+                if buffer.meta.num_elements() < OPENING_PRICE_WORDS + stride as usize =>
+            {
+                self.track_rings(device, stride);
+            }
+            _ => (),
+        }
+    }
 }
 
 pub struct Configuration {
@@ -223,7 +304,7 @@ pub struct Configuration {
     pub economy: crate::domain::Economy,
     pub cohorts: Feature,
     pub home: HomeProduction,
-    opening_prices: burn_wgpu::CubeTensor,
+    market_opening: MarketOpening,
     pub market_table: burn_wgpu::CubeTensor,
     pub work_cap: u32,
     pub reserved_minutes: u32,
@@ -269,7 +350,7 @@ impl Configuration {
         &self,
     ) -> impl Iterator<Item = &burn_wgpu::CubeTensor> + Clone {
         [
-            &self.opening_prices,
+            self.market_opening.buffer(),
             &self.market_table,
             &self.price_table,
             &self.property_regions,
@@ -292,7 +373,47 @@ impl Configuration {
             rentals,
             railway,
             CartageAccounts::new(device, state),
+            MarketOpening::new(device, scenario),
         )
+    }
+
+    pub(in crate::simulation) fn initialize_ring_occupancy(&mut self, device: &Device) {
+        let hardware = &device.client.properties().hardware;
+        match (
+            cfg!(all(target_os = "macos", target_arch = "aarch64")),
+            &device.cube,
+            self.actors,
+            self.state_stride % 32,
+            ScanMode::new(device),
+            hardware.plane_size_min,
+            hardware.plane_size_max,
+            Good::COUNT,
+        ) {
+            (
+                true,
+                cubecl::Device::Metal(_),
+                RING_OCCUPANCY_MIN_ACTORS..,
+                0,
+                ScanMode::Plane,
+                32,
+                32,
+                1..=32,
+            ) => self.enable_ring_occupancy(device),
+            _ => (),
+        }
+    }
+
+    fn enable_ring_occupancy(&mut self, device: &Device) {
+        self.market_opening.track_rings(device, self.state_stride);
+    }
+
+    pub(in crate::simulation) fn ring_occupancy_mode(&self) -> Feature {
+        self.market_opening.mode()
+    }
+
+    pub(in crate::simulation) fn set_state_stride(&mut self, device: &Device, stride: u32) {
+        self.market_opening.grow(device, stride);
+        self.state_stride = stride;
     }
 
     #[cfg(test)]
@@ -369,7 +490,15 @@ impl Configuration {
             );
         }
         let started = std::time::Instant::now();
-        let updated = Self::with_rentals(device, scenario, state, rentals, railway, cartage);
+        let updated = Self::with_rentals(
+            device,
+            scenario,
+            state,
+            rentals,
+            railway,
+            cartage,
+            self.market_opening.clone(),
+        );
         if profile {
             eprintln!(
                 "CONFIG_PART Buffers {:.3}",
@@ -411,6 +540,7 @@ impl Configuration {
         rentals: crate::domain::landlords::RentalRegistry,
         railway: railway::Network,
         cartage: CartageAccounts,
+        market_opening: MarketOpening,
     ) -> Self {
         let config = scenario.config();
         let collection_days = config
@@ -517,7 +647,7 @@ impl Configuration {
                     Feature::Enabled
                 }
             },
-            opening_prices: device.tensor(&Good::ALL.map(|good| scenario.initial_price(good))),
+            market_opening,
             market_table: device.tensor(
                 &Good::ALL
                     .map(Good::consumption_interval)
@@ -591,6 +721,7 @@ impl Configuration {
             state_stride: self.state_stride,
             fields: self.fields,
             ring: self.ring,
+            ring_occupancy_mode: self.market_opening.mode(),
             grain_rounds: self.grain_rounds,
             first_firm: self.first_firm,
             retail_rotation: self.retail_rotation,
@@ -608,7 +739,7 @@ impl Configuration {
             economy: self.economy,
             cohorts: self.cohorts,
             home: self.home.launch(),
-            opening_prices: self.opening_prices.buffer_arg(),
+            opening_prices_and_rings: self.market_opening.buffer().buffer_arg(),
             market_table: self.market_table.buffer_arg(),
             work_cap: self.work_cap,
             reserved_minutes: self.reserved_minutes,
@@ -651,6 +782,69 @@ mod tests {
     use super::*;
     use crate::domain::{Actor, Experiment, Position};
     use anyhow::Result;
+
+    #[cfg(all(target_os = "macos", target_arch = "aarch64"))]
+    #[test]
+    fn empty_ring_tracking_preserves_new_bookings_and_dense_audits_on_gpu() -> Result<()> {
+        use crate::domain::{FirmSeed, HouseholdSeed, Population, Technique};
+        use crate::simulation::{
+            MarketExecution, Simulation, economy::accounting::audit::RingValidation,
+        };
+
+        let device = crate::simulation::tests::device(64)?;
+        let mut config = Scenario::baseline(29, 42, Experiment::Transport)?
+            .config()
+            .clone();
+        config.population = Some(Population {
+            households: (1..=29)
+                .map(|identity| HouseholdSeed {
+                    identity,
+                    position: Position { x: 0, y: 0 },
+                    cash: 100_000,
+                    inventories: [0; Good::COUNT],
+                    fatigue: 0,
+                })
+                .collect(),
+            firms: [Good::Grain, Good::Flour, Good::Bread]
+                .into_iter()
+                .map(|good| {
+                    let mut inventories = [0; Good::COUNT];
+                    inventories[good as usize - 1] = 1_000;
+                    Ok(FirmSeed {
+                        identity: 29 + good as u64,
+                        position: Position { x: 100, y: 0 },
+                        owner: 1,
+                        good,
+                        cash: 1_000,
+                        inventories,
+                        capacity: 1,
+                        technique: Technique::new(60, u32::from(good != Good::Grain), 3)?,
+                        wage: 1,
+                        price: 10,
+                    })
+                })
+                .collect::<Result<_>>()?,
+        });
+        let scenario = Scenario::new(config)?;
+        for execution in [MarketExecution::Grouped, MarketExecution::Reference] {
+            let mut simulation = Simulation::new(scenario.clone(), device.clone())?;
+            assert_eq!(simulation.config.state_stride % 32, 0);
+            assert_eq!(simulation.snapshot.transit, [0; Good::COUNT]);
+            simulation.config.enable_ring_occupancy(&device);
+            simulation.market_execution = execution;
+            simulation.advance()?;
+            let tracked = simulation.observe_rings(RingValidation::Occupied)?;
+            let tracked_mask =
+                device.read(simulation.snapshot_copy.ring_mask().expect("ring mask"))?;
+            assert!(tracked.transit[Good::Bread as usize - 1] > 0);
+            assert_eq!(simulation.observe()?, tracked);
+            assert_eq!(
+                device.read(simulation.snapshot_copy.ring_mask().expect("ring mask"))?,
+                tracked_mask
+            );
+        }
+        Ok(())
+    }
 
     enum RentalChange {
         Migration,

@@ -1,5 +1,48 @@
 use super::*;
 
+#[cube(launch)]
+fn select_supplier_stride(lengths: &[u32], strides: &mut [u32]) {
+    let length = lengths[CUBE_POS];
+    let offset = UNIT_POS % max(length / 2, 1);
+    strides[ABSOLUTE_POS] = coprime_stride(length, offset);
+}
+
+#[test]
+fn supplier_strides_match_the_first_coprime_candidate_on_gpu() -> Result<()> {
+    let workgroup = 128;
+    let device = device(workgroup)?;
+    let lengths = (2..=256)
+        .chain([1024, 104_729, 1_000_000, 16_777_216, 1_000_000_000])
+        .collect::<Vec<u32>>();
+    let strides = device.empty(lengths.len() * workgroup as usize);
+    select_supplier_stride::launch(
+        &device.client,
+        CubeCount::Static(lengths.len() as u32, 1, 1),
+        CubeDim::new_1d(workgroup),
+        device.tensor(&lengths).into_buffer_arg(),
+        strides.buffer_arg(),
+    );
+    let actual = device.read(&strides)?;
+    for (length, strides) in lengths
+        .into_iter()
+        .zip(actual.chunks_exact(workgroup as usize))
+    {
+        for (lane, &stride) in strides.iter().enumerate() {
+            let offset = lane as u32 % (length / 2);
+            let expected = (length / 2 + offset..=length).find(|&candidate| {
+                let mut divisor = candidate;
+                let mut remainder = length;
+                while remainder != 0 {
+                    (divisor, remainder) = (remainder, divisor % remainder);
+                }
+                divisor == 1
+            });
+            assert_eq!(Some(stride), expected, "length {length}, offset {offset}");
+        }
+    }
+    Ok(())
+}
+
 #[test]
 fn grain_firm_index_preserves_rotated_full_partial_and_empty_offers_on_gpu() -> Result<()> {
     for case in [

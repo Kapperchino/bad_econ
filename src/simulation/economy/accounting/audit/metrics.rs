@@ -1,7 +1,10 @@
 use super::*;
 use crate::domain::ActorRows;
-use crate::simulation::parallel::reduction::{combine_metrics, reduce_metric};
+use crate::simulation::parallel::reduction::{checked_sum, combine_metrics, reduce_metric};
+use crate::simulation::parallel::workgroup::WorkgroupTree;
 use bytemuck::{Pod, Zeroable};
+
+const METRIC_PLANE_WIDTH: u32 = 32;
 
 #[repr(C)]
 #[derive(CubeType, Clone, Copy, Pod, Zeroable)]
@@ -146,10 +149,17 @@ enum MetricPopulation {
     Firms,
 }
 
+#[derive(Clone, Copy, Debug, Hash, PartialEq, Eq)]
+enum MetricReduction {
+    Shared,
+    PlaneSum,
+}
+
 struct MetricSet {
     ids: CubeTensor,
     groups: usize,
     population: MetricPopulation,
+    reduction: MetricReduction,
 }
 
 impl MetricSet {
@@ -170,10 +180,32 @@ impl MetricSet {
             MetricPopulation::Actors => actors.len(),
             MetricPopulation::Firms => actors.firms(),
         };
+        let hardware = &device.client.properties().hardware;
+        let reduction = match (
+            population,
+            parallel::ScanMode::new(device),
+            hardware.plane_size_min,
+            hardware.plane_size_max,
+            device.workgroup.is_multiple_of(METRIC_PLANE_WIDTH),
+            ids.iter().all(|&id| metrics[id as usize].operation == 0),
+        ) {
+            (
+                MetricPopulation::Actors,
+                parallel::ScanMode::Plane,
+                METRIC_PLANE_WIDTH,
+                METRIC_PLANE_WIDTH,
+                true,
+                true,
+            ) if !cfg!(all(target_os = "macos", target_arch = "x86_64")) => {
+                MetricReduction::PlaneSum
+            }
+            _ => MetricReduction::Shared,
+        };
         Self {
             ids: device.tensor(&ids),
             groups: count.div_ceil(TILE_ACTORS).max(1),
             population,
+            reduction,
         }
     }
 }
@@ -250,6 +282,7 @@ impl AuditBuffers {
                     control: input.control.buffer_arg(),
                     groups: set.groups as u32,
                     population: set.population,
+                    reduction: set.reduction,
                 },
             );
         }
@@ -276,6 +309,8 @@ struct SummaryInput {
     groups: u32,
     #[cube(comptime)]
     population: MetricPopulation,
+    #[cube(comptime)]
+    reduction: MetricReduction,
 }
 
 struct MetricSummary;
@@ -562,6 +597,35 @@ impl SummaryInput {
             }
             member += CUBE_DIM;
         }
-        reduce_metric(total, definition.operation, control)
+        match comptime!(self.reduction) {
+            MetricReduction::Shared => reduce_metric(total, definition.operation, control),
+            MetricReduction::PlaneSum => reduce_actor_sum(total, control),
+        }
     }
+}
+
+#[cube]
+fn sum_plane_word(word: u32) -> u64 {
+    u64::cast_from(plane_sum(word & 0xffff)) + (u64::cast_from(plane_sum(word >> 16)) << 16)
+}
+
+#[cube]
+fn reduce_actor_sum(value: u64, control: &[Atomic<u32>]) -> u64 {
+    let low = sum_plane_word(u32::cast_from(value));
+    let high = sum_plane_word(u32::cast_from(value >> 32)) + (low >> 32);
+    let mut subtotals = WorkgroupTree::planes::<u64>();
+    if UNIT_POS_PLANE == 0 {
+        if high > u32::MAX as u64 {
+            KernelFaults::new(comptime!(FaultFlags::ARITHMETIC_OVERFLOW)).record(control);
+        }
+        subtotals[PLANE_POS as usize] = (high << 32) | u64::cast_from(u32::cast_from(low));
+    }
+    sync_cube();
+    let mut total = 0u64;
+    if UNIT_POS == 0 {
+        for plane in 0..CUBE_DIM / METRIC_PLANE_WIDTH {
+            total = checked_sum(total, subtotals[plane as usize], control);
+        }
+    }
+    total
 }

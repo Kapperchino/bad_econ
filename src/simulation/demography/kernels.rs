@@ -76,7 +76,7 @@ pub(super) fn family_support(ledger: &Ledger<'_>, household: u32, food: u32) -> 
             HomeKitchen::new(ledger, household).bread_from_flour(flour),
             zero(),
         );
-        let reserves = divide(plus(minimum(bread, times32(food, 90)), baked).value, 90);
+        let reserves = divide_fixed(plus(minimum(bread, times32(food, 90)), baked).value, 90u32);
         let purchased = positive(ticks(food, 0), reserves);
         let food_cost = times(
             purchased,
@@ -95,8 +95,8 @@ pub(super) fn family_support(ledger: &Ledger<'_>, household: u32, food: u32) -> 
             ),
         )
         .value;
-        let income = divide(ledger.value(Field::IncomeForecast, household), 1000);
-        let savings = divide(ledger.value(Field::Cash, household), 90);
+        let income = divide_fixed(ledger.value(Field::IncomeForecast, household), 1000u32);
+        let savings = divide_fixed(ledger.value(Field::Cash, household), 90u32);
         let available = plus(income, savings).value;
         support = select(
             lt(available, cost),
@@ -145,10 +145,10 @@ impl OccupationalExposure {
         let equipment = 1000 + (1000 - min(self.condition, 1000)) * 2;
         let tired = 1000 + self.fatigue + (max(self.minutes, 480) - 480) * 1000 / 480;
         let mechanized = select(self.method > 0, 1250u32, 1000u32);
-        let maintained = ratio(base, equipment, 1000).value;
-        let exertion = ratio(maintained, tired, 1000).value;
-        let method_risk = ratio(exertion, mechanized, 1000).value;
-        ratio(method_risk, 1000 - min(self.safety, 900), 1000).value
+        let maintained = ratio_fixed(base, equipment, 1000u32).value;
+        let exertion = ratio_fixed(maintained, tired, 1000u32).value;
+        let method_risk = ratio_fixed(exertion, mechanized, 1000u32).value;
+        ratio_fixed(method_risk, 1000 - min(self.safety, 900), 1000u32).value
     }
 }
 
@@ -161,9 +161,9 @@ pub(super) fn famine_exposure(prior: u32, deficit: u32, recovery: u32) -> u32 {
 #[cube]
 pub(super) fn famine_risk(exposure: u32, daily_ppm: u32, vulnerability: u32) -> Ticks {
     let severity = min(exposure, 90_000);
-    let base = ratio(times32(daily_ppm, 1_000_000), severity, 30_000).value;
-    let duration = ratio(base, severity, 30_000).value;
-    ratio(duration, vulnerability, 1000).value
+    let base = ratio_fixed(times32(daily_ppm, 1_000_000), severity, 30_000u32).value;
+    let duration = ratio_fixed(base, severity, 30_000u32).value;
+    ratio_fixed(duration, vulnerability, 1000u32).value
 }
 
 #[cube]
@@ -180,9 +180,9 @@ pub(super) fn cold_risk(exposure: u32, daily_ppm: u32, vulnerability: u32) -> Ti
     let mut risk = zero();
     if exposure > 0 {
         let severity = min(exposure, 28_000);
-        let base = ratio(times32(daily_ppm, 1_000_000), severity, 7_000).value;
-        let duration = ratio(base, severity, 7_000).value;
-        risk = ratio(duration, vulnerability, 1000).value;
+        let base = ratio_fixed(times32(daily_ppm, 1_000_000), severity, 7_000u32).value;
+        let duration = ratio_fixed(base, severity, 7_000u32).value;
+        risk = ratio_fixed(duration, vulnerability, 1000u32).value;
     }
     risk
 }

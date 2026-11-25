@@ -176,6 +176,10 @@ fn collect(
         let mut minutes = time - travel;
         let mut income = zero();
         let mut days = 1u32;
+        let candidate_goods = match comptime!(manifest_mode) {
+            Feature::Enabled => 0u32,
+            Feature::Disabled => config.ring_goods(client),
+        };
         while days < config.ring
             && !equal(waiting, zero())
             && minutes >= days * comptime!(CART_MINUTES_PER_UNIT_DAY)
@@ -185,7 +189,7 @@ fn collect(
             let rate = rate(config, days);
             let mut goods = match comptime!(manifest_mode) {
                 Feature::Enabled => manifest[((days - 1) * config.actors + client) as usize],
-                Feature::Disabled => u32::new(comptime!((1i64 << Good::COUNT) - 1)),
+                Feature::Disabled => candidate_goods,
             };
             while goods != 0
                 && !equal(waiting, zero())
@@ -308,11 +312,12 @@ pub(in crate::simulation) fn dispatch(
 ) {
     let carriers = config.cartage_accounts.meta.num_elements() as u32;
     let partners = carriers - config.cartage_firms;
-    let manifest_mode = match (config.ring as usize - 1) * config.actors as usize
-        <= manifest.meta.num_elements()
-        && config.actors >= 4096
-    {
-        true => {
+    let manifest_mode = match (
+        config.ring_occupancy_mode(),
+        config.actors,
+        (config.ring as usize - 1) * config.actors as usize <= manifest.meta.num_elements(),
+    ) {
+        (Feature::Disabled, 4096.., true) => {
             index_pickups::launch(
                 &device.client,
                 device.count(config.actors as usize),
@@ -323,7 +328,7 @@ pub(in crate::simulation) fn dispatch(
             );
             Feature::Enabled
         }
-        false => Feature::Disabled,
+        _ => Feature::Disabled,
     };
     if partners > 0 {
         let count = partners as usize;

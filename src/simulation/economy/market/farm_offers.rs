@@ -6,6 +6,7 @@ use burn_wgpu::CubeTensor;
 pub(in crate::simulation) const MAILBOX_START: usize = Good::COUNT + 5;
 
 const BID_ROWS: u32 = 32;
+const BID_BORDERS: usize = BID_ROWS as usize + 1;
 const BID_WORDS: usize = 4;
 const BID_COLUMNS: usize = 3 + BID_WORDS;
 
@@ -30,8 +31,8 @@ impl FarmMarket {
             (position.y / height, position.x, firm)
         });
         let count = firms.len();
-        let mut bids = vec![0; BID_COLUMNS * count + BID_ROWS as usize + 1];
-        let borders = &mut bids[BID_COLUMNS * count..];
+        let mut bids = vec![0; BID_COLUMNS * count + 2 * BID_BORDERS];
+        let borders = &mut bids[BID_COLUMNS * count..][..BID_BORDERS];
         for &firm in &firms {
             let row = actors.at(firm).position.y / height;
             borders[row as usize + 1] += 1;
@@ -90,7 +91,7 @@ impl FarmMarket {
             parallel::scan(device, &self.bids, 0, self.count);
             index_bids::launch(
                 &device.client,
-                device.count(self.count),
+                device.count(self.count.max(BID_BORDERS)),
                 dim,
                 gpu.actors.buffer_arg(),
                 self.firms.buffer_arg(),
@@ -164,6 +165,12 @@ fn publish_bids(
 fn index_bids(actors: &[u32], firms: &[u32], bids: &mut [u32]) {
     let count = firms.len() as u32;
     let slot = ABSOLUTE_POS as u32;
+    if slot < comptime!(BID_BORDERS as u32) {
+        let border = count as usize * comptime!(BID_COLUMNS) + slot as usize;
+        let end = bids[border];
+        bids[border + comptime!(BID_BORDERS)] =
+            select(end > 0, bids[(max(end, 1) - 1) as usize], 0);
+    }
     if slot < count {
         let end = bids[slot as usize];
         let start = select(slot > 0, bids[(max(slot, 1) - 1) as usize], 0);
@@ -249,10 +256,9 @@ impl FarmOffer {
     ) {
         let x = self.x;
         let n = firms as usize;
-        let first_slot = bids[comptime!(BID_COLUMNS) * n + row as usize];
-        let past_slot = bids[comptime!(BID_COLUMNS) * n + row as usize + 1];
-        let first = select(first_slot == 0, 0, bids[(max(first_slot, 1) - 1) as usize]);
-        let past = select(past_slot == 0, 0, bids[(max(past_slot, 1) - 1) as usize]);
+        let border = comptime!(BID_COLUMNS) * n + comptime!(BID_BORDERS) + row as usize;
+        let first = bids[border];
+        let past = bids[border + 1];
         let mut left = first;
         let mut right = past;
         while left < right {
@@ -293,28 +299,24 @@ impl FarmOffer {
             let y = self.y;
             let height = ceildiv(config.map_size, comptime!(BID_ROWS));
             let row = y / height;
+            let offset = y - row * height;
             let mut lower = row;
             let mut upper = row;
+            let mut below = offset + 1;
+            let mut above = height - offset;
             self.visit_row(&mut search, economy, firms, bids, row);
             let last = (config.map_size - 1) / height;
-            while lower > (max(y, search.distance) - search.distance) / height
-                || upper
-                    < min(
-                        last,
-                        (y + min(search.distance, config.map_size - 1 - y)) / height,
-                    )
+            while (lower > 0 && below <= search.distance)
+                || (upper < last && above <= search.distance)
             {
-                if lower > (max(y, search.distance) - search.distance) / height {
+                if lower > 0 && below <= search.distance {
                     lower -= 1;
+                    below += height;
                     self.visit_row(&mut search, economy, firms, bids, lower);
                 }
-                if upper
-                    < min(
-                        last,
-                        (y + min(search.distance, config.map_size - 1 - y)) / height,
-                    )
-                {
+                if upper < last && above <= search.distance {
                     upper += 1;
+                    above += height;
                     self.visit_row(&mut search, economy, firms, bids, upper);
                 }
             }

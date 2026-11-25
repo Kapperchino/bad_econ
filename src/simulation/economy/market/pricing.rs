@@ -458,7 +458,7 @@ pub(in crate::simulation::economy) fn index_quote_masks(
         for word in 0..QUOTE_MASK_WORDS {
             let mut mask = 0u32;
             for sample in word * 32..min(word * 32 + 32, samples) {
-                let offset = sample * (firms / samples) + sample * (firms % samples) / samples;
+                let offset = quote_sample_offset(firms, sample);
                 let shifted = rotation + offset;
                 let member = select(shifted < firms, shifted, shifted - firms);
                 let quote = quotes.offer(member);
@@ -474,29 +474,64 @@ pub(in crate::simulation::economy) fn index_quote_masks(
 }
 
 #[cube]
-pub(in crate::simulation::economy) fn next_sample(
-    spatial: &[u32],
-    firms: u32,
+fn quote_sample_offset(length: u32, sample: u32) -> u32 {
+    let width = comptime!(HOUSEHOLD_SEARCH_SAMPLES);
+    let spaced = sample * (length / width) + sample * (length % width) / width;
+    select(length < width, sample, spaced)
+}
+
+#[derive(CubeType)]
+pub(in crate::simulation::economy) struct QuoteSamples {
+    length: u32,
     origin: u32,
-    start: u32,
-    #[comptime] quotes: QuoteSource,
-) -> u32 {
-    let mut next = start;
-    if comptime!(quotes == QuoteSource::Masked) && origin <= u32::MAX - (max(firms, 1) - 1) {
-        let rotation = origin % max(firms, 1);
-        let samples = min(firms, HOUSEHOLD_SEARCH_SAMPLES);
-        let mut word = start / 32;
-        let mut bits = 0u32;
-        while bits == 0 && word * 32 < samples {
-            bits = spatial[FirmQuotes::new(1, firms).mask(rotation, word) as usize];
-            if word == start / 32 {
-                bits &= u32::MAX << (start % 32);
-            }
-            word += 1;
+    rotation: u32,
+    offset_fits: bool,
+}
+
+#[cube]
+impl QuoteSamples {
+    pub fn new(length: u32, origin: u32) -> Self {
+        let divisor = max(length, 1);
+        QuoteSamples {
+            length,
+            origin,
+            rotation: origin % divisor,
+            offset_fits: origin <= u32::MAX - (divisor - 1),
         }
-        next = select(bits == 0, samples, (word - 1) * 32 + bits.trailing_zeros());
     }
-    next
+
+    pub fn count(&self) -> u32 {
+        min(self.length, HOUSEHOLD_SEARCH_SAMPLES)
+    }
+
+    pub fn member(&self, sample: u32) -> u32 {
+        let offset = quote_sample_offset(self.length, sample);
+        if self.offset_fits {
+            let shifted = self.rotation + offset;
+            select(shifted < self.length, shifted, shifted - self.length)
+        } else {
+            (offset + self.origin) % self.length
+        }
+    }
+
+    pub fn next(&self, spatial: &[u32], start: u32, #[comptime] source: QuoteSource) -> u32 {
+        let mut next = start;
+        if comptime!(source == QuoteSource::Masked) && self.offset_fits {
+            let quotes = FirmQuotes::new(1, self.length);
+            let samples = self.count();
+            let mut word = start / 32;
+            let mut bits = 0u32;
+            while bits == 0 && word * 32 < samples {
+                bits = spatial[quotes.mask(self.rotation, word) as usize];
+                if word == start / 32 {
+                    bits &= u32::MAX << (start % 32);
+                }
+                word += 1;
+            }
+            next = select(bits == 0, samples, (word - 1) * 32 + bits.trailing_zeros());
+        }
+        next
+    }
 }
 
 #[derive(CubeType)]
@@ -606,13 +641,10 @@ impl<'a> ReplacementMarket<'a> {
                 let cell = row * side + column;
                 let begin = spatial[(segment + cell) as usize];
                 let length = spatial[(segment + cell + 1) as usize] - begin;
-                let samples = min(length, HOUSEHOLD_SEARCH_SAMPLES);
-                let mut sample =
-                    next_sample(spatial, length, self.day + buyer, 0, comptime!(quotes));
-                while sample < samples {
-                    let offset =
-                        sample * (length / samples) + sample * (length % samples) / samples;
-                    let rotated = (offset + self.day + buyer) % length;
+                let samples = QuoteSamples::new(length, self.day + buyer);
+                let mut sample = samples.next(spatial, 0, comptime!(quotes));
+                while sample < samples.count() {
+                    let rotated = samples.member(sample);
                     let seller = spatial[(segment + cells + 1 + begin + rotated) as usize];
                     let price = match comptime!(quotes) {
                         QuoteSource::Indexed | QuoteSource::Masked => {
@@ -653,13 +685,7 @@ impl<'a> ReplacementMarket<'a> {
                             }
                         }
                     }
-                    sample = next_sample(
-                        spatial,
-                        length,
-                        self.day + buyer,
-                        sample + 1,
-                        comptime!(quotes),
-                    );
+                    sample = samples.next(spatial, sample + 1, comptime!(quotes));
                 }
                 column += 1;
             }

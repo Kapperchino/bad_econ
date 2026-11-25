@@ -1,4 +1,5 @@
 use super::graphs::{GraphScope, MarketKey, Preparation};
+use super::settlement::SettlementOrders;
 use super::{FreightExecution, InputOrders, MarketRound, StageTiming};
 use crate::{
     domain::Market,
@@ -99,6 +100,7 @@ impl MarketRound<'_> {
             routing: simulation.config.railway.route_availability(),
             freight: simulation.freight_execution,
             preparation: Preparation::new(self.market, self.index),
+            consumer_reserves: self.consumer_reserves(simulation),
         }
     }
 
@@ -173,7 +175,7 @@ impl MarketRound<'_> {
         self.prepare_orders(simulation, collection)?;
         self.settle_orders(
             simulation,
-            Some(InputOrders {
+            SettlementOrders::Continuation(InputOrders {
                 count: capacity,
                 routing,
             }),
@@ -208,7 +210,7 @@ impl MarketRound<'_> {
 
     fn prepare_and_settle(self, simulation: &mut Simulation) -> Result<u32> {
         self.prepare_orders(simulation, self.order_collection(simulation))?;
-        self.settle_orders(simulation, None)
+        self.settle_orders(simulation, SettlementOrders::FullMarket)
     }
 
     fn submit_sparse_input(
@@ -282,7 +284,7 @@ impl MarketRound<'_> {
                 if orders.count > INPUT_TILE {
                     self.compact_sparse_input(simulation);
                 }
-                self.settle_orders(simulation, Some(orders))
+                self.settle_orders(simulation, SettlementOrders::Observed(orders))
             }
         }
     }

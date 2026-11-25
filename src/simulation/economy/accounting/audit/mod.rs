@@ -1,5 +1,4 @@
 use crate::simulation::economy::*;
-use crate::simulation::parallel::reduction::checked_sum;
 use crate::simulation::{Device, DeviceEconomy};
 use anyhow::Result;
 use burn_wgpu::CubeTensor;
@@ -31,6 +30,7 @@ pub(in crate::simulation) struct AuditInput<'a> {
 
 pub(in crate::simulation) enum RingValidation<'a> {
     All,
+    Occupied,
     Unchanged,
     Selected(&'a CubeTensor),
     Changed {
@@ -81,6 +81,7 @@ impl AuditInput<'_> {
         };
         let hardware = &device.client.properties().hardware;
         let actor_ring_tracking = match (
+            config.ring_occupancy_mode(),
             &self.rings,
             ring_tracking,
             parallel::ScanMode::new(device),
@@ -88,12 +89,29 @@ impl AuditInput<'_> {
             hardware.plane_size_min,
             hardware.plane_size_max,
         ) {
-            (RingValidation::All, RingTracking::Observed, parallel::ScanMode::Plane, 0, 32, 32) => {
-                RingTracking::ObservedPlane
-            }
+            (
+                Feature::Enabled,
+                RingValidation::Occupied,
+                RingTracking::Observed,
+                parallel::ScanMode::Plane,
+                0,
+                32,
+                32,
+            ) => RingTracking::ObservedOccupiedPlane,
+            (
+                _,
+                RingValidation::All | RingValidation::Occupied,
+                RingTracking::Observed,
+                parallel::ScanMode::Plane,
+                0,
+                32,
+                32,
+            ) => RingTracking::ObservedPlane,
             _ => ring_tracking,
         };
-        if let (RingValidation::All, Some(mask)) = (&self.rings, self.ring_mask) {
+        if let (RingValidation::All | RingValidation::Occupied, Some(mask)) =
+            (&self.rings, self.ring_mask)
+        {
             crate::simulation::gpu::tensor::reset_ring_mask(
                 device,
                 mask,
@@ -108,7 +126,7 @@ impl AuditInput<'_> {
                 device,
                 count.div_ceil(validation_workgroup as usize),
                 match self.rings {
-                    RingValidation::All => Good::COUNT + 1,
+                    RingValidation::All | RingValidation::Occupied => Good::COUNT + 1,
                     RingValidation::Unchanged
                     | RingValidation::Selected(_)
                     | RingValidation::Changed { .. } => 1,
@@ -176,6 +194,13 @@ enum RingTracking {
     Untracked,
     Observed,
     ObservedPlane,
+    ObservedOccupiedPlane,
+}
+
+impl RingTracking {
+    fn uses_plane(self) -> bool {
+        matches!(self, Self::ObservedPlane | Self::ObservedOccupiedPlane)
+    }
 }
 
 struct ActorValidation;
@@ -250,6 +275,41 @@ struct LedgerAudit<'a> {
     tracking: RingTracking,
 }
 
+#[derive(CubeType)]
+struct TransitTotal {
+    amount: u64,
+    overflow: bool,
+}
+
+#[cube]
+impl TransitTotal {
+    fn new() -> Self {
+        TransitTotal {
+            amount: 0,
+            overflow: false,
+        }
+    }
+
+    fn add(&mut self, amount: Ticks) {
+        let sum = self.amount + native(amount);
+        self.overflow |= sum < self.amount;
+        self.amount = sum;
+    }
+
+    fn check(&self, held: Ticks, control: &[Atomic<u32>]) {
+        let mut faults = KernelFaults::none();
+        if self.overflow {
+            faults.insert(KernelFaults::new(comptime!(
+                FaultFlags::ARITHMETIC_OVERFLOW
+            )));
+        }
+        if self.amount != native(held) {
+            faults.insert(KernelFaults::new(comptime!(FaultFlags::TRANSIT_MISMATCH)));
+        }
+        faults.record(control);
+    }
+}
+
 #[cube]
 impl<'a> LedgerAudit<'a> {
     fn new(
@@ -277,7 +337,7 @@ impl<'a> LedgerAudit<'a> {
                 self.household_histograms(actors, actor);
             }
             _ => match comptime!(self.tracking) {
-                RingTracking::ObservedPlane => {
+                RingTracking::ObservedPlane | RingTracking::ObservedOccupiedPlane => {
                     self.validate_ring(actor, task - 1);
                 }
                 _ => {
@@ -291,32 +351,51 @@ impl<'a> LedgerAudit<'a> {
 
     fn validate_ring(&self, actor: u32, good: u32) {
         let config = self.ledger.config;
-        let mut held = 0u64;
-        if comptime!(self.tracking != RingTracking::ObservedPlane) || actor < config.actors {
-            held = native(self.ledger.value_at(TRANSIT_FIELDS as u32 + good, actor));
+        let valid = comptime!(!self.tracking.uses_plane()) || actor < config.actors;
+        let mut held = zero();
+        if valid {
+            held = self.ledger.value_at(TRANSIT_FIELDS as u32 + good, actor);
         }
-        let mut in_ring = 0u64;
-        for slot in 0u32..config.ring {
-            let field = BASE_FIELDS as u32 + good * config.ring + slot;
-            let mut waiting = zero();
-            let mut amount = zero();
-            if comptime!(self.tracking != RingTracking::ObservedPlane) || actor < config.actors {
-                amount = self.ledger.value_at(field, actor);
-                waiting = self
-                    .ledger
-                    .value_at(field + Good::COUNT as u32 * config.ring, actor);
+        let scan = match comptime!(self.tracking) {
+            RingTracking::ObservedOccupiedPlane => {
+                let mut present = false;
+                if valid {
+                    present = config.ring_occupied(actor, good);
+                }
+                plane_any(present)
             }
-            self.mark_transit(actor, field, amount);
-            self.mark_transit(actor, field + Good::COUNT as u32 * config.ring, waiting);
-            in_ring = checked_sum(
-                checked_sum(in_ring, native(amount), self.control),
-                native(waiting),
-                self.control,
+            _ => true,
+        };
+        let mut total = TransitTotal::new();
+        if scan {
+            let seed = comptime!(
+                self.tracking != RingTracking::ObservedOccupiedPlane
+                    && config.ring_occupancy_mode == Feature::Enabled
             );
+            let mut populated = false;
+            for slot in 0u32..config.ring {
+                let field = BASE_FIELDS as u32 + good * config.ring + slot;
+                let mut waiting = zero();
+                let mut amount = zero();
+                if valid {
+                    amount = self.ledger.value_at(field, actor);
+                    waiting = self
+                        .ledger
+                        .value_at(field + Good::COUNT as u32 * config.ring, actor);
+                }
+                if seed {
+                    populated |= !equal(amount, zero()) || !equal(waiting, zero());
+                }
+                self.mark_transit(actor, field, amount);
+                self.mark_transit(actor, field + Good::COUNT as u32 * config.ring, waiting);
+                total.add(amount);
+                total.add(waiting);
+            }
+            if seed && populated {
+                config.mark_ring_occupancy(actor, good);
+            }
         }
-        if in_ring != held {
-            KernelFaults::new(comptime!(FaultFlags::TRANSIT_MISMATCH)).record(self.control);
-        }
+        total.check(held, self.control);
     }
 
     fn mark_transit(&self, actor: u32, field: u32, amount: Ticks) {
@@ -324,7 +403,7 @@ impl<'a> LedgerAudit<'a> {
         let block = (field * config.state_stride + actor) * 2
             / crate::simulation::gpu::tensor::SNAPSHOT_BLOCK_WORDS as u32;
         match comptime!(self.tracking) {
-            RingTracking::ObservedPlane => {
+            RingTracking::ObservedPlane | RingTracking::ObservedOccupiedPlane => {
                 let present = plane_any(!equal(amount, zero()));
                 if present && UNIT_POS % 32 == 0 {
                     self.ring_mask[block as usize].store(1);
@@ -366,14 +445,11 @@ impl<'a> LedgerAudit<'a> {
                 KernelFaults::new(comptime!(FaultFlags::UNSETTLED_COMMITMENTS))
                     .record(self.control);
             }
-            let mut transit = 0u64;
+            let mut transit = TransitTotal::new();
             for good in 0u32..Good::COUNT as u32 {
-                let held = self.ledger.value_at(TRANSIT_FIELDS as u32 + good, actor);
-                transit = checked_sum(transit, native(held), self.control);
+                transit.add(self.ledger.value_at(TRANSIT_FIELDS as u32 + good, actor));
             }
-            if transit != native(self.ledger.value(Field::Transit, actor)) {
-                KernelFaults::new(comptime!(FaultFlags::TRANSIT_MISMATCH)).record(self.control);
-            }
+            transit.check(self.ledger.value(Field::Transit, actor), self.control);
         }
     }
 

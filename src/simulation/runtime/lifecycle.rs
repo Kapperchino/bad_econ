@@ -286,7 +286,7 @@ impl Simulation {
             )?;
         }
         self.snapshot =
-            self.observe_with_control(economy::accounting::audit::RingValidation::All)?;
+            self.observe_with_control(economy::accounting::audit::RingValidation::Occupied)?;
         if self.day + 1 == profiling_day() && std::env::var_os("BAD_ECON_PROFILE_STAGES").is_some()
         {
             eprintln!(

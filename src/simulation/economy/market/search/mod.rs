@@ -1,3 +1,4 @@
+pub(in crate::simulation) use super::demand::ConsumerReserves;
 use super::demand::FoodSearchResult;
 use crate::simulation::economy::configuration::Configuration;
 use crate::simulation::economy::*;
@@ -104,6 +105,7 @@ pub(in crate::simulation) enum OrderCollection {
 #[derive(Clone, Copy, Debug, Hash, PartialEq, Eq)]
 pub(in crate::simulation) struct SearchProgram {
     pub(in crate::simulation) quote_source: QuoteSource,
+    pub(in crate::simulation) consumer_reserves: ConsumerReserves,
     collection: OrderCollection,
     stage: SearchStage,
     suppliers: SupplierSearch,
@@ -135,6 +137,7 @@ impl SearchStage {
         };
         SearchProgram {
             quote_source: QuoteSource::FromLedger,
+            consumer_reserves: ConsumerReserves::Ledger,
             collection: OrderCollection::Bitmap,
             stage: self,
             suppliers,

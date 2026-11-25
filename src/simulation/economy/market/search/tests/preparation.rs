@@ -1,5 +1,6 @@
 use super::market::MarketStart;
 use super::*;
+use crate::simulation::storage::flags::FAULT_WORD;
 
 #[derive(Debug, PartialEq, Eq)]
 struct PreparedRequests {
@@ -66,16 +67,42 @@ fn consumer_preparation_clears_inactive_requests_and_preserves_captured_retries_
             state.set(Field::Furniture, actor, 1);
             state.set(Field::inventory(good), actor, 0);
         }
+        if good.consumption_interval() > 1 {
+            state.set(Field::Bread, count - 1, u64::MAX);
+            state.values[(TRANSIT_FIELDS + Good::Bread as usize - 1) * count + count - 1] = 1;
+        }
         let mut remaining = state.clone();
-        for actor in households.into_iter().filter(|actor| actor % 3 == 0) {
-            remaining.set(Field::inventory(good), actor, 1_000_000);
+        for actor in households {
+            match actor % 3 {
+                0 => remaining.set(Field::inventory(good), actor, 1_000_000),
+                1 => remaining.set(Field::Cash, actor, 500_000),
+                _ => remaining.set(Field::CartagePayable, actor, 5),
+            }
         }
         let mut expected = Vec::new();
-        for (discovery, preparation) in [
-            (Discovery::Linear, orders::PreparationWorkgroup::Native),
-            (Discovery::Indexed, orders::PreparationWorkgroup::Native),
-            (Discovery::Indexed, orders::PreparationWorkgroup::Wide),
-        ] {
+        let cached = (good.consumption_interval() > 1).then_some((
+            Discovery::Indexed,
+            orders::PreparationWorkgroup::Wide,
+            ConsumerReserves::Capture,
+        ));
+        let variants = [
+            (
+                Discovery::Linear,
+                orders::PreparationWorkgroup::Native,
+                ConsumerReserves::Ledger,
+            ),
+            (
+                Discovery::Indexed,
+                orders::PreparationWorkgroup::Native,
+                ConsumerReserves::Ledger,
+            ),
+            (
+                Discovery::Indexed,
+                orders::PreparationWorkgroup::Wide,
+                ConsumerReserves::Ledger,
+            ),
+        ];
+        for (discovery, preparation, reserves) in variants.into_iter().chain(cached) {
             let mut parameters = simulation.parameters(
                 Phase::ProvisionPurchase,
                 Market::Consumer(good),
@@ -120,6 +147,13 @@ fn consumer_preparation_clears_inactive_requests_and_preserves_captured_retries_
                 };
                 let resets = orders::search_counts_offset(count) + orders::search_blocks(count);
                 device.write(&simulation.searches.successes, &vec![37; resets]);
+                let mut program = stage.program(&simulation.config);
+                program.consumer_reserves = match (stage, reserves) {
+                    (SearchStage::PrepareSelected, ConsumerReserves::Capture) => {
+                        ConsumerReserves::Cached
+                    }
+                    _ => reserves,
+                };
                 MarketSearch::launch(
                     &device,
                     dispatch,
@@ -136,7 +170,7 @@ fn consumer_preparation_clears_inactive_requests_and_preserves_captured_retries_
                         control: simulation.control.buffer_arg(),
                         parameters: parameters.launch(),
                         status_reset: StatusReset::Full,
-                        program: stage.program(&simulation.config),
+                        program,
                     },
                 );
                 assert_eq!(
@@ -144,6 +178,7 @@ fn consumer_preparation_clears_inactive_requests_and_preserves_captured_retries_
                     vec![0; resets],
                 );
                 let mut control = device.read(&simulation.control)?;
+                assert_eq!(control[LATCH_WORD], 0);
                 let requests = device.read(&simulation.searches.requests)?;
                 let mut actors = requests[..control[SEARCHES_WORD] as usize].to_vec();
                 let mut candidates = requests
@@ -168,6 +203,7 @@ fn consumer_preparation_clears_inactive_requests_and_preserves_captured_retries_
                     faults: control[crate::simulation::storage::flags::FAULT_WORD],
                 });
                 control[SEARCHES_WORD] = 0;
+                control[FAULT_WORD] = 0;
                 device.write(&simulation.control, &control);
                 device.write(
                     &simulation.state,
@@ -176,12 +212,15 @@ fn consumer_preparation_clears_inactive_requests_and_preserves_captured_retries_
             }
             match discovery {
                 Discovery::Linear => expected = observations,
-                _ => assert_eq!(observations, expected, "{good:?}"),
+                _ => assert_eq!(observations, expected, "{good:?}, reserves {reserves:?}"),
             }
         }
         assert!(!expected[0].actors.is_empty());
         assert!(expected[1].actors.len() < expected[0].actors.len());
         assert_eq!(expected[1].candidates, expected[0].candidates);
+        if good.consumption_interval() > 1 {
+            assert_eq!(expected[0].faults, FaultFlags::ARITHMETIC_OVERFLOW.bits());
+        }
     }
     Ok(())
 }

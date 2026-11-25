@@ -17,7 +17,7 @@ use crate::{
                 payroll::{PayrollInputLaunch, PayrollSettlement},
                 quantity::{QuantityInputLaunch, QuantitySettlement},
             },
-            transport::railway::settlement::Stage as FreightStage,
+            transport::railway::{RouteAvailability, settlement::Stage as FreightStage},
         },
         runtime::profiling::MarketProfile,
         system::{AsBufferArg, System},
@@ -35,13 +35,25 @@ enum MarketBatch {
     Grouped,
 }
 
+pub(super) enum SettlementOrders {
+    FullMarket,
+    Observed(InputOrders),
+    Continuation(InputOrders),
+}
+
 impl MarketRound<'_> {
     pub(super) fn settle_orders(
         mut self,
         simulation: &mut Simulation,
-        observed: Option<InputOrders>,
+        orders: SettlementOrders,
     ) -> Result<u32> {
         use EconomyStage::*;
+        let observed = match orders {
+            SettlementOrders::FullMarket => None,
+            SettlementOrders::Observed(input) | SettlementOrders::Continuation(input) => {
+                Some(input)
+            }
+        };
         let freight = self.freight_settlement(simulation, observed.as_ref());
         let observed = observed.map(|orders| orders.count);
         let limit = observed.unwrap_or(self.count);
@@ -56,7 +68,16 @@ impl MarketRound<'_> {
             self.launch_stage(simulation, GroupRemainder, self.count);
         }
         self.finalize_orders(simulation, batch, limit);
-        self.launch_stage(simulation, MarketBoundary, 1);
+        match (orders, freight) {
+            (
+                SettlementOrders::Continuation(InputOrders {
+                    routing: RouteAvailability::Dormant,
+                    ..
+                }),
+                None,
+            ) => (),
+            _ => self.launch_stage(simulation, MarketBoundary, 1),
+        }
         if let Some(execution) = freight {
             self.book_freight(simulation, execution)?;
         }

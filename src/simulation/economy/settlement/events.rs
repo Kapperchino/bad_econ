@@ -295,6 +295,7 @@ pub(in crate::simulation::economy) fn construct(
                         )),
                         guard: plus(retained, quantity).record(control),
                     });
+                    config.mark_ring_occupancy(actor, good - 1);
                     event.transfer(slot, actor, zero, quantity);
                     let delivered = cartage::road_price(
                         config,

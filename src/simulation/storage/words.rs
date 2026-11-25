@@ -139,6 +139,7 @@ pub fn native(value: Ticks) -> u64 {
 #[cube]
 pub fn divide(a: Ticks, b: u32) -> Ticks {
     match b {
+        0 => ticks(u32::MAX, u32::MAX),
         1 => a,
         _ => divide_nonunit(a, b),
     }
@@ -146,48 +147,103 @@ pub fn divide(a: Ticks, b: u32) -> Ticks {
 
 #[cube]
 fn divide_nonunit(a: Ticks, b: u32) -> Ticks {
-    let mut quotient = zero();
-    if a.extract(HIGH_WORD) == 0 && b != 0 {
-        quotient = ticks(a.extract(LOW_WORD) / b, 0);
-    } else {
-        let mut remainder = zero();
-        for step in 0..TICK_BITS {
-            let bit = (TICK_BITS - 1) - step;
-            let digit = (select(bit >= WORD_BITS, a.extract(HIGH_WORD), a.extract(LOW_WORD))
-                >> (bit & WORD_TOP_BIT))
-                & 1;
-            remainder = ticks(
-                (remainder.extract(LOW_WORD) << 1) | digit,
-                (remainder.extract(HIGH_WORD) << 1) | (remainder.extract(LOW_WORD) >> WORD_TOP_BIT),
-            );
-            if !lt(remainder, ticks(b, 0)) {
-                remainder = minus(remainder, ticks(b, 0));
-                quotient.insert(
-                    HIGH_WORD,
-                    quotient.extract(HIGH_WORD)
-                        | select(bit >= WORD_BITS, 1u32 << (bit & WORD_TOP_BIT), 0),
-                );
-                quotient.insert(
-                    LOW_WORD,
-                    quotient.extract(LOW_WORD)
-                        | select(bit < WORD_BITS, 1u32 << (bit & WORD_TOP_BIT), 0),
-                );
-            }
+    let high = a.extract(HIGH_WORD);
+    let low = a.extract(LOW_WORD);
+    let head = select(high == 0, low, high) / b;
+    let mut quotient = ticks(head, 0);
+    if high != 0 {
+        let mut remainder = high - head * b;
+        let mut remaining = low;
+        let mut tail = 0u32;
+        for _ in 0..WORD_BITS {
+            let shifted = (remainder << 1) | (remaining >> WORD_TOP_BIT);
+            let digit = (remainder >> WORD_TOP_BIT != 0) | (shifted >= b);
+            remainder = shifted - select(digit, b, 0);
+            remaining <<= 1;
+            tail = (tail << 1) | u32::cast_from(digit);
         }
+        quotient = ticks(tail, head);
     }
     quotient
 }
 #[cube]
 pub fn ratio(a: Ticks, numerator: u32, denominator: u32) -> CheckedTicks {
-    let quotient = divide(a, denominator);
-    let remainder = minus(a, times(quotient, denominator).value);
-    let whole = times(quotient, numerator);
-    let fraction = divide(times32(remainder.extract(LOW_WORD), numerator), denominator);
-    let result = plus(whole.value, fraction);
-    CheckedTicks {
-        value: result.value,
-        faults: whole.faults.union(result.faults),
+    TickDivisor {
+        value: denominator,
+        method: DivisionMethod::Restoring,
     }
+    .ratio(a, numerator)
+}
+
+const LIMB_BITS: u32 = WORD_BITS / 2;
+const LIMB_MASK: u32 = (1 << LIMB_BITS) - 1;
+
+#[derive(Clone, Copy)]
+enum DivisionMethod {
+    Restoring,
+    Limbs,
+}
+
+#[derive(CubeType)]
+struct TickDivisor {
+    value: u32,
+    #[cube(comptime)]
+    method: DivisionMethod,
+}
+
+#[cube]
+impl TickDivisor {
+    fn fixed(#[comptime] value: u32) -> Self {
+        TickDivisor {
+            value,
+            method: comptime!(match value {
+                2..=65_536 => DivisionMethod::Limbs,
+                _ => DivisionMethod::Restoring,
+            }),
+        }
+    }
+
+    fn quotient(&self, value: Ticks) -> Ticks {
+        match comptime!(self.method) {
+            DivisionMethod::Restoring => divide(value, self.value),
+            DivisionMethod::Limbs => {
+                let high = value.extract(HIGH_WORD);
+                let low = value.extract(LOW_WORD);
+                let head = select(high == 0, low, high) / self.value;
+                let mut quotient = ticks(head, 0);
+                if high != 0 {
+                    let middle = ((high - head * self.value) << LIMB_BITS) | (low >> LIMB_BITS);
+                    let upper_limb = middle / self.value;
+                    let bottom =
+                        ((middle - upper_limb * self.value) << LIMB_BITS) | (low & LIMB_MASK);
+                    quotient = ticks((upper_limb << LIMB_BITS) | (bottom / self.value), head);
+                }
+                quotient
+            }
+        }
+    }
+
+    fn ratio(&self, value: Ticks, numerator: u32) -> CheckedTicks {
+        let quotient = self.quotient(value);
+        let remainder = minus(value, times(quotient, self.value).value);
+        let whole = times(quotient, numerator);
+        let fraction = self.quotient(times32(remainder.extract(LOW_WORD), numerator));
+        let result = plus(whole.value, fraction);
+        CheckedTicks {
+            value: result.value,
+            faults: whole.faults.union(result.faults),
+        }
+    }
+}
+
+#[cube]
+pub fn divide_fixed(value: Ticks, #[comptime] denominator: u32) -> Ticks {
+    TickDivisor::fixed(denominator).quotient(value)
+}
+
+#[cube]
+pub fn ratio_fixed(value: Ticks, numerator: u32, #[comptime] denominator: u32) -> CheckedTicks {
+    TickDivisor::fixed(denominator).ratio(value, numerator)
 }
 #[cube]
 pub fn fraction_index(numerator: Ticks, denominator: Ticks) -> u32 {
@@ -296,7 +352,7 @@ mod tests {
     }
 
     #[cube(launch)]
-    fn probe(input: &[u32], output: &mut [u32]) {
+    fn probe(input: &[u32], output: &mut [u32], #[comptime] fixed_divisor: Option<u32>) {
         let id = ABSOLUTE_POS;
         if id < input.len() / ProbeInput::WORDS {
             let base = id * ProbeInput::WORDS;
@@ -312,8 +368,15 @@ mod tests {
             );
             let sum = plus(a, b);
             let product = times(a, numerator);
-            let quotient = divide(a, denominator);
-            let scaled = ratio(a, numerator, denominator);
+            let divisor = match comptime!(fixed_divisor) {
+                Some(value) => TickDivisor::fixed(comptime!(value)),
+                None => TickDivisor {
+                    value: denominator,
+                    method: DivisionMethod::Restoring,
+                },
+            };
+            let quotient = divisor.quotient(a);
+            let scaled = divisor.ratio(a, numerator);
             let difference = minus(a, b);
             let target = id * ProbeOutput::WORDS;
             output[target + ProbeOutput::SUM + LOW_WORD] = sum.value.extract(LOW_WORD);
@@ -333,7 +396,7 @@ mod tests {
         }
     }
 
-    fn check(device: Device) -> Result<()> {
+    fn check(device: &Device, fixed_divisor: Option<u32>) -> Result<()> {
         let edges = [
             0,
             1,
@@ -374,12 +437,12 @@ mod tests {
                     2 => u32::MAX,
                     _ => draw as u32,
                 };
-                let d = match index % 4 {
+                let d = fixed_divisor.unwrap_or_else(|| match index % 4 {
                     0 => 1000,
                     1 => u32::MAX,
                     2 => 1,
                     _ => (draw >> WORD_BITS) as u32 | 1,
-                };
+                });
                 ProbeInput {
                     left: a.into(),
                     numerator: n,
@@ -396,6 +459,7 @@ mod tests {
             CubeDim::new_1d(TEST_WORKGROUP),
             input.buffer_arg(),
             output.buffer_arg(),
+            fixed_divisor,
         );
         let actual = device.read(&output)?;
         for (case, output) in cases
@@ -547,6 +611,15 @@ mod tests {
 
     #[test]
     fn portable_words_match_wide_oracle_on_gpu() -> Result<()> {
-        check(crate::simulation::tests::device(TEST_WORKGROUP)?)
+        let device = crate::simulation::tests::device(TEST_WORKGROUP)?;
+        check(&device, None)
+    }
+
+    #[test]
+    fn fixed_divisors_match_wide_oracle_on_gpu() -> Result<()> {
+        let device = crate::simulation::tests::device(TEST_WORKGROUP)?;
+        [1, 90, 180, 1000, 7000, 30_000, 65_536, 65_537]
+            .into_iter()
+            .try_for_each(|divisor| check(&device, Some(divisor)))
     }
 }

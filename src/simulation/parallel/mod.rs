@@ -516,19 +516,28 @@ pub(super) fn scan_prefix(value: u32, #[comptime] mode: ScanMode) -> PrefixSum<u
     match mode {
         ScanMode::Shared => prefix_sum::<u32>(value),
         ScanMode::Plane => {
+            let hardware = comptime::hardware_properties().comptime();
+            let width = match comptime!(
+                !cfg!(all(target_os = "macos", target_arch = "x86_64"))
+                    && hardware.plane_size_min > 0
+                    && hardware.plane_size_min == hardware.plane_size_max
+            ) {
+                true => u32::new(comptime!(i64::from(hardware.plane_size_min))),
+                false => PLANE_DIM,
+            };
             let inclusive = plane_inclusive_sum(value);
             let mut preceding = 0u32;
             let mut total = 0u32;
-            if CUBE_DIM <= PLANE_DIM {
+            if CUBE_DIM <= width {
                 total = plane_sum(value);
             } else {
                 let mut planes = workgroup::WorkgroupTree::planes::<u32>();
-                let plane = UNIT_POS / PLANE_DIM;
-                if UNIT_POS_PLANE == min(PLANE_DIM, CUBE_DIM - plane * PLANE_DIM) - 1 {
+                let plane = PLANE_POS;
+                if UNIT_POS_PLANE == min(width, CUBE_DIM - plane * width) - 1 {
                     planes[plane as usize] = inclusive;
                 }
                 sync_cube();
-                for index in 0..ceildiv(CUBE_DIM, PLANE_DIM) {
+                for index in 0..ceildiv(CUBE_DIM, width) {
                     let count = planes[index as usize];
                     total += count;
                     if index < plane {

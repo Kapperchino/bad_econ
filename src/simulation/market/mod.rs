@@ -14,7 +14,7 @@ use crate::{
         Simulation, Trace,
         economy::{
             EconomyStage, EconomySystem,
-            market::orders,
+            market::{orders, search::ConsumerReserves},
             parameters::{Discovery, EconomyParameters, EmptyOrderMode, MarketClock},
             policy::MATCHING_ROUNDS,
             transport::railway::RouteAvailability,
@@ -74,12 +74,13 @@ pub(super) enum Provisioning {
     Standard,
     Minimum,
     Choice,
+    Nonfuel { reserves: ConsumerReserves },
 }
 
 impl Provisioning {
     pub(super) fn rounds(self, standard: usize) -> usize {
         match self {
-            Self::Standard => standard,
+            Self::Standard | Self::Nonfuel { .. } => standard,
             Self::Minimum => MATCHING_ROUNDS - 1,
             Self::Choice => 1,
         }
@@ -121,7 +122,16 @@ impl ProvisionMarket {
                     });
                 let consumers = markets.iter().copied()
                     .filter(|market| matches!(market, Market::Consumer(good) if !matches!(good, Good::Coal | Good::Wood)))
-                    .map(standard);
+                    .enumerate()
+                    .map(|(index, market)| Self {
+                        market,
+                        provisioning: Provisioning::Nonfuel {
+                            reserves: match index {
+                                0 => ConsumerReserves::Capture,
+                                _ => ConsumerReserves::Cached,
+                            },
+                        },
+                    });
                 inputs.chain(necessities).chain(consumers).collect()
             }
             _ => markets.into_iter().map(standard).collect(),
@@ -346,6 +356,23 @@ impl Simulation {
 }
 
 impl<'a> MarketRound<'a> {
+    fn consumer_reserves(&self, simulation: &Simulation) -> ConsumerReserves {
+        match (
+            simulation.market_execution,
+            simulation.provisioning,
+            self.trace,
+            self.index,
+        ) {
+            (MarketExecution::Grouped, Provisioning::Nonfuel { reserves }, Trace::Discard, 0) => {
+                reserves
+            }
+            (MarketExecution::Grouped, Provisioning::Nonfuel { .. }, Trace::Discard, _) => {
+                ConsumerReserves::Cached
+            }
+            _ => ConsumerReserves::Ledger,
+        }
+    }
+
     fn new(
         simulation: &Simulation,
         market: Market,
