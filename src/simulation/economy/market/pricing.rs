@@ -46,6 +46,13 @@ enum QuoteRule {
     Scarcity,
 }
 
+#[repr(u32)]
+enum FinishedStockPolicy {
+    Market,
+    FirstOffer,
+    Clearance,
+}
+
 #[derive(CubeType)]
 pub(in crate::simulation::economy) struct PriceQuote {
     actor: u32,
@@ -96,6 +103,36 @@ impl PriceQuote {
                 PRICE_SCALE,
             ),
         );
+    }
+}
+
+#[derive(CubeType)]
+pub(in crate::simulation::economy) struct ProductOrders {
+    pub requested: Ticks,
+    pub unfilled: Ticks,
+}
+
+#[cube]
+impl ProductOrders {
+    pub fn load(ledger: &Ledger<'_>, control: &[Atomic<u32>], firm: u32, primary: u32) -> Self {
+        let config = ledger.config;
+        let mut unfilled = ledger.value(Field::Unfilled, firm);
+        let mut requested = plus(ledger.value(Field::Sales, firm), unfilled).record(control);
+        if distributor(ledger, firm) {
+            requested = ledger.value_at(
+                retail_field(
+                    config,
+                    primary,
+                    comptime!(crate::domain::RetailAccount::Orders),
+                ),
+                firm,
+            );
+            unfilled = ledger.value(Field::PrimaryRetailUnfilled, firm);
+        }
+        ProductOrders {
+            requested,
+            unfilled,
+        }
     }
 }
 
@@ -173,31 +210,26 @@ impl<'a> FirmPricing<'a> {
         !lt(revenue, self.packet_cost(ledger))
     }
 
-    fn quote_rule(&self, ledger: &Ledger<'_>, excess: Ticks) -> u32 {
+    fn quote_rule(&self, ledger: &Ledger<'_>, excess: Ticks, orders: &ProductOrders) -> u32 {
         let firm = self.firm;
         if equal(excess, zero()) {
-            let unfilled = ledger.value(Field::Unfilled, firm);
-            let fulfilled = equal(unfilled, zero())
-                && (self.good <= comptime!(Good::Bread as u32)
-                    || equal(ledger.value(Field::Sales, firm), zero()));
+            let fulfilled = equal(orders.unfilled, zero())
+                && (self.good <= comptime!(Good::Bread as u32) || equal(orders.requested, zero()));
             select(
                 fulfilled,
                 comptime!(QuoteRule::CostPlusMargin as u32),
                 comptime!(QuoteRule::Scarcity as u32),
             )
         } else {
-            let purchased_stock = ledger.number(Field::FirstInput, firm) > 0
-                || ledger.number(Field::EnterpriseModel, firm)
-                    == comptime!(EnterpriseModel::Distributor as u32);
-            let stale_food = self.good <= comptime!(Good::Bread as u32)
-                && equal(ledger.value(Field::Sales, firm), zero())
-                && equal(ledger.value(Field::Unfilled, firm), zero())
+            let dealer = distributor(ledger, firm);
+            let stale_retail = dealer
+                && equal(orders.requested, zero())
                 && lt(
                     ledger.value(Field::Demand, firm),
                     ledger.value(Field::OutputTicks, firm),
                 );
-            let operating = purchased_stock
-                && !stale_food
+            let operating = (ledger.number(Field::FirstInput, firm) > 0 || dealer)
+                && !stale_retail
                 && ledger.number(Field::EnterpriseStatus, firm)
                     == comptime!(EnterpriseState::Operating as u32);
             select(
@@ -208,12 +240,18 @@ impl<'a> FirmPricing<'a> {
         }
     }
 
-    fn response(&self, ledger: &Ledger<'_>, excess: Ticks, inventory_response: u32) -> u32 {
+    fn response(
+        &self,
+        ledger: &Ledger<'_>,
+        excess: Ticks,
+        orders: &ProductOrders,
+        inventory_response: u32,
+    ) -> u32 {
         let firm = self.firm;
         let control = self.control;
         let config = ledger.config;
         let mut response = inventory_response;
-        let repricing = self.quote_rule(ledger, excess);
+        let repricing = self.quote_rule(ledger, excess, orders);
         if comptime!(config.economy == crate::domain::Economy::Industrial)
             && comptime!(config.home_mode == Feature::Enabled)
             && config.price_response > 0
@@ -257,7 +295,14 @@ impl<'a> FirmPricing<'a> {
             )
             .extract(LOW_WORD);
             response = match repricing {
-                1 => max(inventory_response, min(correction, PRICE_SCALE)),
+                1 => max(
+                    inventory_response,
+                    select(
+                        equal(orders.requested, zero()),
+                        min(correction, PRICE_SCALE),
+                        correction,
+                    ),
+                ),
                 2 => correction,
                 _ => max(inventory_response, correction),
             };
@@ -265,13 +310,45 @@ impl<'a> FirmPricing<'a> {
         response
     }
 
+    fn finished_stock_policy(&self, ledger: &Ledger<'_>, orders: &ProductOrders) -> u32 {
+        let firm = self.firm;
+        let stock = ledger.value_at(self.good, firm);
+        if comptime!(ledger.config.economy == crate::domain::Economy::Industrial)
+            && ledger.number(Field::FirstInput, firm) > 0
+            && !equal(stock, zero())
+            && equal(orders.requested, zero())
+            && lt(
+                ledger.value(Field::Demand, firm),
+                ledger.value(Field::OutputTicks, firm),
+            )
+        {
+            select(
+                equal(stock, ledger.value(Field::FinishedToday, firm)),
+                comptime!(FinishedStockPolicy::FirstOffer as u32),
+                comptime!(FinishedStockPolicy::Clearance as u32),
+            )
+        } else {
+            u32::new(comptime!(FinishedStockPolicy::Market as i64))
+        }
+    }
+
     pub(in crate::simulation::economy) fn reprice(
         &self,
         ledger: &mut Ledger<'_>,
         excess: Ticks,
+        orders: &ProductOrders,
         inventory_response: u32,
     ) {
-        let response = self.response(&*ledger, excess, inventory_response);
+        let config = ledger.config;
+        let response = match self.finished_stock_policy(&*ledger, orders) {
+            1 => u32::new(comptime!(i64::from(PRICE_SCALE))),
+            2 => {
+                PRICE_SCALE
+                    - (PRICE_SCALE - config.price_table[0usize]) * config.price_response
+                        / POLICY_SCALE
+            }
+            _ => self.response(&*ledger, excess, orders, inventory_response),
+        };
         let quote = PriceQuote::load(&*ledger, self.firm);
         quote.adjust(ledger, self.control, response);
     }
@@ -596,7 +673,9 @@ impl<'a> ReplacementMarket<'a> {
                                 && input < 2
                                 && !lt(stock, ticks(batch, 0))
                                 && economy.ledger.number_at(field, buyer) > 0;
-                        if !stocked {
+                        let orders = !equal(economy.ledger.value(Field::Sales, buyer), zero())
+                            || !equal(economy.ledger.value(Field::Unfilled, buyer), zero());
+                        if !stocked || orders {
                             let current = self.quote(
                                 &*economy,
                                 buyer,

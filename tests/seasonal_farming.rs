@@ -1011,3 +1011,93 @@ fn distributor_with_a_bread_business_restocks_grain_for_a_mill_on_gpu() -> Resul
     assert!(state.get(Field::Sales, dealer) <= state.get(Field::RetailOpen, dealer));
     Ok(())
 }
+
+fn grain_review_market(wage: u32) -> Result<Scenario> {
+    let mut config = household_wheat_market(1000, 0, wage)?.config().clone();
+    config.wage = 100;
+    config.behavior.price_response = 1000;
+    config.behavior.wage_increment = 0;
+    config.population.as_mut().unwrap().households[0].cash = 0;
+    Scenario::new(config)
+}
+
+#[test]
+fn household_grain_markdowns_use_paid_work_and_sales_over_the_review_period_on_gpu() -> Result<()> {
+    let device = support::device(64)?;
+    for (job_demand, wage, previous_rate, previous_sales, expected) in [
+        (0, 100, 0, 0, 19),
+        (100, 1, 0, 0, 19),
+        (0, 100, 2, 0, 20),
+        (0, 100, 0, 1, 20),
+    ] {
+        let scenario = grain_review_market(wage)?;
+        let timber = scenario.index_of(17).unwrap();
+        let mut state = scenario.initial()?;
+        state.day = 29;
+        state.set(Field::GrainQuote, 0, 20);
+        state.set(Field::LandPlots, 0, 1);
+        state.set(Field::Job, 0, timber as u64 + 1);
+        state.set(Field::JobDaysRemaining, 0, 10);
+        state.set(Field::Demand, timber, job_demand);
+        state.set(Field::GrossIncome, 0, 500_000);
+        state.set(Field::OpeningGrossIncome, 0, 500_000);
+        state.set(
+            Field::GrainReviewMinutes,
+            0,
+            60 * u64::from(previous_rate > 0),
+        );
+        state.set(Field::GrainReviewEarnings, 0, 60 * previous_rate);
+        state.set(Field::GrainReviewSales, 0, previous_sales);
+        let mut simulation =
+            Simulation::from_checkpoint(Checkpoint::new(&scenario, &state)?, device.clone())?;
+        simulation.advance()?;
+        let after = simulation.download()?;
+        assert_eq!(after.get(Field::GrainReviewEarnings, 0), 0);
+        assert_eq!(after.get(Field::GrainReviewMinutes, 0), 0);
+        assert_eq!(after.get(Field::GrainReviewSales, 0), 0);
+        assert_eq!(after.get(Field::Hours, 0) > 0, job_demand > 0);
+        assert_eq!(after.get(Field::GrainQuote, 0), expected);
+    }
+    Ok(())
+}
+
+#[test]
+fn a_household_carries_actual_paid_work_into_its_next_grain_review_on_gpu() -> Result<()> {
+    let scenario = grain_review_market(2)?;
+    let timber = scenario.index_of(17).unwrap();
+    let mut initial = scenario.initial()?;
+    initial.day = 28;
+    for (field, value) in [
+        (Field::LandPlots, 1),
+        (Field::Job, timber as u64 + 1),
+        (Field::JobDaysRemaining, 10),
+        (Field::GrainQuote, 20),
+    ] {
+        initial.set(field, 0, value);
+    }
+    initial.set(Field::Demand, timber, 100);
+    let device = support::device(64)?;
+    let mut live =
+        Simulation::from_checkpoint(Checkpoint::new(&scenario, &initial)?, device.clone())?;
+    live.advance()?;
+    let midway = live.download()?;
+    let minutes = midway.get(Field::Hours, 0) + midway.get(Field::CartageMinutes, 0);
+    let earnings = midway.get(Field::GrossIncome, 0) - midway.get(Field::OpeningGrossIncome, 0)
+        + midway.get(Field::CartageIncome, 0);
+    assert!(minutes > 0 && earnings > 0);
+    assert_eq!(midway.get(Field::GrainReviewMinutes, 0), minutes);
+    assert_eq!(midway.get(Field::GrainReviewEarnings, 0), earnings);
+    assert_eq!(
+        midway.get(Field::GrainReviewSales, 0),
+        midway.get(Field::GrainSales, 0)
+    );
+    let mut restored = Simulation::from_checkpoint(live.checkpoint()?, device)?;
+    live.advance()?;
+    restored.advance()?;
+    let after = live.download()?;
+    assert_eq!(restored.download()?, after);
+    assert_eq!(after.get(Field::GrainQuote, 0), 20);
+    assert_eq!(after.get(Field::GrainReviewMinutes, 0), 0);
+    assert_eq!(after.get(Field::GrainReviewEarnings, 0), 0);
+    Ok(())
+}

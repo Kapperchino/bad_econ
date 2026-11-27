@@ -245,9 +245,314 @@ fn grouped_market_faults_match_reference_and_restore_the_audited_state() -> Resu
     Ok(())
 }
 
+fn estate_fixture(scenario: &Scenario, day: u64, deceased: &[usize]) -> Result<State> {
+    use crate::domain::demography::{DeathCause, LivingState};
+    let mut state = scenario.initial()?;
+    state.day = day;
+    let mut living = vec![0; scenario.population_rows()];
+    for person in &mut state.people {
+        let row = scenario
+            .index_of(person.household)
+            .context("estate fixture household")?;
+        match deceased.contains(&row) {
+            true => {
+                person.state = LivingState::Deceased {
+                    day,
+                    cause: DeathCause::Background,
+                }
+            }
+            false => living[row] += u64::from(matches!(person.state, LivingState::Living)),
+        }
+    }
+    for (row, count) in living.into_iter().enumerate() {
+        state.set(Field::LivingMembers, row, count);
+    }
+    Ok(state)
+}
+
+#[test]
+fn gpu_unclaimed_estates_resume_local_succession_and_dividends_after_restore() -> Result<()> {
+    use crate::domain::enterprise::EstateStatus;
+    let mut config: ScenarioConfig =
+        serde_json::from_str(include_str!("../../scenarios/property.json"))?;
+    config.reserve = 0;
+    config.distribution_rate = 1000;
+    config.shipment_speed = 500;
+    let population = config.population.as_mut().context("property households")?;
+    for (household, x) in population
+        .households
+        .iter_mut()
+        .zip([499, 499, 300, 300, 250, 250, 500, 750])
+    {
+        household.position.x = x;
+    }
+    let scenario = Scenario::new(config)?;
+    let mut initial = estate_fixture(&scenario, 29, &[0, 1])?;
+    initial.set(Field::EstateSettled, 0, EstateStatus::Unclaimed as u64);
+    initial.set(Field::ParentHousehold, 1, initial.actors.at(0).identity);
+    let accounts = initial.actors.len();
+    let shipment = initial
+        .shipment_coordinate(Good::Bread, 0, scenario.ring(), 0)
+        .0 as usize;
+    let transit = (TRANSIT_FIELDS + Good::Bread as usize - 1) * accounts;
+    initial.set(Field::Bread, 0, initial.get(Field::Bread, 0) - 1);
+    initial.values[shipment] = 1;
+    initial.values[transit] = 1;
+    initial.set(Field::Transit, 0, 1);
+    let mut original = Simulation::from_state(scenario.clone(), initial.clone(), device(64)?)
+        .context("loading unclaimed estates")?;
+    let mut replay = Simulation::from_checkpoint(original.checkpoint()?, device(64)?)
+        .context("restoring unclaimed estates")?;
+    original.commit_enterprises(RegistryAudit::Full)?;
+    replay.commit_enterprises(RegistryAudit::Full)?;
+    let waiting = original.download()?;
+    assert_eq!(
+        waiting.get(Field::EstateSettled, 0),
+        EstateStatus::Unclaimed as u64
+    );
+    assert_eq!(
+        waiting.get(Field::EstateSettled, 1),
+        EstateStatus::Transferred as u64
+    );
+    for simulation in [&mut original, &mut replay] {
+        simulation.day = 30;
+        simulation.commit_enterprises(RegistryAudit::Full)?;
+    }
+    let settled = original.download()?;
+    assert_eq!(settled, replay.download()?);
+    let successor = settled.actors.at(2).identity;
+    let total_cash = (0..3).map(|row| initial.get(Field::Cash, row)).sum::<u64>();
+    assert_eq!(settled.get(Field::Cash, 2), total_cash);
+    assert_eq!(
+        settled.get(Field::Bread, 2),
+        (0..3)
+            .map(|row| initial.get(Field::Bread, row))
+            .sum::<u64>()
+    );
+    assert_eq!(
+        settled.get(Field::EstateSettled, 0),
+        EstateStatus::Transferred as u64
+    );
+    assert_eq!(settled.get(Field::Transit, 0), 0);
+    assert_eq!(settled.values[shipment], 0);
+    assert_eq!(settled.values[shipment + 2], 1);
+    assert_eq!(settled.values[transit + 2], 1);
+    let mut dividends = 0;
+    for firm in initial
+        .actors
+        .firm_indices()
+        .filter(|&row| initial.actors.at(row).owner == 0)
+    {
+        let actor = settled.actors.at(firm);
+        assert_eq!(actor.owner, 2);
+        let issued = settled
+            .ownership
+            .iter()
+            .find(|ownership| ownership.firm == actor.identity)
+            .context("inherited firm")?;
+        assert_eq!(
+            issued.shares,
+            [crate::domain::enterprise::OwnershipShare {
+                household: successor,
+                units: 1_000_000
+            }]
+        );
+        dividends += settled
+            .get(Field::Cash, firm)
+            .saturating_sub(settled.get(Field::OperatingReserve, firm));
+    }
+    assert!(dividends > 0);
+    original
+        .ownership
+        .as_ref()
+        .context("ownership runtime")?
+        .distribute(original.gpu(), &original.control);
+    assert_eq!(
+        original.download()?.get(Field::Cash, 2),
+        total_cash + dividends
+    );
+    assert_eq!(original.observe()?.cash, initial.initial_cash);
+    Ok(())
+}
+
+#[test]
+fn gpu_estate_settlement_preserves_the_owner_of_the_heirs_migration_destination() -> Result<()> {
+    use crate::domain::enterprise::OwnershipShare;
+    let scenario = Scenario::baseline(4, 42, Experiment::Concentrated)?;
+    let mut initial = estate_fixture(&scenario, 29, &[0])?;
+    initial.set(Field::ParentHousehold, 1, initial.actors.at(0).identity);
+    let destination = scenario.population_rows();
+    let mut firm = initial.actors.at(destination);
+    firm.owner = 3;
+    let issued = initial
+        .ownership
+        .iter_mut()
+        .find(|issued| issued.firm == firm.identity)
+        .context("migration destination firm")?;
+    issued.shares = vec![OwnershipShare {
+        household: initial.actors.at(3).identity,
+        units: 1_000_000,
+    }];
+    let ownership = issued.clone();
+    initial.actors.set(destination, firm);
+    let mut gpu = Simulation::from_state(scenario.clone(), initial, device(64)?)?;
+    let mut requests = vec![0; gpu.actors().len()];
+    requests[0] = 5 << 24;
+    requests[1] = (2 << 24) + destination as u32 + 1;
+    gpu.device.write(&gpu.enterprise_requests, &requests);
+    let pending =
+        registry::records::PendingRecords::from_dense(&requests, &vec![0; requests.len()])?;
+    let plan =
+        registry::RegistryPlan::new(&scenario, &gpu.metadata, &gpu.migrations, &pending.records)?
+            .context("sparse settlement")?;
+    gpu.commit_registry(plan, &pending.records)?;
+    let settled = gpu.download()?;
+    assert_eq!(settled.actors.at(destination).owner, 3);
+    assert!(settled.ownership.contains(&ownership));
+    assert!(settled.get(Field::MoveDue, 1) > settled.day);
+    Checkpoint::new(&scenario, &settled)?;
+    Ok(())
+}
+
+#[test]
+fn gpu_food_migration_pays_living_suppliers_and_skips_estates() -> Result<()> {
+    use crate::domain::enterprise::{FoodAccess, HouseholdProduction};
+    let mut config = Scenario::baseline(4, 42, Experiment::Concentrated)?
+        .config()
+        .clone();
+    config.household_production = HouseholdProduction::industrial();
+    let scenario = Scenario::new(config)?;
+    for deceased in [&[][..], &[0][..]] {
+        let mut initial = estate_fixture(&scenario, 29, deceased)?;
+        let bread = (0..initial.actors.len())
+            .map(|row| initial.get(Field::Bread, row))
+            .sum();
+        for row in 0..initial.actors.len() {
+            initial.set(Field::Bread, row, 0);
+        }
+        initial.set(Field::Bread, 0, bread);
+        initial.set(Field::ParentHousehold, 2, initial.actors.at(0).identity);
+        initial.set(Field::LandPlots, 1, 0);
+        initial.set(Field::Shortage, 1, 1);
+        initial.set(Field::FoodAccess, 1, FoodAccess::MissingSupply as u64);
+        let mut gpu = Simulation::from_state(scenario.clone(), initial.clone(), device(64)?)?;
+        gpu.commit_enterprises(RegistryAudit::Full)?;
+        let settled = gpu.download()?;
+        match deceased {
+            [] => {
+                assert_eq!(
+                    settled.get(Field::Cash, 0),
+                    initial.get(Field::Cash, 0) + 100
+                );
+                assert_eq!(
+                    settled.get(Field::Cash, 1),
+                    initial.get(Field::Cash, 1) - 100
+                );
+                assert!(settled.get(Field::MoveDue, 1) > settled.day);
+            }
+            _ => {
+                assert_eq!(settled.get(Field::Cash, 0), 0);
+                assert_eq!(settled.get(Field::Cash, 1), initial.get(Field::Cash, 1));
+                assert_eq!(settled.get(Field::MoveDue, 1), 0);
+            }
+        }
+        assert_eq!(gpu.snapshot.cash, initial.initial_cash);
+    }
+    Ok(())
+}
+
+#[test]
+fn gpu_estates_retain_assets_without_a_surviving_household() -> Result<()> {
+    use crate::domain::enterprise::EstateStatus;
+    let scenario = Scenario::baseline(3, 42, Experiment::Concentrated)?;
+    let initial = estate_fixture(&scenario, 29, &[0, 1, 2])?;
+    let mut gpu = Simulation::from_state(scenario, initial.clone(), device(64)?)?;
+    gpu.commit_enterprises(RegistryAudit::Full)?;
+    let settled = gpu.download()?;
+    assert_eq!(settled.ownership, initial.ownership);
+    assert_eq!(settled.actors, initial.actors);
+    for row in 0..3 {
+        assert_eq!(
+            settled.get(Field::EstateSettled, row),
+            EstateStatus::Unclaimed as u64
+        );
+        assert_eq!(settled.get(Field::Cash, row), initial.get(Field::Cash, row));
+    }
+    assert_eq!(gpu.snapshot.cash, initial.initial_cash);
+    Ok(())
+}
+
+#[test]
+fn gpu_estate_settles_to_a_neighbor_after_creditor_repayment() -> Result<()> {
+    use crate::domain::{
+        enterprise::EstateStatus,
+        finance::{LoanField, LoanStatus},
+    };
+    use crate::simulation::finance::FinanceStage;
+    let mut config: ScenarioConfig =
+        serde_json::from_str(include_str!("../../scenarios/institutions.json"))?;
+    config.research = None;
+    let borrower = &mut config.population.as_mut().context("households")?.households[0];
+    borrower.cash = 100;
+    let policy = config.finance.as_mut().context("finance policy")?;
+    policy.loans[0].borrower = borrower.identity;
+    policy.loans[0].daily_rate = 0;
+    let scenario = Scenario::new(config)?;
+    let initial = estate_fixture(&scenario, 29, &[0])?;
+    let cash = initial.get(Field::Cash, 0);
+    let layout = scenario
+        .config()
+        .finance
+        .as_ref()
+        .context("finance policy")?
+        .layout(initial.actors.len() * scenario.fields())?;
+    let mut gpu = Simulation::from_state(scenario, initial.clone(), device(64)?)?;
+    gpu.finance.as_ref().context("finance runtime")?.phase(
+        &gpu.device,
+        &gpu.state,
+        29,
+        FinanceStage::Lending,
+    )?;
+    gpu.commit_enterprises(RegistryAudit::Full)?;
+    let waiting = gpu.download()?;
+    assert_eq!(
+        waiting.values[layout.loan(LoanField::Status, 0)],
+        LoanStatus::Active as u64
+    );
+    assert_eq!(
+        waiting.get(Field::EstateSettled, 0),
+        EstateStatus::AwaitingSettlement as u64
+    );
+    assert!(waiting.get(Field::Cash, 0) > cash);
+    assert_eq!(waiting.ownership, initial.ownership);
+    gpu.day = 60;
+    gpu.finance.as_ref().context("finance runtime")?.phase(
+        &gpu.device,
+        &gpu.state,
+        60,
+        FinanceStage::Opening,
+    )?;
+    gpu.commit_enterprises(RegistryAudit::Full)?;
+    let settled = gpu.download()?;
+    assert_eq!(
+        settled.values[layout.loan(LoanField::Status, 0)],
+        LoanStatus::Repaid as u64
+    );
+    assert_eq!(
+        settled.get(Field::EstateSettled, 0),
+        EstateStatus::Transferred as u64
+    );
+    assert_eq!(settled.get(Field::Cash, 0), 0);
+    assert_eq!(
+        settled.get(Field::Cash, 1),
+        cash + initial.get(Field::Cash, 1)
+    );
+    assert_eq!(gpu.snapshot.cash, initial.initial_cash);
+    Ok(())
+}
+
 #[test]
 fn gpu_parent_estates_preserve_inheritance_without_full_state_readback() -> Result<()> {
-    use crate::domain::demography::{DeathCause, LivingState};
     use crate::domain::enterprise::OwnershipShare;
 
     let mut config = Scenario::industrial(3000, 42, Experiment::Baseline)?
@@ -256,40 +561,19 @@ fn gpu_parent_estates_preserve_inheritance_without_full_state_readback() -> Resu
     config.research = None;
     config.firms = 6 * Good::COUNT as u32;
     let scenario = Scenario::new(config)?;
-    let mut initial = scenario.initial()?;
+    let mut initial = estate_fixture(&scenario, 1700, &[0, 1, 31, 40, 41])?;
     assert!(
         crate::domain::landlords::RentalRegistry::new(&scenario, &initial)
             .accounts
             .len()
             > 1
     );
-    initial.day = 1700;
     for (child, parent) in [(1, 0), (2, 0), (3, 0), (32, 31), (41, 40)] {
         initial.set(
             Field::ParentHousehold,
             child,
             initial.actors.at(parent).identity,
         );
-    }
-    let deceased = [0, 1, 31, 40, 41].map(|index| initial.actors.at(index).identity);
-    for person in &mut initial.people {
-        if deceased.contains(&person.household) {
-            person.state = LivingState::Deceased {
-                day: initial.day,
-                cause: DeathCause::Background,
-            };
-        }
-    }
-    for household in 0..3000 {
-        let identity = initial.actors.at(household).identity;
-        let living = initial
-            .people
-            .iter()
-            .filter(|person| {
-                person.household == identity && matches!(person.state, LivingState::Living)
-            })
-            .count() as u64;
-        initial.set(Field::LivingMembers, household, living);
     }
     for (firm, parent) in [(3000, 0), (3001, 31), (3002, 10)] {
         let mut actor = initial.actors.at(firm);

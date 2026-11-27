@@ -7,8 +7,8 @@ use anyhow::Context;
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 
-pub const STATE_HASH_VERSION: &str = "bad-econ/state/CubekV2/v34";
-pub const USED_FIELDS: usize = Field::ConstructionDaysRemaining as usize + 1;
+pub const STATE_HASH_VERSION: &str = "bad-econ/state/CubekV2/v35";
+pub const USED_FIELDS: usize = Field::FinishedToday as usize + 1;
 pub const TRANSIT_FIELDS: usize = USED_FIELDS + Good::COUNT;
 pub const CONSUMPTION_FIELDS: usize = TRANSIT_FIELDS + Good::COUNT;
 pub const PRODUCTION_FIELDS: usize = CONSUMPTION_FIELDS + Good::COUNT;
@@ -204,6 +204,12 @@ pub enum Field {
     CartageCapacity,
     MaintenanceWork,
     ConstructionDaysRemaining,
+    GrainReviewEarnings,
+    GrainReviewMinutes,
+    GrainReviewSales,
+    PrimaryRetailUnfilled,
+    UncappedWage,
+    FinishedToday,
 }
 impl Field {
     pub fn inventory(good: Good) -> Self {

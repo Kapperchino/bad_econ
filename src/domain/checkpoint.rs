@@ -9,7 +9,7 @@ use anyhow::{Result, anyhow};
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 
-const CHECKPOINT_VERSION: u32 = 31;
+const CHECKPOINT_VERSION: u32 = 32;
 const LEGACY_USED_FIELDS: usize = Field::MaintenanceWork as usize;
 const LEGACY_FIELD_GAP: usize = USED_FIELDS - LEGACY_USED_FIELDS;
 
@@ -80,7 +80,7 @@ impl TryFrom<CheckpointDocument> for Checkpoint {
             .get("version")
             .and_then(serde_json::Value::as_u64)
         {
-            Some(23..=30) => (),
+            Some(23..=31) => (),
             Some(version) if version == u64::from(CHECKPOINT_VERSION) => (),
             _ => Err(anyhow!(
                 "unsupported checkpoint format: expected 23 through {CHECKPOINT_VERSION}"
@@ -165,6 +165,7 @@ impl TryFrom<CheckpointDocument> for Checkpoint {
             let state = &mut current.state;
             let count = state.actors.len();
             let first_missing = match current.version {
+                31 => Field::GrainReviewEarnings as usize,
                 30 => Field::ConstructionDaysRemaining as usize,
                 _ => LEGACY_USED_FIELDS,
             };
@@ -201,10 +202,12 @@ impl TryFrom<CheckpointDocument> for Checkpoint {
                     }
                 }
             }
-            for row in 0..count {
-                if state.get(Field::ProjectStatus, row) == ProjectStatus::Requested as u64 {
-                    let days = PropertyUse::for_site(state, row)?.construction_days();
-                    state.set(Field::ConstructionDaysRemaining, row, days.into());
+            if current.version < 31 {
+                for row in 0..count {
+                    if state.get(Field::ProjectStatus, row) == ProjectStatus::Requested as u64 {
+                        let days = PropertyUse::for_site(state, row)?.construction_days();
+                        state.set(Field::ConstructionDaysRemaining, row, days.into());
+                    }
                 }
             }
             current.version = CHECKPOINT_VERSION;

@@ -527,6 +527,39 @@ fn legacy_checkpoints_migrate_and_resume_on_gpu() -> Result<()> {
             ObservationSnapshot::from_state(&scenario, &migrated)?
         );
     }
+    let rows = state.actors.len();
+    let mut legacy_state = state.clone();
+    legacy_state
+        .values
+        .drain(Field::GrainReviewEarnings as usize * rows..USED_FIELDS * rows);
+    let checksum = bad_econ::arithmetic::hex(&Sha256::digest(serde_json::to_vec(&(
+        scenario.config(),
+        &legacy_state,
+    ))?));
+    let mut legacy = checkpoint;
+    legacy["state"] = serde_json::to_value(legacy_state)?;
+    legacy["version"] = 31.into();
+    legacy["checksum"] = checksum.into();
+    let mut expected = state.clone();
+    for row in 0..rows {
+        for field in [
+            Field::GrainReviewEarnings,
+            Field::GrainReviewMinutes,
+            Field::GrainReviewSales,
+            Field::PrimaryRetailUnfilled,
+            Field::UncappedWage,
+            Field::FinishedToday,
+        ] {
+            expected.set(field, row, 0);
+        }
+    }
+    let mut restored =
+        Simulation::from_checkpoint(serde_json::from_value(legacy)?, device.clone())?;
+    assert_eq!(restored.download()?, expected);
+    let mut replay = Simulation::from_checkpoint(Checkpoint::new(&scenario, &expected)?, device)?;
+    restored.advance()?;
+    replay.advance()?;
+    assert_eq!(restored.download()?, replay.download()?);
     Ok(())
 }
 

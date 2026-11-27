@@ -1,9 +1,10 @@
 use crate::{
     arithmetic::{add, mul},
     domain::{
-        BASE_FIELDS, Field, Good, Scenario, State, TRANSIT_FIELDS,
+        ActorRows, BASE_FIELDS, Field, Good, Scenario, State, TRANSIT_FIELDS,
         enterprise::{EnterpriseState, EstateStatus, Ownership, OwnershipShare},
         finance::{LoanField, LoanStatus},
+        property::PropertyConfig,
         railway::CART_BILLABLE_MINUTES_PER_UNIT_DAY,
     },
 };
@@ -15,7 +16,7 @@ use std::{
 
 pub(super) struct Settlement<'a> {
     scenario: &'a Scenario,
-    heirs: HashMap<u64, usize>,
+    successors: HashMap<usize, usize>,
     sites: OnceCell<SettlementSites>,
 }
 
@@ -49,8 +50,37 @@ impl Claims {
     }
 }
 
+pub(in crate::simulation) fn nearest_living_household(
+    actors: &ActorRows,
+    property: Option<&PropertyConfig>,
+    estate: usize,
+    living: impl Fn(usize) -> bool,
+) -> Result<Option<usize>> {
+    let origin = actors.at(estate).position;
+    let region = property
+        .map(|property| property.region(origin).map(|row| &property.regions[row]))
+        .transpose()?;
+    let colocated = actors
+        .iter()
+        .enumerate()
+        .position(|(row, actor)| actor.position == origin && actor.kind == 0 && living(row));
+    Ok(colocated.or_else(|| {
+        actors
+            .iter()
+            .enumerate()
+            .filter(|(row, actor)| actor.kind == 0 && living(*row))
+            .min_by_key(|(_, actor)| {
+                (
+                    region.is_some_and(|region| !region.contains(actor.position)),
+                    origin.distance(actor.position),
+                )
+            })
+            .map(|(row, _)| row)
+    }))
+}
+
 impl<'a> Settlement<'a> {
-    pub fn new(scenario: &'a Scenario, state: &State) -> Self {
+    pub fn new(scenario: &'a Scenario, state: &State, requests: &[u32]) -> Result<Self> {
         let mut heirs = HashMap::new();
         for actor in 0..state.actors.len() {
             let parent = state.get(Field::ParentHousehold, actor);
@@ -65,11 +95,30 @@ impl<'a> Settlement<'a> {
                 _ => (),
             }
         }
-        Self {
-            scenario,
-            heirs,
-            sites: OnceCell::new(),
+        let mut successors = HashMap::new();
+        for (row, _) in requests
+            .iter()
+            .enumerate()
+            .filter(|(_, action)| *action >> 24 == 5)
+        {
+            let successor = match heirs.get(&state.actors.at(row).identity) {
+                Some(&heir) => Some(heir),
+                None => nearest_living_household(
+                    &state.actors,
+                    scenario.config().property.as_ref(),
+                    row,
+                    |candidate| state.get(Field::LivingMembers, candidate) > 0,
+                )?,
+            };
+            if let Some(successor) = successor {
+                successors.insert(row, successor);
+            }
         }
+        Ok(Self {
+            scenario,
+            successors,
+            sites: OnceCell::new(),
+        })
     }
 
     pub fn close_firm(&self, state: &mut State, actor: usize) -> Result<()> {
@@ -90,7 +139,25 @@ impl<'a> Settlement<'a> {
 
     pub fn inherit(&self, state: &mut State, actor: usize) -> Result<()> {
         let identity = state.actors.at(actor).identity;
-        let heir = self.heirs.get(&identity).copied();
+        let heir = self.successors.get(&actor).copied();
+        match (
+            state.get(Field::LivingMembers, actor),
+            state.get(Field::EstateSettled, actor),
+        ) {
+            (0, status) if status != EstateStatus::Transferred as u64 => {
+                self.settle_estate(state, actor, identity, heir)
+            }
+            _ => Ok(()),
+        }
+    }
+
+    fn settle_estate(
+        &self,
+        state: &mut State,
+        actor: usize,
+        identity: u64,
+        heir: Option<usize>,
+    ) -> Result<()> {
         let status = match heir {
             Some(_) => EstateStatus::AwaitingSettlement,
             None => EstateStatus::Unclaimed,
@@ -107,18 +174,23 @@ impl<'a> Settlement<'a> {
                 state.set(Field::InvestmentFirm, actor, 0);
                 let successor = state.actors.at(receiver).identity;
                 for ownership in &mut state.ownership {
-                    let mut combined = BTreeMap::<u64, u32>::new();
-                    for share in &ownership.shares {
-                        let household = match share.household == identity {
-                            true => successor,
-                            false => share.household,
-                        };
-                        *combined.entry(household).or_default() += share.units;
+                    if let Some(share) = ownership
+                        .shares
+                        .iter_mut()
+                        .find(|share| share.household == identity)
+                    {
+                        share.household = successor;
                     }
-                    ownership.shares = combined
-                        .into_iter()
-                        .map(|(household, units)| OwnershipShare { household, units })
-                        .collect();
+                    ownership
+                        .shares
+                        .sort_unstable_by_key(|share| share.household);
+                    ownership.shares.dedup_by(|later, prior| {
+                        let same = later.household == prior.household;
+                        if same {
+                            prior.units += later.units;
+                        }
+                        same
+                    });
                 }
                 state
                     .actors

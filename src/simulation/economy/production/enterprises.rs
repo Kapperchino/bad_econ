@@ -33,8 +33,17 @@ pub(crate) fn mobility(
     if target == 0 && needs_food && idle && landless && settled && alive {
         for sample in 0..16u32 {
             let candidate = (household + day * 17 + sample * 31) % config.actors;
-            let accessible =
-                household_production::offers(&*economy, candidate, comptime!(Good::Bread as u32));
+            let receiving = !economy
+                .actors
+                .kind(candidate)
+                .is(comptime!(ActorKind::Household))
+                || economy.ledger.number(Field::LivingMembers, candidate) > 0;
+            let accessible = receiving
+                && household_production::offers(
+                    &*economy,
+                    candidate,
+                    comptime!(Good::Bread as u32),
+                );
             let trip = economy.actors.distance(household, candidate);
             let days = max(ceildiv(trip, config.shipment_speed), 1) + config.coverage;
             let food = times32(

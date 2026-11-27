@@ -175,14 +175,11 @@ impl EntryBatch {
             .collect::<Vec<_>>();
         plan.migrations
             .extend_households(&metadata.actors, &formations);
-        let prepared_actors = match super::settlement::SettlementBatch::required(
-            metadata,
-            &entries.transitions,
-            &plan.migrations,
-        ) {
-            true => None,
-            false => plan.actors.take(),
-        };
+        let prepared_actors =
+            match super::settlement::SettlementBatch::required(&entries.transitions) {
+                true => None,
+                false => plan.actors.take(),
+            };
         let mut grown = State {
             actors: prepared_actors.unwrap_or_else(|| {
                 metadata

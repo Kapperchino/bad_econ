@@ -34,7 +34,7 @@ pub(in crate::simulation) fn transitions_in_rows(
             person.household = state.actors.at(formation.household).identity;
         }
     }
-    let settlement = Settlement::new(scenario, state);
+    let settlement = Settlement::new(scenario, state, requests)?;
     for (actor, &action) in requests.iter().enumerate() {
         match action >> 24 {
             2 => {

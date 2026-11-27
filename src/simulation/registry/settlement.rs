@@ -1,8 +1,8 @@
-use super::staging::{StagedRows, Staging, Transfer, transfer};
+use super::staging::{LivingRows, StagedRows, Staging, Transfer, transfer};
 use super::{MigrationRegistry, records::PendingRecord};
-use crate::domain::{ActorRows, Scenario, State, enterprise::Ownership};
+use crate::domain::{ActorRows, BASE_FIELDS, Good, Scenario, State, enterprise::Ownership};
 use crate::simulation::enterprise::acquisitions::PURCHASE;
-use crate::simulation::{Device, encode, enterprise};
+use crate::simulation::{Device, encode, enterprise, storage::layout::NO_ACTOR};
 use anyhow::{Context, Result, anyhow};
 use burn_wgpu::CubeTensor;
 use std::collections::{BTreeMap, BTreeSet};
@@ -30,19 +30,10 @@ pub(in crate::simulation) struct OwnerChange {
 }
 
 impl SettlementBatch {
-    pub fn required(
-        metadata: &State,
-        requests: &[PendingRecord],
-        migrations: &MigrationRegistry,
-    ) -> bool {
-        requests.iter().any(|record| match record.request >> 24 {
-            4 | 7 | PURCHASE => true,
-            5 => migrations
-                .children(metadata.actors.at(record.actor as usize).identity)
-                .next()
-                .is_some(),
-            _ => false,
-        })
+    pub fn required(requests: &[PendingRecord]) -> bool {
+        requests
+            .iter()
+            .any(|record| matches!(record.request >> 24, 4 | 5 | 7 | PURCHASE))
     }
 
     pub fn new(
@@ -54,7 +45,7 @@ impl SettlementBatch {
         day: u64,
         migrations: &MigrationRegistry,
     ) -> Result<Option<Self>> {
-        match Self::required(metadata, requests, migrations) {
+        match Self::required(requests) {
             false => Ok(None),
             true => Self::prepare(device, scenario, metadata, state, requests, day, migrations)
                 .map(Some),
@@ -73,6 +64,10 @@ impl SettlementBatch {
         let mut selected = BTreeSet::new();
         let mut firms = BTreeSet::new();
         let mut estates = BTreeSet::new();
+        let living = match requests.iter().any(|record| record.request >> 24 == 5) {
+            true => LivingRows::read(device, state, scenario.fields(), metadata.actors.len())?,
+            false => LivingRows::default(),
+        };
         for record in requests
             .iter()
             .filter(|record| record.request > 0 && !matches!(record.request >> 24, 2 | 3))
@@ -89,7 +84,19 @@ impl SettlementBatch {
                 5 => {
                     let identity = metadata.actors.at(record.actor as usize).identity;
                     estates.insert(identity);
-                    selected.extend(migrations.children(identity));
+                    let successor = match migrations
+                        .children(identity)
+                        .find(|&row| living.contains(row))
+                    {
+                        Some(heir) => Some(heir),
+                        None => enterprise::nearest_living_household(
+                            &metadata.actors,
+                            scenario.config().property.as_ref(),
+                            record.actor as usize,
+                            |row| living.contains(row),
+                        )?,
+                    };
+                    selected.extend(successor);
                 }
                 _ => (),
             }
@@ -211,8 +218,8 @@ impl SettlementBatch {
             .iter()
             .any(|record| matches!(record.request >> 24, 4 | 5))
         {
-            true => scenario.fields(),
-            false => crate::domain::BASE_FIELDS,
+            true => BASE_FIELDS + 2 * scenario.ring() * Good::COUNT,
+            false => BASE_FIELDS,
         };
         let staged = StagedRows::new(
             device,
@@ -232,9 +239,10 @@ impl SettlementBatch {
                 )
             })
             .transpose()?;
-        let readback_bytes = tiles
-            .as_ref()
-            .map_or(staged.readback_bytes(), |tiles| tiles.readback_bytes());
+        let readback_bytes = living.readback_bytes()
+            + tiles
+                .as_ref()
+                .map_or(staged.readback_bytes(), |tiles| tiles.readback_bytes());
         let values = match &tiles {
             Some(tiles) => tiles.unpack(staged.elements),
             None => staged.read(device, state)?,
@@ -244,8 +252,9 @@ impl SettlementBatch {
                 .iter()
                 .map(|&index| {
                     let mut actor = metadata.actors.at(index);
-                    actor.owner =
-                        selected.binary_search(&(actor.owner as usize)).unwrap_or(0) as u32;
+                    actor.owner = selected
+                        .binary_search(&(actor.owner as usize))
+                        .map_or(NO_ACTOR, |row| row as u32);
                     actor
                 })
                 .collect(),
@@ -291,27 +300,19 @@ impl SettlementBatch {
                 owner: selected[actor.owner as usize] as u32,
             })
             .collect();
-        let ownership = match companies.is_some()
-            || requests
+        let changed = compact
+            .ownership
+            .into_iter()
+            .filter(|issued| owned.get(&issued.firm).copied() != Some(issued))
+            .map(|issued| (issued.firm, issued))
+            .collect::<BTreeMap<_, _>>();
+        let ownership = (!changed.is_empty()).then(|| {
+            metadata
+                .ownership
                 .iter()
-                .any(|record| matches!(record.request >> 24, 5 | 7))
-        {
-            false => None,
-            true => {
-                let changed = compact
-                    .ownership
-                    .into_iter()
-                    .map(|ownership| (ownership.firm, ownership))
-                    .collect::<BTreeMap<_, _>>();
-                Some(
-                    metadata
-                        .ownership
-                        .iter()
-                        .map(|ownership| changed.get(&ownership.firm).unwrap_or(ownership).clone())
-                        .collect(),
-                )
-            }
-        };
+                .map(|issued| changed.get(&issued.firm).unwrap_or(issued).clone())
+                .collect()
+        });
         Ok(Self {
             companies,
             ownership,

@@ -2,6 +2,58 @@ use super::*;
 use crate::simulation::{decode, storage::layout::TICK_WORDS};
 use anyhow::anyhow;
 
+#[derive(Default)]
+pub(super) struct LivingRows {
+    words: Vec<u32>,
+}
+
+impl LivingRows {
+    pub(super) fn read(
+        device: &Device,
+        state: &CubeTensor,
+        fields: usize,
+        actors: usize,
+    ) -> Result<Self> {
+        let stride = state.meta.num_elements() / (fields * TICK_WORDS);
+        let words = actors.div_ceil(u32::BITS as usize);
+        let packed = device.empty(words);
+        pack_living_rows::launch(
+            &device.client,
+            device.count(words),
+            CubeDim::new_1d(device.workgroup),
+            state.buffer_arg(),
+            packed.buffer_arg(),
+            (Field::LivingMembers as usize * stride) as u32,
+            actors as u32,
+        );
+        Ok(Self {
+            words: device.read(&packed)?,
+        })
+    }
+
+    pub(super) fn contains(&self, row: usize) -> bool {
+        self.words[row / u32::BITS as usize] & (1 << (row % u32::BITS as usize)) != 0
+    }
+
+    pub(super) fn readback_bytes(&self) -> u64 {
+        size_of_val(self.words.as_slice()) as u64
+    }
+}
+
+#[cube(launch)]
+fn pack_living_rows(state: &[Ticks], packed: &mut [u32], offset: u32, actors: u32) {
+    let word = ABSOLUTE_POS;
+    if word < packed.len() {
+        let first = word as u32 * comptime!(u32::BITS);
+        let mut mask = 0u32;
+        for bit in 0..min(actors - first, comptime!(u32::BITS)) {
+            let living = state[(offset + first + bit) as usize];
+            mask |= u32::cast_from(!equal(living, zero())) << bit;
+        }
+        packed[word] = mask;
+    }
+}
+
 pub(super) enum Staging {
     Entry,
     Settlement { fields: usize },

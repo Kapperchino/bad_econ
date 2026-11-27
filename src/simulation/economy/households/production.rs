@@ -160,6 +160,76 @@ pub(in crate::simulation::economy) fn seed_reserve(
 }
 
 #[derive(CubeType)]
+pub(in crate::simulation::economy) struct PaidWork {
+    pub earnings: Ticks,
+    pub minutes: u32,
+}
+
+#[cube]
+impl PaidWork {
+    pub fn load(ledger: &Ledger<'_>, control: &[Atomic<u32>], actor: u32) -> Self {
+        let wages = positive(
+            ledger.value(Field::GrossIncome, actor),
+            ledger.value(Field::OpeningGrossIncome, actor),
+        );
+        PaidWork {
+            earnings: plus(wages, ledger.value(Field::CartageIncome, actor)).record(control),
+            minutes: ledger.number(Field::Hours, actor)
+                + ledger.number(Field::CartageMinutes, actor),
+        }
+    }
+}
+
+#[derive(CubeType)]
+struct GrainReview {
+    earnings: Ticks,
+    minutes: Ticks,
+    sales: Ticks,
+}
+
+#[cube]
+impl GrainReview {
+    fn observe(ledger: &Ledger<'_>, control: &[Atomic<u32>], actor: u32) -> Self {
+        let work = PaidWork::load(ledger, control, actor);
+        GrainReview {
+            earnings: plus(
+                ledger.value(Field::GrainReviewEarnings, actor),
+                work.earnings,
+            )
+            .record(control),
+            minutes: plus(
+                ledger.value(Field::GrainReviewMinutes, actor),
+                ticks(work.minutes, 0),
+            )
+            .record(control),
+            sales: plus(
+                ledger.value(Field::GrainReviewSales, actor),
+                ledger.value(Field::GrainSales, actor),
+            )
+            .record(control),
+        }
+    }
+
+    fn markdown_floor(&self, config: &EconomyConfig) -> u32 {
+        let minutes = native(self.minutes);
+        let earnings = native(self.earnings);
+        let denominator = max(minutes * comptime!(u64::from(SEED_RETURN - 1)), 1);
+        let cultivation = u64::cast_from(config.home.cultivation_minutes * comptime!(SEED_RETURN));
+        let whole = min(earnings / denominator, u64::cast_from(config.maximum_price));
+        let remainder = (earnings % denominator) * cultivation;
+        let cost = whole * cultivation
+            + remainder / denominator
+            + u64::cast_from(remainder % denominator != 0);
+        let floor = u32::cast_from(min(cost, u64::cast_from(config.maximum_price)));
+        select(
+            minutes == 0,
+            config.minimum_price,
+            max(config.minimum_price, floor),
+        )
+    }
+}
+
+#[derive(CubeType)]
 pub(in crate::simulation::economy) struct HouseholdFarm<'a> {
     ledger: Ledger<'a>,
     control: &'a [Atomic<u32>],
@@ -272,11 +342,25 @@ impl<'a> HouseholdFarm<'a> {
         .record(control);
         self.ledger.set(Field::ExpectedGrainSales, actor, forecast);
         let quote = self.ledger.number(Field::GrainQuote, actor);
-        if self.day % comptime!(SALES_WINDOW)
-            == comptime!(SALES_WINDOW - 1) - actor % comptime!(SALES_WINDOW)
-            && config.price_response > 0
-            && quote > 0
-        {
+        let scheduled = self.day % comptime!(SALES_WINDOW)
+            == comptime!(SALES_WINDOW - 1) - actor % comptime!(SALES_WINDOW);
+        let review = GrainReview::observe(&self.ledger, control, actor);
+        self.ledger.set(
+            Field::GrainReviewEarnings,
+            actor,
+            select(scheduled, zero(), review.earnings),
+        );
+        self.ledger.set(
+            Field::GrainReviewMinutes,
+            actor,
+            select(scheduled, zero(), review.minutes),
+        );
+        self.ledger.set(
+            Field::GrainReviewSales,
+            actor,
+            select(scheduled, zero(), review.sales),
+        );
+        if scheduled && config.price_response > 0 && quote > 0 {
             let surplus = positive(
                 self.ledger.value(Field::Grain, actor),
                 seed_reserve(&self.ledger, control, actor),
@@ -289,20 +373,18 @@ impl<'a> HouseholdFarm<'a> {
             );
             let for_sale = minimum(surplus, self.grain_to_fund_meals(times32(daily, days)));
             let step = max(ceildiv(quote * config.price_response, 20 * POLICY_SCALE), 1);
-            let production_cost = min(
-                config.maximum_price,
-                ceildiv(
-                    config.starting_wage * config.home.cultivation_minutes * comptime!(SEED_RETURN),
-                    comptime!(SEED_RETURN - 1),
-                ),
+            let offered = positive(
+                self.ledger.value(Field::Grain, actor),
+                self.ledger.value(Field::GrainReserve, actor),
             );
-            let floor = min(quote, max(config.minimum_price, production_cost));
+            let floor = min(quote, review.markdown_floor(config));
             let cheaper = max(quote, step + floor) - step;
             let dearer = min(quote + step, config.maximum_price);
+            let sold = !equal(review.sales, zero());
             let next = select(
-                lt(expected, for_sale),
+                lt(expected, for_sale) && !equal(offered, zero()) && !sold,
                 cheaper,
-                select(lt(surplus, expected), dearer, quote),
+                select(lt(surplus, expected) && sold, dearer, quote),
             );
             self.ledger.set_number(Field::GrainQuote, actor, next);
         }

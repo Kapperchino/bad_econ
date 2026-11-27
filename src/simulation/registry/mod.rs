@@ -127,13 +127,7 @@ impl RegistryPlan {
         let supported = requests.iter().all(|record| match record.request >> 24 {
             0 => record.request == 0,
             2 | 3 | 10 => true,
-            4 | 7 | enterprise::acquisitions::PURCHASE => scenario.config().finance.is_none(),
-            5 => {
-                scenario.config().finance.is_none()
-                    || !migrations
-                        .children
-                        .contains_key(&metadata.actors.at(record.actor as usize).identity)
-            }
+            4 | 5 | 7 | enterprise::acquisitions::PURCHASE => scenario.config().finance.is_none(),
             6 => record.payload() > 0,
             _ => false,
         });
@@ -254,16 +248,6 @@ fn transition(
             move_actor(economy, requests, actor, day);
             if kind == 6 {
                 economy.ledger.set(Field::PendingCapacity, actor, zero());
-            }
-            if kind == 5 {
-                economy.ledger.set(
-                    Field::EstateSettled,
-                    actor,
-                    ticks(
-                        comptime!(crate::domain::enterprise::EstateStatus::Unclaimed as u32),
-                        0,
-                    ),
-                );
             }
         }
     }

@@ -216,35 +216,378 @@ pub(in crate::simulation::economy) fn payroll_members(
     }
 }
 
+#[repr(u32)]
+enum WageChange {
+    Hold,
+    Cut,
+    Raise,
+}
+
 #[cube]
-pub(in crate::simulation::economy) fn adjust_wage(ledger: &mut Ledger<'_>, firm: u32) {
+fn standing_wage(ledger: &Ledger<'_>, firm: u32) -> u32 {
+    max(
+        ledger.number(Field::UncappedWage, firm),
+        ledger.number(Field::Wage, firm),
+    )
+}
+
+#[cube]
+fn offer_wage(ledger: &mut Ledger<'_>, firm: u32, rate: u32, cap: Ticks) {
+    let offered = max(minimum(ticks(rate, 0), cap).extract(LOW_WORD), MINIMUM_WAGE);
+    if comptime!(ledger.config.economy == crate::domain::Economy::Industrial) {
+        ledger.set_number(Field::UncappedWage, firm, select(offered < rate, rate, 0));
+    }
+    ledger.set_number(Field::Wage, firm, offered);
+}
+
+#[cube]
+pub(in crate::simulation::economy) fn post_wage(
+    ledger: &mut Ledger<'_>,
+    control: &[Atomic<u32>],
+    firm: u32,
+) {
+    let config = ledger.config;
+    let minutes = ledger.number(Field::LaborMinutes, firm);
+    if comptime!(config.economy == crate::domain::Economy::Industrial)
+        && config.wage_increment > 0
+        && minutes > 0
+    {
+        let cash = positive(
+            ledger.value(Field::Cash, firm),
+            rent::obligation(&*ledger, control, firm),
+        );
+        let rate = standing_wage(&*ledger, firm);
+        offer_wage(ledger, firm, rate, divide(cash, minutes));
+    }
+}
+
+#[cube]
+pub(in crate::simulation::economy) fn bid_for_vacancies(
+    ledger: &mut Ledger<'_>,
+    control: &[Atomic<u32>],
+    firm: u32,
+    good: u32,
+    day: u32,
+    previous_plan: u32,
+    previous_vacancies: u32,
+) {
+    let config = ledger.config;
+    let plan = ledger.number(Field::Plan, firm);
+    let increment = config.wage_increment;
+    if comptime!(config.economy == crate::domain::Economy::Industrial)
+        && increment > 0
+        && previous_vacancies > 0
+        && plan > previous_plan - previous_vacancies
+    {
+        let minutes = ledger.number(Field::LaborMinutes, firm);
+        let wage = min(standing_wage(&*ledger, firm) + increment, MAXIMUM_WAGE);
+        let budget = ShiftBudget {
+            cash: positive(
+                ledger.value(Field::Cash, firm),
+                rent::obligation(&*ledger, control, firm),
+            ),
+            pay: wage * minutes,
+        };
+        let funded =
+            farming::FarmProduction::new(ledger, control, farming::FarmSite::new(firm, good), day)
+                .funded_shifts(&budget);
+        let rise = times32(increment * minutes, plan);
+        let spare = positive(
+            ledger.value(Field::Cash, firm),
+            ledger.value(Field::OperatingReserve, firm),
+        );
+        if !lt(spare, rise) && !lt(funded, ticks(plan, 0)) {
+            ledger.set_number(Field::UncappedWage, firm, 0);
+            ledger.set_number(Field::Wage, firm, wage);
+        }
+    }
+}
+
+#[cube]
+pub(in crate::simulation::economy) fn adjust_wage(
+    ledger: &mut Ledger<'_>,
+    control: &[Atomic<u32>],
+    firm: u32,
+    good: u32,
+    day: u32,
+    excess: Ticks,
+) {
     let config = ledger.config;
     let increment = config.wage_increment;
     if increment > 0 {
+        let plan = ledger.number(Field::Plan, firm);
+        let industrial = comptime!(config.economy == crate::domain::Economy::Industrial);
+        let mut cash = ledger.value(Field::Cash, firm);
+        let mut cut = true;
+        if comptime!(config.economy == crate::domain::Economy::Industrial) {
+            cash = positive(cash, rent::obligation(&*ledger, control, firm));
+            let seasonal_idle = plan == 0
+                && config.home.harvest_days < 365
+                && farming::FarmSite::new(firm, good).is_farm(&*ledger);
+            let batch = ledger.value(Field::OutputTicks, firm);
+            cut = ledger.number(Field::Slots, firm) == 0
+                && (day + firm) % 30 == 0
+                && !seasonal_idle
+                && !equal(excess, zero())
+                && equal(ledger.value(Field::Unfilled, firm), zero())
+                && lt(ledger.value(Field::Sales, firm), batch)
+                && lt(ledger.value(Field::Demand, firm), batch);
+        }
         let cap = divide(
-            divide(
-                ledger.value(Field::Cash, firm),
-                ledger.number(Field::LaborMinutes, firm),
-            ),
-            max(ledger.number(Field::Plan, firm), 1u32),
+            divide(cash, ledger.number(Field::LaborMinutes, firm)),
+            select(industrial, 1, max(plan, 1)),
         );
-        let wage = ledger.number(Field::Wage, firm);
-        let unstaffed = ledger.number(Field::Slots, firm) > 0;
-        let offered = select(
-            unstaffed,
-            wage + increment,
-            max(wage, increment + MINIMUM_WAGE) - increment,
-        );
-        ledger.set_number(
-            Field::Wage,
-            firm,
-            min(
-                max(
-                    minimum(ticks(offered, 0u32), cap).extract(LOW_WORD),
-                    MINIMUM_WAGE,
-                ),
-                MAXIMUM_WAGE,
+        let wage = if comptime!(config.economy == crate::domain::Economy::Industrial) {
+            standing_wage(&*ledger, firm)
+        } else {
+            ledger.number(Field::Wage, firm)
+        };
+        let change = select(
+            !industrial && ledger.number(Field::Slots, firm) > 0,
+            comptime!(WageChange::Raise as u32),
+            select(
+                cut,
+                comptime!(WageChange::Cut as u32),
+                comptime!(WageChange::Hold as u32),
             ),
         );
+        let offered = match change {
+            1 => max(wage, increment + MINIMUM_WAGE) - increment,
+            2 => wage + increment,
+            _ => wage,
+        };
+        let rate = min(offered, MAXIMUM_WAGE);
+        offer_wage(ledger, firm, rate, cap);
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::domain::{Checkpoint, Experiment, Market, Scenario};
+    use crate::simulation::{Simulation, tests::device};
+    use anyhow::{Context, Result};
+
+    #[derive(Clone, Copy, Debug)]
+    enum WageDecision {
+        Hiring,
+        Review { days_late: u32 },
+    }
+
+    #[derive(Clone, Copy, Debug)]
+    struct WageCase {
+        decision: WageDecision,
+        good: Good,
+        changes: &'static [(Field, u64)],
+        wage: u32,
+    }
+
+    #[test]
+    fn industrial_wage_recovers_from_a_temporary_cash_shortfall_on_gpu() -> Result<()> {
+        let scenario = Scenario::industrial(24, 42, Experiment::Concentrated)?;
+        let device = device(64)?;
+        let mut initial = scenario.initial()?;
+        let mill = initial
+            .actors
+            .iter()
+            .position(|actor| actor.kind == Good::Steel as u32)
+            .context("generated steel mill is missing")?;
+        let minutes = initial.get(Field::LaborMinutes, mill);
+        let initial_cash = initial.get(Field::Cash, mill);
+        let arrears = 30;
+        let cash = minutes * 5
+            + u64::from(scenario.config().rent.map_or(0, |rent| rent.firm_daily))
+            + arrears;
+        let transferred = initial_cash - cash;
+        initial.set(Field::Wage, mill, 17);
+        initial.set(Field::Cash, mill, cash);
+        initial.set(Field::Cash, 0, initial.get(Field::Cash, 0) + transferred);
+        initial.set(Field::RentArrears, mill, arrears);
+        let mut sim =
+            Simulation::from_checkpoint(Checkpoint::new(&scenario, &initial)?, device.clone())?;
+        let posting = sim.parameters(Phase::Proposal, Market::Labor, 0, initial.actors.len())?;
+        sim.economy(
+            EconomyStage::Local,
+            initial.actors.len(),
+            &posting,
+            &sim.work.proposals,
+        );
+        sim.fault_check()?;
+        let mut stressed = sim.download()?;
+        assert_eq!(stressed.get(Field::Wage, mill), 5);
+        assert_eq!(stressed.get(Field::UncappedWage, mill), 17);
+        stressed.set(Field::Cash, mill, initial_cash);
+        stressed.set(Field::Cash, 0, stressed.get(Field::Cash, 0) - transferred);
+        stressed.set(Field::Slots, mill, 0);
+        let saved = serde_json::to_vec(&Checkpoint::new(&scenario, &stressed)?)?;
+        let mut restored = Simulation::from_checkpoint(serde_json::from_slice(&saved)?, device)?;
+        restored.economy(
+            EconomyStage::Local,
+            initial.actors.len(),
+            &posting,
+            &restored.work.proposals,
+        );
+        restored.fault_check()?;
+        let recovered = restored.download()?;
+        assert_eq!(recovered.get(Field::Wage, mill), 17);
+        assert_eq!(recovered.get(Field::UncappedWage, mill), 0);
+        Ok(())
+    }
+
+    #[test]
+    fn industrial_wage_reviews_respect_orders_seasons_and_saved_increments_on_gpu() -> Result<()> {
+        let generated = Scenario::industrial(24, 42, Experiment::Concentrated)?;
+        assert_eq!(generated.config().behavior.wage_increment, 1);
+        let device = device(64)?;
+        for increment in [1, 0, 3] {
+            let mut config = generated.config().clone();
+            config.behavior.wage_increment = increment;
+            config.forecast_weight = 0;
+            let scenario = Scenario::new(config)?;
+            let opening = scenario.initial()?;
+            let mut sim =
+                Simulation::from_checkpoint(Checkpoint::new(&scenario, &opening)?, device.clone())?;
+            let funded = WageCase {
+                decision: WageDecision::Hiring,
+                good: Good::Steel,
+                changes: &[],
+                wage: 12 + increment,
+            };
+            let cut = WageCase {
+                decision: WageDecision::Review { days_late: 0 },
+                wage: 12 - increment,
+                ..funded
+            };
+            let shortfall = WageCase {
+                changes: &[
+                    (Field::Plan, 0),
+                    (Field::Cash, 140),
+                    (Field::RentArrears, 30),
+                ],
+                wage: if increment == 0 { 12 } else { 5 },
+                ..cut
+            };
+            let hiring_hold = WageCase { wage: 12, ..funded };
+            let review_hold = WageCase { wage: 12, ..cut };
+            let mut cases = vec![funded, cut];
+            match increment {
+                1 => cases.extend([
+                    shortfall,
+                    WageCase {
+                        changes: &[(Field::Slots, 0)],
+                        ..hiring_hold
+                    },
+                    WageCase {
+                        changes: &[(Field::Steel, 10_000)],
+                        ..hiring_hold
+                    },
+                    WageCase {
+                        changes: &[(Field::Plan, 1000)],
+                        ..hiring_hold
+                    },
+                    WageCase {
+                        changes: &[(Field::OperatingReserve, 1_000_000)],
+                        ..hiring_hold
+                    },
+                    WageCase {
+                        decision: WageDecision::Review { days_late: 1 },
+                        ..review_hold
+                    },
+                    WageCase {
+                        changes: &[(Field::Slots, 1)],
+                        ..review_hold
+                    },
+                    WageCase {
+                        changes: &[(Field::Sales, 10)],
+                        ..review_hold
+                    },
+                    WageCase {
+                        changes: &[(Field::Demand, 10)],
+                        ..review_hold
+                    },
+                    WageCase {
+                        changes: &[(Field::Unfilled, 1)],
+                        ..review_hold
+                    },
+                    WageCase {
+                        changes: &[(Field::Steel, 0)],
+                        ..review_hold
+                    },
+                    WageCase {
+                        good: Good::Flax,
+                        changes: &[(Field::Plan, 0)],
+                        ..review_hold
+                    },
+                    WageCase {
+                        changes: &[
+                            (Field::Slots, 1),
+                            (Field::Cash, 300),
+                            (Field::RentArrears, 90),
+                        ],
+                        wage: 10,
+                        ..review_hold
+                    },
+                ]),
+                0 => cases.push(shortfall),
+                _ => (),
+            }
+            for case in cases {
+                let mut initial = opening.clone();
+                let firm = initial
+                    .actors
+                    .iter()
+                    .position(|actor| actor.kind == case.good as u32)
+                    .context("generated wage-test firm is missing")?;
+                let defaults: &[(Field, u64)] = match case.decision {
+                    WageDecision::Hiring => &[
+                        (Field::Slots, 1),
+                        (Field::Plan, 1),
+                        (Field::Cash, 1_000_000),
+                        (Field::OperatingReserve, 0),
+                        (Field::Steel, 0),
+                        (Field::Demand, 10),
+                        (Field::Iron, 1000),
+                        (Field::Coal, 1000),
+                    ],
+                    WageDecision::Review { .. } => &[
+                        (Field::Cash, 100_000),
+                        (Field::Plan, 2),
+                        (Field::Slots, 0),
+                        (Field::Demand, 0),
+                        (Field::OutputTicks, 10),
+                        (Field::LaborMinutes, 20),
+                        (Field::inventory(case.good), 10_000),
+                    ],
+                };
+                initial.set(Field::Wage, firm, 12);
+                for &(field, value) in defaults.iter().chain(case.changes) {
+                    initial.set(field, firm, value);
+                }
+                let rows = initial.actors.len();
+                let stride = sim.config.state_stride as usize;
+                let values = crate::simulation::tensor::state_values(&initial.values, rows, stride);
+                sim.device.write(&sim.state, bytemuck::cast_slice(&values));
+                let params = match case.decision {
+                    WageDecision::Hiring => {
+                        sim.parameters(Phase::Proposal, Market::Labor, 0, rows)?
+                    }
+                    WageDecision::Review { days_late } => {
+                        let mut params =
+                            sim.parameters(Phase::AccountsDecisions, Market::Labor, 0, rows)?;
+                        params.day = 330 - firm as u32 % 30 + days_late;
+                        params
+                    }
+                };
+                sim.economy(EconomyStage::Local, rows, &params, &sim.work.proposals);
+                sim.fault_check()?;
+                let word = (Field::Wage as usize * stride + firm) * TICK_WORDS + LOW_WORD;
+                assert_eq!(
+                    sim.device.read_range(&sim.state, word, 1)?[0],
+                    case.wage,
+                    "{case:?}, increment {increment}"
+                );
+            }
+        }
+        Ok(())
     }
 }

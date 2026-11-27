@@ -173,3 +173,73 @@ fn grocery_restock_delivery_staffing_and_resale_conserve_food_and_cash() -> Resu
     );
     Ok(())
 }
+
+#[test]
+fn a_dealer_carries_a_secondary_quote_forward_while_its_primary_good_sells_on_gpu() -> Result<()> {
+    let mut config = economy()?.config().clone();
+    config.behavior.price_response = 1000;
+    config.behavior.wage_increment = 0;
+    let dealer_seed = &mut config.population.as_mut().unwrap().firms[1];
+    dealer_seed.inventories[Good::Steel as usize - 1] = 5;
+    dealer_seed.inventories[Good::Bread as usize - 1] = 50;
+    let scenario = Scenario::new(config)?;
+    let dealer = scenario.index_of(5).unwrap();
+    let row = scenario.fields() - RetailAccount::FIELDS + Good::Steel as usize - 1;
+    let mut initial = scenario.initial()?;
+    let quote = row * initial.actors.len() + dealer;
+    initial.values[quote] = 100;
+    let mut simulation =
+        Simulation::from_checkpoint(Checkpoint::new(&scenario, &initial)?, support::device(64)?)?;
+    simulation.advance()?;
+    let first = simulation.download()?;
+    assert!(first.get(Field::Sales, dealer) > 0);
+    assert_eq!(first.get(Field::Steel, dealer), 5);
+    assert_eq!(first.values[quote], 95);
+    simulation.advance()?;
+    assert_eq!(simulation.download()?.values[quote], 90);
+    Ok(())
+}
+
+#[test]
+fn orders_restore_a_discounted_secondary_shelf_to_its_delivered_cost_on_gpu() -> Result<()> {
+    let mut config = economy()?.config().clone();
+    config.economy = Economy::Industrial;
+    config.household_production = HouseholdProduction::industrial();
+    config.behavior.price_response = 250;
+    config.behavior.wage_increment = 0;
+    let firms = &mut config.population.as_mut().unwrap().firms;
+    firms[0].good = Good::Locomotives;
+    firms[0].position = firms[1].position;
+    firms[0].technique = Technique::new(60, 1, 1)?;
+    firms[0].inventories = [0; Good::COUNT];
+    firms[1].inventories[Good::Steel as usize - 1] = 1000;
+    firms[1].inventories[Good::Bread as usize - 1] = 4;
+    let scenario = Scenario::new(config)?;
+    let dealer = scenario.index_of(5).unwrap();
+    let mut initial = scenario.initial()?;
+    let account = |good: Good, account: RetailAccount| {
+        (scenario.fields() - RetailAccount::FIELDS
+            + (account as usize) * Good::COUNT
+            + good as usize
+            - 1)
+            * scenario.actors()
+            + dealer
+    };
+    let quote = account(Good::Steel, RetailAccount::Quote);
+    initial.values[quote] = 4;
+    initial.values[account(Good::Steel, RetailAccount::Cost)] = 60;
+    initial.set(Field::PrimaryRetailUnfilled, dealer, 1234);
+    let mut simulation =
+        Simulation::from_checkpoint(Checkpoint::new(&scenario, &initial)?, support::device(64)?)?;
+    simulation.advance()?;
+    let after = simulation.download()?;
+    assert!(after.values[account(Good::Steel, RetailAccount::Orders)] > 0);
+    assert!(after.get(Field::Steel, dealer) < 1000);
+    assert!(after.values[quote] >= 60);
+    let bread_sales = initial.get(Field::Bread, dealer) - after.get(Field::Bread, dealer);
+    assert_eq!(
+        after.get(Field::PrimaryRetailUnfilled, dealer),
+        after.values[account(Good::Bread, RetailAccount::Orders)] - bread_sales
+    );
+    Ok(())
+}

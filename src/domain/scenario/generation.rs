@@ -85,7 +85,6 @@ impl Scenario {
         }
         config.prices = prices::StartingPrices::production(&config).food();
         config.household_liquidity = HouseholdLiquidity::PaycheckToPaycheck;
-        config.behavior.wage_increment = 0;
         config.behavior.price_response = 1000;
         let commercial_farm_spacing = employment::InitialSettlement::new(&config).spacing();
         let mut grain_businesses = 0usize;

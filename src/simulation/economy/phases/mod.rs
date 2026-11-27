@@ -72,6 +72,8 @@ impl<'a> ActorDay<'a> {
         let day = self.day;
         let config = economy.ledger.config;
         let kind = economy.actors.kind(id);
+        let previous_plan = economy.ledger.number(Field::Plan, id);
+        let previous_vacancies = economy.ledger.number(Field::Slots, id);
         if !kind.is(comptime!(ActorKind::Household)) {
             let cash = economy.ledger.value(Field::Cash, id);
             let rent = economy.ledger.value(Field::RentalIncome, id);
@@ -79,6 +81,7 @@ impl<'a> ActorDay<'a> {
             economy.ledger.set(Field::BusinessOpeningRent, id, rent);
         }
         if kind.bits() == comptime!(Good::Railway as u32) {
+            employment::post_wage(&mut economy.ledger, control, id);
             railway::offer_crew_jobs(economy, control, id);
         }
         if !kind.is(comptime!(ActorKind::Household))
@@ -88,6 +91,7 @@ impl<'a> ActorDay<'a> {
             if comptime!(config.home_mode == Feature::Enabled) {
                 enterprises::FirmPolicy::new(id, control).select_method(economy);
             }
+            employment::post_wage(&mut economy.ledger, control, id);
             let mut demand = economy.ledger.value(Field::Demand, id);
             if kind.bits() <= comptime!(Good::Bread as u32) {
                 demand = farming::production_target(control, demand);
@@ -183,6 +187,15 @@ impl<'a> ActorDay<'a> {
             economy.ledger.set(Field::Slots, id, planned);
             economy.ledger.set(Field::Plan, id, planned);
         }
+        employment::bid_for_vacancies(
+            &mut economy.ledger,
+            control,
+            id,
+            kind.output(),
+            day,
+            previous_plan,
+            previous_vacancies,
+        );
     }
 
     fn finish_work(&self, economy: &mut EconomyView<'_>) {
@@ -267,21 +280,11 @@ impl<'a> ActorDay<'a> {
         let kind = economy.actors.kind(id);
         match kind.bits() {
             ActorKind::HOUSEHOLD_BITS => {
+                let paid = household_production::PaidWork::load(&economy.ledger, control, id);
                 let prior_income = economy.ledger.value(Field::IncomeForecast, id);
                 let income = KernelObservation {
                     kind: comptime!(ObservationKind::Observed as u32),
-                    value: times(
-                        plus(
-                            positive(
-                                economy.ledger.value(Field::GrossIncome, id),
-                                economy.ledger.value(Field::OpeningGrossIncome, id),
-                            ),
-                            economy.ledger.value(Field::CartageIncome, id),
-                        )
-                        .record(control),
-                        POLICY_SCALE,
-                    )
-                    .record(control),
+                    value: times(paid.earnings, POLICY_SCALE).record(control),
                 }
                 .blend(prior_income, POLICY_SCALE / 30, control);
                 economy.ledger.set(Field::IncomeForecast, id, income);
@@ -337,8 +340,7 @@ impl<'a> ActorDay<'a> {
                 economy.ledger.set_number(Field::Shortage, id, shortage);
                 let previous_fatigue = economy.ledger.number(Field::Fatigue, id);
                 let mut fatigue = min(previous_fatigue + config.work_fatigue, POLICY_SCALE);
-                let work = economy.ledger.number(Field::Hours, id)
-                    + economy.ledger.number(Field::CartageMinutes, id);
+                let work = paid.minutes;
                 if work == 0 {
                     fatigue = max(previous_fatigue, config.rest_recovery) - config.rest_recovery;
                 }
@@ -381,6 +383,9 @@ impl<'a> ActorDay<'a> {
                     day,
                 );
                 let output = farm.finish(completed);
+                economy
+                    .ledger
+                    .set(Field::FinishedToday, id, output.finished);
                 economy
                     .ledger
                     .increase(control, Field::UnscaledProduced, id, output.unscaled);
@@ -469,7 +474,7 @@ impl<'a> ActorDay<'a> {
         let firm = enterprises::FirmPolicy::new(id, control);
         if kind.bits() == comptime!(Good::Railway as u32) {
             firm.reserve_operating_costs(economy);
-            employment::adjust_wage(&mut economy.ledger, id);
+            employment::adjust_wage(&mut economy.ledger, control, id, kind.output(), day, zero());
             if comptime!(config.home_mode == Feature::Enabled) {
                 firm.advance_lifecycle(economy, day);
             }
@@ -490,32 +495,21 @@ impl<'a> ActorDay<'a> {
                 firm.advance_lifecycle(economy, day);
             }
             let old = economy.ledger.value(Field::Demand, id);
-            let mut signal = plus(
-                economy.ledger.value(Field::Sales, id),
-                economy.ledger.value(Field::Unfilled, id),
-            )
-            .record(control);
             if pricing::distributor(&economy.ledger, id) {
                 market::distribution::close(economy, control, id);
-                signal = economy.ledger.value_at(
-                    pricing::retail_field(
-                        config,
-                        kind.output(),
-                        comptime!(crate::domain::RetailAccount::Orders),
-                    ),
-                    id,
-                );
             }
+            let orders = pricing::ProductOrders::load(&economy.ledger, control, id, kind.output());
             let demand = KernelObservation {
                 kind: comptime!(ObservationKind::Observed as u32),
-                value: signal,
+                value: orders.requested,
             }
             .blend(old, config.forecast_weight, control);
+            economy.ledger.set(Field::Demand, id, demand);
             let pricing = pricing::FirmPricing::new(id, kind.output(), control);
             let target = pricing.inventory_target(&*economy, demand, day);
             let stock = economy.ledger.value_at(kind.output(), id);
             let mut excess = positive(stock, target);
-            let mut unfilled = economy.ledger.value(Field::Unfilled, id);
+            let mut unfilled = orders.unfilled;
             if comptime!(
                 config.economy == crate::domain::Economy::Industrial
                     && config.home_mode == Feature::Enabled
@@ -545,12 +539,19 @@ impl<'a> ActorDay<'a> {
             pricing.reprice(
                 &mut economy.ledger,
                 excess,
+                &orders,
                 config.price_table[table_index as usize],
             );
-            economy.ledger.set(Field::Demand, id, demand);
             firm.reserve_operating_costs(economy);
 
-            employment::adjust_wage(&mut economy.ledger, id);
+            employment::adjust_wage(
+                &mut economy.ledger,
+                control,
+                id,
+                kind.output(),
+                day,
+                positive(stock, target),
+            );
         }
     }
 }

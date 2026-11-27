@@ -12,6 +12,7 @@ mod transitions;
 
 pub(super) use formation::{HouseholdFormation, enter, form_households};
 pub(in crate::simulation) use opportunities::EntryQuoteMode;
+pub(super) use settlement::nearest_living_household;
 pub(super) use transitions::{transitions, transitions_in_rows};
 
 use super::{
@@ -203,7 +204,8 @@ fn requests(
         if kind == 0
             && living == 0
             && (estate == comptime!(EstateStatus::Open as u32)
-                || (estate == comptime!(EstateStatus::AwaitingSettlement as u32)
+                || ((estate == comptime!(EstateStatus::AwaitingSettlement as u32)
+                    || estate == comptime!(EstateStatus::Unclaimed as u32))
                     && (day + actor) % 30 == 0))
         {
             action = 0x05000000u32;
