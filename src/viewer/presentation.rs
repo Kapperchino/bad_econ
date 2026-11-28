@@ -1,7 +1,8 @@
 use super::{
     Chart, Dashboard, DashboardPage, Display, atlas,
     graph::{
-        self, GraphPanel, GraphRenderer, HoverDot, LineHit, LineObservation, LineRun, PLOT_MARGIN,
+        self, GraphCache, GraphPanel, GraphRenderer, HoverDot, LineHit, LineObservation, LineRun,
+        PLOT_MARGIN,
     },
     model::{ChartRange, Menu, Period, SeriesSelection, ValueFormat},
     theme::{Theme, Tone},
@@ -272,6 +273,7 @@ fn draw_plot(
     theme: Option<Res<Theme>>,
     plots: Query<(Entity, &Plot, &ComputedNode, &RelativeCursorPosition)>,
     mut renderer: GraphRenderer,
+    mut cache: Local<GraphCache>,
     mut state: ResMut<PlotState>,
     mut commands: Commands,
 ) {
@@ -305,7 +307,7 @@ fn draw_plot(
         };
         let changed = state.version.as_ref() != Some(&version);
         if changed {
-            state.atlas = plot_atlas(&display, &version);
+            state.atlas = plot_atlas(&display, &version, &mut cache);
             paint_plots(
                 &display,
                 &version,
@@ -338,13 +340,13 @@ fn draw_plot(
             .as_ref()
             .and_then(PlotHover::observation)
             .map(|observation| observation.line);
+        drop(display);
         if let Some(layout) = version
             .plots
             .first()
             .filter(|_| changed || hovered != previous)
         {
             renderer.update(
-                &display,
                 &state.atlas.panels,
                 state.atlas.pixels,
                 1.0 / layout.scale,
@@ -390,7 +392,11 @@ fn draw_hover_dots(
     }
 }
 
-fn plot_atlas(display: &Display, version: &PlotVersion) -> PlotAtlas {
+fn plot_atlas(display: &Display, version: &PlotVersion, cache: &mut GraphCache) -> PlotAtlas {
+    cache.retain(
+        display.history_generation,
+        version.plots.iter().map(|plot| plot.chart),
+    );
     let tile = version
         .plots
         .iter()
@@ -403,18 +409,15 @@ fn plot_atlas(display: &Display, version: &PlotVersion) -> PlotAtlas {
         .enumerate()
         .map(|(index, plot)| {
             let origin = tile * UVec2::new((index % columns) as u32, (index / columns) as u32);
-            GraphPanel {
-                chart: plot.chart,
-                range: ChartRange::new(
-                    plot.chart,
-                    &display.snapshot,
-                    &display.history,
-                    display.comparison.as_ref(),
-                    version.period,
-                    version.selection,
-                ),
-                pixels: URect::from_corners(origin, origin + plot.size),
-            }
+            GraphPanel::new(
+                display,
+                plot.chart,
+                URect::from_corners(origin, origin + plot.size),
+                plot.plot_width(),
+                version.period,
+                version.selection,
+                cache,
+            )
         })
         .collect::<Vec<_>>();
     PlotAtlas {
@@ -935,11 +938,7 @@ fn draw_cursor(
     if let Some(dashboard) = dashboard {
         let display = dashboard.data.lock().expect("dashboard lock");
         let last = display.snapshot.day;
-        let first = display
-            .history
-            .front()
-            .map_or(last, |point| point.day)
-            .max(dashboard.period.first_day(last));
+        let first = *dashboard.period.days(last, &display.history).start();
         let span = last - first;
         let hovered = state.hover.as_ref();
         let observation = hovered.and_then(PlotHover::observation);

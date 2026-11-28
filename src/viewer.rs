@@ -85,6 +85,7 @@ struct Display {
     speed: Speed,
     revision: u64,
     observation_revision: u64,
+    history_generation: u64,
     map_revision: u64,
     cues: VecDeque<Cue>,
 }
@@ -105,6 +106,7 @@ impl Display {
             speed: Speed::Normal,
             revision: 0,
             observation_revision: 0,
+            history_generation: 0,
             map_revision: 0,
             cues: VecDeque::new(),
         }

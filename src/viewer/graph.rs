@@ -1,9 +1,10 @@
+mod history;
+
 use super::{
     Chart, Display,
-    model::{ChartRange, ChartSample},
+    model::{ChartRange, Period, SeriesSelection},
     theme::{Theme, Tone},
 };
-use crate::domain::ObservationSnapshot;
 use bevy::{
     asset::RenderAssetUsages,
     camera::{RenderTarget, ScalingMode, visibility::RenderLayers},
@@ -13,7 +14,8 @@ use bevy::{
     render::render_resource::TextureFormat,
     sprite_render::AlphaMode2d,
 };
-use std::collections::VecDeque;
+pub(super) use history::GraphCache;
+use history::{Point, Trace};
 
 #[derive(Resource)]
 pub(super) struct Graph {
@@ -75,7 +77,6 @@ pub(super) struct GraphRenderer<'w, 's> {
 impl GraphRenderer<'_, '_> {
     pub fn update(
         &mut self,
-        display: &Display,
         panels: &[GraphPanel],
         pixels: UVec2,
         scale: f32,
@@ -103,7 +104,7 @@ impl GraphRenderer<'_, '_> {
         }
         let mut geometry = Geometry { theme, ..default() };
         for panel in panels {
-            geometry.panel(display, panel, scale, hovered);
+            geometry.panel(panel, scale, hovered);
         }
         *self.meshes.get_mut(&self.graph.mesh).expect("graph mesh") = geometry.mesh(size);
     }
@@ -120,9 +121,14 @@ const LINE_HIT_RADIUS: f32 = 6.0;
 pub(super) struct HoverDot;
 
 pub(super) struct GraphPanel {
-    pub chart: Chart,
     pub range: ChartRange,
     pub pixels: URect,
+    lines: Vec<GraphLine>,
+}
+
+struct GraphLine {
+    id: ChartLine,
+    trace: Trace,
 }
 
 #[derive(Clone, Copy, PartialEq, Eq)]
@@ -132,7 +138,7 @@ pub(super) struct ChartLine {
     pub run: LineRun,
 }
 
-#[derive(Clone, Copy, PartialEq, Eq)]
+#[derive(Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub(super) enum LineRun {
     Current,
     Reference,
@@ -156,7 +162,6 @@ impl ChartLine {
 pub(super) struct LineHit {
     pub observation: LineObservation,
     pub point: Vec2,
-    distance: f32,
 }
 
 #[derive(Clone, Copy, PartialEq)]
@@ -166,33 +171,60 @@ pub(super) struct LineObservation {
     pub value: f64,
 }
 
-#[derive(Clone, Copy)]
-struct LinePoint {
-    day: u64,
-    value: f64,
-    position: Vec2,
+struct SegmentHit {
+    line: ChartLine,
+    from_day: u64,
+    day_offset: f64,
+    point: Vec2,
+    distance: f32,
 }
 
-impl LineHit {
-    fn near(line: ChartLine, cursor: Vec2, from: LinePoint, to: LinePoint) -> Option<Self> {
-        let segment = to.position - from.position;
-        let fraction = ((cursor - from.position).dot(segment)
-            / segment.length_squared().max(f32::EPSILON))
-        .clamp(0.0, 1.0);
-        let point = from.position + fraction * segment;
+impl SegmentHit {
+    fn near(
+        panel: &GraphPanel,
+        line: ChartLine,
+        bounds: Rect,
+        cursor: Vec2,
+        from: Point,
+        to: Point,
+    ) -> Option<Self> {
+        let start = panel.point(bounds, from.day, from.value);
+        let segment = panel.point(bounds, to.day, to.value) - start;
+        let fraction = ((cursor - start).dot(segment) / segment.length_squared().max(f32::EPSILON))
+            .clamp(0.0, 1.0);
+        let point = start + fraction * segment;
         let distance = point.distance_squared(cursor);
-        let observation = match fraction < 0.5 {
-            true => from,
-            false => to,
-        };
-        (distance <= LINE_HIT_RADIUS.powi(2)).then_some(Self {
-            observation: LineObservation {
-                line,
-                day: observation.day,
-                value: observation.value,
-            },
+        (distance <= LINE_HIT_RADIUS.powi(2)).then(|| Self {
+            line,
+            from_day: from.day,
+            day_offset: f64::from(fraction) * (to.day - from.day) as f64,
             point,
             distance,
+        })
+    }
+
+    fn observation(self, display: &Display) -> Option<LineHit> {
+        let history = match self.line.run {
+            LineRun::Current => &display.history,
+            LineRun::Reference => &display.comparison.as_ref()?.history,
+        };
+        let offset = |day: u64| day.saturating_sub(self.from_day) as f64;
+        let next = history.partition_point(|point| {
+            point.day < self.from_day || offset(point.day) < self.day_offset
+        });
+        let next_distance = offset(history.get(next)?.day) - self.day_offset;
+        let index = next
+            .checked_sub(1)
+            .filter(|&prior| self.day_offset - offset(history[prior].day) < next_distance)
+            .unwrap_or(next);
+        let sample = self.line.chart.sample(history, index);
+        Some(LineHit {
+            observation: LineObservation {
+                line: self.line,
+                day: sample.day,
+                value: sample.values[self.line.series],
+            },
+            point: self.point,
         })
     }
 }
@@ -211,88 +243,74 @@ impl GraphPanel {
         )
     }
 
-    fn line(&self, run: LineRun, series: usize) -> ChartLine {
-        ChartLine {
-            chart: self.chart,
-            series,
-            run,
+    pub fn new(
+        display: &Display,
+        chart: Chart,
+        pixels: URect,
+        width: f32,
+        period: Period,
+        selection: SeriesSelection,
+        cache: &mut GraphCache,
+    ) -> Self {
+        let days = period.days(display.snapshot.day, &display.history);
+        let span = days.end() - days.start();
+        let columns = (width as u64).max(1);
+        let bucket_days = span
+            .div_ceil(columns)
+            .max(1)
+            .checked_next_power_of_two()
+            .unwrap_or(1 << 63);
+        let lines: Vec<_> = display
+            .comparison
+            .as_ref()
+            .map(|run| (&run.history, LineRun::Reference))
+            .into_iter()
+            .chain([(&display.history, LineRun::Current)])
+            .flat_map(|(history, run)| {
+                cache.lines(chart, run, history, &days, bucket_days, selection)
+            })
+            .collect();
+        let values = lines
+            .iter()
+            .flat_map(|line| line.trace.points.iter().map(|point| point.value));
+        Self {
+            range: ChartRange::from_values(chart, days, values),
+            pixels,
+            lines,
         }
     }
 
     pub fn hit(&self, display: &Display, cursor: Vec2, inverse_scale: f32) -> Option<LineHit> {
         let bounds = plot_bounds(self.pixels.size().as_vec2() * inverse_scale, PLOT_MARGIN);
-        std::iter::once((&display.history, LineRun::Current))
-            .chain(
-                display
-                    .comparison
-                    .as_ref()
-                    .map(|run| (&run.history, LineRun::Reference)),
-            )
-            .filter_map(|(history, run)| self.hit_history(history, bounds, cursor, run))
-            .min_by(|first, second| first.distance.total_cmp(&second.distance))
-    }
-
-    fn hit_history(
-        &self,
-        history: &VecDeque<ObservationSnapshot>,
-        bounds: Rect,
-        cursor: Vec2,
-        run: LineRun,
-    ) -> Option<LineHit> {
-        let range = &self.range;
-        let span = (range.last_day - range.first_day) as f64;
+        let span = (self.range.last_day - self.range.first_day) as f64;
         let offset = |x: f32| {
             let fraction = ((x - bounds.min.x) / bounds.width().max(f32::EPSILON)).clamp(0.0, 1.0);
             f64::from(fraction) * span
         };
-        let start = range.first_day + offset(cursor.x - LINE_HIT_RADIUS).floor() as u64;
-        let end = range.first_day + offset(cursor.x + LINE_HIT_RADIUS).ceil() as u64;
-        let last_index = history
-            .partition_point(|sample| sample.day <= range.last_day)
-            .checked_sub(1)?;
-        let first_index = history
-            .partition_point(|sample| sample.day < start)
-            .saturating_sub(1);
-        let end_index = history
-            .partition_point(|sample| sample.day <= end)
-            .min(last_index);
-        let first_day = history.get(first_index)?.day.max(range.first_day);
-        let last_day = history.get(end_index)?.day;
-        let endpoint = history[last_index].day;
-        let mut previous: Option<ChartSample> = None;
-        let mut best = None;
-        let point = |day, value| LinePoint {
-            day,
-            value,
-            position: self.point(bounds, day, value),
-        };
-        for sample in self.chart.samples(history, first_day, last_day) {
-            let closest = sample
-                .values
-                .iter()
-                .enumerate()
-                .filter(|(series, _)| range.selection.includes(*series))
-                .flat_map(|(series, value)| {
-                    let to = point(sample.day, *value);
-                    let from = previous.as_ref().and_then(|prior| {
-                        prior
-                            .values
-                            .get(series)
-                            .map(|value| point(prior.day, *value))
-                    });
-                    from.into_iter()
-                        .chain((sample.day == endpoint).then_some(to))
-                        .filter_map(move |from| {
-                            LineHit::near(self.line(run, series), cursor, from, to)
-                        })
-                });
-            best = best
-                .into_iter()
-                .chain(closest)
-                .min_by(|first: &LineHit, second| first.distance.total_cmp(&second.distance));
-            previous = Some(sample);
-        }
-        best
+        let start = self.range.first_day + offset(cursor.x - LINE_HIT_RADIUS).floor() as u64;
+        let end = self.range.first_day + offset(cursor.x + LINE_HIT_RADIUS).ceil() as u64;
+        self.lines
+            .iter()
+            .flat_map(|line| {
+                let points = &line.trace.points;
+                let first = points
+                    .partition_point(|point| point.day < start)
+                    .saturating_sub(1);
+                let last = (points.partition_point(|point| point.day <= end) + 1).min(points.len());
+                points[first..last]
+                    .windows(2)
+                    .map(|pair| (pair[0], pair[1]))
+                    .chain(points.last().map(|&point| (point, point)))
+                    .filter_map(move |(from, to)| {
+                        SegmentHit::near(self, line.id, bounds, cursor, from, to)
+                    })
+            })
+            .min_by(|a, b| {
+                a.distance
+                    .total_cmp(&b.distance)
+                    .then_with(|| a.line.run.cmp(&b.line.run))
+            })?
+            .observation(display)
     }
 }
 
@@ -303,14 +321,13 @@ struct Geometry {
     colors: Vec<[f32; 4]>,
 }
 impl Geometry {
-    fn quad(&mut self, points: [Vec2; 4], color: Color) {
-        let color = color.to_linear().to_f32_array();
+    fn quad(&mut self, points: [Vec2; 4], color: LinearRgba) {
         self.positions
             .extend([0, 2, 1, 0, 3, 2].map(|index| points[index].extend(0.0).to_array()));
-        self.colors.extend([color; 6]);
+        self.colors.extend([color.to_f32_array(); 6]);
     }
 
-    fn line(&mut self, from: Vec2, to: Vec2, width: f32, color: Color) {
+    fn line(&mut self, from: Vec2, to: Vec2, width: f32, color: LinearRgba) {
         let normal = (to - from).normalize_or_zero().perp() * (width * 0.5);
         self.quad(
             [from - normal, to - normal, to + normal, from + normal],
@@ -318,13 +335,7 @@ impl Geometry {
         );
     }
 
-    fn panel(
-        &mut self,
-        display: &Display,
-        panel: &GraphPanel,
-        scale: f32,
-        hovered: Option<ChartLine>,
-    ) {
+    fn panel(&mut self, panel: &GraphPanel, scale: f32, hovered: Option<ChartLine>) {
         let bounds = plot_bounds(panel.pixels.size().as_vec2(), PLOT_MARGIN * scale);
         let bounds = Rect::from_corners(
             bounds.min + panel.pixels.min.as_vec2(),
@@ -333,19 +344,23 @@ impl Geometry {
         let origin = bounds.min;
         let extent = bounds.size();
         let range = &panel.range;
+        let rule = self.theme.color(Tone::Rule);
+        let horizontal = rule.with_alpha(0.7).to_linear();
+        let vertical = rule.with_alpha(0.45).to_linear();
+        let brass = self.theme.color(Tone::Brass).to_linear();
         for tick in 0..=4 {
             let offset = extent * (tick as f32 / 4.0);
             self.line(
                 origin + Vec2::new(0.0, offset.y),
                 origin + Vec2::new(extent.x, offset.y),
                 scale,
-                self.theme.color(Tone::Rule).with_alpha(0.7),
+                horizontal,
             );
             self.line(
                 origin + Vec2::new(offset.x, 0.0),
                 origin + Vec2::new(offset.x, extent.y),
                 scale,
-                self.theme.color(Tone::Rule).with_alpha(0.45),
+                vertical,
             );
         }
         for tick in 0..=16 {
@@ -355,12 +370,7 @@ impl Geometry {
                 0 => 4.0,
                 _ => 2.0,
             } * scale;
-            self.line(
-                foot - Vec2::Y * length,
-                foot,
-                scale,
-                self.theme.color(Tone::Brass),
-            );
+            self.line(foot - Vec2::Y * length, foot, scale, brass);
         }
         if range.minimum < 0.0 {
             let y = bounds.max.y - range.fraction(0.0) as f32 * extent.y;
@@ -368,63 +378,23 @@ impl Geometry {
                 Vec2::new(bounds.min.x, y),
                 Vec2::new(bounds.max.x, y),
                 scale,
-                self.theme.color(Tone::Muted).with_alpha(0.55),
+                self.theme.color(Tone::Muted).with_alpha(0.55).to_linear(),
             );
         }
-        if let Some(reference) = &display.comparison {
-            self.history(
-                &reference.history,
-                panel,
-                bounds,
-                scale,
-                LineRun::Reference,
-                hovered,
-            );
-        }
-        self.history(
-            &display.history,
-            panel,
-            bounds,
-            scale,
-            LineRun::Current,
-            hovered,
-        );
-    }
-
-    fn history(
-        &mut self,
-        history: &VecDeque<ObservationSnapshot>,
-        panel: &GraphPanel,
-        bounds: Rect,
-        scale: f32,
-        run: LineRun,
-        hovered: Option<ChartLine>,
-    ) {
-        let range = &panel.range;
-        let theme = self.theme;
-        let color = |series| panel.line(run, series).color(theme, hovered);
-        let mut previous = Vec::<Vec2>::new();
-        let mut current = Vec::new();
-        for sample in panel
-            .chart
-            .samples(history, range.first_day, range.last_day)
-        {
-            current.extend(
-                sample
-                    .values
-                    .into_iter()
-                    .map(|value| panel.point(bounds, sample.day, value)),
-            );
-            for (series, (&from, &to)) in previous.iter().zip(&current).enumerate() {
-                if range.selection.includes(series) && from.is_finite() && to.is_finite() {
-                    self.line(from, to, 1.8 * scale, color(series));
+        for line in &panel.lines {
+            let color = line.id.color(self.theme, hovered).to_linear();
+            let mut previous = None;
+            for sample in &line.trace.points {
+                let current = sample
+                    .value
+                    .is_finite()
+                    .then(|| panel.point(bounds, sample.day, sample.value));
+                if let Some((from, to)) = previous.zip(current) {
+                    self.line(from, to, 1.8 * scale, color);
                 }
+                previous = current;
             }
-            std::mem::swap(&mut previous, &mut current);
-            current.clear();
-        }
-        for (series, point) in previous.into_iter().enumerate() {
-            if range.selection.includes(series) && point.is_finite() {
+            if let Some(point) = previous {
                 let radius = 2.5 * scale;
                 self.quad(
                     [
@@ -433,7 +403,7 @@ impl Geometry {
                         point + Vec2::new(radius, radius),
                         point + Vec2::new(-radius, radius),
                     ],
-                    color(series),
+                    color,
                 );
             }
         }

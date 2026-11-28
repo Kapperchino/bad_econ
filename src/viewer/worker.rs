@@ -236,6 +236,7 @@ fn publish(
             };
             display.map_size = simulation.scenario.config().map_size;
             display.history.clear();
+            display.history_generation = display.history_generation.wrapping_add(1);
             display.inspection = None;
             display.map_revision = display.map_revision.wrapping_add(1);
         }

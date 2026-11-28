@@ -71,6 +71,18 @@ impl Period {
             Self::All => "All history",
         }
     }
+    pub fn days(
+        self,
+        last: u64,
+        history: &VecDeque<ObservationSnapshot>,
+    ) -> std::ops::RangeInclusive<u64> {
+        let first = history
+            .front()
+            .map_or(last, |point| point.day)
+            .max(self.first_day(last));
+        first..=last
+    }
+
     pub fn first_day(self, day: u64) -> u64 {
         match self {
             Self::Month => day.saturating_sub(29),
@@ -94,7 +106,7 @@ impl SeriesSelection {
         }
     }
 }
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub enum Chart {
     Employment,
     Unemployment,
@@ -538,17 +550,21 @@ impl Chart {
         last_day: u64,
     ) -> impl Iterator<Item = ChartSample> {
         let start = history.partition_point(|point| point.day < first_day);
-        history
-            .range(start..)
-            .take_while(move |point| point.day <= last_day)
-            .enumerate()
-            .map(move |(offset, snapshot)| {
-                let previous = (start + offset).checked_sub(1).map(|index| &history[index]);
-                ChartSample {
-                    day: snapshot.day,
-                    values: self.values(snapshot, previous),
-                }
-            })
+        let end = history.partition_point(|point| point.day <= last_day);
+        (start..end).map(move |index| self.sample(history, index))
+    }
+
+    pub(super) fn sample(
+        self,
+        history: &VecDeque<ObservationSnapshot>,
+        index: usize,
+    ) -> ChartSample {
+        let snapshot = &history[index];
+        let previous = index.checked_sub(1).map(|prior| &history[prior]);
+        ChartSample {
+            day: snapshot.day,
+            values: self.values(snapshot, previous),
+        }
     }
 
     pub fn values(
@@ -727,7 +743,6 @@ pub struct ChartRange {
     pub last_day: u64,
     pub minimum: f64,
     pub maximum: f64,
-    pub selection: SeriesSelection,
 }
 impl ChartRange {
     pub fn new(
@@ -738,38 +753,33 @@ impl ChartRange {
         period: Period,
         selection: SeriesSelection,
     ) -> Self {
-        let first_day = history
-            .front()
-            .map_or(snapshot.day, |point| point.day)
-            .max(period.first_day(snapshot.day));
-        let last_day = snapshot.day;
-        let range = std::iter::once(history)
+        let days = period.days(snapshot.day, history);
+        let values = std::iter::once(history)
             .chain(comparison.map(|run| &run.history))
-            .flat_map(|history| chart.samples(history, first_day, last_day))
+            .flat_map(|history| chart.samples(history, *days.start(), *days.end()))
             .flat_map(|sample| sample.values.into_iter().enumerate())
-            .filter_map(|(series, value)| {
-                (selection.includes(series) && value.is_finite()).then_some(value)
-            })
-            .fold(
-                Self {
-                    first_day,
-                    last_day,
-                    minimum: 0.0,
-                    maximum: 1.0,
-                    selection,
-                },
-                |range, value| Self {
-                    minimum: range.minimum.min(value),
-                    maximum: range.maximum.max(value),
-                    ..range
-                },
-            );
+            .filter_map(|(series, value)| selection.includes(series).then_some(value));
+        Self::from_values(chart, days.clone(), values)
+    }
+
+    pub fn from_values(
+        chart: Chart,
+        days: std::ops::RangeInclusive<u64>,
+        values: impl Iterator<Item = f64>,
+    ) -> Self {
+        let (minimum, maximum) = values
+            .filter(|value| value.is_finite())
+            .fold((0.0_f64, 1.0_f64), |(low, high), value| {
+                (low.min(value), high.max(value))
+            });
         Self {
+            first_day: *days.start(),
+            last_day: *days.end(),
+            minimum,
             maximum: match chart {
                 Chart::Unemployment | Chart::Occupations => 100.0,
-                _ => range.maximum,
+                _ => maximum,
             },
-            ..range
         }
     }
     pub fn fraction(&self, value: f64) -> f64 {
