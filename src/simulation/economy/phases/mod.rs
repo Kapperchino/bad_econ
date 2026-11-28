@@ -152,28 +152,9 @@ impl<'a> ActorDay<'a> {
             )
             .funded_shifts(&budget);
             planned = minimum(planned, funded);
-            let distributor = economy.ledger.number(Field::EnterpriseModel, id) == 1;
-            if distributor {
-                let stock = economy.ledger.value_at(kind.output(), id);
-                let mut demand = maximum(economy.ledger.value(Field::Demand, id), ticks(1, 0));
-                if kind.output() == comptime!(Good::Grain as u32) {
-                    let days = max(
-                        min(
-                            economy.ledger.number(Field::StockCoverage, id),
-                            config.coverage,
-                        ),
-                        1,
-                    );
-                    let daily_stock = CheckedTicks::ceiling_ratio(stock, 1, days).record(control);
-                    demand = maximum(demand, daily_stock);
-                }
+            if pricing::distributor(&economy.ledger, id) {
                 let units = max(economy.ledger.number(Field::OutputTicks, id), 1);
-                let sales = market::distribution::handling_demand(
-                    &*economy,
-                    control,
-                    id,
-                    minimum(stock, demand),
-                );
+                let sales = market::distribution::handling_demand(&*economy, control, id);
                 let shifts = divide(plus(sales, ticks(units - 1, 0)).record(control), units);
                 let capacity = ticks(economy.actors.capacity(id), 0);
                 planned = minimum(minimum(shifts, funded), capacity);

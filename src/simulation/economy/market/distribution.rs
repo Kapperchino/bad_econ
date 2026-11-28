@@ -186,12 +186,25 @@ pub(in crate::simulation::economy) fn handling_demand(
     economy: &EconomyView<'_>,
     control: &[Atomic<u32>],
     firm: u32,
-    primary: Ticks,
 ) -> Ticks {
     let ledger = &economy.ledger;
-    let mut total = primary;
+    let primary = economy.actors.kind(firm).output();
+    let stock = ledger.value_at(primary, firm);
+    let mut demand = maximum(ledger.value(Field::Demand, firm), ticks(1, 0));
+    if primary == comptime!(Good::Grain as u32) {
+        let days = max(
+            min(
+                ledger.number(Field::StockCoverage, firm),
+                ledger.config.coverage,
+            ),
+            1,
+        );
+        let daily_stock = CheckedTicks::ceiling_ratio(stock, 1, days).record(control);
+        demand = maximum(demand, daily_stock);
+    }
+    let mut total = minimum(stock, demand);
     for good in 1..Good::COUNT as u32 + 1 {
-        if good != economy.actors.kind(firm).output() {
+        if good != primary {
             let forecast = ledger.value_at(
                 pricing::retail_field(ledger.config, good, comptime!(RetailAccount::Demand)),
                 firm,

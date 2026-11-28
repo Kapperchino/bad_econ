@@ -109,7 +109,11 @@ pub(in crate::simulation::economy) fn expand(
         let busy = economy.ledger.number(Field::Slots, firm) == 0
             && economy.ledger.number(Field::Plan, firm) >= capacity;
         let target = times32(capacity, economy.ledger.number(Field::OutputTicks, firm));
-        let demand = economy.ledger.value(Field::Demand, firm);
+        let demand = if pricing::distributor(&economy.ledger, firm) {
+            market::distribution::handling_demand(&*economy, control, firm)
+        } else {
+            economy.ledger.value(Field::Demand, firm)
+        };
         let funded = !lt(
             economy.ledger.value(Field::Cash, firm),
             plus(

@@ -118,6 +118,38 @@ fn producers_and_distributors_reserve_for_at_most_installed_capacity_on_gpu() ->
 }
 
 #[test]
+fn distributor_expansion_uses_combined_handling_demand_on_gpu() -> Result<()> {
+    let mut config = economy()?.config().clone();
+    config.household_production = HouseholdProduction::industrial();
+    config.expansion = enterprise::ExpansionPolicy {
+        small_business_per_mille: 1000,
+        industrial_per_mille: 1000,
+    };
+    let population = config.population.as_mut().unwrap();
+    let shop = &mut population.firms[1];
+    shop.position = population.households[0].position;
+    shop.cash = 100_000;
+    shop.inventories = Good::food([24, 24, 0]);
+    let scenario = Scenario::new(config)?;
+    let dealer = scenario.index_of(5).unwrap();
+    let demand_field =
+        scenario.fields() - RetailAccount::FIELDS + RetailAccount::Demand as usize * Good::COUNT;
+    let forecast = |good: Good| (demand_field + good as usize - 1) * scenario.actors() + dealer;
+    let mut initial = scenario.initial()?;
+    initial.set(Field::Demand, dealer, 0);
+    initial.values[forecast(Good::Grain)] = 12;
+    initial.values[forecast(Good::Flour)] = 13;
+    let mut simulation =
+        Simulation::from_checkpoint(Checkpoint::new(&scenario, &initial)?, support::device(64)?)?;
+    simulation.advance()?;
+    assert_eq!(
+        simulation.download()?.get(Field::PendingCapacity, dealer),
+        1
+    );
+    Ok(())
+}
+
+#[test]
 fn buying_tools_preserves_the_delivered_cost_of_resale_stock_on_gpu() -> Result<()> {
     let mut config = economy()?.config().clone();
     config.household_production = HouseholdProduction::industrial();
